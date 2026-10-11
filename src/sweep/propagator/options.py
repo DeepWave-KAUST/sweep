@@ -15,6 +15,7 @@ class EagerDefaults:
     compile_backend: str | None = None
     compile_fullgraph: bool = False
     store_last_wavefield: bool = False
+    cpml_strips: bool = False
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,9 @@ class EagerOptions:
     compile_backend: str | None = EAGER_DEFAULTS.compile_backend
     compile_fullgraph: bool = EAGER_DEFAULTS.compile_fullgraph
     store_last_wavefield: bool = EAGER_DEFAULTS.store_last_wavefield
+    # CPML memory fields on the absorbing strips only (fields whose spec names
+    # a ``cpml_axis``); see ``sweep.equations._cpml``.
+    cpml_strips: bool = EAGER_DEFAULTS.cpml_strips
 
 
 @dataclass
@@ -501,7 +505,7 @@ _MEMORY_CAPABILITIES = {
     },
     "eager": {
         "strategies": ("full", "boundary", "ckpt"),
-        "boundary_storage": ("gpu", "cpu"),   # the ring stays on device or in host RAM
+        "boundary_storage": ("gpu", "cpu", "disk"),   # the ring on device, in host RAM or in files
         "boundary_tail_steps": False,         # no truncated backward in the eager driver
         "ckpt_mode": ("chunk",),              # no recursive/binomial schedule
     },

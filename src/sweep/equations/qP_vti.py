@@ -90,6 +90,10 @@ class AcousticVTI(SecondOrderEquation):
     # The isotropic image-method free surface is WRONG for an anisotropic
     # medium (see EquationBase.supports_free_surface); fail loud instead.
     supports_free_surface = False
+
+    # The qP gradient is ill-conditioned: boundary saving's reconstruction
+    # round-off comes back several percent into it (4-10% measured).
+    supports_boundary_saving_eager = False
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="VTI acoustic reference velocity.", unit="m/s"),
         ModelSpec("epsilon", description="Thomsen epsilon parameter."),

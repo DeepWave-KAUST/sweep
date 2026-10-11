@@ -73,13 +73,18 @@ class BackendSpec:
 BACKENDS = (
     BackendSpec("eager/cpu", "eager", "cpu"),
     BackendSpec("eager/gpu", "eager", "cuda"),
+    # The same uncompiled eager step with the CPML memories on the absorbing
+    # strips (EagerOptions(cpml_strips=True)); equations without strip-held
+    # fields run it full-grid.
+    BackendSpec("eager-strips/gpu", "eager-strips", "cuda"),
     BackendSpec("c-cuda", "c", "cuda"),
 )
 
 EAGER_MODES = {"full", "ckpt_chunk"}
 
 
-def make_eager_solver(case: Case, mode: str, device: torch.device, config: RunConfig) -> PropTorch:
+def make_eager_solver(case: Case, mode: str, device: torch.device, config: RunConfig,
+                      cpml_strips: bool = False) -> PropTorch:
     equation = make_equation(case, device, config)
     common = dict(
         shape=case.shape,
@@ -97,7 +102,7 @@ def make_eager_solver(case: Case, mode: str, device: torch.device, config: RunCo
         # from das_mu2d on, Dynamo hit its recompile limit and the rest of the
         # column silently ran uncompiled -- a reference that changed nature
         # halfway down the table.
-        eager_options=EagerOptions(use_compile=False),
+        eager_options=EagerOptions(use_compile=False, cpml_strips=cpml_strips),
     )
     if mode == "full":
         return PropTorch(equation, backend="eager", use_ckpt=False, **common)
@@ -108,15 +113,15 @@ def make_eager_solver(case: Case, mode: str, device: torch.device, config: RunCo
 
 def make_solver(case: Case, mode: str, backend: BackendSpec, config: RunConfig) -> PropTorch:
     device = torch.device(backend.device)
-    if backend.family == "eager":
-        return make_eager_solver(case, mode, device, config)
+    if backend.family in ("eager", "eager-strips"):
+        return make_eager_solver(case, mode, device, config, cpml_strips=backend.family == "eager-strips")
     return make_c_solver(case, mode, device, config)
 
 
 def backend_supported(mode: str, backend: BackendSpec, cuda_available: bool) -> bool:
     if backend.device == "cuda" and not cuda_available:
         return False
-    if backend.family == "eager":
+    if backend.family in ("eager", "eager-strips"):
         return mode in EAGER_MODES
     return True
 

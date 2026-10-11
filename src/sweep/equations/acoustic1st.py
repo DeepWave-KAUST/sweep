@@ -1,6 +1,7 @@
 from .base import FirstOrderEquation
 from .fields import FieldSpec, ModelSpec, ensure_field_specs
 from ._registry import register_equation
+from ._cpml import cpml_update
 
 def step_cpml(p, vx, vz, phix, phiz, psix, psiz, vp, rho, dt, h, b, pd, pml=None):
 
@@ -11,24 +12,20 @@ def step_cpml(p, vx, vz, phix, phiz, psix, psiz, vp, rho, dt, h, b, pd, pml=None
     p_x = pd.x_backward(p)
     p_z = pd.z_backward(p)
  
-    psi_z = azh * psiz + bzh * p_z
-    p_z = p_z + psi_z
+    p_z, psi_z = cpml_update(p_z, psiz, azh, bzh, (p, pd.kzb, pd._spacing["z"]))
     vz = vz - dt / rho * p_z
 
-    psi_x = axh * psix + bxh * p_x
-    p_x = p_x + psi_x
+    p_x, psi_x = cpml_update(p_x, psix, axh, bxh, (p, pd.kxb, pd._spacing["x"]))
     vx = vx - dt / rho * p_x
     # Update p
     vx_x = pd.x_forward(vx)
     vz_z = pd.z_forward(vz)
     div_v = 0.
 
-    phiz = az * phiz + bz * vz_z
-    vz_z = vz_z + phiz
+    vz_z, phiz = cpml_update(vz_z, phiz, az, bz, (vz, pd.kzf, pd._spacing["z"]))
     div_v = div_v + vz_z
 
-    phix = ax * phix + bx * vx_x
-    vx_x = vx_x + phix
+    vx_x, phix = cpml_update(vx_x, phix, ax, bx, (vx, pd.kxf, pd._spacing["x"]))
     div_v = div_v + vx_x
 
     p = p - vp**2 * rho * dt * (vz_z + vx_x)
@@ -161,10 +158,10 @@ class Acoustic1st(FirstOrderEquation):
             FieldSpec("vz", aliases=("velocity_z",), description="Particle velocity in the z direction.", supports_receiver=True),
             FieldSpec("px", description="Split-field pressure component in the x direction.", internal=True, boundary_related=True),
             FieldSpec("pz", description="Split-field pressure component in the z direction.", internal=True, boundary_related=True),
-            FieldSpec("phix", description="CPML memory variable for the x-derivative term.", internal=True, boundary_related=True),
-            FieldSpec("phiz", description="CPML memory variable for the z-derivative term.", internal=True, boundary_related=True),
-            FieldSpec("psix", description="CPML auxiliary field in the x direction.", internal=True, boundary_related=True),
-            FieldSpec("psiz", description="CPML auxiliary field in the z direction.", internal=True, boundary_related=True),
+            FieldSpec("phix", description="CPML memory variable for the x-derivative term.", internal=True, boundary_related=True, cpml_axis="x"),
+            FieldSpec("phiz", description="CPML memory variable for the z-derivative term.", internal=True, boundary_related=True, cpml_axis="z"),
+            FieldSpec("psix", description="CPML auxiliary field in the x direction.", internal=True, boundary_related=True, cpml_axis="x"),
+            FieldSpec("psiz", description="CPML auxiliary field in the z direction.", internal=True, boundary_related=True, cpml_axis="z"),
         ])
         return ensure_field_specs(self.wavefields, specs)
 

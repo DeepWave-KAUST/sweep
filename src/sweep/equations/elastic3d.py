@@ -1,4 +1,5 @@
 from .base import FirstOrderEquation
+from ._cpml import cpml_update
 from .cuda_layout import CUDALayoutSpec, history_fields, record_multi
 
 from . import slot_table
@@ -42,23 +43,18 @@ def _fs_z_deriv(field, deriv, top_halo, odd, topo_rows, half=False):
     )
 
 
-def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
-         m_vxx, m_vxy, m_vxz,
-         m_vyx, m_vyy, m_vyz,
-         m_vzx, m_vzy, m_vzz,
-         m_sxxx, m_szzz,
-         m_sxyx, m_sxyy,
-         m_sxzx, m_sxzz,
-            m_syyy,
-         m_syzy, m_syzz,
-         vp, vs, rho,
-         lame_lambda, lame_mu,
-         dt, h, b, pd,
-         pml=None,
-         free_surface=False,
-         topo_rows=None,
-         return_gradients=False,
-         ):
+def velocity_substep(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
+                     m_vxx, m_vxy, m_vxz,
+                     m_vyx, m_vyy, m_vyz,
+                     m_vzx, m_vzy, m_vzz,
+                     m_sxxx, m_szzz,
+                     m_sxyx, m_sxyy,
+                     m_sxzx, m_sxzz,
+                     m_syyy,
+                     m_syzy, m_syzz,
+                     *, rho, dt, pd, pml, free_surface=False, topo_rows=None):
+    """First half of :func:`step`: the stress derivatives (and their CPML
+    memories), then the velocities. Returns all 27 fields, in order."""
     az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh = pml
     top_halo = pd.coes.shape[0]
 
@@ -83,33 +79,51 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
     else:
         dszz_dz = pd.z_forward(szz)
 
-    m_szzz = azh * m_szzz + bzh * dszz_dz
-    dszz_dz = dszz_dz + m_szzz
-    m_sxzx = ax * m_sxzx + bx * dsxz_dx
-    dsxz_dx = dsxz_dx + m_sxzx
+    dszz_dz, m_szzz = cpml_update(dszz_dz, m_szzz, azh, bzh, (szz, pd.kzf, pd._spacing["z"]))
+    dsxz_dx, m_sxzx = cpml_update(dsxz_dx, m_sxzx, ax, bx, (sxz, pd.kxb, pd._spacing["x"]))
 
-    m_sxzz = az * m_sxzz + bz * dsxz_dz
-    dsxz_dz = dsxz_dz + m_sxzz
-    m_sxxx = axh * m_sxxx + bxh * dsxx_dx
-    dsxx_dx = dsxx_dx + m_sxxx
+    dsxz_dz, m_sxzz = cpml_update(dsxz_dz, m_sxzz, az, bz, (sxz, pd.kzb, pd._spacing["z"]))
+    dsxx_dx, m_sxxx = cpml_update(dsxx_dx, m_sxxx, axh, bxh, (sxx, pd.kxf, pd._spacing["x"]))
 
-    m_sxyy = ay * m_sxyy + by * dsxy_dy
-    dsxy_dy = dsxy_dy + m_sxyy
+    dsxy_dy, m_sxyy = cpml_update(dsxy_dy, m_sxyy, ay, by, (sxy, pd.kyb, pd._spacing["y"]))
 
-    m_sxyx = ax * m_sxyx + bx * dsxy_dx
-    dsxy_dx = dsxy_dx + m_sxyx
+    dsxy_dx, m_sxyx = cpml_update(dsxy_dx, m_sxyx, ax, bx, (sxy, pd.kxb, pd._spacing["x"]))
 
-    m_syyy = ayh * m_syyy + byh * dsyy_dy
-    dsyy_dy = dsyy_dy + m_syyy
-    m_syzz = az * m_syzz + bz * dsyz_dz
-    dsyz_dz = dsyz_dz + m_syzz
+    dsyy_dy, m_syyy = cpml_update(dsyy_dy, m_syyy, ayh, byh, (syy, pd.kyf, pd._spacing["y"]))
+    dsyz_dz, m_syzz = cpml_update(dsyz_dz, m_syzz, az, bz, (syz, pd.kzb, pd._spacing["z"]))
 
-    m_syzy = ay * m_syzy + by * dsyz_dy
-    dsyz_dy = dsyz_dy + m_syzy
+    dsyz_dy, m_syzy = cpml_update(dsyz_dy, m_syzy, ay, by, (syz, pd.kyb, pd._spacing["y"]))
 
     vx = vx + dt / rho * (dsxx_dx + dsxy_dy + dsxz_dz)
     vy = vy + dt / rho * (dsxy_dx + dsyy_dy + dsyz_dz)
     vz = vz + dt / rho * (dsxz_dx + dsyz_dy + dszz_dz)
+
+    return (vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
+            m_vxx, m_vxy, m_vxz,
+            m_vyx, m_vyy, m_vyz,
+            m_vzx, m_vzy, m_vzz,
+            m_sxxx, m_szzz,
+            m_sxyx, m_sxyy,
+            m_sxzx, m_sxzz,
+            m_syyy,
+            m_syzy, m_syzz)
+
+
+def stress_substep(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
+                   m_vxx, m_vxy, m_vxz,
+                   m_vyx, m_vyy, m_vyz,
+                   m_vzx, m_vzy, m_vzz,
+                   m_sxxx, m_szzz,
+                   m_sxyx, m_sxyy,
+                   m_sxzx, m_sxzz,
+                   m_syyy,
+                   m_syzy, m_syzz,
+                   *, lame_lambda, lame_mu, dt, pd, pml, free_surface=False, topo_rows=None,
+                   return_gradients=False):
+    """Second half of :func:`step`: the velocity derivatives (and their CPML
+    memories), then the stresses and the free-surface rows."""
+    az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh = pml
+    top_halo = pd.coes.shape[0]
 
     dvx_dx = pd.x_backward(vx)
     dvx_dy = pd.y_forward(vx)
@@ -132,25 +146,16 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
     else:
         dvz_dz = pd.z_backward(vz)
 
-    m_vzz = az * m_vzz + bz * dvz_dz
-    dvz_dz = dvz_dz + m_vzz
-    m_vyy = ay * m_vyy + by * dvy_dy
-    dvy_dy = dvy_dy + m_vyy
-    m_vxx = ax * m_vxx + bx * dvx_dx
-    dvx_dx = dvx_dx + m_vxx
-    m_vxz = azh * m_vxz + bzh * dvx_dz
-    dvx_dz = dvx_dz + m_vxz
-    m_vzx = axh * m_vzx + bxh * dvz_dx
-    dvz_dx = dvz_dx + m_vzx
+    dvz_dz, m_vzz = cpml_update(dvz_dz, m_vzz, az, bz, (vz, pd.kzb, pd._spacing["z"]))
+    dvy_dy, m_vyy = cpml_update(dvy_dy, m_vyy, ay, by, (vy, pd.kyb, pd._spacing["y"]))
+    dvx_dx, m_vxx = cpml_update(dvx_dx, m_vxx, ax, bx, (vx, pd.kxb, pd._spacing["x"]))
+    dvx_dz, m_vxz = cpml_update(dvx_dz, m_vxz, azh, bzh, (vx, pd.kzf, pd._spacing["z"]))
+    dvz_dx, m_vzx = cpml_update(dvz_dx, m_vzx, axh, bxh, (vz, pd.kxf, pd._spacing["x"]))
 
-    m_vxy = ayh * m_vxy + byh * dvx_dy
-    dvx_dy = dvx_dy + m_vxy
-    m_vyx = axh * m_vyx + bxh * dvy_dx
-    dvy_dx = dvy_dx + m_vyx
-    m_vyz = azh * m_vyz + bzh * dvy_dz
-    dvy_dz = dvy_dz + m_vyz
-    m_vzy = ayh * m_vzy + byh * dvz_dy
-    dvz_dy = dvz_dy + m_vzy
+    dvx_dy, m_vxy = cpml_update(dvx_dy, m_vxy, ayh, byh, (vx, pd.kyf, pd._spacing["y"]))
+    dvy_dx, m_vyx = cpml_update(dvy_dx, m_vyx, axh, bxh, (vy, pd.kxf, pd._spacing["x"]))
+    dvy_dz, m_vyz = cpml_update(dvy_dz, m_vyz, azh, bzh, (vy, pd.kzf, pd._spacing["z"]))
+    dvz_dy, m_vzy = cpml_update(dvz_dy, m_vzy, ayh, byh, (vz, pd.kyf, pd._spacing["y"]))
 
     div_v = dvx_dx + dvy_dy + dvz_dz
 
@@ -213,6 +218,41 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
     return out
 
 
+def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
+         m_vxx, m_vxy, m_vxz,
+         m_vyx, m_vyy, m_vyz,
+         m_vzx, m_vzy, m_vzz,
+         m_sxxx, m_szzz,
+         m_sxyx, m_sxyy,
+         m_sxzx, m_sxzz,
+            m_syyy,
+         m_syzy, m_syzz,
+         vp, vs, rho,
+         lame_lambda, lame_mu,
+         dt, h, b, pd,
+         pml=None,
+         free_surface=False,
+         topo_rows=None,
+         return_gradients=False,
+         ):
+    """One leapfrog step: :func:`velocity_substep`, then :func:`stress_substep`
+    (``Elastic.interior_substeps`` reuses the two halves)."""
+    fields = velocity_substep(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
+                              m_vxx, m_vxy, m_vxz,
+                              m_vyx, m_vyy, m_vyz,
+                              m_vzx, m_vzy, m_vzz,
+                              m_sxxx, m_szzz,
+                              m_sxyx, m_sxyy,
+                              m_sxzx, m_sxzz,
+                              m_syyy,
+                              m_syzy, m_syzz,
+                              rho=rho, dt=dt, pd=pd, pml=pml,
+                              free_surface=free_surface, topo_rows=topo_rows)
+    return stress_substep(*fields, lame_lambda=lame_lambda, lame_mu=lame_mu, dt=dt, pd=pd, pml=pml,
+                          free_surface=free_surface, topo_rows=topo_rows,
+                          return_gradients=return_gradients)
+
+
 def step_apm(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
              m_vxx, m_vxy, m_vxz,
              m_vyx, m_vyy, m_vyz,
@@ -257,29 +297,20 @@ def step_apm(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
 
     # CPML memory for stress-gradient derivatives (same staggering as
     # ``step``).
-    m_szzz = azh * m_szzz + bzh * dszz_dz
-    dszz_dz = dszz_dz + m_szzz
-    m_sxzx = ax * m_sxzx + bx * dsxz_dx
-    dsxz_dx = dsxz_dx + m_sxzx
+    dszz_dz, m_szzz = cpml_update(dszz_dz, m_szzz, azh, bzh, (szz, pd.kzf, pd._spacing["z"]))
+    dsxz_dx, m_sxzx = cpml_update(dsxz_dx, m_sxzx, ax, bx, (sxz, pd.kxb, pd._spacing["x"]))
 
-    m_sxzz = az * m_sxzz + bz * dsxz_dz
-    dsxz_dz = dsxz_dz + m_sxzz
-    m_sxxx = axh * m_sxxx + bxh * dsxx_dx
-    dsxx_dx = dsxx_dx + m_sxxx
+    dsxz_dz, m_sxzz = cpml_update(dsxz_dz, m_sxzz, az, bz, (sxz, pd.kzb, pd._spacing["z"]))
+    dsxx_dx, m_sxxx = cpml_update(dsxx_dx, m_sxxx, axh, bxh, (sxx, pd.kxf, pd._spacing["x"]))
 
-    m_sxyy = ay * m_sxyy + by * dsxy_dy
-    dsxy_dy = dsxy_dy + m_sxyy
+    dsxy_dy, m_sxyy = cpml_update(dsxy_dy, m_sxyy, ay, by, (sxy, pd.kyb, pd._spacing["y"]))
 
-    m_sxyx = ax * m_sxyx + bx * dsxy_dx
-    dsxy_dx = dsxy_dx + m_sxyx
+    dsxy_dx, m_sxyx = cpml_update(dsxy_dx, m_sxyx, ax, bx, (sxy, pd.kxb, pd._spacing["x"]))
 
-    m_syyy = ayh * m_syyy + byh * dsyy_dy
-    dsyy_dy = dsyy_dy + m_syyy
-    m_syzz = az * m_syzz + bz * dsyz_dz
-    dsyz_dz = dsyz_dz + m_syzz
+    dsyy_dy, m_syyy = cpml_update(dsyy_dy, m_syyy, ayh, byh, (syy, pd.kyf, pd._spacing["y"]))
+    dsyz_dz, m_syzz = cpml_update(dsyz_dz, m_syzz, az, bz, (syz, pd.kzb, pd._spacing["z"]))
 
-    m_syzy = ay * m_syzy + by * dsyz_dy
-    dsyz_dy = dsyz_dy + m_syzy
+    dsyz_dy, m_syzy = cpml_update(dsyz_dy, m_syzy, ay, by, (syz, pd.kyb, pd._spacing["y"]))
 
     # Velocity update: per-component inverse density (already zeroed
     # where the velocity node sits in air, so no NaN even if rho was
@@ -301,25 +332,16 @@ def step_apm(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
     dvz_dy = pd.y_forward(vz)
     dvz_dz = pd.z_backward(vz)
 
-    m_vzz = az * m_vzz + bz * dvz_dz
-    dvz_dz = dvz_dz + m_vzz
-    m_vyy = ay * m_vyy + by * dvy_dy
-    dvy_dy = dvy_dy + m_vyy
-    m_vxx = ax * m_vxx + bx * dvx_dx
-    dvx_dx = dvx_dx + m_vxx
-    m_vxz = azh * m_vxz + bzh * dvx_dz
-    dvx_dz = dvx_dz + m_vxz
-    m_vzx = axh * m_vzx + bxh * dvz_dx
-    dvz_dx = dvz_dx + m_vzx
+    dvz_dz, m_vzz = cpml_update(dvz_dz, m_vzz, az, bz, (vz, pd.kzb, pd._spacing["z"]))
+    dvy_dy, m_vyy = cpml_update(dvy_dy, m_vyy, ay, by, (vy, pd.kyb, pd._spacing["y"]))
+    dvx_dx, m_vxx = cpml_update(dvx_dx, m_vxx, ax, bx, (vx, pd.kxb, pd._spacing["x"]))
+    dvx_dz, m_vxz = cpml_update(dvx_dz, m_vxz, azh, bzh, (vx, pd.kzf, pd._spacing["z"]))
+    dvz_dx, m_vzx = cpml_update(dvz_dx, m_vzx, axh, bxh, (vz, pd.kxf, pd._spacing["x"]))
 
-    m_vxy = ayh * m_vxy + byh * dvx_dy
-    dvx_dy = dvx_dy + m_vxy
-    m_vyx = axh * m_vyx + bxh * dvy_dx
-    dvy_dx = dvy_dx + m_vyx
-    m_vyz = azh * m_vyz + bzh * dvy_dz
-    dvy_dz = dvy_dz + m_vyz
-    m_vzy = ayh * m_vzy + byh * dvz_dy
-    dvz_dy = dvz_dy + m_vzy
+    dvx_dy, m_vxy = cpml_update(dvx_dy, m_vxy, ayh, byh, (vx, pd.kyf, pd._spacing["y"]))
+    dvy_dx, m_vyx = cpml_update(dvy_dx, m_vyx, axh, bxh, (vy, pd.kxf, pd._spacing["x"]))
+    dvy_dz, m_vyz = cpml_update(dvy_dz, m_vyz, azh, bzh, (vy, pd.kzf, pd._spacing["z"]))
+    dvz_dy, m_vzy = cpml_update(dvz_dy, m_vzy, ayh, byh, (vz, pd.kyf, pd._spacing["y"]))
 
     # Normal stresses: per-cell effective α (diagonal) + λ (off-diagonal).
     # Bulk: α = λ + 2μ on the diagonal and λ off-diagonal — identical to
@@ -378,28 +400,31 @@ class Elastic(FirstOrderEquation):
         FieldSpec("sxy", aliases=("stress_xy", "shear_xy"), description="Shear stress component.", supports_source=True),
         FieldSpec("sxz", aliases=("stress_xz", "shear_xz"), description="Shear stress component.", supports_source=True),
         FieldSpec("syz", aliases=("stress_yz", "shear_yz"), description="Shear stress component.", supports_source=True),
-        FieldSpec("m_vxx", description="CPML memory variable for dvx/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_vxy", description="CPML memory variable for dvx/dy.", internal=True, boundary_related=True),
-        FieldSpec("m_vxz", description="CPML memory variable for dvx/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_vyx", description="CPML memory variable for dvy/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_vyy", description="CPML memory variable for dvy/dy.", internal=True, boundary_related=True),
-        FieldSpec("m_vyz", description="CPML memory variable for dvy/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_vzx", description="CPML memory variable for dvz/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_vzy", description="CPML memory variable for dvz/dy.", internal=True, boundary_related=True),
-        FieldSpec("m_vzz", description="CPML memory variable for dvz/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_sxxx", description="CPML memory variable for dsxx/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_szzz", description="CPML memory variable for dszz/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_sxyx", description="CPML memory variable for dsxy/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_sxyy", description="CPML memory variable for dsxy/dy.", internal=True, boundary_related=True),
-        FieldSpec("m_sxzx", description="CPML memory variable for dsxz/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_sxzz", description="CPML memory variable for dsxz/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_syyy", description="CPML memory variable for dsyy/dy.", internal=True, boundary_related=True),
-        FieldSpec("m_syzy", description="CPML memory variable for dsyz/dy.", internal=True, boundary_related=True),
-        FieldSpec("m_syzz", description="CPML memory variable for dsyz/dz.", internal=True, boundary_related=True),
+        FieldSpec("m_vxx", description="CPML memory variable for dvx/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_vxy", description="CPML memory variable for dvx/dy.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_vxz", description="CPML memory variable for dvx/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_vyx", description="CPML memory variable for dvy/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_vyy", description="CPML memory variable for dvy/dy.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_vyz", description="CPML memory variable for dvy/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_vzx", description="CPML memory variable for dvz/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_vzy", description="CPML memory variable for dvz/dy.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_vzz", description="CPML memory variable for dvz/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_sxxx", description="CPML memory variable for dsxx/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_szzz", description="CPML memory variable for dszz/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_sxyx", description="CPML memory variable for dsxy/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_sxyy", description="CPML memory variable for dsxy/dy.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_sxzx", description="CPML memory variable for dsxz/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_sxzz", description="CPML memory variable for dsxz/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_syyy", description="CPML memory variable for dsyy/dy.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_syzy", description="CPML memory variable for dsyz/dy.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("m_syzz", description="CPML memory variable for dsyz/dz.", internal=True, boundary_related=True, cpml_axis="z"),
     )
 
     default_pml_type = "cpmls"  # staggered-grid CPML: step() unpacks 12 profiles
     supports_apm = True          # Cao & Chen 2018 3-D APM is implemented
+    # The eager boundary-saving sub-steps carry the free-surface BC (the image
+    # derivatives and the surface rows of stress_substep).
+    supports_bs_free_surface = True
     supports_image_topography = True   # eager func applies the staircase
     # supports_image_topography_c stays False: the CUDA kernels never read
     # the topo rows (topo3d_gradient_mode_suite's docstring says the same).
@@ -451,15 +476,18 @@ class Elastic(FirstOrderEquation):
         lame_mu = rho * vs**2
         return [vp, vs, rho, lame_lambda, lame_mu]
     
-    def func(self, wavefields, models, dt, h, b, **kwargs):
+    @staticmethod
+    def _moduli(models):
+        """``(vp, vs, rho, lame_lambda, lame_mu)`` from the raw or prepared models."""
         if len(models) == 5:
-            vp, vs, rho, lame_lambda, lame_mu = models
-        elif len(models) == 3:
+            return tuple(models)
+        if len(models) == 3:
             vp, vs, rho = models
-            lame_lambda = rho * (vp**2 - 2 * vs**2)
-            lame_mu = rho * vs**2
-        else:
-            raise ValueError(f"Elastic3D.func expected 3 or 5 models, got {len(models)}")
+            return vp, vs, rho, rho * (vp**2 - 2 * vs**2), rho * vs**2
+        raise ValueError(f"Elastic3D.func expected 3 or 5 models, got {len(models)}")
+
+    def func(self, wavefields, models, dt, h, b, **kwargs):
+        vp, vs, rho, lame_lambda, lame_mu = self._moduli(models)
 
         # APM dispatch: if the propagator's ``topography=`` was a 3-D air
         # mask it stored a replicate-padded runtime version on the
@@ -491,6 +519,30 @@ class Elastic(FirstOrderEquation):
             topo_rows=topo_rows,
             **kwargs,
         )
+
+    def interior_substeps(self):
+        """The leapfrog as two reversible sub-steps, REUSING the
+        ``velocity_substep`` / ``stress_substep`` that :func:`step` (and thus
+        ``func``) is built from -- no rewritten copy of the physics. Called with
+        ``pml`` zeroed (boundary saving reconstructs only the lossless interior)
+        but the free-surface BC kept, so the eager boundary-saving 'substep'
+        driver inverts the step exactly by composing the list in reverse order
+        at ``-dt``."""
+        if getattr(self, "_apm_air_mask_runtime", None) is not None:
+            raise NotImplementedError("Eager boundary saving with topo_method='apm' (Elastic3D).")
+        pd = self.pd
+        fs = bool(getattr(self, "free_surface", False))
+        topo = getattr(self, "_topo_rows_runtime", None)
+        kw = dict(pd=pd, pml=(0.0,) * 12, free_surface=fs, topo_rows=topo)
+
+        def sub_v(wf, models, dt, h):
+            return list(velocity_substep(*wf, rho=self._moduli(models)[2], dt=dt, **kw))
+
+        def sub_s(wf, models, dt, h):
+            _, _, _, lam, mu = self._moduli(models)
+            return list(stress_substep(*wf, lame_lambda=lam, lame_mu=mu, dt=dt, **kw))
+
+        return [sub_v, sub_s]   # forward order; reverse = reversed(...) at -dt
 
     def _func_apm(self, wavefields, lame_lambda, lame_mu, rho, air_mask_rt,
                   dt, h, b, **kwargs):

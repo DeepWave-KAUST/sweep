@@ -30,6 +30,7 @@ no extra memory.
 
 from __future__ import annotations
 
+from ._cpml import cpml_update
 from ._free_surface import (
     FS_MOD_SXX,
     FS_NEARSURF_O2,
@@ -138,16 +139,13 @@ def elastic_velocity_substep(
                      half=True)
 
     # ---- CPML accumulation + velocity update -----------------------------
-    m_tzzz = azh * m_tzzz + bzh * tzz_z
-    tzz_z = tzz_z + m_tzzz
-    m_txzx = ax * m_txzx + bx * txz_x
-    txz_x = txz_x + m_txzx
+    hz, hx = pd._spacing["z"], pd._spacing["x"]
+    tzz_z, m_tzzz = cpml_update(tzz_z, m_tzzz, azh, bzh, (szz, pd.kzf, hz))
+    txz_x, m_txzx = cpml_update(txz_x, m_txzx, ax, bx, (sxz, pd.kxb, hx))
     vz = vz + dt / rho_z * (tzz_z + txz_x)
 
-    m_txzz = az * m_txzz + bz * txz_z
-    txz_z = txz_z + m_txzz
-    m_txxx = axh * m_txxx + bxh * txx_x
-    txx_x = txx_x + m_txxx
+    txz_z, m_txzz = cpml_update(txz_z, m_txzz, az, bz, (sxz, pd.kzb, hz))
+    txx_x, m_txxx = cpml_update(txx_x, m_txxx, axh, bxh, (sxx, pd.kxf, hx))
     vx = vx + dt / rho_x * (txx_x + txz_z)
 
     return (
@@ -217,22 +215,26 @@ def elastic_velocity_gradients(
         vz_x = _fsd(pd, _pd2, "x_forward", vz, False, -1, x_sides, top_halo, _n_o2)
 
     # ---- CPML accumulation (normal strain rates) --------------------------
-    m_vzz = az * m_vzz + bz * vz_z
-    vz_z = vz_z + m_vzz
-    m_vxx = ax * m_vxx + bx * vx_x
-    vx_x = vx_x + m_vxx
+    hz, hx = pd._spacing["z"], pd._spacing["x"]
+    vz_z, m_vzz = cpml_update(vz_z, m_vzz, az, bz, (vz, pd.kzb, hz))
+    vx_x, m_vxx = cpml_update(vx_x, m_vxx, ax, bx, (vx, pd.kxb, hx))
     return vx_x, vz_z, vx_z, vz_x, m_vxx, m_vzz
 
 
-def elastic_shear_cpml(vx_z, vz_x, m_vxz, m_vzx, pml):
+def elastic_shear_cpml(vx_z, vz_x, m_vxz, m_vzx, pml, src=None):
     """CPML memories of the two shear derivatives (the half-grid profiles):
     returns the corrected ``(vx_z, vz_x)`` and the updated ``(m_vxz, m_vzx)``.
-    Second half of :func:`elastic_velocity_gradients`."""
+    Second half of :func:`elastic_velocity_gradients`.  ``src = (vx, vz, pd)``
+    lets strip-held memories retake the derivatives on the strips."""
     az, bz, azh, bzh, ax, bx, axh, bxh = pml
-    m_vxz = azh * m_vxz + bzh * vx_z
-    vx_z = vx_z + m_vxz
-    m_vzx = axh * m_vzx + bxh * vz_x
-    vz_x = vz_x + m_vzx
+    if src is not None:
+        vx, vz, pd = src
+        sz = (vx, pd.kzf, pd._spacing["z"])
+        sx = (vz, pd.kxf, pd._spacing["x"])
+    else:
+        sz = sx = None
+    vx_z, m_vxz = cpml_update(vx_z, m_vxz, azh, bzh, sz)
+    vz_x, m_vzx = cpml_update(vz_x, m_vzx, axh, bxh, sx)
     return vx_z, vz_x, m_vxz, m_vzx
 
 
@@ -295,7 +297,7 @@ def elastic_stress_substep(
         for side in x_sides:
             szz = overwrite_surface_row(szz, _szz_surf, top_halo, axis=-1, side=side)
 
-    vx_z, vz_x, m_vxz, m_vzx = elastic_shear_cpml(vx_z, vz_x, m_vxz, m_vzx, pml)
+    vx_z, vz_x, m_vxz, m_vzx = elastic_shear_cpml(vx_z, vz_x, m_vxz, m_vzx, pml, (vx, vz, pd))
     sxz = sxz + dt * mu_xz * (vx_z + vz_x)
 
     out = (

@@ -14,6 +14,9 @@ class FieldSpec:
     supports_receiver: bool = False
     internal: bool = False
     boundary_related: bool = False
+    # A CPML memory variable of a derivative along this axis ("z", "y" or "x"):
+    # with EagerOptions(cpml_strips=True) it is kept on the absorbing strips only.
+    cpml_axis: str = ""
 
 
 @dataclass(frozen=True)

@@ -454,7 +454,7 @@ class ViscoElastic(FirstOrderEquation):
             dt=dt, h=h, b=b, pd=self.pd, pml=self.b,
             free_surface=free_surface, topo_rows=None, fs_faces=fs_faces,
         )
-        vx_z, vz_x, m_vxz, m_vzx = elastic_shear_cpml(vx_z, vz_x, m_vxz, m_vzx, self.b)
+        vx_z, vz_x, m_vxz, m_vzx = elastic_shear_cpml(vx_z, vz_x, m_vxz, m_vzx, self.b, (vx, vz, self.pd))
         exz = vx_z + vz_x
 
         a_l, c_l = self.relaxation_coefficients(dt)

@@ -100,6 +100,12 @@ class WaveEquation:
     # raises instead of running a wrong reconstruction.
     supports_boundary_saving_c = True
 
+    # Same, for the pure-Python reverse drivers (impl='eager' and PropJax, which
+    # share ``propagator._bs_dispatch``).  An equation whose reconstruction
+    # amplifies its round-off into the gradient overrides this to False, and a
+    # boundary request raises instead of returning a gradient several percent off.
+    supports_boundary_saving_eager = True
+
     # Whether the compiled (``impl='c'``) kernels accept a per-shot *batched*
     # velocity model — one model per shot in the batch, shape ``(B, *spatial)``
     # — in addition to a single shared ``(*spatial)`` model broadcast across

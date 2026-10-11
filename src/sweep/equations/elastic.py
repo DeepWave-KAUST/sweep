@@ -53,16 +53,16 @@ class Elastic(FirstOrderEquation):
         FieldSpec("sxx", aliases=("stress_xx",), description="Normal stress in the x direction.", supports_source=True, supports_receiver=True),
         FieldSpec("szz", aliases=("stress_zz",), description="Normal stress in the z direction.", supports_source=True, supports_receiver=True),
         FieldSpec("sxz", aliases=("stress_xz", "shear_xz"), description="Shear stress component.", supports_source=True),
-        FieldSpec("m_vxx", description="CPML memory variable for dvx/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_vxz", description="CPML memory variable for dvx/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_vzx", description="CPML memory variable for dvz/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_vzz", description="CPML memory variable for dvz/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_txxx", description="CPML memory variable for dsxx/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_txxz", description="Reserved elastic auxiliary field.", internal=True, boundary_related=True),
-        FieldSpec("m_tzzx", description="Reserved elastic auxiliary field.", internal=True, boundary_related=True),
-        FieldSpec("m_tzzz", description="CPML memory variable for dszz/dz.", internal=True, boundary_related=True),
-        FieldSpec("m_txzx", description="CPML memory variable for dsxz/dx.", internal=True, boundary_related=True),
-        FieldSpec("m_txzz", description="CPML memory variable for dsxz/dz.", internal=True, boundary_related=True),
+        FieldSpec("m_vxx", description="CPML memory variable for dvx/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_vxz", description="CPML memory variable for dvx/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_vzx", description="CPML memory variable for dvz/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_vzz", description="CPML memory variable for dvz/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_txxx", description="CPML memory variable for dsxx/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_txxz", description="Reserved elastic auxiliary field.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_tzzx", description="Reserved elastic auxiliary field.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_tzzz", description="CPML memory variable for dszz/dz.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_txzx", description="CPML memory variable for dsxz/dx.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_txzz", description="CPML memory variable for dsxz/dz.", internal=True, boundary_related=True, cpml_axis="z"),
     )
 
     default_pml_type = "cpmls"  # staggered-grid CPML: step() unpacks 8 profiles
@@ -258,6 +258,10 @@ class Elastic(FirstOrderEquation):
         saving reconstructs only the lossless interior) but the free-surface BC
         KEPT, so the eager boundary-saving 'substep' driver inverts the step
         exactly by composing the list in reverse order at ``-dt``."""
+        if getattr(self, "_apm_air_mask_runtime", None) is not None:
+            # The APM step zeroes the air cells after the stress update, from
+            # velocities the reverse sub-step no longer has: not invertible.
+            raise NotImplementedError("Eager boundary saving with topo_method='apm' (Elastic).")
         pd = self.pd
         fs = bool(getattr(self, "free_surface", False))
         topo = getattr(self, "_topo_rows_runtime", None)

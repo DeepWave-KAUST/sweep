@@ -66,7 +66,7 @@ Pick the Python-only path when any of the following is true:
 - you are prototyping a new physics and want to iterate fast in pure Python
 - you target `backend="jax"` and run through `PropJax`
 - the eager memory modes are enough for your model sizes: `Full()`,
-  `BoundarySaving(storage="gpu" | "cpu")` or `Ckpt(mode="chunk")` (the eager
+  `BoundarySaving(storage="gpu" | "cpu" | "disk")` or `Ckpt(mode="chunk")` (the eager
   default); boundary saving of a first-order equation needs its
   `interior_substeps()`
 - you are happy with `torch.compile` (default) for speed and do not need
@@ -416,6 +416,7 @@ when the corresponding capability is implemented (or, for
 | `supports_apm` | `False` | Parameter-modified (APM) irregular topography path — see below. |
 | `supports_batched_models` | `False` | The CUDA kernels accept per-shot batched models `(B, *spatial)` in addition to a single shared model. |
 | `supports_boundary_saving_c` | `True` | Whether the compiled backend can run boundary saving. Set `False` when the step cannot be reverse-reconstructed from boundary strips (`ViscoAcoustic`, `DASZhao3D`): the `impl='c'` default strategy then falls back to `'full'` and an explicit boundary request raises. |
+| `supports_boundary_saving_eager` | `True` | The same for eager (and `PropJax`) boundary saving, whose reverse drivers reconstruct the wavefield backwards in time. Set `False` when that reconstruction leaves the gradient inaccurate (`ViscoAcoustic`, `AcousticVTI`, `AcousticTTI`): a boundary request then raises. |
 | `supports_image_topography` / `supports_image_topography_c` | `False` | The eager `func` / the compiled kernels apply the image-method topography staircase; without it, `topography=` with `topo_method='image'` is refused instead of silently modelling a flat surface. |
 | `BOUNDARY_BUFFER_REACH` | `0` | How far, in units of M, the boundary-saving imaging stencil reaches beyond the reverse step; a non-zero value makes the propagator insert a sigma=0 buffer of `REACH*M + 1` cells before the PML (`AcousticVRZ` / `AcousticVRZ3D` declare 1). |
 | `C_HAS_RECURSIVE_CKPT` | `True` | Set `False` when the core ships no `{C_NAME}_backward_recursive_ckpt`; `Ckpt(mode="recursive")` is then refused. |

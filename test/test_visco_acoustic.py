@@ -89,6 +89,14 @@ def test_no_top_level_backend_imports():
 # torch backend
 # --------------------------------------------------------------------------
 
+def _uncompiled():
+    # torch.compile rebuilds the step for every new propagator (5-40 s each on
+    # a CPU runner); test_compiled_forward_matches_uncompiled covers it once.
+    from sweep.propagator.options import EagerOptions
+
+    return EagerOptions(use_compile=False)
+
+
 def _build(phase_shift=True, amplitude_damping=True, free_surface=False):
     from sweep.equations import ViscoAcoustic
     from sweep.propagator.torch import PropTorch
@@ -97,7 +105,8 @@ def _build(phase_shift=True, amplitude_damping=True, free_surface=False):
                        phase_shift=phase_shift, amplitude_damping=amplitude_damping)
     prop = PropTorch(eq, shape=(NZ, NX), dh=DH, dt=DT, dev=torch.device("cpu"),
                      source_type=["h1"], receiver_type=["h1"], abcn=ABCN,
-                     impl="eager", use_ckpt=False, free_surface=free_surface)
+                     impl="eager", use_ckpt=False, free_surface=free_surface,
+                     eager_options=_uncompiled())
     return eq, prop
 
 
@@ -121,7 +130,8 @@ def _acoustic_run(free_surface=False):
     ea = Acoustic(spatial_order=4, backend="torch", device="cpu")
     pa = PropTorch(ea, shape=(NZ, NX), dh=DH, dt=DT, dev=torch.device("cpu"),
                    source_type=["h1"], receiver_type=["h1"], abcn=ABCN,
-                   impl="eager", use_ckpt=False, free_surface=free_surface)
+                   impl="eager", use_ckpt=False, free_surface=free_surface,
+                   eager_options=_uncompiled())
     return _run(pa, models=[torch.full((NZ, NX), VP)])
 
 
@@ -307,7 +317,8 @@ def _build_fs(fs, N=None):
     shape = (N, N) if N is not None else (NZ, NX)
     prop = PropTorch(eq, shape=shape, dh=DH, dt=DT, dev=torch.device("cpu"),
                      source_type=["h1"], receiver_type=["h1"], abcn=ABCN,
-                     impl="eager", use_ckpt=False, free_surface=fs)
+                     impl="eager", use_ckpt=False, free_surface=fs,
+                     eager_options=_uncompiled())
     return prop
 
 
@@ -340,7 +351,7 @@ def test_per_edge_closed_box_mirror_symmetry():
     eq = ViscoAcoustic(spatial_order=4, backend="torch", device="cpu")
     prop = PropTorch(eq, shape=(M, M), dh=DH, dt=DT, dev=torch.device("cpu"),
                      source_type=["h1"], receiver_type=["h1"], abcn=0,
-                     impl="eager", use_ckpt=False,
+                     impl="eager", use_ckpt=False, eager_options=_uncompiled(),
                      free_surface=["top", "bottom", "left", "right"])
     w = _ricker(nt, DT, F0)
     src = np.array([[c, c]], dtype=np.int64)

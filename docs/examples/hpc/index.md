@@ -1,7 +1,7 @@
 # HPC
 
-Memory strategies, compressed boundary storage, one shot per GPU, and one model
-split across GPUs.
+Memory strategies, compressed boundary storage, the eager and compiled backends
+side by side, one shot per GPU, and one model split across GPUs.
 
 <div class="grid cards" markdown>
 
@@ -30,6 +30,20 @@ split across GPUs.
     convergence, plus a runtime GPU-memory breakdown.
 
     [:material-notebook-outline: Open notebook](../../notebooks/19_fwi_boundary_dtype.ipynb)
+
+-   ![eager vs c](../../figures/gallery/33_eager_vs_c.png){ loading=lazy }
+
+    **HPC · eager vs c**
+
+    ---
+
+    Forward modelling, a full-storage gradient and a boundary-saving gradient
+    on both backends — 2-D and 3-D, acoustic and elastic, from one shot on a
+    small grid to large multi-shot runs — with steady-state time, compile time
+    and peak GPU memory side by side. Eager with CPML strips wins forward
+    modelling on the large grids; `c` wins every gradient.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/33_eager_vs_c.ipynb)
 
 -   ![Multi-GPU DDP](../../figures/gallery/01_fwi_acoustic_marmousi.png){ loading=lazy }
 

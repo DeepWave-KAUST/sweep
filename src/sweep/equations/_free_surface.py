@@ -2,6 +2,7 @@ import os
 
 import numpy as np
 
+from ._cpml import Strips
 from .utils import is_torch_tensor
 
 
@@ -490,6 +491,9 @@ def zero_above_topo(u, iz_surf, axis):
     """Zero cells strictly above the surface in each column (the "air"
     region). Replaces :func:`zero_top_row` on the topo path."""
     import torch
+
+    if isinstance(u, Strips):
+        raise NotImplementedError("CPML strips with an irregular surface (topography).")
 
     z, surf, ax, nz = _broadcast_topo(u, iz_surf, axis)
     mask = (z < surf).expand_as(u)

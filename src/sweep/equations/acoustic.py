@@ -15,6 +15,7 @@ def step_cpml(
         pml,
         grad_op,
         grad_kernels=None,
+        src=None,
         ):
 
     az, bz, dbzdz, ax, bx, dbxdx = pml
@@ -29,12 +30,12 @@ def step_cpml(
     # reasons -- it is returned in the z slot, so the name is wrong but the
     # wiring is right. Renaming it is a separate change from this one.
     contrib_z, psiyn, zetaz = cpml_axis_update(
-        lap_z, dudz, psiz, zetaz, az, bz, dbzdz, h, -2, grad_op, grad_kernels)
+        lap_z, dudz, psiz, zetaz, az, bz, dbzdz, h, -2, grad_op, grad_kernels, src)
     w_sum += contrib_z
 
     # X direction
     contrib_x, psixn, zetax = cpml_axis_update(
-        lap_x, dudx, psix, zetax, ax, bx, dbxdx, h, -1, grad_op, grad_kernels)
+        lap_x, dudx, psix, zetax, ax, bx, dbxdx, h, -1, grad_op, grad_kernels, src)
     w_sum += contrib_x
 
     u_next = 2 * u_now - u_pre + vp**2 * dt**2 * w_sum
@@ -61,10 +62,10 @@ class Acoustic(SecondOrderEquation):
     FIELD_SPECS = (
         FieldSpec("h1", aliases=("pressure", "p"), description="Primary acoustic pressure-like wavefield.", supports_source=True, supports_receiver=True),
         FieldSpec("h2", aliases=("pressure_prev",), description="Previous-step pressure-like wavefield.", internal=True),
-        FieldSpec("psix", description="CPML memory variable for the x-derivative term.", internal=True, boundary_related=True),
-        FieldSpec("psiz", description="CPML memory variable for the z-derivative term.", internal=True, boundary_related=True),
-        FieldSpec("zetax", description="CPML auxiliary wavefield for the x-direction update.", internal=True, boundary_related=True),
-        FieldSpec("zetaz", description="CPML auxiliary wavefield for the z-direction update.", internal=True, boundary_related=True),
+        FieldSpec("psix", description="CPML memory variable for the x-derivative term.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("psiz", description="CPML memory variable for the z-derivative term.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("zetax", description="CPML auxiliary wavefield for the x-direction update.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("zetaz", description="CPML auxiliary wavefield for the z-direction update.", internal=True, boundary_related=True, cpml_axis="z"),
     )
 
     default_pml_type = "cpmlr"
@@ -134,7 +135,8 @@ class Acoustic(SecondOrderEquation):
         (vp,) = models
         hz, hx = self._spacings_2d(h)
         lap_u_now_z, lap_u_now_x = self.separable_d2_2d(u_now, self.laplace_kernels, hz, hx)
-        out = step_cpml(*wavefields, vp, dt, h, b, lap_u_now_x, lap_u_now_z, self.b, self.gradient, self.grad_kernels)
+        out = step_cpml(*wavefields, vp, dt, h, b, lap_u_now_x, lap_u_now_z, self.b, self.gradient, self.grad_kernels,
+                         src=(u_now, self.laplace_kernels, (hz, hx)))
         if getattr(self, "free_surface", False):
             topo_rows = getattr(self, "_topo_rows_runtime", None)
             if topo_rows is not None:

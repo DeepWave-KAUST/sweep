@@ -40,6 +40,8 @@ def step_cpml(
     lap_sz,
     pml,
     grad_op,
+    src=None,
+    ssrc=None,
 ):
     az, bz, dbzdz, ay, by, dbydy, ax, bx, dbxdx = pml
 
@@ -53,15 +55,15 @@ def step_cpml(
     w_sum = 0.0
 
     contrib_z, psizn, zetaz = cpml_axis_update(
-        lap_z, dudz, psiz, zetaz, az, bz, dbzdz, h, -3, grad_op)
+        lap_z, dudz, psiz, zetaz, az, bz, dbzdz, h, -3, grad_op, src=src)
     w_sum += contrib_z
 
     contrib_y, psiyn, zetay = cpml_axis_update(
-        lap_y, dudy, psiy, zetay, ay, by, dbydy, h, -2, grad_op)
+        lap_y, dudy, psiy, zetay, ay, by, dbydy, h, -2, grad_op, src=src)
     w_sum += contrib_y
 
     contrib_x, psixn, zetax = cpml_axis_update(
-        lap_x, dudx, psix, zetax, ax, bx, dbxdx, h, -1, grad_op)
+        lap_x, dudx, psix, zetax, ax, bx, dbxdx, h, -1, grad_op, src=src)
     w_sum += contrib_x
 
     u_next = 2 * u_now - u_pre + vp**2 * dt**2 * w_sum
@@ -69,15 +71,15 @@ def step_cpml(
     sw_sum = 0.0
 
     contrib_sz, spsizn, szetaz = cpml_axis_update(
-        lap_sz, dsudz, spsiz, szetaz, az, bz, dbzdz, h, -3, grad_op)
+        lap_sz, dsudz, spsiz, szetaz, az, bz, dbzdz, h, -3, grad_op, src=ssrc)
     sw_sum += contrib_sz
 
     contrib_sy, spsiyn, szetay = cpml_axis_update(
-        lap_sy, dsudy, spsiy, szetay, ay, by, dbydy, h, -2, grad_op)
+        lap_sy, dsudy, spsiy, szetay, ay, by, dbydy, h, -2, grad_op, src=ssrc)
     sw_sum += contrib_sy
 
     contrib_sx, spsixn, szetax = cpml_axis_update(
-        lap_sx, dsudx, spsix, szetax, ax, bx, dbxdx, h, -1, grad_op)
+        lap_sx, dsudx, spsix, szetax, ax, bx, dbxdx, h, -1, grad_op, src=ssrc)
     sw_sum += contrib_sx
 
     su_next = 2 * su_now - su_pre + vp**2 * dt**2 * sw_sum + ref * vp**2 * dt**2 * w_sum
@@ -151,20 +153,20 @@ class AcousticLSRTM3D(SecondOrderEquation):
     FIELD_SPECS = (
         FieldSpec("h1", aliases=("pressure", "p", "background"), description="Background 3D acoustic pressure-like wavefield.", supports_source=True),
         FieldSpec("h2", aliases=("pressure_prev", "background_prev"), description="Previous-step background wavefield.", internal=True),
-        FieldSpec("psix", description="Background CPML memory variable for the x-derivative term.", internal=True, boundary_related=True),
-        FieldSpec("psiy", description="Background CPML memory variable for the y-derivative term.", internal=True, boundary_related=True),
-        FieldSpec("psiz", description="Background CPML memory variable for the z-derivative term.", internal=True, boundary_related=True),
-        FieldSpec("zetax", description="Background CPML auxiliary wavefield for the x-direction update.", internal=True, boundary_related=True),
-        FieldSpec("zetay", description="Background CPML auxiliary wavefield for the y-direction update.", internal=True, boundary_related=True),
-        FieldSpec("zetaz", description="Background CPML auxiliary wavefield for the z-direction update.", internal=True, boundary_related=True),
+        FieldSpec("psix", description="Background CPML memory variable for the x-derivative term.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("psiy", description="Background CPML memory variable for the y-derivative term.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("psiz", description="Background CPML memory variable for the z-derivative term.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("zetax", description="Background CPML auxiliary wavefield for the x-direction update.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("zetay", description="Background CPML auxiliary wavefield for the y-direction update.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("zetaz", description="Background CPML auxiliary wavefield for the z-direction update.", internal=True, boundary_related=True, cpml_axis="z"),
         FieldSpec("sh1", aliases=("scattered", "scattered_pressure", "data"), description="Scattered 3D acoustic wavefield used for LSRTM data prediction.", supports_receiver=True),
         FieldSpec("sh2", aliases=("scattered_prev",), description="Previous-step scattered wavefield.", internal=True),
-        FieldSpec("spsix", description="Scattered-wave CPML memory variable for the x-derivative term.", internal=True, boundary_related=True),
-        FieldSpec("spsiy", description="Scattered-wave CPML memory variable for the y-derivative term.", internal=True, boundary_related=True),
-        FieldSpec("spsiz", description="Scattered-wave CPML memory variable for the z-derivative term.", internal=True, boundary_related=True),
-        FieldSpec("szetax", description="Scattered-wave CPML auxiliary wavefield for the x-direction update.", internal=True, boundary_related=True),
-        FieldSpec("szetay", description="Scattered-wave CPML auxiliary wavefield for the y-direction update.", internal=True, boundary_related=True),
-        FieldSpec("szetaz", description="Scattered-wave CPML auxiliary wavefield for the z-direction update.", internal=True, boundary_related=True),
+        FieldSpec("spsix", description="Scattered-wave CPML memory variable for the x-derivative term.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("spsiy", description="Scattered-wave CPML memory variable for the y-derivative term.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("spsiz", description="Scattered-wave CPML memory variable for the z-derivative term.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("szetax", description="Scattered-wave CPML auxiliary wavefield for the x-direction update.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("szetay", description="Scattered-wave CPML auxiliary wavefield for the y-direction update.", internal=True, boundary_related=True, cpml_axis="y"),
+        FieldSpec("szetaz", description="Scattered-wave CPML auxiliary wavefield for the z-direction update.", internal=True, boundary_related=True, cpml_axis="z"),
     )
 
     default_pml_type = "cpmlr"
@@ -222,6 +224,8 @@ class AcousticLSRTM3D(SecondOrderEquation):
             lap_sz,
             self.b,
             self.gradient,
+            src=(wavefields[0], self.laplace_kernels, (hz, hy, hx)),
+            ssrc=(wavefields[8], self.laplace_kernels, (hz, hy, hx)),
         )
         if getattr(self, "free_surface", False):
             out = zero_top_halo_fields(out, self.so // 2, axis=-3)

@@ -207,6 +207,7 @@ class ViscoAcoustic(SecondOrderEquation):
     # boundary strips cannot restore), so boundary saving is refused; the
     # impl='c' default gradient-memory strategy falls back to 'full'.
     supports_boundary_saving_c = False
+    supports_boundary_saving_eager = False   # same reason; the gradient came out ~5% off
 
     # impl='c' consumes the PREPARED model pair (vp_step, A), not (vp, Q,
     # omega); autograd chains the returned (grad_vp_step, grad_A) back through

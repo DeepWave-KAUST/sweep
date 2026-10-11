@@ -34,6 +34,12 @@ def resolve_reverse_mode(equation, registry, *, forced=None, free_surface=False,
         The driver name (a key of ``registry``).
     """
     from sweep.equations.base import SecondOrderEquation
+    if not getattr(equation, "supports_boundary_saving_eager", True):
+        raise NotImplementedError(
+            f"{label.capitalize()} is not supported for {type(equation).__name__}: "
+            "reconstructing its wavefield backwards in time amplifies the round-off "
+            f"into a gradient several percent off. Use {alternatives}."
+        )
     is_2nd = isinstance(equation, SecondOrderEquation)
     has_substeps = callable(getattr(equation, "interior_substeps", None))
     if forced is not None:

@@ -16,7 +16,7 @@ still work and emit a `DeprecationWarning`.
 `memory=` takes exactly one of these; `BoundarySaving` and `Ckpt` carry the
 fields of `BoundaryOptions` and `CkptOptions` below.  Not every backend
 implements every field, and an unsupported one raises at construction:
-eager boundary saving stores to `'gpu'` or `'cpu'` and has no `tail_steps`;
+eager boundary saving stores to `'gpu'`, `'cpu'` or `'disk'` and has no `tail_steps`;
 `PropJax` boundary saving keeps the ring on the device (`storage='gpu'`) and
 has no `tail_steps`; eager and `PropJax` checkpointing are `mode='chunk'` only.
 

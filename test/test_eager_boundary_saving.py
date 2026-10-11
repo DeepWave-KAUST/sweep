@@ -28,7 +28,9 @@ _SRC = Path(__file__).resolve().parents[1] / "src"
 if (_SRC / "sweep").exists() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from sweep.equations import Acoustic, Acoustic3D, Acoustic1st, Elastic  # noqa: E402
+from sweep.equations import (  # noqa: E402
+    Acoustic, Acoustic3D, Acoustic1st, DASMu, DASMu3D, Elastic, Elastic3D, ElasticVRR,
+)
 from sweep.propagator.options import (  # noqa: E402
     BoundaryOptions,
     EagerOptions,
@@ -72,6 +74,9 @@ def _models(kind, shape):
     # elastic
     vs_i = (vp_i / 1.73).astype(np.float32)
     vs_t = (vp_t / 1.73).astype(np.float32)
+    if kind == "vrr":   # (vp, vs, Rp_x, Rp_z, Rs_x, Rs_z): no density
+        r = np.full(shape, 1e-4, np.float32)
+        return [vp_t, vs_t, r, r, r, r], [vp_i, vs_i, r, r, r, r], 1
     rho = _ramp(shape, 1000.0, 1200.0)
     return [vp_t, vs_t, rho], [vp_i, vs_i, rho], 1
 
@@ -81,6 +86,14 @@ CASES = {
     "acoustic3d": dict(cls=Acoustic3D, ndim=3, st=["h1"], rt=["h1"], kind="acoustic", driver="swap2nd"),
     "acoustic1st": dict(cls=Acoustic1st, ndim=2, st=["p"], rt=["p"], kind="acoustic1st", driver="substep"),
     "elastic2d": dict(cls=Elastic, ndim=2, st=["sxx", "szz"], rt=["vx", "vz"], kind="elastic", driver="substep"),
+    "elastic3d": dict(cls=Elastic3D, ndim=3, st=["sxx", "syy", "szz"], rt=["vx", "vy", "vz"], kind="elastic",
+                      driver="substep"),
+    "dasmu2d": dict(cls=DASMu, ndim=2, st=["sxx", "szz"], rt=["exx", "ezz", "exz"], kind="elastic",
+                    driver="substep"),
+    "dasmu3d": dict(cls=DASMu3D, ndim=3, st=["sxx", "syy", "szz"], rt=["exx", "eyy", "ezz"], kind="elastic",
+                    driver="substep"),
+    "elastic_vrr": dict(cls=ElasticVRR, ndim=2, st=["sxx", "szz"], rt=["px", "pz"], kind="vrr",
+                        driver="substep"),
 }
 
 
@@ -163,6 +176,8 @@ def test_boundary_saving_matches_full_tape(name):
     g_full = _first_grad(_build(cfg), cfg, init_m, obs, wavelet, src, rec)
     g_bs = _first_grad(_build(cfg, memory=BOUNDARY), cfg, init_m, obs, wavelet, src, rec)
     assert torch.isfinite(g_bs).all()
+    # float64 norms: DAS strain gradients sit near 1e-32, whose fp32 squares underflow
+    g_full, g_bs = g_full.double(), g_bs.double()
     assert g_full.norm() > 0
     cos = _cosine(g_full, g_bs)
     rel = float((g_bs - g_full).norm() / g_full.norm())
@@ -206,7 +221,7 @@ def test_boundary_saving_reduces_memory(name):
     )
 
 
-@pytest.mark.parametrize("name", ["acoustic2d", "elastic2d"])
+@pytest.mark.parametrize("name", ["acoustic2d", "elastic2d", "elastic3d", "dasmu2d", "dasmu3d", "elastic_vrr"])
 def test_free_surface_supported(name):
     """Free-surface boundary saving matches full-tape:
     * acoustic2d (2nd-order) — swap2nd reuses ``func`` (FS BC applied);
@@ -269,6 +284,44 @@ def test_no_cross_iteration_drift(name):
     assert (g2 - g0).abs().max() <= 1e-5 * scale
 
 
+@pytest.mark.parametrize("name", ["elastic2d", "elastic3d"])
+def test_apm_topography_is_refused(name):
+    """APM zeroes the air cells after the stress update, from velocities the
+    reverse sub-step no longer has, so boundary saving cannot invert it.  It must
+    refuse up front: the self-check only caught it at fp32 -- int8/bf16's looser
+    tolerance let a wrong gradient through."""
+    cfg = CASES[name]
+    shape = _shape(cfg["ndim"])
+    topo = np.full(shape[1:], 2, dtype=np.int64)
+    _, init_m, wavelet, src, rec, _ = _setup(cfg)
+    eq = cfg["cls"](spatial_order=SO, device="cuda", backend="torch")
+    int8 = MemoryOptions(strategy="boundary", boundary=BoundaryOptions(storage="gpu", storage_dtype="int8"))
+    prop = PropTorch(eq, impl="eager", eager_options=EagerOptions(use_compile=False), memory=int8,
+                     shape=shape, dev="cuda", dh=DH, dt=DT, source_type=cfg["st"], receiver_type=cfg["rt"],
+                     abcn=ABCN, nt=NT, B=1, topography=topo, topo_method="apm")
+    m = [torch.tensor(a, device="cuda", requires_grad=(i == 0)) for i, a in enumerate(init_m)]
+    with pytest.raises(NotImplementedError, match="apm"):
+        prop(wavelet, src.copy(), rec.copy(), models=m)
+
+
+@pytest.mark.parametrize("name", ["ViscoAcoustic", "AcousticVTI", "AcousticTTI"])
+def test_refused_where_the_reconstruction_spoils_the_gradient(name):
+    """``supports_boundary_saving_eager = False``: reconstructing these wavefields
+    backwards in time left the gradient several percent off (ViscoAcoustic ~5%,
+    AcousticVTI 4-10%, AcousticTTI ~2%), so a boundary request raises."""
+    from sweep.equations import _registry
+    eq = _registry.get_equation(name)(spatial_order=SO, device="cuda", backend="torch")
+    shape = _shape(2)
+    prop = PropTorch(eq, impl="eager", eager_options=EagerOptions(use_compile=False), memory=BOUNDARY,
+                     shape=shape, dev="cuda", dh=DH, dt=DT, abcn=ABCN, nt=NT, B=1)
+    vals = {"vp": 2000.0, "Q": 80.0, "omega": 30.0, "epsilon": 0.1, "delta": 0.05, "theta": 0.3}
+    m = [torch.full(shape, vals.get(n, 1.0), device="cuda", requires_grad=(i == 0))
+         for i, n in enumerate(eq.models)]
+    src, rec = _geometry(2)
+    with pytest.raises(NotImplementedError, match=f"not supported for {name}"):
+        prop(torch.tensor(ricker(NT, DT), device="cuda"), src.copy(), rec.copy(), models=m)
+
+
 def test_first_order_requires_substeps():
     """1st-order boundary saving needs an interior_substeps hook (the exact
     reverse driver); there is no approximate fallback, so the path must refuse
@@ -283,7 +336,7 @@ def test_first_order_requires_substeps():
         prop(wavelet, src.copy(), rec.copy(), models=m)
 
 
-@pytest.mark.parametrize("name", ["acoustic1st", "elastic2d"])
+@pytest.mark.parametrize("name", ["acoustic1st", "elastic2d", "elastic3d", "dasmu2d", "dasmu3d", "elastic_vrr"])
 def test_substep_round_trip_identity(name):
     """Composing the forward sub-steps forward (+dt) then in reverse order (-dt)
     recovers the input — i.e. the reverse is the forward code driven backwards,
@@ -303,7 +356,8 @@ def test_substep_round_trip_identity(name):
     state = [torch.randn((1, 1) + tuple(shape_rt), device="cuda") for _ in range(nwf)]
     runtime_models = impl._prepare_runtime_models(
         [torch.full((1, 1) + tuple(shape_rt), v, device="cuda")
-         for v in ([2000.0, 1000.0] if name == "acoustic1st" else [2500.0, 1500.0, 1000.0])]
+         for v in {"acoustic1st": [2000.0, 1000.0],
+                   "elastic_vrr": [2500.0, 1500.0] + [1e-4] * 4}.get(name, [2500.0, 1500.0, 1000.0])]
     )
 
     fwd = state
@@ -465,6 +519,68 @@ def test_cpu_offload_int8():
     g8 = _first_grad(_build(cfg, memory=cpu8), cfg, init_m, obs, wavelet, src, rec)
     assert torch.isfinite(g8).all()
     assert _cosine(g32, g8) > 0.999
+
+
+@pytest.mark.parametrize("name", ["acoustic2d", "elastic2d"])
+@pytest.mark.parametrize("boundary", [
+    dict(storage="cpu", pinned_memory=False),
+    dict(storage="disk", transfer_interval=7),
+    dict(storage="disk", transfer_interval=1, ring_buffers=3),
+    dict(storage="disk", transfer_interval=7, storage_dtype="int8"),
+], ids=["cpu-pageable", "disk", "disk-1step-3slots", "disk-int8"])
+def test_offloaded_ring_matches_gpu_ring_exactly(name, boundary, tmp_path):
+    """Every ring storage returns the on-device ring's gradient bit for bit.
+    'disk' goes through page-locked slots and a background thread: chunks of 7
+    steps leave a partial last chunk (nt=64 -> 65 rows) and the reverse pass
+    reads most of them back from the files, which are gone afterwards.  Covers
+    both reverse drivers (swap2nd / substep).  cuDNN's default convolution
+    algorithms differ run to run in the last bits, hence deterministic ones."""
+    cfg = CASES[name]
+    _, init_m, wavelet, src, rec, obs = _setup(cfg)
+    dtype = boundary.get("storage_dtype", "fp32")
+    on_gpu = MemoryOptions(strategy="boundary",
+                           boundary=BoundaryOptions(storage="gpu", storage_dtype=dtype))
+    if boundary["storage"] == "disk":
+        boundary = dict(boundary, disk_dir=str(tmp_path))
+    mem = MemoryOptions(strategy="boundary", boundary=BoundaryOptions(**boundary))
+    with torch.backends.cudnn.flags(enabled=True, deterministic=True):
+        g_gpu = _first_grad(_build(cfg, memory=on_gpu), cfg, init_m, obs, wavelet, src, rec)
+        g = _first_grad(_build(cfg, memory=mem), cfg, init_m, obs, wavelet, src, rec)
+    assert torch.equal(g, g_gpu)
+    assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("op", ["_pwrite", "_pread"])
+def test_disk_io_failure_raises(op, tmp_path, monkeypatch):
+    """A failed ring write or read (a full disk, say) raises.  The impl='c'
+    disk path once swallowed write errors and read the holes back as zeros: a
+    silently wrong gradient."""
+    import errno
+    import sweep.propagator._eager_boundary_saving as ebs
+
+    def fail(*args):
+        raise OSError(errno.ENOSPC, "No space left on device")
+    monkeypatch.setattr(ebs, op, fail)
+    cfg = CASES["acoustic2d"]
+    _, init_m, wavelet, src, rec, obs = _setup(cfg)
+    disk = MemoryOptions(strategy="boundary", boundary=BoundaryOptions(
+        storage="disk", disk_dir=str(tmp_path), transfer_interval=7))
+    with pytest.raises(OSError, match="No space"):
+        _first_grad(_build(cfg, memory=disk), cfg, init_m, obs, wavelet, src, rec)
+
+
+def test_cpu_compute_device_disk(tmp_path):
+    """On a CPU compute device 'disk' keeps the ring in a memory-mapped file."""
+    cfg = CASES["acoustic2d"]
+    _, init_m, wavelet, src, rec, obs = _setup(cfg, device="cpu")
+    g_ram = _first_grad(_build(cfg, memory=BOUNDARY, device="cpu"), cfg, init_m, obs,
+                        wavelet, src, rec, device="cpu")
+    disk = MemoryOptions(strategy="boundary",
+                         boundary=BoundaryOptions(storage="disk", disk_dir=str(tmp_path)))
+    g_disk = _first_grad(_build(cfg, memory=disk, device="cpu"), cfg, init_m, obs,
+                         wavelet, src, rec, device="cpu")
+    assert torch.equal(g_disk, g_ram)
+    assert not any(tmp_path.iterdir())
 
 
 def test_cpu_compute_device():

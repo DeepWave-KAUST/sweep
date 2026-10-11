@@ -18,6 +18,7 @@ import torch
 
 from sweep.equations import AcousticVTI1st, AcousticVTI1st3D, Acoustic1st
 from sweep.equations._anisotropy_utils import smooth_delta_to_epsilon_disk
+from sweep.propagator.options import EagerOptions
 from sweep.propagator.torch import PropTorch
 from sweep.signal import ricker
 
@@ -33,6 +34,9 @@ ABCN = 10
 VP_BG = 1500.0
 RHO_BG = 1000.0
 DOM_FREQ = 20.0
+# Uncompiled: torch.compile rebuilds the step for every new propagator (5-40 s
+# each on a CPU runner), and the CPU tests here are about the physics.
+UNCOMPILED = EagerOptions(use_compile=False)
 
 
 def _wavelet(nt=NT):
@@ -73,7 +77,7 @@ def _run_2d(models, source_type=("sH", "sV"), receiver_type=("vz",),
         eq, shape,
         source_type=list(source_type), receiver_type=list(receiver_type),
         abcn=abcn, dh=DH, dt=DT, nt=nt, device="cpu",
-        impl="eager",
+        impl="eager", eager_options=UNCOMPILED,
         use_ckpt=not return_wavefield,
     )
     kwargs = {}
@@ -112,7 +116,7 @@ def test_isotropic_fallback():
     prop1 = PropTorch(
         eq1, shape,
         source_type=["p"], receiver_type=["vz"],
-        abcn=ABCN, dh=DH, dt=DT, nt=NT, device="cpu", impl="eager",
+        abcn=ABCN, dh=DH, dt=DT, nt=NT, device="cpu", impl="eager", eager_options=UNCOMPILED,
     )
     models_ac = [torch.full(shape, VP_BG, dtype=torch.float32),
                  torch.full(shape, RHO_BG, dtype=torch.float32)]
@@ -154,7 +158,7 @@ def test_variable_density():
     prop = PropTorch(
         eq, shape,
         source_type=["sH", "sV"], receiver_type=["vz"],
-        abcn=ABCN, dh=DH, dt=DT, nt=NT * 2, device="cpu", impl="eager",
+        abcn=ABCN, dh=DH, dt=DT, nt=NT * 2, device="cpu", impl="eager", eager_options=UNCOMPILED,
         use_ckpt=False,
     )
     t = np.arange(NT * 2, dtype=np.float32) * DT - 0.05
@@ -219,7 +223,7 @@ def test_3d_vs_2d_parity():
     src2 = _src(nz, nx)
     prop2 = PropTorch(eq2, shape2d,
                       source_type=["sH", "sV"], receiver_type=["vz"],
-                      abcn=5, dh=DH, dt=DT, nt=NT, device="cpu", impl="eager",
+                      abcn=5, dh=DH, dt=DT, nt=NT, device="cpu", impl="eager", eager_options=UNCOMPILED,
                       use_ckpt=False)
     models2 = _models_2d(shape2d, eps=0.15, delta=0.05)
     with torch.no_grad():
@@ -231,7 +235,7 @@ def test_3d_vs_2d_parity():
     src3 = torch.tensor(np.array([[nx // 2, ny // 2, nz // 2]], dtype=np.int64)[None])
     prop3 = PropTorch(eq3, shape3d,
                       source_type=["sH", "sV"], receiver_type=["vz"],
-                      abcn=5, dh=DH, dt=DT, nt=NT, device="cpu", impl="eager",
+                      abcn=5, dh=DH, dt=DT, nt=NT, device="cpu", impl="eager", eager_options=UNCOMPILED,
                       use_ckpt=False)
     models3 = [torch.full(shape3d, 1500.0, dtype=torch.float32),
                torch.full(shape3d, 0.15, dtype=torch.float32),
@@ -280,7 +284,7 @@ def _run_snapshot(delta_field, nz, nx):
     prop = PropTorch(eq, shape,
                      source_type=["sH", "sV"], receiver_type=["vz"],
                      abcn=ABCN, dh=DH, dt=DT, nt=nt_snap, device="cpu", impl="eager",
-                     use_ckpt=False)
+                     eager_options=UNCOMPILED, use_ckpt=False)
     t = np.arange(nt_snap, dtype=np.float32) * DT - 0.05
     wav = torch.tensor((1e3 * ricker(t, f=DOM_FREQ)).astype(np.float32))[None, :]
     with torch.no_grad():
