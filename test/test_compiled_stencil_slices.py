@@ -17,7 +17,8 @@ import torch
 import torch.nn.functional as F
 
 import sweep.operators.torch as OPS
-from sweep.equations import Acoustic, Acoustic3D, AcousticVRZ3D, Elastic, ElasticTTI, ElasticVRR, ViscoElastic
+from sweep.equations import (Acoustic, Acoustic3D, AcousticVRZ3D, DASMu, Elastic, ElasticTTI, ElasticVRR,
+                             ViscoElastic)
 from sweep.equations.elastic3d import Elastic as Elastic3D
 from sweep.equations.utils import to_backend
 from sweep.operators.general import StaggeredDerivative
@@ -100,34 +101,47 @@ def test_kernels_the_slice_form_cannot_express_stay_unregistered():
 
 
 # ---- compiled steps --------------------------------------------------------
+# Each case is compiled once warm (the free surface's order-2 twin built by an
+# uncompiled call first) for three checks at once: no conv in the graph, one
+# graph per step, and the record and gradients of the uncompiled conv path.
+# Free-surface cases are compiled once more cold, where the first compiled step
+# builds the twin itself.  Compiling is most of this file's runtime.
+_HILL = np.array([2, 2, 1, 1, 0, 0, 0, 1, 1, 2, 2, 2, 1, 0, 0, 1])
+
 EQUATIONS = [
-    pytest.param(Acoustic, (40, 44), False, id="acoustic2d"),
-    pytest.param(Acoustic3D, (16, 14, 12), False, id="acoustic3d"),
-    pytest.param(AcousticVRZ3D, (16, 14, 12), False, id="acoustic_vrz3d"),
-    pytest.param(Elastic, (40, 44), False, id="elastic2d"),
-    # The free surface builds its near-surface order-2 operator lazily, on the
-    # first (compiled) step; it must still come out registered.
-    pytest.param(Elastic, (40, 44), True, id="elastic2d_free_surface"),
-    pytest.param(Elastic3D, (16, 14, 12), False, id="elastic3d"),
-    pytest.param(ElasticTTI, (40, 44), False, id="elastic_tti_rsg"),
+    pytest.param(Acoustic, (40, 44), {}, id="acoustic2d"),
+    pytest.param(Acoustic3D, (16, 14, 12), {}, id="acoustic3d"),
+    pytest.param(AcousticVRZ3D, (16, 14, 12), {}, id="acoustic_vrz3d"),
+    pytest.param(Elastic, (40, 44), {}, id="elastic2d"),
+    pytest.param(Elastic, (40, 44), {"free_surface": True}, id="elastic2d_free_surface"),
+    # Small enough that the wave reaches the bottom and both sides in 60 steps.
+    pytest.param(Elastic, (10, 14), {"free_surface": ["bottom", "left", "right"]},
+                 id="elastic2d_per_edge_free_surface"),
+    pytest.param(Elastic, (12, 16), {"topography": _HILL, "topo_method": "image"},
+                 id="elastic2d_topography"),
+    pytest.param(Elastic3D, (16, 14, 12), {}, id="elastic3d"),
+    pytest.param(ElasticTTI, (40, 44), {}, id="elastic_tti_rsg"),
     # Their steps read lookup tables and a per-run cache that once broke the
     # graph on every torch.
-    pytest.param(ElasticVRR, (40, 44), False, id="elastic_vrr"),
-    pytest.param(ViscoElastic, (40, 44), True, id="visco_elastic_free_surface"),
+    pytest.param(ElasticVRR, (40, 44), {}, id="elastic_vrr"),
+    pytest.param(ViscoElastic, (40, 44), {"free_surface": True}, id="visco_elastic_free_surface"),
+    pytest.param(DASMu, (40, 44), {"free_surface": True}, id="dasmu2d_free_surface"),
 ]
+# The free surface builds its order-2 twin lazily (topography does not).
+SURFACES = [p for p in EQUATIONS if "free_surface" in p.values[2]]
 
 MODEL_VALUES = {"vp": 2500.0, "vs": 1400.0, "rho": 2000.0, "z": 5.0e6, "vp0": 2500.0, "vs0": 1400.0,
                 "epsilon": 0.1, "delta": 0.05, "gamma": 0.05, "theta": 0.3, "phi": 0.2,
                 "Rp_x": 0.01, "Rp_z": 0.01, "Rs_x": 0.01, "Rs_z": 0.01, "Qp": 80.0, "Qs": 60.0}
 
 
-def _run(cls, shape, free_surface, use_compile, backend=None, fullgraph=False, warm=False):
+def _run(cls, shape, surface, use_compile, backend=None, fullgraph=False, warm=False):
     """Forward + backward; ``warm`` runs one uncompiled forward first, so the
     lazily built pieces (the free surface's order-2 twin) exist before tracing."""
     eq = cls(spatial_order=4, device=DEV, backend="torch")
     opts = EagerOptions(use_compile=use_compile, compile_backend=backend, compile_fullgraph=fullgraph)
-    solver = PropTorch(eq, shape=shape, dh=10.0, dt=1e-3, dev=DEV, impl="eager", abcn=8, nt=60,
-                       eager_options=opts, free_surface=free_surface)
+    solver = PropTorch(eq, shape=shape, dh=10.0, dt=1e-3, dev=DEV, impl="eager", abcn=4, nt=60,
+                       eager_options=opts, **surface)
     wavelet = torch.zeros(60, device=DEV)
     wavelet[3] = 1.0
     src = np.array([[shape[-1] // 2, 4] if len(shape) == 2 else [shape[-1] // 2, shape[-2] // 2, 4]])
@@ -149,41 +163,68 @@ def _run(cls, shape, free_surface, use_compile, backend=None, fullgraph=False, w
     return out.detach(), [m.grad for m in models]
 
 
-def _conv_node_counter(counts):
-    def backend(gm, example_inputs):
+def _counting_convs(counts, backend):
+    """``backend``, after counting the conv nodes of each graph it is given."""
+    from torch._dynamo.backends.registry import lookup_backend   # torch 2.0+, unlike torch._dynamo's
+    compile_graph = lookup_backend(backend)
+
+    def count(gm, example_inputs):
         counts.append(sum(1 for n in gm.graph.nodes
                           if n.op == "call_function" and "conv" in str(n.target)))
-        return gm.forward
-    return backend
+        return compile_graph(gm, example_inputs)
+    return count
+
+
+def _assert_matches(run, ref):
+    (out, grads), (ref_out, ref_grads) = run, ref
+    torch.testing.assert_close(out, ref_out, rtol=1e-4, atol=1e-6 * ref_out.abs().max().item())
+    for g, rg in zip(grads, ref_grads):
+        # By hand: F.cosine_similarity clamps the norm product at 1e-8, which
+        # zeroes the cosine of the (tiny, ~1e-13) elastic gradients.
+        a, b = g.flatten().double(), rg.flatten().double()
+        cos = (a @ b / (a.norm() * b.norm())).item()
+        rel = ((a - b).norm() / b.norm()).item()
+        assert cos > 1 - 1e-6 and rel < 1e-4, (cos, rel)
 
 
 @requires_compile
-@pytest.mark.parametrize("cls,shape,free_surface", EQUATIONS)
-def test_compiled_step_has_no_conv(cls, shape, free_surface, monkeypatch):
-    # The counter must be able to see a conv, or "zero" proves nothing.
+def test_the_conv_counter_sees_a_conv(monkeypatch):
+    """With the slice form off the counter must find the convs, or the zero
+    the tests below assert proves nothing."""
     torch._dynamo.reset()
     monkeypatch.setattr(OPS, "SLICE_STENCILS_UNDER_COMPILE", False)
-    before = []
-    _run(cls, shape, free_surface, True, _conv_node_counter(before))
-    assert sum(before) > 0, "conv counter saw nothing with the slice form off"
-
-    torch._dynamo.reset()
-    monkeypatch.setattr(OPS, "SLICE_STENCILS_UNDER_COMPILE", True)
-    after = []
-    _run(cls, shape, free_surface, True, _conv_node_counter(after))
-    assert after and sum(after) == 0, f"conv left in the compiled step: {after}"
+    counts = []
+    _run(Acoustic, (40, 44), {}, True, _counting_convs(counts, "eager"))
+    assert sum(counts) > 0, "conv counter saw nothing with the slice form off"
 
 
 @requires_compile
-@pytest.mark.parametrize("cls,shape,free_surface", EQUATIONS)
-def test_compiled_step_traces_whole(cls, shape, free_surface):
+@pytest.mark.parametrize("cls,shape,surface", EQUATIONS)
+def test_compiled_step_is_one_conv_free_graph_matching_uncompiled(cls, shape, surface):
     """In steady state a step is one graph (fullgraph=True raises on any
-    break).  A break splits the step's fusion; before torch 2.5 the taps lookup
-    and the free-surface switches broke it on every call, and the slices never
-    ran.  The first step may break once, to build the order-2 twin outside
-    compile, so a warm uncompiled call runs first."""
+    break) with no conv left, and gives the uncompiled conv path's record and
+    gradients through AOTAutograd.  A break splits the step's fusion; before
+    torch 2.5 the taps lookup and the free-surface switches broke it on every
+    call, and the slices never ran."""
     torch._dynamo.reset()
-    _run(cls, shape, free_surface, True, "eager", fullgraph=True, warm=True)
+    ref = _run(cls, shape, surface, False)
+    counts = []
+    run = _run(cls, shape, surface, True, _counting_convs(counts, "aot_eager"), fullgraph=True, warm=True)
+    assert counts and sum(counts) == 0, f"conv left in the compiled step: {counts}"
+    _assert_matches(run, ref)
+
+
+@requires_compile
+@pytest.mark.parametrize("cls,shape,surface", SURFACES)
+def test_first_compiled_step_builds_the_surface_operators(cls, shape, surface):
+    """Cold, the first compiled step builds the surface's order-2 operator
+    itself (breaking the graph once to do it outside the trace).  It must come
+    out registered, so no conv, and the record must not notice."""
+    torch._dynamo.reset()
+    counts = []
+    run = _run(cls, shape, surface, True, _counting_convs(counts, "eager"))
+    assert counts and sum(counts) == 0, f"conv left in the compiled step: {counts}"
+    _assert_matches(run, _run(cls, shape, surface, False))
 
 
 @requires_compile
@@ -194,28 +235,12 @@ def test_plain_warmup_prefix_changes_nothing(monkeypatch):
     import sweep.propagator._torch_eager as TE
     if TE.CKPT_PLAIN_WARMUP:
         pytest.skip("this torch cannot compile inside the checkpoint at all; "
-                    "test_compiled_slices_match_uncompiled_convs covers the warm-up here")
+                    "test_compiled_step_is_one_conv_free_graph_matching_uncompiled covers the warm-up here")
     runs = []
     for warm in (False, True):
         torch._dynamo.reset()
         monkeypatch.setattr(TE, "CKPT_PLAIN_WARMUP", warm)
-        runs.append(_run(Acoustic, (40, 44), False, True, "aot_eager"))
+        runs.append(_run(Acoustic, (40, 44), {}, True, "aot_eager"))
     (out0, g0), (out1, g1) = runs
     assert torch.equal(out0, out1)
     assert all(torch.equal(a, b) for a, b in zip(g0, g1))
-
-
-@requires_compile
-@pytest.mark.parametrize("cls,shape,free_surface", EQUATIONS)
-def test_compiled_slices_match_uncompiled_convs(cls, shape, free_surface):
-    torch._dynamo.reset()
-    ref_out, ref_grads = _run(cls, shape, free_surface, False)
-    out, grads = _run(cls, shape, free_surface, True, "aot_eager")
-    torch.testing.assert_close(out, ref_out, rtol=1e-4, atol=1e-6 * ref_out.abs().max().item())
-    for g, rg in zip(grads, ref_grads):
-        # By hand: F.cosine_similarity clamps the norm product at 1e-8, which
-        # zeroes the cosine of the (tiny, ~1e-13) elastic gradients.
-        a, b = g.flatten().double(), rg.flatten().double()
-        cos = (a @ b / (a.norm() * b.norm())).item()
-        rel = ((a - b).norm() / b.norm()).item()
-        assert cos > 1 - 1e-6 and rel < 1e-4, (cos, rel)

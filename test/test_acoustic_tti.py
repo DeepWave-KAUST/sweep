@@ -15,6 +15,7 @@ import pytest
 import torch
 
 from sweep.equations import AcousticTTI
+from sweep.propagator.options import EagerOptions
 from sweep.propagator.torch import PropTorch
 from sweep.signal import ricker
 
@@ -27,6 +28,9 @@ VP_BG = 2500.0
 DOM_FREQ = 12.0
 EPS = 0.25   # ε ≠ δ ⇒ genuinely anisotropic, so the wavefront has an axis to tilt
 DELTA = 0.10
+# Uncompiled: torch.compile rebuilds the step for every new propagator (5-40 s
+# each on a CPU runner), and these tests are about the wavefront.
+UNCOMPILED = EagerOptions(use_compile=False)
 
 
 def _wavelet(nt=NT):
@@ -55,7 +59,7 @@ def _wavefront_tilt_deg(theta_rad, nz=NZ, nx=NX):
         eq, shape,
         source_type=["h1"], receiver_type=["h1"],
         abcn=ABCN, dh=DH, dt=DT, nt=NT, device="cpu", impl="eager",
-        use_ckpt=False,
+        use_ckpt=False, eager_options=UNCOMPILED,
     )
     with torch.no_grad():
         _, wf = prop(_wavelet(), src, src, models=models,

@@ -20,6 +20,7 @@ from sweep.propagator.torch import PropTorch
 
 DEV = torch.device("cpu")
 SHAPE = (40, 48)
+ABCN = 10   # not the default 50: the fallback does not depend on it
 WAVELET = np.zeros(120, dtype=np.float32)
 WAVELET[5] = 1.0
 SRC = np.array([[20, 4]])
@@ -37,7 +38,7 @@ def _compile_that_cannot_build(calls):
 
 def _run(use_compile, memory=None):
     kw = {} if memory is None else {"memory": memory}
-    solver = PropTorch(Acoustic(device=DEV), shape=SHAPE, dh=10.0, dt=1e-3, dev=DEV, impl="eager",
+    solver = PropTorch(Acoustic(device=DEV), shape=SHAPE, dh=10.0, dt=1e-3, dev=DEV, impl="eager", abcn=ABCN,
                        eager_options=EagerOptions(use_compile=use_compile), **kw)
     vp = torch.full(SHAPE, 2000.0, requires_grad=True)
     out = solver(WAVELET, SRC, REC, models=[vp])
@@ -142,7 +143,7 @@ def test_torch_23_on_cpu_still_compiles_for_other_backends(monkeypatch, memory):
     calls = []
     monkeypatch.setattr(TE, "INDUCTOR_23", True)
     monkeypatch.setattr(torch, "compile", _compile_never_called(calls))
-    solver = PropTorch(Acoustic(device=DEV), shape=SHAPE, dh=10.0, dt=1e-3, dev=DEV, impl="eager",
+    solver = PropTorch(Acoustic(device=DEV), shape=SHAPE, dh=10.0, dt=1e-3, dev=DEV, impl="eager", abcn=ABCN,
                        eager_options=EagerOptions(compile_backend="aot_eager"),
                        **({} if memory is None else {"memory": memory}))
     solver(WAVELET, SRC, REC, models=[torch.full(SHAPE, 2000.0, requires_grad=True)]).sum().backward()

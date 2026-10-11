@@ -14,7 +14,13 @@ from sweep.equations import (
     gauge_average,
     helical_das_response,
 )
+from sweep.propagator.options import EagerOptions
 from sweep.propagator.torch import PropTorch
+
+# Uncompiled: torch.compile rebuilds the step for every new propagator (5-40 s
+# each on a CPU runner) and these grids are a few cells wide; the CPU tests
+# here check fields, layouts and gradients, not the compiler.
+UNCOMPILED = EagerOptions(use_compile=False)
 
 
 def _ricker(nt, dt, fm=12.0, delay=0.04):
@@ -81,6 +87,7 @@ def test_das_modeler_zhao_uses_standard_record_layout():
         dev=device,
         pml_type="cpmls",
         use_ckpt=False,
+        eager_options=UNCOMPILED,
     )
 
     out = modeler(wavelet, sources=sources, receivers=receivers, models=[vp, vs, rho])
@@ -115,6 +122,7 @@ def test_das_modeler_mu_outputs_physical_strain_rate_and_das_fields():
         dev=device,
         pml_type="cpmls",
         use_ckpt=False,
+        eager_options=UNCOMPILED,
     )
 
     out = modeler(wavelet, sources=sources, receivers=receivers, models=[vp, vs, rho])
@@ -154,6 +162,7 @@ def test_das_mu_supports_all_physical_fields_as_source_receiver_with_free_surfac
         pml_type="cpmls",
         free_surface=True,
         use_ckpt=False,
+        eager_options=UNCOMPILED,
     )
 
     out = solver(wavelet, sources=sources, receivers=receivers, models=[vp, vs, rho])
@@ -190,6 +199,7 @@ def test_das_modeler_mu_3d_outputs_physical_strain_rate_and_das_fields():
         dev=device,
         pml_type="cpmls",
         use_ckpt=False,
+        eager_options=UNCOMPILED,
     )
 
     out = modeler(wavelet, sources=sources, receivers=receivers, models=[vp, vs, rho])
@@ -238,6 +248,7 @@ def test_das_mu3d_supports_all_physical_fields_as_source_receiver_with_free_surf
         pml_type="cpmls",
         free_surface=True,
         use_ckpt=False,
+        eager_options=UNCOMPILED,
     )
 
     out = solver(wavelet, sources=sources, receivers=receivers, models=[vp, vs, rho])
@@ -275,6 +286,7 @@ def test_das_modeler_mu_variant():
         dev=device,
         pml_type="cpmls",
         use_ckpt=False,
+        eager_options=UNCOMPILED,
     )
 
     out = modeler(wavelet, sources=sources, receivers=receivers, models=[vp, vs, rho])
@@ -314,6 +326,7 @@ def test_das_elastic_2d_eager_forward_and_gradient():
         dev=device,
         pml_type="cpmls",
         use_ckpt=False,
+        eager_options=UNCOMPILED,
     )
 
     out = solver(wavelet, sources=sources, receivers=receivers, models=[vp, vs, rho])
@@ -361,6 +374,7 @@ def test_das_elastic_3d_eager_forward_smoke():
         dev=device,
         pml_type="cpmls",
         use_ckpt=False,
+        eager_options=UNCOMPILED,
     )
 
     out = solver(wavelet, sources=sources, receivers=receivers, models=[vp, vs, rho])
@@ -400,6 +414,7 @@ def test_das_final_channels_backward_2d():
         dev=device,
         pml_type="cpmls",
         use_ckpt=False,
+        eager_options=UNCOMPILED,
     )
 
     out = solver(wavelet, sources=sources, receivers=receivers, models=[vp, vs, rho])
@@ -596,6 +611,7 @@ def test_das_final_channels_backward_3d():
         dev=device,
         pml_type="cpmls",
         use_ckpt=False,
+        eager_options=UNCOMPILED,
     )
 
     out = solver(wavelet, sources=sources, receivers=receivers, models=[vp, vs, rho])

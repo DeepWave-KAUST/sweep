@@ -36,6 +36,7 @@ import pytest
 import torch
 
 from sweep.equations import Acoustic
+from sweep.propagator.options import EagerOptions
 from sweep.propagator.torch import PropTorch
 from sweep.signal import ricker
 
@@ -54,6 +55,10 @@ DELAY = 0.06
 
 # Auto-select CUDA when available.
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# Uncompiled eager: torch.compile rebuilds the step for every new propagator
+# (5-40 s each on a CPU runner), and these tests are about the topography.
+# test_compiled_stencil_slices checks the compiled step against this one.
+UNCOMPILED = EagerOptions(use_compile=False)
 
 
 def _wavelet():
@@ -93,7 +98,7 @@ def _make_prop(topography, *, free_surface=True, topo_method='auto', impl="eager
             free_surface=free_surface,
             topography=None,
             abcn=ABCN, dh=DH, dt=DT,
-            use_ckpt=False, impl=impl,
+            use_ckpt=False, impl=impl, eager_options=UNCOMPILED if impl == "eager" else None,
         )
     # Topography given — free_surface auto-set by topo_method.
     return PropTorch(
@@ -101,7 +106,7 @@ def _make_prop(topography, *, free_surface=True, topo_method='auto', impl="eager
         topography=topography,
         topo_method=topo_method,
         abcn=ABCN, dh=DH, dt=DT,
-        use_ckpt=False, impl=impl,
+        use_ckpt=False, impl=impl, eager_options=UNCOMPILED if impl == "eager" else None,
     )
 
 

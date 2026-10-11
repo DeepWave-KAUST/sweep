@@ -20,11 +20,16 @@ from sweep.equations import Acoustic, Elastic
 from sweep.equations._edges import (
     normalize_free_surface, normalize_pad, is_top_only_or_none, torch_pad_order,
 )
+from sweep.propagator.options import EagerOptions
 from sweep.propagator.torch import PropTorch
 from sweep.signal import ricker
 
 DH, DT, SO = 10.0, 1.0e-3, 4
 DEV = "cpu"
+# Uncompiled: torch.compile rebuilds the step for every new propagator (5-40 s
+# each on a CPU runner), and these tests are about the boundary physics.
+# test_compiled_stencil_slices checks the compiled step against this one.
+UNCOMPILED = EagerOptions(use_compile=False)
 
 
 def _wav(nt, f=12.0, delay=0.05):
@@ -118,7 +123,7 @@ def test_per_edge_guard_on_unmigrated_and_3d():
 def _ac_run(fs, N, src, rec, nt, abcn=20, vp=2000.0):
     eq = Acoustic(spatial_order=SO, device=DEV, backend="torch")
     prop = PropTorch(eq, shape=(N, N), free_surface=fs, abcn=abcn, dh=DH, dt=DT,
-                     use_ckpt=False, impl="eager")
+                     use_ckpt=False, impl="eager", eager_options=UNCOMPILED)
     return prop(_wav(nt), src, rec, models=[torch.full((N, N), vp)])
 
 
@@ -158,7 +163,7 @@ def test_acoustic_single_edge_grad_finite():
         eq = Acoustic(spatial_order=SO, device=DEV, backend="torch")
         vp = torch.full((N, N), 2000.0, requires_grad=True)
         prop = PropTorch(eq, shape=(N, N), free_surface=fs, abcn=15, dh=DH, dt=DT,
-                         use_ckpt=False, impl="eager")
+                         use_ckpt=False, impl="eager", eager_options=UNCOMPILED)
         r = prop(_wav(120), src, rec, models=[vp])
         (r ** 2).sum().backward()
         assert torch.isfinite(vp.grad).all() and vp.grad.abs().max() > 0
@@ -174,8 +179,8 @@ def _el_run(fs, N, src, rec, nt, abcn=18, vp_np=None, need_grad=False, rectype=(
     vs = torch.full((N, N), 1400.0)
     rho = torch.full((N, N), 1000.0)
     prop = PropTorch(eq, shape=(N, N), free_surface=fs, abcn=abcn, dh=DH, dt=DT,
-                     use_ckpt=False, impl="eager", source_type=["sxx", "szz"],
-                     receiver_type=list(rectype))
+                     use_ckpt=False, impl="eager", eager_options=UNCOMPILED,
+                     source_type=["sxx", "szz"], receiver_type=list(rectype))
     return prop(_wav(nt, f=14.0, delay=0.04), src, rec, models=[vp, vs, rho]), vp
 
 

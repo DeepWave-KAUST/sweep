@@ -14,7 +14,7 @@ import torch
 
 from sweep.equations import Acoustic
 from sweep.propagator import BoundarySaving, Full
-from sweep.propagator.options import Ckpt
+from sweep.propagator.options import Ckpt, EagerOptions
 from sweep.propagator.torch import PropTorch
 
 NZ, NX, NT = 24, 28, 40
@@ -24,10 +24,13 @@ RECORD_NODE = {"full": "Stack", "ckpt": "Cat", "bs": "Stack"}
 
 
 def _prop(memory):
+    # Uncompiled: the record is built outside the step either way, and
+    # compiling the step costs seconds per propagator on a CPU runner.
     return PropTorch(Acoustic(spatial_order=4, device="cpu"), backend="torch",
                      impl="eager", shape=(NZ, NX), dh=10.0, dt=1e-3, nt=NT,
                      abcn=6, B=1, dev="cpu", source_type=["h1"],
-                     receiver_type=["h1"], memory=MEMORY[memory]())
+                     receiver_type=["h1"], memory=MEMORY[memory](),
+                     eager_options=EagerOptions(use_compile=False))
 
 
 def _shoot(memory="full", prop=None):
