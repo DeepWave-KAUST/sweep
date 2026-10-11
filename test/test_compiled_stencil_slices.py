@@ -101,11 +101,9 @@ def test_kernels_the_slice_form_cannot_express_stay_unregistered():
 
 
 # ---- compiled steps --------------------------------------------------------
-# Each case is compiled once warm (the free surface's order-2 twin built by an
-# uncompiled call first) for three checks at once: no conv in the graph, one
-# graph per step, and the record and gradients of the uncompiled conv path.
-# Free-surface cases are compiled once more cold, where the first compiled step
-# builds the twin itself.  Compiling is most of this file's runtime.
+# Each case is compiled once for three checks at once: no conv in the graph,
+# one graph per rollout, and the record and gradients of the uncompiled conv
+# path.  Compiling is most of this file's runtime.
 _HILL = np.array([2, 2, 1, 1, 0, 0, 0, 1, 1, 2, 2, 2, 1, 0, 0, 1])
 
 EQUATIONS = [
@@ -127,17 +125,13 @@ EQUATIONS = [
     pytest.param(ViscoElastic, (40, 44), {"free_surface": True}, id="visco_elastic_free_surface"),
     pytest.param(DASMu, (40, 44), {"free_surface": True}, id="dasmu2d_free_surface"),
 ]
-# The free surface builds its order-2 twin lazily (topography does not).
-SURFACES = [p for p in EQUATIONS if "free_surface" in p.values[2]]
-
 MODEL_VALUES = {"vp": 2500.0, "vs": 1400.0, "rho": 2000.0, "z": 5.0e6, "vp0": 2500.0, "vs0": 1400.0,
                 "epsilon": 0.1, "delta": 0.05, "gamma": 0.05, "theta": 0.3, "phi": 0.2,
                 "Rp_x": 0.01, "Rp_z": 0.01, "Rs_x": 0.01, "Rs_z": 0.01, "Qp": 80.0, "Qs": 60.0}
 
 
-def _run(cls, shape, surface, use_compile, backend=None, fullgraph=False, warm=False):
-    """Forward + backward; ``warm`` runs one uncompiled forward first, so the
-    lazily built pieces (the free surface's order-2 twin) exist before tracing."""
+def _run(cls, shape, surface, use_compile, backend=None, fullgraph=False):
+    """Forward + backward."""
     eq = cls(spatial_order=4, device=DEV, backend="torch")
     opts = EagerOptions(use_compile=use_compile, compile_backend=backend, compile_fullgraph=fullgraph)
     solver = PropTorch(eq, shape=shape, dh=10.0, dt=1e-3, dev=DEV, impl="eager", abcn=4, nt=60,
@@ -153,11 +147,6 @@ def _run(cls, shape, surface, use_compile, backend=None, fullgraph=False, warm=F
     ramp = torch.linspace(0, 1, shape[0], device=DEV).view(-1, *([1] * (len(shape) - 1)))
     models = [(MODEL_VALUES[n] * (1 + 0.02 * ramp)).expand(shape).clone().requires_grad_(True)
               for n in eq.models]
-    if warm:
-        solver._backend_impl.use_compile = False
-        with torch.no_grad():
-            solver(wavelet, src, rec, models=models)
-        solver._backend_impl.use_compile = use_compile
     out = solver(wavelet, src, rec, models=models)
     out.square().sum().backward()
     return out.detach(), [m.grad for m in models]
@@ -200,30 +189,19 @@ def test_the_conv_counter_sees_a_conv(monkeypatch):
 
 @requires_compile
 @pytest.mark.parametrize("cls,shape,surface", EQUATIONS)
-def test_compiled_step_is_one_conv_free_graph_matching_uncompiled(cls, shape, surface):
-    """In steady state a step is one graph (fullgraph=True raises on any
-    break) with no conv left, and gives the uncompiled conv path's record and
-    gradients through AOTAutograd.  A break splits the step's fusion; before
-    torch 2.5 the taps lookup and the free-surface switches broke it on every
-    call, and the slices never ran."""
-    torch._dynamo.reset()
-    ref = _run(cls, shape, surface, False)
-    counts = []
-    run = _run(cls, shape, surface, True, _counting_convs(counts, "aot_eager"), fullgraph=True, warm=True)
-    assert counts and sum(counts) == 0, f"conv left in the compiled step: {counts}"
-    _assert_matches(run, ref)
-
-
-@requires_compile
-@pytest.mark.parametrize("cls,shape,surface", SURFACES)
-def test_first_compiled_step_builds_the_surface_operators(cls, shape, surface):
-    """Cold, the first compiled step builds the surface's order-2 operator
-    itself (breaking the graph once to do it outside the trace).  It must come
-    out registered, so no conv, and the record must not notice."""
+def test_compiled_rollout_is_one_conv_free_graph_matching_uncompiled(cls, shape, surface):
+    """A rollout compiles one graph (fullgraph=True raises on any break) with
+    no conv left, and gives the uncompiled conv path's record and gradients
+    through AOTAutograd.  A break splits the step's fusion; before torch 2.5
+    the taps lookup and the free-surface switches broke it on every call, and
+    the slices never ran.  A second graph was a step's inputs' requires_grad
+    still changing: those first steps run uncompiled (_SettledSteps), which
+    also builds the free surface's order-2 twin before the trace."""
     torch._dynamo.reset()
     counts = []
-    run = _run(cls, shape, surface, True, _counting_convs(counts, "eager"))
-    assert counts and sum(counts) == 0, f"conv left in the compiled step: {counts}"
+    run = _run(cls, shape, surface, True, _counting_convs(counts, "aot_eager"), fullgraph=True)
+    assert len(counts) == 1, f"{len(counts)} graphs compiled for one rollout"
+    assert counts == [0], f"conv left in the compiled step: {counts}"
     _assert_matches(run, _run(cls, shape, surface, False))
 
 
@@ -235,7 +213,7 @@ def test_plain_warmup_prefix_changes_nothing(monkeypatch):
     import sweep.propagator._torch_eager as TE
     if TE.CKPT_PLAIN_WARMUP:
         pytest.skip("this torch cannot compile inside the checkpoint at all; "
-                    "test_compiled_step_is_one_conv_free_graph_matching_uncompiled covers the warm-up here")
+                    "test_compiled_rollout_is_one_conv_free_graph_matching_uncompiled covers the warm-up here")
     runs = []
     for warm in (False, True):
         torch._dynamo.reset()

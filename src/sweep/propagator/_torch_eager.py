@@ -123,6 +123,42 @@ def _compiler_failures():
     return tuple(found)
 
 
+class _SettledSteps:
+    """Which steps of one rollout take the compiled step.
+
+    Dynamo guards on every input's ``requires_grad``.  In a rollout that
+    differentiates the models those flags change over the first steps: the
+    wavefields start as zeros and pick up ``requires_grad`` as the models
+    reach them.  Each change compiled a graph that then served one step, two
+    of the three graphs a rollout compiled.  So steps run uncompiled until
+    their inputs' flags repeat from one step to the next.  A step's flags
+    follow from the previous step's alone, so they stay put from there, and the
+    first compiled step is the only one that compiles.  Without gradients the
+    flags never change and only step 0 runs uncompiled.
+
+    The answer for a step never changes once given: a checkpoint's recompute
+    replays its steps and has to take the path the forward took.
+    """
+
+    def __init__(self):
+        self.first = None           # the first compiled step
+        self._flags = None
+        self._plain = set()
+
+    def compiled(self, step, wavefield):
+        if self.first is not None:
+            return step >= self.first
+        if step in self._plain:
+            return False
+        flags = tuple(w.requires_grad for w in wavefield)
+        if flags == self._flags:
+            self.first = step
+            return True
+        self._flags = flags
+        self._plain.add(step)
+        return False
+
+
 class _PropTorchEager(
     PropBase, torch.nn.Module, _CustomGradientMixin, _EagerBoundarySavingMixin
 ):
@@ -155,7 +191,8 @@ class _PropTorchEager(
         # User-registered custom gradient / imaging conditions.
         #   {param_name: (imaging_fn, mode)}  with mode in {"gradient", "imaging"}
         self._custom_gradients = {}
-        self.step_func = self._build_step_func()
+        self._plain_step_func = self._build_step_func()
+        self.step_func = self._maybe_compile(self._plain_step_func)
 
     def _as_device_tensor(self, value, *, dtype):
         if isinstance(value, torch.Tensor):
@@ -197,18 +234,18 @@ class _PropTorchEager(
                 out[k] = scatter_source(out[k], *source)
             return out
 
-        return self._maybe_compile(step_func)
+        return step_func
 
     def _maybe_compile(self, fn):
         """``torch.compile`` *fn* with the propagator's compile settings, after
         raising Dynamo's recompile limit.  Dynamo specializes the step on
-        per-tensor metadata; each wavefield's ``requires_grad`` flips False->True
-        the first time it absorbs a contribution from the (``requires_grad=True``)
-        models, forcing a recompile.  Elastic/DAS have many wavefields, so the
-        default cap of 8 is exhausted before Dynamo settles and it silently falls
-        back to eager — bump the cap so specialization can finish (Acoustic's
-        tighter step is unaffected).  Returns *fn* unchanged when compilation is
-        off.  Shared by the full-tape step and the eager boundary-saving step.
+        per-tensor metadata, ``requires_grad`` included, and the graphs of every
+        propagator a process builds collect on the step's one code object; at
+        the default cap of 8 it silently falls back to eager.  (A rollout runs
+        its first steps, while the wavefields' ``requires_grad`` still changes,
+        uncompiled: see ``_SettledSteps``.)  Returns *fn* unchanged when
+        compilation is off.  Shared by the full-tape step and the eager
+        boundary-saving step.
 
         The compiled step is wrapped so that a compiler that cannot build it
         (Inductor's CPU backend needs g++ >= 10, for one) costs speed, not the
@@ -293,9 +330,12 @@ class _PropTorchEager(
             if compiler is not None and hasattr(compiler, "cudagraph_mark_step_begin"):
                 compiler.cudagraph_mark_step_begin()
 
-    def _compiled_step(self, wavefields, models, dt, h, b, source=None):
+    def _compiled_step(self, wavefields, models, dt, h, b, source=None, compiled=True):
         """One step; ``source`` (``SourceTorch.step_args``) is injected into
-        the source fields inside it."""
+        the source fields inside it.  ``compiled=False`` runs it uncompiled
+        (see ``_SettledSteps``)."""
+        if not compiled:
+            return self._plain_step_func(*wavefields, *models, dt, h, b, source=source)
         self._mark_compile_step_begin()
         return self.step_func(*wavefields, *models, dt, h, b, source=source)
 
@@ -390,12 +430,14 @@ class _PropTorchEager(
             cached.zero_()
         return cached
 
-    def _run_chunk(self, wavefield, models, dt, h, b, wavelet_steps, nt, start_t, chunk_size, src, rec, receivers, adj=False):
+    def _run_chunk(self, wavefield, models, dt, h, b, wavelet_steps, nt, start_t, chunk_size, src, rec, receivers,
+                   settled, adj=False):
         columns = []
         for t in range(start_t, min(start_t + chunk_size, nt)):
             time = t if not adj else nt - t - 1
             wavefield = list(self._compiled_step(wavefield, models, dt, h, b,
-                                                 source=src.step_args(wavelet_steps[time])))
+                                                 source=src.step_args(wavelet_steps[time]),
+                                                 compiled=settled.compiled(t, wavefield)))
             columns.append(self._sample_receivers(rec, wavefield, receivers))
         return tuple(wavefield), torch.stack(columns, dim=1)
 
@@ -441,24 +483,20 @@ class _PropTorchEager(
         num_wavefields = len(wavefield)
         num_models = len(models)
 
+        settled = _SettledSteps()
         chunk_records = []
         start = 0
         if self.use_compile and CKPT_PLAIN_WARMUP:
             # Before torch 2.5, compiling inside a checkpointed forward saves
             # tensors its recompute does not, and backward raises a
-            # CheckpointError.  The step recompiles only while its inputs'
-            # requires_grad settles (3 steps for every equation here), so run
-            # those steps on the plain tape.
+            # CheckpointError.  Only the first compiled step compiles (see
+            # _SettledSteps), so run the steps up to and including it on the
+            # plain tape.
             runtime_models = self._prepare_runtime_models(models)
-            seen = None
-            while start < min(nt, 8):
-                flags = tuple(w.requires_grad for w in wavefield)
-                if start >= 3 and flags == seen:
-                    break
-                seen = flags
+            while start < min(nt, 8) and settled.first is None:
                 wavefield, column = self._run_chunk(
                     wavefield, runtime_models, self.dt, self._equation_spacing, None,
-                    wavelet_steps, nt, start, 1, src, rec, receivers, adj=adj)
+                    wavelet_steps, nt, start, 1, src, rec, receivers, settled, adj=adj)
                 wavefield = list(wavefield)
                 chunk_records.append(column)
                 start += 1
@@ -482,6 +520,7 @@ class _PropTorchEager(
                     src,
                     rec,
                     receivers,
+                    settled,
                     adj=adj,
                 )
 
@@ -498,11 +537,13 @@ class _PropTorchEager(
         (wavefield snapshots).  Returns ``(wavefield, record)``; the snapshots,
         which are detached host copies, are still written in place.
         """
+        settled = _SettledSteps()
         columns = []
         for i in range(nt):
             time = i if not adj else nt - i - 1
             wavefield = list(self._compiled_step(wavefield, runtime_models, self.dt, self._equation_spacing, None,
-                                                 source=src.step_args(wavelet_steps[time])))
+                                                 source=src.step_args(wavelet_steps[time]),
+                                                 compiled=settled.compiled(i, wavefield)))
             if return_wavefield and i in snapshot_lookup:
                 snapshots[snapshot_lookup[i]] = torch.stack(
                     [self._crop_runtime_halo(w).detach().cpu() for w in wavefield],
