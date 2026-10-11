@@ -521,8 +521,9 @@ class _BoundarySaveStep(torch.autograd.Function):
         nwf, nm = cfg["nwf"], cfg["nm"]
         S_in = list(tensors[:nwf])
         models = list(tensors[nwf:nwf + nm])
+        func = cfg["func"] if cfg["settled"].compiled(step, S_in) else cfg["func_plain"]
         with torch.no_grad():
-            S_out = list(cfg["func"](S_in, models, cfg["dt"], cfg["h"], None))
+            S_out = list(func(S_in, models, cfg["dt"], cfg["h"], None))
         save_step(cfg["state"], step + 1, [S_out[f] for f in cfg["ring_fields"]])
         # The ring is saved before the source goes in, as when the source was
         # an op after this Function; the reverse drivers re-inject it.  Inside,
@@ -743,7 +744,9 @@ class _EagerBoundarySavingMixin:
         # backward.  With use_compile=True the inner step is torch.compile'd; the
         # custom autograd.Function and the time loop stay eager (Dynamo treats the
         # Function as an opaque boundary), so only the per-step kernels are fused.
-        bs_func = self._maybe_compile(self._grouped(self.equation.func))
+        from ._torch_eager import _SettledSteps
+        bs_plain = self._grouped(self.equation.func)
+        bs_func = self._maybe_compile(bs_plain)
         bs_substeps = (
             [self._maybe_compile(self._grouped(ss)) for ss in self.equation.interior_substeps()]
             if reverse_mode == "substep" else None
@@ -761,6 +764,9 @@ class _EagerBoundarySavingMixin:
             "self_check": getattr(self, "_eager_bs_self_check", True),
             "check_tol": getattr(self, "_eager_bs_check_tol", 1e-2),
             "func": bs_func, "substeps": bs_substeps,
+            # The forward's first steps run uncompiled (see _SettledSteps); the
+            # reverse pass passes the same flags every step and compiles once.
+            "func_plain": bs_plain, "settled": _SettledSteps(),
         }
         return state, base_cfg
 
