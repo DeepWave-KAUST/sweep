@@ -20,11 +20,11 @@
 //   * allt_shape = (nt, B, nz, nx): u only, written in-kernel through u_thist (capture_allt is a no-op);
 //   * save_width = abcn > 0 ? M + 1 : M; boundary save/restore offset 0;
 //   * bind_or_alloc_forward / _adjoint / _recon bind p.wavefields / p.adjoint_wavefields / p.forward_wavefields -- all three are propagator-owned and MANDATORY (the recon list binds WITHOUT CPML, use_pml = false); no driver-side allocation is left;
-//   * launch_step_range: an air-clear prepass (has_topo only, x range widened by M) then the ACOUSTIC2D kernel ranged over x in [xb, xe) via ctx.x_base / x_limit (phase-split capable);
+//   * launch_step_range: an air-clear prepass (has_topo only, x range widened by M) then launch_acoustic2d_forward (the interior box plus one launch over the CPML ring, forward_split.cu) ranged over x in [xb, xe) via ctx.x_base / x_limit (phase-split capable);
 //   * forward loop: inject_source_fwd and record act on u_next; rotate_buffers = swap_pml (u triple AND psi<->psin); save_last_state stores (u_prev, u_now) in last_two;
 //   * backward outputs: bind_backward_outputs = eqdrv::acoustic_bind_backward_outputs (grads_out is mandatory: {grad_wavelet, grad_vp}); pack_outputs returns grads + source/receiver illumination + adcig;
 //   * u_forward_ptr = u_forward.select(0, it) (vp^2 * Lap(u), the vp-gradient operand, NOT raw pressure);
-//   * adjoint_step = ACOUSTIC2D_ADJOINT_FUSED: single-kernel exact adjoint, g_* recomputed at each tap, next-step psi/zeta written to the double-buffer out-tensors, grad_forward_img / grad_out fused in;
+//   * adjoint_step = launch_acoustic2d_adjoint (adjoint_split.cu): the exact adjoint as the pure-interior box plus one launch over the CPML ring, g_* recomputed at each tap, next-step psi/zeta written to the double-buffer out-tensors, grad_forward_img / grad_out fused in;
 //   * inject_adjoint_source adds p.adjoint_source into u_next with the record_config slot (the adjoint source config in backward states); rotate_adjoint_buffers = swap_aux (u + psi + zeta rotation);
 //   * accumulate_source_grad = accumulate_source_grad_2d from the adjoint u_now into grads[0];
 //   * image_step = calculate_grad (vp gradient) + accumulate_illumination_2d; no ADCIG launch here (the full store is not raw pressure);
@@ -33,7 +33,7 @@
 //   * bs_recon_step order: ACOUSTIC2D_NOPML (+ fused vp imaging on the cells the restore will not overwrite) -> restore_backward_2d -> sub_source_in_restore_strip (strip source cells back to w^{it-1} - s^{it}) -> calculate_grad_utt_band on the restore strips -> forward-source add_source into u_next -> forward.swap();
 //   * bs_rtm_tap, after the prefetch: accumulate_illumination_2d gated by compute_illumination, then accumulate_adcig_2d when illumination.adcig is non-empty, both on the co-resident (forward.u_now, adjoint.u_now) pair;
 //   * ckpt: CKPT_STATE_COUNT = 7 (u triple + the 4 CPML aux slabs, bind order) per replay state set of p.forward_wavefields; bind_or_alloc_recon_ckpt binds set 0 (bind_replay_state: wavefield_set + geometry check), bind_or_alloc_recursive_scratch sets 1..depth -- both MANDATORY;
-//   * ckpt replay: replay_step = full-domain ACOUSTIC2D (no air-clear prepass, no x range) -> inject_source_fwd (BackwardInput overload) -> rotate_recon_buffers = swap().
+//   * ckpt replay: replay_step = full-domain launch_acoustic2d_forward (no air-clear prepass, no x range) -> inject_source_fwd (BackwardInput overload) -> rotate_recon_buffers = swap().
 //
 // Hook timing: see the HOOK TIMING MAP at the top of ../../common/eq_driver.cuh.
 #pragma once
@@ -49,6 +49,7 @@
 #include "../../common/cudautils.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
+#include "../../common/boundary/strip.cuh"
 #include "../../../core/input_core.h"
 #include "../../../core/outputs.h"
 #include "../../common/eq_driver.cuh"
@@ -237,22 +238,8 @@ struct Driver {
         SolverContext sctx = ctx;
         sctx.x_base = xb;
         sctx.x_limit = xe;
-        auto lc = fdtd::Wave2D::make(xe - xb, s.nz, s.B);
-        ACOUSTIC2D(
-            s.order,
-            lc.grid,
-            lc.block,
-            view,
-            save_all,
-            u_thist,
-            s.vp,
-            s.lap_ctx,
-            s.grad_ctx,
-            s.grad_ctx_x,
-            s.grad_ctx_z,
-            cpml,
-            sctx
-        );
+        launch_acoustic2d_forward(s.order, view, u_thist, s.vp, s.lap_ctx, s.grad_ctx,
+                                  s.grad_ctx_x, s.grad_ctx_z, cpml, sctx);
     }
 
     static void save_boundary_fwd(BoundaryRuntime& rt, const State& s,
@@ -391,9 +378,8 @@ struct Driver {
         SWEEP_CHECK(adj_view.zetaxn != nullptr && adj_view.psixn != nullptr,
             "fused adjoint needs the adjoint wavefield bound with psi+zeta "
             "double-buffer (11 tensors in 2D); set cuda_layout.adjoint_extra_nvar=2.");
-        ACOUSTIC2D_ADJOINT_FUSED(s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view, s.vp, s.lap_ctx, s.grad_ctx_x, s.grad_ctx_z, cpml, ctx,
-            adj_view.psixn, adj_view.psizn, adj_view.zetaxn, adj_view.zetazn,
+        launch_acoustic2d_adjoint(s.order, adj_view, s.vp, s.lap_ctx, s.grad_ctx_x, s.grad_ctx_z,
+            cpml, ctx, adj_view.psixn, adj_view.psizn, adj_view.zetaxn, adj_view.zetazn,
             grad_forward_img, grad_out);
     }
 
@@ -593,11 +579,13 @@ struct Driver {
             ctx
         );
         {
-            const int wxl = ctx.cut_x_lo() ? 0 : save_width;
-            const int wxh = ctx.cut_x_hi() ? 0 : save_width;
-            const int wzl = ctx.cut_z_lo() ? 0 : save_width;
-            const int wzh = ctx.cut_z_hi() ? 0 : save_width;
+            int wxl = ctx.cut_x_lo() ? 0 : save_width;
+            int wxh = ctx.cut_x_hi() ? 0 : save_width;
+            int wzl = ctx.cut_z_lo() ? 0 : save_width;
+            int wzh = ctx.cut_z_hi() ? 0 : save_width;
             const int bw = ctx.phys_x1() - ctx.phys_x0();
+            bs_strip_widths(ctx.phys_z1() - ctx.phys_z0(), wzl, wzh);   // a thin box: no cell twice
+            bs_strip_widths(bw, wxl, wxh);
             const int bh = ctx.phys_z1() - ctx.phys_z0() - wzl - wzh;
             const int n_strip = (wzl + wzh) * bw + (wxl + wxh) * (bh > 0 ? bh : 0);
             if (n_strip > 0) {
@@ -732,23 +720,10 @@ struct Driver {
     static void replay_step(const State& s, const SolverContext& ctx,
                             AcousticWavefieldPointer view,
                             AcousticCPMLPointer cpml,
-                            bool save_all, float* u_this)
+                            bool /*save_all*/, float* u_this)
     {
-        ACOUSTIC2D(
-            s.order,
-            s.launch_config.grid,
-            s.launch_config.block,
-            view,
-            save_all,
-            u_this,
-            s.vp,
-            s.lap_ctx,
-            s.grad_ctx,
-            s.grad_ctx_x,
-            s.grad_ctx_z,
-            cpml,
-            ctx
-        );
+        launch_acoustic2d_forward(s.order, view, u_this, s.vp, s.lap_ctx, s.grad_ctx,
+                                  s.grad_ctx_x, s.grad_ctx_z, cpml, ctx);
     }
 
     // Overload for ckpt replay: BackwardInput spells the forward source fields

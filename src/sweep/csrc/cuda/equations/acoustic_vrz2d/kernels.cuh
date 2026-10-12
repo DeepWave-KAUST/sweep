@@ -9,21 +9,41 @@
 #include "../../operators/gradient.cuh"
 #include "../../operators/laplace.cuh"
 
-template<int Order>
-__global__ void acoustic_vrz2nd(
-    AcousticWavefieldPointer wf,
-    bool save_all_wavefields,
-    float* __restrict__ u_this,
-    const float* __restrict__ vp,
-    const float* __restrict__ z,
-    const float* __restrict__ inv_z,
-    LaplaceParam lap_ctx,
-    GradParam grad_ctx,
-    GradParam grad_ctx_x,
-    GradParam grad_ctx_z,
-    AcousticCPMLPointer cpml,
-    SolverContext solver
-);
+// The VRZ2D forward and adjoint steps (forward_split.cu, adjoint_split.cu): the
+// interior box plus one launch over the CPML ring around it, every order
+// (orders above 8 through the runtime-order instantiation).
+void launch_acoustic_vrz2d_forward(
+    int order, AcousticWavefieldPointer wf,
+    const float* vp, const float* z, const float* inv_z,
+    LaplaceParam lap_ctx, GradParam grad_ctx, GradParam grad_ctx_x, GradParam grad_ctx_z,
+    AcousticCPMLPointer cpml, SolverContext ctx);
+void launch_acoustic_vrz2d_adjoint(
+    int order, AcousticWavefieldPointer wf,
+    const float* C0, const float* Cx, const float* Cz,
+    LaplaceParam lap_ctx, GradParam grad_ctx, GradParam grad_ctx_x, GradParam grad_ctx_z,
+    AcousticCPMLPointer cpml, SolverContext ctx,
+    float* psix_out, float* psiz_out, float* zetax_out, float* zetaz_out);
+
+// The model gradient at it (grad_tiled.cu): one 2-D tiled kernel at orders 4-8,
+// CALCULATE_GRAD_VRZ2D_AUTO (launched over grid/block) at order 2 and the
+// runtime orders.
+// p_tt is the stored second difference (full) or nullptr (then from p_prev,
+// p, p_next).
+bool acoustic_vrz2d_grad_is_tiled(int order);
+void launch_acoustic_vrz2d_grad(
+    int order, dim3 grid, dim3 block,
+    const float* p, const float* lam, const float* p_tt, const float* p_prev, const float* p_next,
+    const float* vp, const float* z, const float* inv_z,
+    float* c_x, float* c_z, float* e_x, float* e_z,
+    float* grad_vp, float* grad_z, GradParam grad_ctx, LaplaceParam lap_ctx, SolverContext ctx);
+// Boundary saving, tiled orders: the reverse step's U_{it-1} (into wf.u_next,
+// forward source included) and the gradient at it in one pass.  The strip
+// restore of u_next must have run.
+void launch_acoustic_vrz2d_recon_grad(
+    int order, AcousticWavefieldPointer wf, const float* lam,
+    const float* vp, const float* z, const float* inv_z,
+    const float* source, const int* sources_loc, int nsrc, int it,
+    float* grad_vp, float* grad_z, GradParam grad_ctx, LaplaceParam lap_ctx, SolverContext ctx);
 
 template<int Order>
 __global__ void acoustic_vrz2nd_nopml(
@@ -111,9 +131,6 @@ __global__ void calculate_grad_vrz2d(
     LaplaceParam lap_ctx,
     SolverContext solver
 );
-
-#define ACOUSTIC_VRZ2D(order, grid, block, ...) \
-    SWEEP_LAUNCH_BY_ORDER(acoustic_vrz2nd_by_order, order, grid, block, __VA_ARGS__)
 
 #define ACOUSTIC_VRZ2D_NOPML(order, grid, block, ...) \
     SWEEP_LAUNCH_BY_ORDER(acoustic_vrz2nd_nopml_by_order, order, grid, block, __VA_ARGS__)
@@ -247,119 +264,6 @@ __device__ __forceinline__ float vrz2d_split_grad_q_gradp(
     float dp = gradient<2, Order, Direction>(p, ix, 0, iz, grad_ctx);
     return dq * dp;
 }
-
-template<int Order>
-__global__ void acoustic_vrz2nd(
-    AcousticWavefieldPointer wf,
-    bool save_all_wavefields,
-    float* __restrict__ u_this,
-    const float* __restrict__ vp,
-    const float* __restrict__ z,
-    const float* __restrict__ inv_z,
-    LaplaceParam lap_ctx,
-    GradParam grad_ctx,
-    GradParam grad_ctx_x,
-    GradParam grad_ctx_z,
-    AcousticCPMLPointer cpml,
-    SolverContext solver
-) {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
-
-    constexpr bool is_runtime = (Order == -1);
-    constexpr int m_static = is_runtime ? 0 : (Order / 2);
-    int halo = is_runtime ? solver.M : m_static;
-
-    if (ix < halo || ix >= solver.nx - halo || iz < halo || iz >= solver.nz - halo)
-        return;
-
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-
-    auto f = wf.offset(b, spatial_size);
-    float* u_this_b = u_this ? u_this + b * spatial_size : nullptr;
-    const float* vp_b = vp + b * spatial_size;
-    const float* z_b = z + b * spatial_size;
-    const float* inv_z_b = inv_z + b * spatial_size;
-
-    float lap_x = laplace<2, Order, X>(f.u_now, ix, 0, iz, lap_ctx);
-    float lap_z = laplace<2, Order, Z>(f.u_now, ix, 0, iz, lap_ctx);
-
-    float dudx = gradient<2, Order, X>(f.u_now, ix, 0, iz, grad_ctx);
-    float dudz = gradient<2, Order, Z>(f.u_now, ix, 0, iz, grad_ctx);
-
-    float dvpdx = gradient<2, Order, X>(vp_b, ix, 0, iz, grad_ctx);
-    float dvpdz = gradient<2, Order, Z>(vp_b, ix, 0, iz, grad_ctx);
-    float z1x = gradient<2, Order, X>(inv_z_b, ix, 0, iz, grad_ctx);
-    float z1z = gradient<2, Order, Z>(inv_z_b, ix, 0, iz, grad_ctx);
-
-    float v = vp_b[idx];
-    float inv_z0 = inv_z_b[idx];
-    float beta = v * inv_z0;
-    float kappa = v * z_b[idx];
-    float dbdx = dvpdx * inv_z0 + v * z1x;
-    float dbdz = dvpdz * inv_z0 + v * z1z;
-
-    // PML / interior split. ax/bx/dbxdx vanish in the interior so psixn/psizn/
-    // zetaxn/zetazn all collapse to 0; rhs reduces to kappa*(beta*(lap_x+lap_z)
-    // + dbdx*dudx + dbdz*dudz). Skipping the dpsix/dpsiz/daxdx/dazdz loads and
-    // four aux-field writes is the main bandwidth win here.
-    bool in_pml = solver.in_pml_2d(ix, iz, halo);
-
-    if (!in_pml) {
-        float rhs = kappa * (beta * (lap_x + lap_z) + dbdx * dudx + dbdz * dudz);
-        f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * rhs;
-        if (save_all_wavefields && u_this_b != nullptr)
-            u_this_b[idx] = rhs;
-        return;
-    }
-
-    float ax_ = cpml.ax[ix];
-    float az_ = cpml.az[iz];
-    float bx_ = cpml.bx[ix];
-    float bz_ = cpml.bz[iz];
-    float dbxdx_ = cpml.dbxdx[ix];
-    float dbzdz_ = cpml.dbzdz[iz];
-
-    float dpsixdx = gradient<2, Order, X>(f.psix, ix, 0, iz, grad_ctx);
-    float dpsizdz = gradient<2, Order, Z>(f.psiz, ix, 0, iz, grad_ctx);
-
-    float daxdx = gradient<2, Order, X>(cpml.ax, ix, 0, 0, grad_ctx_x);
-    float dazdz = gradient<2, Order, X>(cpml.az, iz, 0, 0, grad_ctx_z);
-
-    float tmpx = ((1.0f + bx_) * lap_x + dbxdx_ * dudx) + (daxdx * f.psix[idx] + ax_ * dpsixdx);
-    float psixn = bx_ * dudx + ax_ * f.psix[idx];
-    float zetaxn = bx_ * tmpx + ax_ * f.zetax[idx];
-
-    float tmpz = ((1.0f + bz_) * lap_z + dbzdz_ * dudz) + (dazdz * f.psiz[idx] + az_ * dpsizdz);
-    float psizn = bz_ * dudz + az_ * f.psiz[idx];
-    float zetazn = bz_ * tmpz + az_ * f.zetaz[idx];
-
-    float px = dudx + psixn;
-    float pz = dudz + psizn;
-    float w_sum = (1.0f + bx_) * tmpx + ax_ * f.zetax[idx]
-                + (1.0f + bz_) * tmpz + az_ * f.zetaz[idx];
-
-    float rhs = kappa * (beta * w_sum + dbdx * px + dbdz * pz);
-
-    (f.psixn ? f.psixn : f.psix)[idx] = psixn;   // race-free forward psi double-buffer
-    (f.psizn ? f.psizn : f.psiz)[idx] = psizn;
-    f.zetax[idx] = zetaxn;
-    f.zetaz[idx] = zetazn;
-
-    f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * rhs;
-
-    if (save_all_wavefields && u_this_b != nullptr)
-        u_this_b[idx] = rhs;
-}
-
-using acoustic_vrz2nd_fn = void (*)(AcousticWavefieldPointer, bool, float*,
-    const float*, const float*, const float*, LaplaceParam, GradParam, GradParam,
-    GradParam, AcousticCPMLPointer, SolverContext);
-SWEEP_BY_ORDER_DECL(acoustic_vrz2nd_fn, acoustic_vrz2nd_by_order);
 
 template<int Order>
 __global__ void acoustic_vrz2nd_nopml(
@@ -748,7 +652,7 @@ SWEEP_BY_ORDER_DECL(calculate_grad_vrz2d_fn, calculate_grad_vrz2d_by_order);
 // ===========================================================================
 // Fused backward kernels (functor recompute-at-tap, bit-exact with the split
 // prepare+apply path above).  Backward per step: build_vrz_adjoint_fields +
-// acoustic_vrz2nd_adjoint -> acoustic_vrz2nd_adjoint_fused;  build_vrz_grad_fields
+// acoustic_vrz2nd_adjoint -> launch_acoustic_vrz2d_adjoint;  build_vrz_grad_fields
 // + calculate_grad_vrz2d -> calculate_grad_vrz2d_fused.  The time-invariant
 // adjoint coefficients (vp^2, dx b*kappa, dz b*kappa) are precomputed once by
 // build_vrz_adjoint_coeffs before the timestep loop.
@@ -805,186 +709,6 @@ __global__ void build_vrz_adjoint_coeffs(
 using build_vrz_adjoint_coeffs_fn = void (*)(const float*, const float*, const float*,
     float*, float*, float*, GradParam, SolverContext);
 SWEEP_BY_ORDER_DECL(build_vrz_adjoint_coeffs_fn, build_vrz_adjoint_coeffs_by_order);
-
-template<int Order>
-__global__ void acoustic_vrz2nd_adjoint_fused(
-    AcousticWavefieldPointer wf,
-    const float* __restrict__ vp,
-    const float* __restrict__ z,
-    const float* __restrict__ inv_z,
-    const float* __restrict__ C0,   // vp²          (time-invariant, build_vrz_adjoint_coeffs)
-    const float* __restrict__ Cx,   // (∂ₓb)·κ
-    const float* __restrict__ Cz,   // (∂_z b)·κ
-    LaplaceParam lap_ctx,
-    GradParam grad_ctx,
-    GradParam grad_ctx_x,
-    GradParam grad_ctx_z,
-    AcousticCPMLPointer cpml,
-    SolverContext solver,
-    float* __restrict__ psix_out,   // adjoint psi/zeta double-buffers (swap_aux)
-    float* __restrict__ psiz_out,
-    float* __restrict__ zetax_out,
-    float* __restrict__ zetaz_out
-) {
-    // EXACT discrete transpose of acoustic_vrz2nd's CPML step.  Per axis d the
-    // forward reads (u, psi_d, zeta_d) and writes
-    //   t_d   = (1+b_d)·L_d u + db_d·D_d u + da_d·psi_d + a_d·D_d psi_d
-    //   psin_d = b_d·D_d u + a_d·psi_d,   zetan_d = b_d·t_d + a_d·zeta_d
-    //   rhs   = κβ·Σ_d[(1+b_d)·t_d + a_d·zeta_d] + Σ_d κ∂_d b·(D_d u + psin_d)
-    //         = C0·Σ_d[...] + Σ_d C_d·((1+b_d)·D_d u + a_d·psi_d)
-    // with κβ = vp² = C0 and κ∂_d b = C_d.  Transposing operation by operation
-    // (Lᵀ = L, D_dᵀ = −D_d, pointwise coefficients evaluated at the TAP) gives,
-    // with gw = C0·dt²·λ and gtmp_d = b_d·ζ*_d + (1+b_d)·gw:
-    //   λ_next = 2λ − λ_prev + Σ_d [ L_d((1+b_d)·gtmp_d) − D_d(b_d·ψ*_d + db_d·gtmp_d + (1+b_d)·C_d·dt²·λ) ]
-    //   ψ*_d'  = a_d·(ψ*_d + C_d·dt²·λ) + da_d·gtmp_d − D_d(a_d·gtmp_d)
-    //   ζ*_d'  = a_d·(ζ*_d + gw)
-    // Verified against the numerical transpose of the forward step
-    // (test/vrz_adjoint_transpose_check.py, rel 1e-16).  Every neighbour read
-    // is of the OLD λ/ψ*/ζ*: the new ψ*/ζ* land in the double-buffers.
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
-
-    constexpr bool is_runtime = (Order == -1);
-    constexpr int m_static = is_runtime ? 0 : (Order / 2);
-    int halo = is_runtime ? solver.M : m_static;
-
-    if (ix < halo || ix >= solver.nx - halo || iz < halo || iz >= solver.nz - halo)
-        return;
-
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-    int oidx = b * spatial_size + idx;
-
-    auto f = wf.offset(b, spatial_size);
-    const float* C0_b = C0 + b * spatial_size;
-    const float* Cx_b = Cx + b * spatial_size;
-    const float* Cz_b = Cz + b * spatial_size;
-    const float* lam = f.u_now;
-    const int sz = solver.nx;
-    const float dt2 = solver.dt * solver.dt;
-
-    // Deep interior (every tap has b = 0, aux = 0): the transpose collapses to
-    // ∇²(vp²λ) − ∂ₓ((∂ₓb·κ)·λ) − ∂_z((∂_z b·κ)·λ), the pre-existing exact
-    // interior branch, bit-identical.  The adjoint aux there is a dead
-    // accumulator (never feeds λ: every coupling carries b), so it is left 0.
-    bool pure_interior =
-        (ix >= (solver.cut_x_lo() ? halo : solver.padLo(2) + 2 * halo)) &&
-        (ix < solver.nx - (solver.cut_x_hi() ? halo : solver.padHi(2) + 2 * halo)) &&
-        (iz >= (solver.cut_z_lo() ? halo : solver.padLo(0) + 2 * halo)) &&
-        (iz < solver.nz - (solver.cut_z_hi() ? halo : solver.padHi(0) + 2 * halo));
-    if (pure_interior) {
-        VrzProductAccessor a0x{C0_b, lam, idx, 1};
-        VrzProductAccessor a0z{C0_b, lam, idx, solver.nx};
-        float lap_x = centered_laplace1d_stencil<Order>(a0x, lap_ctx.dx, solver.M, lap_ctx.coeff);
-        float lap_z = centered_laplace1d_stencil<Order>(a0z, lap_ctx.dz, solver.M, lap_ctx.coeff);
-
-        VrzProductAccessor axx{Cx_b, lam, idx, 1};
-        VrzProductAccessor azz{Cz_b, lam, idx, solver.nx};
-        float gx = centered_gradient_stencil<Order>(axx, solver.M, grad_ctx.coeff, grad_ctx.dx);
-        float gz = centered_gradient_stencil<Order>(azz, solver.M, grad_ctx.coeff, grad_ctx.dz);
-
-        float rhs = (lap_x + lap_z) - gx - gz;
-        f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + dt2 * rhs;
-        return;
-    }
-
-    const float* lc = lap_ctx.coeff;    // [c0(centre), c1..cM]
-    const float* gc = grad_ctx.coeff;   // [_, c1..cM] (antisymmetric)
-    const float invdx2 = 1.0f / (lap_ctx.dx * lap_ctx.dx);
-    const float invdz2 = 1.0f / (lap_ctx.dz * lap_ctx.dz);
-    const float invdx = 1.0f / grad_ctx.dx;
-    const float invdz = 1.0f / grad_ctx.dz;
-
-    // The forward runs its CPML branch only where in_pml_2d(cell) holds; every
-    // other cell takes the interior formula and never touches aux.  The
-    // transpose must mirror that per TAP: a coefficient enters a tap's term
-    // only if the forward evaluated it there.  b is exactly 0 outside the band
-    // by construction (sigma = 0), but db = np.gradient(b) leaks one cell past
-    // the band edge and a = exp(-alpha dt) is not zero in the interior, so
-    // both are gated.  A tap on the x axis shares this row's z answer (and
-    // vice versa), so the 2-D predicate costs one compare per tap.
-    const bool px0 = solver.in_pml_x(ix, halo);
-    const bool pz0 = solver.in_pml_z(iz, halo);
-    const bool own_pml = px0 || pz0;
-
-    const float ax_ = cpml.ax[ix], az_ = cpml.az[iz];
-    const float bx_ = cpml.bx[ix], bz_ = cpml.bz[iz];
-
-    const float gw0 = C0_b[idx] * dt2 * lam[idx];
-    const float gtmpx0 = bx_ * f.zetax[idx] + (1.0f + bx_) * gw0;
-    const float gtmpz0 = bz_ * f.zetaz[idx] + (1.0f + bz_) * gw0;
-
-    #define VRZ_GW(n)          ( C0_b[n] * dt2 * lam[n] )
-    #define VRZ_GTMP_X(n, nix) ( cpml.bx[nix] * f.zetax[n] + (1.0f + cpml.bx[nix]) * VRZ_GW(n) )
-    #define VRZ_GTMP_Z(n, niz) ( cpml.bz[niz] * f.zetaz[n] + (1.0f + cpml.bz[niz]) * VRZ_GW(n) )
-
-    // X: L((1+b)·gtmp), D(b·ψ* + db·gtmp + (1+b)·Cx·dt²·λ), D(a·gtmp)
-    float Lx_gl = -lc[0] * ((1.0f + bx_) * gtmpx0);
-    float Dx_gg = 0.0f, Dx_gq = 0.0f;
-    #pragma unroll
-    for (int k = 1; k <= halo; ++k) {
-        int np = idx + k, nm = idx - k, nixp = ix + k, nixm = ix - k;
-        bool Pp = pz0 || solver.in_pml_x(nixp, halo);
-        bool Pm = pz0 || solver.in_pml_x(nixm, halo);
-        float tp = VRZ_GTMP_X(np, nixp), tm = VRZ_GTMP_X(nm, nixm);
-        float bxp = cpml.bx[nixp], bxm = cpml.bx[nixm];
-        float dbp = Pp ? cpml.dbxdx[nixp] : 0.0f, dbm = Pm ? cpml.dbxdx[nixm] : 0.0f;
-        float ap  = Pp ? cpml.ax[nixp]    : 0.0f, am  = Pm ? cpml.ax[nixm]    : 0.0f;
-        Lx_gl += lc[k] * ((1.0f + bxp) * tp + (1.0f + bxm) * tm);
-        Dx_gg += gc[k] * ((bxp * f.psix[np] + dbp * tp + (1.0f + bxp) * Cx_b[np] * dt2 * lam[np])
-                        - (bxm * f.psix[nm] + dbm * tm + (1.0f + bxm) * Cx_b[nm] * dt2 * lam[nm]));
-        Dx_gq += gc[k] * (ap * tp - am * tm);
-    }
-    Lx_gl *= invdx2; Dx_gg *= invdx; Dx_gq *= invdx;
-
-    // Z
-    float Lz_gl = -lc[0] * ((1.0f + bz_) * gtmpz0);
-    float Dz_gg = 0.0f, Dz_gq = 0.0f;
-    #pragma unroll
-    for (int k = 1; k <= halo; ++k) {
-        int np = idx + k * sz, nm = idx - k * sz, nizp = iz + k, nizm = iz - k;
-        bool Pp = px0 || solver.in_pml_z(nizp, halo);
-        bool Pm = px0 || solver.in_pml_z(nizm, halo);
-        float tp = VRZ_GTMP_Z(np, nizp), tm = VRZ_GTMP_Z(nm, nizm);
-        float bzp = cpml.bz[nizp], bzm = cpml.bz[nizm];
-        float dbp = Pp ? cpml.dbzdz[nizp] : 0.0f, dbm = Pm ? cpml.dbzdz[nizm] : 0.0f;
-        float ap  = Pp ? cpml.az[nizp]    : 0.0f, am  = Pm ? cpml.az[nizm]    : 0.0f;
-        Lz_gl += lc[k] * ((1.0f + bzp) * tp + (1.0f + bzm) * tm);
-        Dz_gg += gc[k] * ((bzp * f.psiz[np] + dbp * tp + (1.0f + bzp) * Cz_b[np] * dt2 * lam[np])
-                        - (bzm * f.psiz[nm] + dbm * tm + (1.0f + bzm) * Cz_b[nm] * dt2 * lam[nm]));
-        Dz_gq += gc[k] * (ap * tp - am * tm);
-    }
-    Lz_gl *= invdz2; Dz_gg *= invdz; Dz_gq *= invdz;
-
-    f.u_next[idx] = 2.0f * lam[idx] - f.u_prev[idx] + (Lx_gl + Lz_gl - Dx_gg - Dz_gg);
-
-    // Adjoint aux is alive only where the forward ran its CPML branch: a
-    // cell outside the band never wrote psi/zeta, so nothing there reads
-    // them back (every coupling carries b, which is 0 there).  Its
-    // double-buffers were zeroed at allocation and no other cell writes them,
-    // so skipping the writes keeps them exactly 0 -- same as pure interior.
-    if (!own_pml) return;
-
-    // da_d = D_d a_d, exactly as the forward computes it (product-rule form)
-    const float daxdx = gradient<2, Order, X>(cpml.ax, ix, 0, 0, grad_ctx_x);
-    const float dazdz = gradient<2, Order, X>(cpml.az, iz, 0, 0, grad_ctx_z);
-    psix_out[oidx]  = ax_ * (f.psix[idx] + Cx_b[idx] * dt2 * lam[idx]) + daxdx * gtmpx0 - Dx_gq;
-    psiz_out[oidx]  = az_ * (f.psiz[idx] + Cz_b[idx] * dt2 * lam[idx]) + dazdz * gtmpz0 - Dz_gq;
-    zetax_out[oidx] = ax_ * (f.zetax[idx] + gw0);
-    zetaz_out[oidx] = az_ * (f.zetaz[idx] + gw0);
-    #undef VRZ_GW
-    #undef VRZ_GTMP_X
-    #undef VRZ_GTMP_Z
-}
-
-using acoustic_vrz2nd_adjoint_fused_fn = void (*)(AcousticWavefieldPointer,
-    const float*, const float*, const float*, const float*, const float*, const float*,
-    LaplaceParam, GradParam, GradParam, GradParam, AcousticCPMLPointer, SolverContext,
-    float*, float*, float*, float*);
-SWEEP_BY_ORDER_DECL(acoustic_vrz2nd_adjoint_fused_fn, acoustic_vrz2nd_adjoint_fused_by_order);
 
 // Accessor recomputing c_d = λ·vp·∂_d p  (UseE=false) or e_d = λ·vp²·z·∂_d p
 // (UseE=true) at stencil tap `off` along Dir, matching build_vrz_grad_fields.
@@ -1137,9 +861,6 @@ __global__ void vrz2d_utt_source_correction(
 
 #define BUILD_VRZ_ADJOINT_COEFFS(order, grid, block, ...) \
     SWEEP_LAUNCH_BY_ORDER(build_vrz_adjoint_coeffs_by_order, order, grid, block, __VA_ARGS__)
-
-#define ACOUSTIC_VRZ2D_ADJOINT_FUSED(order, grid, block, ...) \
-    SWEEP_LAUNCH_BY_ORDER(acoustic_vrz2nd_adjoint_fused_by_order, order, grid, block, __VA_ARGS__)
 
 #define CALCULATE_GRAD_VRZ2D_FUSED(order, grid, block, ...) \
     SWEEP_LAUNCH_BY_ORDER(calculate_grad_vrz2d_fused_by_order, order, grid, block, __VA_ARGS__)

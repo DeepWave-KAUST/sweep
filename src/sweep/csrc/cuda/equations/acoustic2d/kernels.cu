@@ -92,7 +92,8 @@ __global__ void calculate_grad_utt_band(
     int wxl, int wxh, int wzl, int wzh
 ) {
     // Strip cell enumeration: top rows, bottom rows (full box width), then
-    // left / right columns over the inner z range (corners counted once).
+    // left / right columns over the inner z range (corners counted once; the
+    // caller clips the widths to the box, bs_strip_widths, so no cell twice).
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     const int b  = blockIdx.y;
     const int bw = x1 - x0;

@@ -192,6 +192,11 @@ class CUDALayoutSpec:
     # (constant within a backward, so built and exchanged once before the
     # reverse loop rather than per step).
     dd_adjoint_coeff_nvar: int = 0
+    # Spatial orders whose compiled DD backward takes the tiled gradient: the
+    # deep pressure strips are packed in phase 1 and ship with its exchange, so
+    # the schedule has no phase 2 (dd_spec.VRZ_DD_TILED).  Must match the core's
+    # acoustic_vrz3d_grad_is_tiled -- the core refuses a phase 2 at these orders.
+    dd_tiled_gradient_orders: tuple = ()
 
     def resolved_last_two_storage_nvar(self) -> int:
         return self.base_nvar if self.last_two_storage_nvar is None else self.last_two_storage_nvar

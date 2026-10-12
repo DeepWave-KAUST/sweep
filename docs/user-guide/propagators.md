@@ -300,12 +300,11 @@ memory=BoundarySaving(storage="gpu", tail_steps=n_probe + margin)
 
 A few knobs stay out of the API because the right value depends on the
 machine, not on the problem. All are read once per run. None changes the
-physics, but two change the numbers: a lossy `SWEEP_BOUNDARY_DTYPE`
-(fp16/bf16/int8) and `SWEEP_VRZ_GRAD_SPLIT` (a different summation, ~1 ULP).
+physics, but one changes the numbers: a lossy `SWEEP_BOUNDARY_DTYPE`
+(fp16/bf16/int8).
 
 | Variable | Effect |
 | --- | --- |
-| `SWEEP_VRZ_GRAD_SPLIT=1` | `AcousticVRZ3D` backward: force the O(M) split gradient (materialise `c_d`/`e_d`, then one divergence) instead of the fused nested-stencil kernel that `order<=4` picks by default. The crossover is GPU-dependent — fused wins on RTX 6000 Ada, split is ~12 s/iter faster on V100 at production scale. |
 | `SWEEP_DD_DISABLE_OVERLAP=1` | Domain decomposition: serial step-then-exchange instead of the overlapped forward (see [Domain decomposition](parallel.md)). |
 | `SWEEP_BOUNDARY_DTYPE` | `impl="c"`: `storage_dtype` of the implicit default ring only (no memory knob passed). Any `BoundarySaving(...)` carries `storage_dtype="fp32"` unless set, so it always wins. |
 | `SWEEP_DATASETS_CACHE` | Where `sweep.datasets` caches downloads (see [Datasets](datasets.md)). |

@@ -230,23 +230,9 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 
         for (int it = start; it < end; ++it) {
             auto for_view = forward.view();
-            ACOUSTIC_VRZ2D(
-                order,
-                launch_config.grid,
-                launch_config.block,
-                for_view,
-                false,
-                nullptr,
-                vp.data_ptr<float>(),
-                z.data_ptr<float>(),
-                inv_z.data_ptr<float>(),
-                lap_ctx,
-                grad_ctx,
-                grad_ctx_x,
-                grad_ctx_z,
-                cpml,
-                ctx
-            );
+            launch_acoustic_vrz2d_forward(order, for_view, vp.data_ptr<float>(), z.data_ptr<float>(),
+                                          inv_z.data_ptr<float>(), lap_ctx, grad_ctx, grad_ctx_x,
+                                          grad_ctx_z, cpml, ctx);
 
             add_source<<<fwd_source_config.grid, fwd_source_config.block>>>(
                 for_view.u_next,
@@ -268,14 +254,9 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 
             SWEEP_CHECK(adj_view.psixn != nullptr && adj_view.zetaxn != nullptr,
                         "VRZ exact adjoint needs psi+zeta double-buffers on the adjoint wavefield");
-            ACOUSTIC_VRZ2D_ADJOINT_FUSED(
+            launch_acoustic_vrz2d_adjoint(
                 order,
-                launch_config.grid,
-                launch_config.block,
                 adj_view,
-                vp.data_ptr<float>(),
-                z.data_ptr<float>(),
-                inv_z.data_ptr<float>(),
                 C0.data_ptr<float>(),
                 Cx.data_ptr<float>(),
                 Cz.data_ptr<float>(),
@@ -315,7 +296,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
                 ctx
             );
 
-            CALCULATE_GRAD_VRZ2D_AUTO(
+            launch_acoustic_vrz2d_grad(
                 order,
                 launch_config.grid,
                 launch_config.block,

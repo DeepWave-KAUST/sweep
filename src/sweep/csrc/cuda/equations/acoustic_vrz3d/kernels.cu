@@ -3,12 +3,9 @@
 // (launch/by_order.cuh).
 #include "kernels.cuh"
 
-SWEEP_BY_ORDER_TABLE(acoustic_vrz3nd_fn, acoustic_vrz3nd_by_order, acoustic_vrz3nd);
-SWEEP_BY_ORDER_TABLE(acoustic_vrz3nd_nopml_fn, acoustic_vrz3nd_nopml_by_order, acoustic_vrz3nd_nopml);
 SWEEP_BY_ORDER_TABLE(build_vrz_grad_fields_3d_fn, build_vrz_grad_fields_3d_by_order, build_vrz_grad_fields_3d);
 SWEEP_BY_ORDER_TABLE(calculate_grad_vrz3d_fn, calculate_grad_vrz3d_by_order, calculate_grad_vrz3d);
 SWEEP_BY_ORDER_TABLE(build_vrz_adjoint_coeffs_3d_fn, build_vrz_adjoint_coeffs_3d_by_order, build_vrz_adjoint_coeffs_3d);
-SWEEP_BY_ORDER_TABLE(acoustic_vrz3nd_adjoint_fused_fn, acoustic_vrz3nd_adjoint_fused_by_order, acoustic_vrz3nd_adjoint_fused);
 SWEEP_BY_ORDER_TABLE(calculate_grad_vrz3d_fused_fn, calculate_grad_vrz3d_fused_by_order, calculate_grad_vrz3d_fused);
 
 // Source-cell correction of the p_tt imaging (see the 2-D twin): the stored

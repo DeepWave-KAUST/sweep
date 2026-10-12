@@ -493,17 +493,20 @@ class SteppedBackwardRunner:
 
         The variable-density gradient is a spatial divergence of the coupling
         field c/e = lambda*vp*grad(p), so unlike acoustic's pointwise u_tt*lambda
-        it needs the NEIGHBOUR's c/e at a cut seam.  Three phases let the DD
-        driver exchange lambda,p (after phase 1) AND c/e (after phase 2) before
-        the divergence:
+        it needs values from beyond a cut seam.  The DD driver exchanges between
+        the phases (see :mod:`sweep.parallel.dd_spec`, VRZ_DD / VRZ_DD_TILED):
 
         * ``phase == 1`` -- advance the adjoint + reconstruct the forward
           (swap_pml + forward.swap happen in C++ here); the buffer-role counters
           advance so :attr:`lambda_now` / :attr:`recon_u_now` point at the
-          just-produced fields for the driver to halo-exchange.
-        * ``phase == 2`` -- build c/e from the POST-exchange lambda,p.  Bound at
-          the advanced counters, so ``u_now`` IS the tensor the exchange filled.
-        * ``phase == 3`` -- divergence of the POST-exchange c/e -> gradient.
+          just-produced fields for the driver to halo-exchange.  At the tiled
+          orders (2-8) it also packs the deep pressure strips into C_X/C_Y,
+          which ship with that same exchange.
+        * ``phase == 2`` -- runtime orders only: build c/e from the POST-exchange
+          lambda,p (the core refuses it at the tiled orders).  Bound at the
+          advanced counters, so ``u_now`` IS the tensor the exchange filled.
+        * ``phase == 3`` -- the gradient: tiled over the deep strips, or the
+          divergence of the POST-exchange c/e.
 
         Counters advance ONLY after phase 1 (phases 2/3 re-read the same step's
         fields).  ``step_phase`` is reset to 0 after every call so plain

@@ -9,7 +9,7 @@
 // not listed here is the same as in acoustic2d/driver_traits.cuh):
 //   * two models, [vp, z] (make_state checks the count); State keeps z and the derived inv_z = 1/z alive as tensors beside their raw pointers;
 //   * TANGENT_PAD = 1: the boundary strips carry a tangential pad of M (matches the Python boundary_tangent_pad = so//2 and the persistent int8 buffers' per-step stride);
-//   * ADJ_WF_COUNT = 11 (u triple + psi/zeta double-buffer): the exact CPML adjoint (acoustic_vrz2nd_adjoint_fused) writes new adjoint psi AND zeta to separate buffers, rotated with swap_aux;
+//   * ADJ_WF_COUNT = 11 (u triple + psi/zeta double-buffer): the exact CPML adjoint (launch_acoustic_vrz2d_adjoint, adjoint_split.cu) writes new adjoint psi AND zeta to separate buffers, rotated with swap_aux;
 //   * ADCIG_IN_FULL_MODES = false, HAS_FUSED_FULL_IMG = false, BS_HAS_IT0_ADJOINT_TAIL = false (no RTM/ADCIG kernels, per-step gradient with no lag fusion, bs floor is it == 1);
 //   * BwdWorkspace is non-empty: the time-invariant adjoint coefficients C0/Cx/Cz and the split-gradient scratch c_x/c_z/e_x/e_z; the seven grids come from the Python-bound p.adjoint_workspace (WorkspaceSlot: [0-3]=c_x,c_z,e_x,e_z, [4-6]=C0,Cx,Cz), which AcousticVRZ.cuda_layout.backward_workspace_shapes declares in every memory mode, so the binding is required; make_bwd_workspace zeroes the adjoint wavefield state and runs BUILD_VRZ_ADJOINT_COEFFS once;
 //   * validate_forward checks 6 checkpoint tensors and a 1-D checkpoint_steps; validate_backward checks u_last_two (bs) or a (nt, 5, B, 1, nz, nx) u_forward (full);
@@ -19,10 +19,10 @@
 //   * launch_step_range refuses sub-ranges (the kernels ignore ctx.x_base / x_limit), so there are no phase-split strips and no air-clear prepass;
 //   * grads = the two model gradients {grad_vp, grad_z} (grads_out slot 0, the wavelet, is unused): no grad_wavelet (accumulate_source_grad is empty), no illumination/ADCIG (rtm_out_full / rtm_out_bs return nullptr, fused_grad_ptr is nullptr, bs_rtm_tap is empty, pack_outputs sets grads only);
 //   * u_forward_ptr = the u slice u_forward.select(0, it)[0];
-//   * adjoint_step = ACOUSTIC_VRZ2D_ADJOINT_FUSED with the C0/Cx/Cz coefficients; inject_adjoint_source injects the NEGATED residual (add_source_signed, sign -1, straight from p.adjoint_source -- no negated copy is built);
-//   * image_step = CALCULATE_GRAD_VRZ2D_AUTO (two gradients, split scratch from the workspace; returns early without grads), no RTM kernel;
+//   * adjoint_step = launch_acoustic_vrz2d_adjoint (the pure-interior box plus one launch over the CPML ring, adjoint_split.cu) with the C0/Cx/Cz coefficients; inject_adjoint_source injects the NEGATED residual (add_source_signed, sign -1, straight from p.adjoint_source -- no negated copy is built);
+//   * image_step = launch_acoustic_vrz2d_grad (two gradients: the tiled kernel of grad_tiled.cu at orders 4-8, CALCULATE_GRAD_VRZ2D_AUTO at order 2 and (with the split scratch from the workspace) the runtime orders; returns early without grads), no RTM kernel;
 //   * seed_reconstruction also zeroes u_next and, unlike acoustic2d, zeroes no boundary band (the offset -M band's pad cells are read by the first reverse step);
-//   * bs_recon_step order: ACOUSTIC_VRZ2D_NOPML -> forward-source add_source -> restore_backward_2d -> CALCULATE_GRAD_VRZ2D_AUTO on u_now before the swap (= U_it, p_tt from u_prev/u_now/u_next) -> forward.swap() (acoustic2d: NOPML -> restore -> band imaging -> inject -> swap);
+//   * bs_recon_step order, orders 2-8: restore_backward_2d -> launch_acoustic_vrz2d_recon_grad (the NOPML update, the forward source and the gradient at it in one tiled pass) -> forward.swap(); runtime orders: ACOUSTIC_VRZ2D_NOPML -> forward-source add_source -> restore_backward_2d -> launch_acoustic_vrz2d_grad on u_now before the swap (= U_it, p_tt from u_prev/u_now/u_next) -> forward.swap() (acoustic2d: NOPML -> restore -> band imaging -> inject -> swap);
 //   * no ckpt/recursive hooks (section [5] is empty): backward.cu keeps the hand-written chunk/recursive checkpoint backward.
 //
 // What the skeleton ADDS for this equation (dormant on legacy calls, all
@@ -331,23 +331,8 @@ struct Driver {
         // History is captured post-swap by capture_allt (tensor copies), so
         // the in-kernel u_this pointer stays disabled like the hand-written
         // driver's (false, nullptr).
-        ACOUSTIC_VRZ2D(
-            s.order,
-            s.launch_config.grid,
-            s.launch_config.block,
-            view,
-            false,
-            nullptr,
-            s.vp,
-            s.z,
-            s.inv_z,
-            s.lap_ctx,
-            s.grad_ctx,
-            s.grad_ctx_x,
-            s.grad_ctx_z,
-            cpml,
-            ctx
-        );
+        launch_acoustic_vrz2d_forward(s.order, view, s.vp, s.z, s.inv_z, s.lap_ctx, s.grad_ctx,
+                                      s.grad_ctx_x, s.grad_ctx_z, cpml, ctx);
     }
 
     static void save_boundary_fwd(BoundaryRuntime& rt, const State& s,
@@ -486,14 +471,9 @@ struct Driver {
         SWEEP_CHECK(adj_view.psixn != nullptr && adj_view.zetaxn != nullptr,
             "VRZ exact adjoint needs the adjoint wavefield bound with psi+zeta "
             "double-buffers (11 tensors in 2D); set cuda_layout.adjoint_extra_nvar=2.");
-        ACOUSTIC_VRZ2D_ADJOINT_FUSED(
+        launch_acoustic_vrz2d_adjoint(
             s.order,
-            s.launch_config.grid,
-            s.launch_config.block,
             adj_view,
-            s.vp,
-            s.z,
-            s.inv_z,
             ws.C0.data_ptr<float>(),
             ws.Cx.data_ptr<float>(),
             ws.Cz.data_ptr<float>(),
@@ -568,7 +548,7 @@ struct Driver {
         // precomputed second time difference, one slot stride further on.
         const float* p_tt = forward_ptr
             + 5 * (size_t)s.B * (size_t)s.nz * (size_t)s.nx;
-        CALCULATE_GRAD_VRZ2D_AUTO(
+        launch_acoustic_vrz2d_grad(
             s.order,
             s.launch_config.grid,
             s.launch_config.block,
@@ -640,7 +620,8 @@ struct Driver {
 
     // VRZ bs reverse order: NOPML step, forward-source injection, strip
     // restore, the gradient at it (U_{it+1}, U_it, U_{it-1} co-resident),
-    // THEN the swap.
+    // THEN the swap -- at the tiled orders the restore first and the other
+    // three as one pass (grad_tiled.cu).
     // No illumination on this equation (rtm_out_bs returns nullptr), and its bs
     // loop has no it == 0 tail either -- present so the skeleton can call it.
     static void bs_illum_tail(const State&, const SolverContext&,
@@ -659,6 +640,27 @@ struct Driver {
                                 int it, int bs_it0)
     {
         auto for_view = forward.view();
+        if (acoustic_vrz2d_grad_is_tiled(s.order)) {
+            // the strips first: disjoint from the cells the fused step forms,
+            // which reads them back for p_tt
+            boundary_runtime.restore_backward_2d(
+                it - bs_it0,
+                for_view.u_next,
+                s.launch_config.grid,
+                s.launch_config.block,
+                bs,
+                save_width,
+                -s.M, // offset
+                ctx
+            );
+            launch_acoustic_vrz2d_recon_grad(
+                s.order, for_view, adjoint.u_now_t.data_ptr<float>(), s.vp, s.z, s.inv_z,
+                p.forward_source.data_ptr<float>(), p.forward_sources_loc.data_ptr<int>(),
+                (int)p.forward_sources_loc.size(1), it,
+                grads[0].data_ptr<float>(), grads[1].data_ptr<float>(), s.grad_ctx, s.lap_ctx, ctx);
+            forward.swap();
+            return;
+        }
         ACOUSTIC_VRZ2D_NOPML(
             s.order,
             s.launch_config.grid,
@@ -693,7 +695,7 @@ struct Driver {
         // co-resident: u_now = U_it, u_next = U_{it-1} (just reconstructed,
         // restored and re-sourced), u_prev = U_{it+1}.  The p_tt path forms
         // U_{it+1} − 2U_it + U_{it−1} from them.
-        CALCULATE_GRAD_VRZ2D_AUTO(
+        launch_acoustic_vrz2d_grad(
             s.order,
             s.launch_config.grid,
             s.launch_config.block,

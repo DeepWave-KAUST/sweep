@@ -59,18 +59,23 @@ class FieldRef:
       around the PML block. For ``buf == "recon"`` the lookup is by NAME against
       the table's ``recon`` tuple, so the trailing ``fv*_prev`` carries drop out
       of every group on their own -- they have no slot, hence no role.
-    * neither -- the whole buffer list (``coupling`` / ``coeffs``: fixed-size
-      workspaces sized by ``cuda_layout.dd_coupling_nvar`` and
-      ``dd_adjoint_coeff_nvar``).
+    * ``slots`` -- positions in one of the fixed-size workspaces (``coupling``
+      / ``coeffs``), whose order the compiled backward fixes (c_x, c_y, c_z,
+      e_x, e_y, e_z for the VRZ coupling).
+    * none of them -- the whole buffer list (``coupling`` / ``coeffs``: sized by
+      ``cuda_layout.dd_coupling_nvar`` and ``dd_adjoint_coeff_nvar``).
     """
 
     buf: Buf
     at: TimeRole | None = None
     roles: tuple[str, ...] | None = None
+    slots: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
-        if self.at is not None and self.roles is not None:
-            raise ValueError("FieldRef is time-role OR slot-role resolved, not both")
+        if sum(x is not None for x in (self.at, self.roles, self.slots)) > 1:
+            raise ValueError("FieldRef is resolved by ONE of at / roles / slots")
+        if self.slots is not None and self.buf not in ("coupling", "coeffs"):
+            raise ValueError("FieldRef.slots indexes a fixed workspace (coupling / coeffs)")
 
 
 @dataclass(frozen=True)
@@ -183,6 +188,9 @@ STR_R = FieldRef("recon", roles=("stress",))
 
 COUPLING = FieldRef("coupling")
 COEFFS = FieldRef("coeffs")
+#: the C_X / C_Y coupling slots, which carry the deep pressure strips of the
+#: tiled VRZ gradient (orders 2-8)
+DEEP_P = FieldRef("coupling", slots=(0, 1))
 
 
 # --------------------------------------------------------------------------- #
@@ -314,11 +322,12 @@ LSRTM_DD = DDSpec(
     backward=ACOUSTIC_DD.backward,
 )
 
-#: Variable-density VRZ. Its forward is the acoustic one; its BACKWARD is the
+#: Variable-density VRZ at runtime spatial orders (above 8; orders 2-8 run
+#: VRZ_DD_TILED below). Its forward is the acoustic one; its BACKWARD is the
 #: only three-phase adjoint in the tree, because the gradient is a spatial
 #: divergence of a coupling field rather than a pointwise product -- so the
-#: coupling has to be built from the POST-exchange lambda/p, shipped, and only
-#: then differentiated.
+#: coupling field c/e has to be built from the POST-exchange lambda/p (phase
+#: 2), shipped, and only then differentiated (phase 3).
 #:
 #: Note ``advances`` sits on phase 1, not on the last phase. Phases 2 and 3
 #: deliberately re-read the ALREADY-advanced lists, which is exactly what makes
@@ -335,7 +344,7 @@ VRZ_DD = DDSpec(
         prologue=(Phase(4, advances=False, label="adjoint coeff build",
                         after=(ExchangeGroup(
                             (COEFFS,),
-                            why="the fused adjoint's transpose fast path reads "
+                            why="the adjoint's interior launch reads "
                                 "C0/Cx/Cy/Cz over [ix-M, ix+M], i.e. into the cut "
                                 "halo. Model-only and constant within a backward, "
                                 "so built and shipped once instead of per step."),)),),
@@ -358,8 +367,37 @@ VRZ_DD = DDSpec(
                   after=(ExchangeGroup(
                       (COUPLING,),
                       why="the gradient is div(c/e), so the divergence at a cut "
-                          "seam needs the neighbour's coupling values"),)),
+                          "seam needs the neighbour's c/e"),)),
             Phase(3, advances=False, label="divergence -> gradient"),
+        ),
+    ),
+)
+
+#: Variable-density VRZ at the orders its compiled backward serves with the tiled
+#: gradient (``cuda_layout.dd_tiled_gradient_orders``, 2-8). Phase 1 also packs
+#: the pressure the neighbour needs beyond its halo -- from cells the tile owns,
+#: final before the step starts -- into the C_X/C_Y coupling slots, so they ride
+#: the same batched exchange as lambda and p, and phase 3 takes the gradient over
+#: them. No phase 2 and no second shipment per step: the core refuses a phase 2
+#: at these orders, so a schedule that disagrees with it fails loudly.
+VRZ_DD_TILED = DDSpec(
+    name="acoustic_vrz_tiled",
+    forward=ACOUSTIC_FWD,
+    forward_overlapped=ACOUSTIC_FWD_OVERLAP,
+    backward=DDLoop(
+        direction="rev",
+        floor=1,
+        prologue=VRZ_DD.backward.prologue,
+        phases=(
+            Phase(1, advances=True, label="advance adjoint + reconstruct + pack deep p",
+                  after=(ExchangeGroup(
+                      (LAMBDA, RECON_U, DEEP_P), batched=True,
+                      why="the next step's phase 1 and this step's phase 3 read "
+                          "lambda and p across the cut seam, and phase 3 also "
+                          "reads the neighbour's pressure beyond the halo from "
+                          "the C_X/C_Y strips; all four ride one batched P2P per "
+                          "cut axis"),)),
+            Phase(3, advances=False, label="tiled gradient"),
         ),
     ),
 )

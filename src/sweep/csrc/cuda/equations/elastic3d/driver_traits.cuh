@@ -30,6 +30,7 @@
 #include "../../common/derived_models.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
+#include "../../common/boundary/strip.cuh"
 #include "../../../core/input_core.h"
 #include "../../../core/outputs.h"
 #include "../../common/eq_driver.cuh"
@@ -841,14 +842,17 @@ public:
 
         // Carrier capture v(it+1); see the 2-D twin.
         {
-            const int wxl = solver.cut_x_lo() ? 0 : save_width;
-            const int wxh = solver.cut_x_hi() ? 0 : save_width;
-            const int wyl = solver.cut_y_lo() ? 0 : save_width;
-            const int wyh = solver.cut_y_hi() ? 0 : save_width;
-            const int wzl = solver.cut_z_lo() ? 0 : save_width;
-            const int wzh = solver.cut_z_hi() ? 0 : save_width;
+            int wxl = solver.cut_x_lo() ? 0 : save_width;
+            int wxh = solver.cut_x_hi() ? 0 : save_width;
+            int wyl = solver.cut_y_lo() ? 0 : save_width;
+            int wyh = solver.cut_y_hi() ? 0 : save_width;
+            int wzl = solver.cut_z_lo() ? 0 : save_width;
+            int wzh = solver.cut_z_hi() ? 0 : save_width;
             const int bx = solver.phys_x1() - solver.phys_x0();
             const int by = solver.phys_y1() - solver.phys_y0();
+            bs_strip_widths(solver.phys_z1() - solver.phys_z0(), wzl, wzh);   // a thin box: no cell twice
+            bs_strip_widths(by, wyl, wyh);
+            bs_strip_widths(bx, wxl, wxh);
             const int bzi = solver.phys_z1() - solver.phys_z0() - wzl - wzh;
             const int byi = by - wyl - wyh;
             const int n_strip = (wzl + wzh) * bx * by

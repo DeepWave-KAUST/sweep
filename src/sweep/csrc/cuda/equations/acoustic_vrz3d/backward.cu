@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 
@@ -18,6 +19,18 @@
 namespace acoustic_vrz3d {
 
 namespace {
+
+// SWEEP_VRZ_GRAD_SPLIT used to force the two-pass gradient so one card matched
+// ModelParallel bit for bit at orders 2-4; one card and DD now run the same
+// gradient kernels at every order (the tiled one at orders 2-8), so the switch
+// is gone -- and a set switch must not go unnoticed.
+void reject_retired_grad_split()
+{
+    const char* e = std::getenv("SWEEP_VRZ_GRAD_SPLIT");
+    SWEEP_CHECK(e == nullptr || *e == '\0',
+                "SWEEP_VRZ_GRAD_SPLIT was removed: the AcousticVRZ3D gradient now matches "
+                "ModelParallel bit for bit at every order without it; unset it");
+}
 
 void zero_wavefield_state_vrz3d(AcousticWavefieldTensor& wf)
 {
@@ -129,6 +142,7 @@ static void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInputC
 BackwardOutputCore backward_full_impl(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
+    reject_retired_grad_split();
     SWEEP_CHECK(
         in.u_forward.defined() && in.u_forward.numel() > 0,
         "AcousticVRZ3D backward expects saved full forward wavefields."
@@ -215,14 +229,9 @@ BackwardOutputCore backward_full_impl(const BackwardInputCore& in)
     for (int it = in.nt - 1; it >= 0; --it) {
         auto adj_view = adjoint.view();
 
-        ACOUSTIC_VRZ3D_ADJOINT_FUSED(
+        launch_acoustic_vrz3d_adjoint(
             order,
-            launch_config.grid,
-            launch_config.block,
             adj_view,
-            vp.data_ptr<float>(),
-            z.data_ptr<float>(),
-            inv_z.data_ptr<float>(),
             C0.data_ptr<float>(),
             Cx.data_ptr<float>(),
             Cy.data_ptr<float>(),
@@ -370,7 +379,7 @@ private:
     GradParam grad_ctx{}, grad_ctx_x{}, grad_ctx_y{}, grad_ctx_z{};
     std::optional<BoundaryScope> boundary_scope;
     BoundaryRuntime* boundary_runtime = nullptr;
-    int grad_split = 0;
+    bool coupling_built = false;   // phased runtime orders: phase 2 ran since the last phase 1
 };
 
 void Vrz3dBackwardBsRunner::setup()
@@ -422,14 +431,15 @@ void Vrz3dBackwardBsRunner::setup()
     const auto& ws = workspace_slots(p);
     grad_vp = pool_required(gs, 1, vp, "grads_out");
     grad_z = pool_required(gs, 2, z, "grads_out");
-    // Adjoint coeffs (C0/Cx/Cy/Cz) + split-grad scratch (c_*/e_*) come from the
+    // Adjoint coeffs (C0/Cx/Cy/Cz) + gradient scratch (c_*/e_*) come from the
     // pool (WorkspaceSlot above): under DD (phased) the driver halo-exchanges
-    // the c/e grids between the build (phase 2) and divergence (phase 3) steps,
-    // so they are Python-bound there, and the monolithic path binds the same
-    // ten slots. BUILD_VRZ_ADJOINT_COEFFS overwrites C0..Cz on the first
-    // segment; build_vrz_grad_fields overwrites every INTERIOR c_*/e_* cell each
-    // step while their halo stays at the pool's zero. Buf copies share
-    // storage, so .data_ptr() hits the bound buffer.
+    // them before phase 3 -- at orders 2-8 C_X/C_Y carry the deep pressure
+    // strips of the tiled gradient (packed in phase 1, shipped with lambda and
+    // p), at runtime orders all six carry c/e from build_vrz_grad_fields
+    // (phase 2) -- so they are Python-bound there, and the monolithic path
+    // binds the same ten slots.
+    // BUILD_VRZ_ADJOINT_COEFFS overwrites C0..Cz on the first segment.  Buf
+    // copies share storage, so .data_ptr() hits the bound buffer.
     C0 = pool_required(ws, COEF_C0, vp, "adjoint_workspace");
     Cx = pool_required(ws, COEF_CX, vp, "adjoint_workspace");
     Cy = pool_required(ws, COEF_CY, vp, "adjoint_workspace");
@@ -506,13 +516,7 @@ void Vrz3dBackwardBsRunner::setup()
     );
     boundary_runtime = &boundary_scope->runtime();
 
-    // SWEEP_VRZ_GRAD_SPLIT=1 forces the O(M) split gradient (materialise c_d/e_d,
-    // then a single-level divergence) even for order<=4, where AUTO otherwise
-    // picks the fused O(M^2) nested-stencil kernel.  The fused/split crossover is
-    // GPU-dependent (fused wins on RTX 6000 Ada; V100 prefers split — measured
-    // faster on a large run), so it stays a per-run toggle.
-    grad_split = [](){ const char* e = std::getenv("SWEEP_VRZ_GRAD_SPLIT");
-                       return e ? std::atoi(e) : 0; }();
+    reject_retired_grad_split();
 }
 
 BackwardOutputCore Vrz3dBackwardBsRunner::step()
@@ -530,16 +534,20 @@ BackwardOutputCore Vrz3dBackwardBsRunner::step()
     SWEEP_CHECK(0 <= it_lo && it_lo < it_hi && it_hi <= static_cast<int>(p.nt),
                 "AcousticVRZ3D stepped backward: require 0 <= bw_it_end < "
                 "bw_it_begin <= nt, got [", it_lo, ", ", it_hi, ") with nt=", p.nt);
-    // Phased DD backward (Fix A). The variable-density gradient is a spatial
-    // divergence of the coupling field c/e = lambda*vp*grad(p), so unlike acoustic's
-    // pointwise u_tt*lambda it needs the NEIGHBOUR's c/e at a cut seam. Split the
-    // per-step backward into three driver-visible phases so ModelParallel can
-    // halo-exchange lambda,p (after phase 1) AND c/e (after phase 2) before the
-    // divergence (phase 3):
-    //   phase 1 = adjoint advance + forward reconstruction (+restore, swaps)
-    //   phase 2 = build c/e from the POST-exchange lambda,p (split kernel)
-    //   phase 3 = divergence of the POST-exchange c/e -> gradient accumulate
-    // step_phase 0 stays the monolithic single-GPU path (AUTO/fused; unchanged).
+    // Phased DD backward. The variable-density gradient is a spatial divergence
+    // of the coupling field c/e = lambda*vp*grad(p), so unlike acoustic's
+    // pointwise u_tt*lambda it needs values from beyond a cut seam. Split the
+    // per-step backward into driver-visible phases so ModelParallel can
+    // halo-exchange between them before the gradient (phase 3):
+    //   phase 1 = adjoint advance + forward reconstruction (+restore, swaps);
+    //             orders 2-8 also pack the pressure the neighbour needs beyond
+    //             its halo into C_X/C_Y, which the exchange after phase 1 carries
+    //             along with lambda and p
+    //   phase 2 = runtime orders only: build c/e from the POST-exchange lambda
+    //             and p, then the coupling exchange
+    //   phase 3 = orders 2-8: the tiled gradient over the deep strips; runtime
+    //             orders: the divergence of the exchanged c/e
+    // step_phase 0 stays the monolithic single-GPU path.
     SWEEP_CHECK(p.step_phase >= 0 && p.step_phase <= 4,
                 "AcousticVRZ3D backward step_phase must be 0, 1, 2, 3 or 4");
     const bool phased     = (p.step_phase != 0);
@@ -547,6 +555,11 @@ BackwardOutputCore Vrz3dBackwardBsRunner::step()
     const bool do_build   = (p.step_phase == 0 || p.step_phase == 2);
     const bool do_grad    = (p.step_phase == 0 || p.step_phase == 3);
     const bool do_coeff   = (p.step_phase == 0 || p.step_phase == 4);   // 4 = build adjoint coeffs only
+    const bool tiled      = acoustic_vrz3d_grad_is_tiled(order);
+    SWEEP_CHECK(!(tiled && p.step_phase == 2),
+                "AcousticVRZ3D phased backward at spatial order ", order, " has no phase 2 "
+                "(the deep pressure strips are packed in phase 1 and ship with its exchange); "
+                "the DD schedule and the compiled core disagree");
     if (phased) {
         SWEEP_CHECK(it_hi == it_lo + 1,
                     "AcousticVRZ3D phased backward requires a single-step segment "
@@ -631,14 +644,9 @@ BackwardOutputCore Vrz3dBackwardBsRunner::step()
         if (do_advance) {
             auto adj_view = adjoint.view();
 
-            ACOUSTIC_VRZ3D_ADJOINT_FUSED(
+            launch_acoustic_vrz3d_adjoint(
                 order,
-                launch_config.grid,
-                launch_config.block,
                 adj_view,
-                vp.data_ptr<float>(),
-                z.data_ptr<float>(),
-                inv_z.data_ptr<float>(),
                 C0.data_ptr<float>(),
                 Cx.data_ptr<float>(),
                 Cy.data_ptr<float>(),
@@ -672,10 +680,8 @@ BackwardOutputCore Vrz3dBackwardBsRunner::step()
 
             auto for_view = forward.view();
 
-            ACOUSTIC_VRZ3D_NOPML(
+            launch_acoustic_vrz3d_nopml(
                 order,
-                launch_config.grid,
-                launch_config.block,
                 for_view,
                 vp.data_ptr<float>(),
                 z.data_ptr<float>(),
@@ -730,50 +736,50 @@ BackwardOutputCore Vrz3dBackwardBsRunner::step()
             );
         }
         if (!phased) {
-            if (grad_split && (order == 2 || order == 4)) {
-                BUILD_VRZ_GRAD_FIELDS_3D(
-                    order, launch_config.grid, launch_config.block,
-                    fwd_img, adjoint.u_now_t.data_ptr<float>(),
-                    vp.data_ptr<float>(), z.data_ptr<float>(),
-                    c_x.data_ptr<float>(), c_y.data_ptr<float>(), c_z.data_ptr<float>(),
-                    e_x.data_ptr<float>(), e_y.data_ptr<float>(), e_z.data_ptr<float>(),
-                    grad_ctx, ctx);
-                CALCULATE_GRAD_VRZ3D(
-                    order, launch_config.grid, launch_config.block,
-                    fwd_img, adjoint.u_now_t.data_ptr<float>(),
-                    nullptr, fwd_prev, fwd_next,
-                    c_x.data_ptr<float>(), c_y.data_ptr<float>(), c_z.data_ptr<float>(),
-                    e_x.data_ptr<float>(), e_y.data_ptr<float>(), e_z.data_ptr<float>(),
-                    vp.data_ptr<float>(), z.data_ptr<float>(), inv_z.data_ptr<float>(),
-                    grad_vp.data_ptr<float>(), grad_z.data_ptr<float>(),
-                    grad_ctx, lap_ctx, ctx);
-            } else {
-                CALCULATE_GRAD_VRZ3D_AUTO(
-                    order,
-                    launch_config.grid,
-                    launch_config.block,
-                    fwd_img,
-                    adjoint.u_now_t.data_ptr<float>(),
-                    nullptr,
-                    fwd_prev,
-                    fwd_next,
-                    vp.data_ptr<float>(),
-                    z.data_ptr<float>(),
-                    inv_z.data_ptr<float>(),
-                    c_x.data_ptr<float>(),
-                    c_y.data_ptr<float>(),
-                    c_z.data_ptr<float>(),
-                    e_x.data_ptr<float>(),
-                    e_y.data_ptr<float>(),
-                    e_z.data_ptr<float>(),
-                    grad_vp.data_ptr<float>(),
-                    grad_z.data_ptr<float>(),
-                    grad_ctx,
-                    lap_ctx,
-                    ctx
-                );
-            }
+            CALCULATE_GRAD_VRZ3D_AUTO(
+                order,
+                launch_config.grid,
+                launch_config.block,
+                fwd_img,
+                adjoint.u_now_t.data_ptr<float>(),
+                nullptr,
+                fwd_prev,
+                fwd_next,
+                vp.data_ptr<float>(),
+                z.data_ptr<float>(),
+                inv_z.data_ptr<float>(),
+                c_x.data_ptr<float>(),
+                c_y.data_ptr<float>(),
+                c_z.data_ptr<float>(),
+                e_x.data_ptr<float>(),
+                e_y.data_ptr<float>(),
+                e_z.data_ptr<float>(),
+                grad_vp.data_ptr<float>(),
+                grad_z.data_ptr<float>(),
+                grad_ctx,
+                lap_ctx,
+                ctx
+            );
+        } else if (tiled) {
+            // Tiled gradient (orders 2-8): phase 1 packs, from U_it, the pressure
+            // the neighbour needs beyond its halo into the C_X/C_Y slots, and the
+            // phase-1 exchange carries them along with lambda and p; phase 3 runs
+            // the single-domain tiled kernel over those deep strips -- the seam is
+            // computed exactly as one card computes it.
+            if (p.step_phase == 1)
+                SWEEP_CHECK(launch_acoustic_vrz3d_grad_pack(order, fwd_img, c_x.data_ptr<float>(),
+                                                            c_y.data_ptr<float>(), ctx),
+                            "AcousticVRZ3D phased backward: the deep-strip pack did not launch");
+            if (do_grad)
+                SWEEP_CHECK(launch_acoustic_vrz3d_grad_tiled(order, fwd_img, adjoint.u_now_t.data_ptr<float>(),
+                                nullptr, fwd_prev, fwd_next,
+                                vp.data_ptr<float>(), z.data_ptr<float>(), inv_z.data_ptr<float>(),
+                                grad_vp.data_ptr<float>(), grad_z.data_ptr<float>(), grad_ctx, ctx,
+                                c_x.data_ptr<float>(), c_y.data_ptr<float>()),
+                            "AcousticVRZ3D phased backward: the tiled gradient did not launch");
         } else {
+            // Runtime orders: phase 2 builds c/e from the POST-exchange lambda and
+            // p, the coupling exchange carries them, phase 3 takes the divergence.
             if (do_build) {
                 BUILD_VRZ_GRAD_FIELDS_3D(
                     order, launch_config.grid, launch_config.block,
@@ -782,8 +788,16 @@ BackwardOutputCore Vrz3dBackwardBsRunner::step()
                     c_x.data_ptr<float>(), c_y.data_ptr<float>(), c_z.data_ptr<float>(),
                     e_x.data_ptr<float>(), e_y.data_ptr<float>(), e_z.data_ptr<float>(),
                     grad_ctx, ctx);
+                coupling_built = true;
             }
             if (do_grad) {
+                // a schedule that skipped phase 2 (the tiled one, at an order the
+                // core does not tile) would take the divergence of c/e never built
+                SWEEP_CHECK(coupling_built,
+                            "AcousticVRZ3D phased backward at spatial order ", order,
+                            ": phase 3 without a phase 2 since the last phase 1 (the "
+                            "DD schedule and the compiled core disagree)");
+                coupling_built = false;
                 CALCULATE_GRAD_VRZ3D(
                     order, launch_config.grid, launch_config.block,
                     fwd_img, adjoint.u_now_t.data_ptr<float>(),
@@ -813,6 +827,7 @@ BackwardOutputCore backward_bs_impl(const BackwardInputCore& in)
 BackwardOutputCore backward_ckpt_impl(const BackwardInputCore& in)
 {
     sweep::DeviceGuard device_guard(device_index_of(in.models[0]));
+    reject_retired_grad_split();
     const auto& p = in;
     BackwardOutputCore out;
 
@@ -983,10 +998,8 @@ BackwardOutputCore backward_ckpt_impl(const BackwardInputCore& in)
 
         for (int it = start; it < end; ++it) {
             auto for_view = forward.view();
-            ACOUSTIC_VRZ3D(
+            launch_acoustic_vrz3d_forward(
                 order,
-                launch_config.grid,
-                launch_config.block,
                 for_view,
                 vp.data_ptr<float>(),
                 z.data_ptr<float>(),
@@ -1018,14 +1031,9 @@ BackwardOutputCore backward_ckpt_impl(const BackwardInputCore& in)
         for (int it = end - 1; it >= start; --it) {
             auto adj_view = adjoint.view();
 
-            ACOUSTIC_VRZ3D_ADJOINT_FUSED(
+            launch_acoustic_vrz3d_adjoint(
                 order,
-                launch_config.grid,
-                launch_config.block,
                 adj_view,
-                vp.data_ptr<float>(),
-                z.data_ptr<float>(),
-                inv_z.data_ptr<float>(),
                 C0.data_ptr<float>(),
                 Cx.data_ptr<float>(),
                 Cy.data_ptr<float>(),

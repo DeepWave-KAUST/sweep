@@ -53,6 +53,7 @@
 #include "../../common/derived_models.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
+#include "../../common/boundary/strip.cuh"
 #include "../../../core/input_core.h"
 #include "../../../core/outputs.h"
 #include "../../common/eq_driver.cuh"
@@ -774,11 +775,13 @@ struct Driver {
         // (the only other box cells the imaging reads) are copied here
         // first.  Replaces two full-field memcpys.
         {
-            const int wxl = solver.cut_x_lo() ? 0 : save_width;
-            const int wxh = solver.cut_x_hi() ? 0 : save_width;
-            const int wzl = solver.cut_z_lo() ? 0 : save_width;
-            const int wzh = solver.cut_z_hi() ? 0 : save_width;
+            int wxl = solver.cut_x_lo() ? 0 : save_width;
+            int wxh = solver.cut_x_hi() ? 0 : save_width;
+            int wzl = solver.cut_z_lo() ? 0 : save_width;
+            int wzh = solver.cut_z_hi() ? 0 : save_width;
             const int bw = solver.phys_x1() - solver.phys_x0();
+            bs_strip_widths(solver.phys_z1() - solver.phys_z0(), wzl, wzh);   // a thin box: no cell twice
+            bs_strip_widths(bw, wxl, wxh);
             const int bh = solver.phys_z1() - solver.phys_z0() - wzl - wzh;
             const int n_strip = (wzl + wzh) * bw + (wxl + wxh) * (bh > 0 ? bh : 0);
             if (n_strip > 0) {

@@ -6,10 +6,6 @@ Launch: torchrun --standalone --nproc-per-node=N test/dd_corner_check_vrz.py --p
 from __future__ import annotations
 import argparse, os, sys
 from pathlib import Path
-# DD backward forces the SPLIT gradient kernel; make the single-domain reference use
-# split too (else split-vs-fused differ by fast-math FMA and never match). Post-fix the
-# grad should collapse from rel~2 to the forward-reconstruction level (~1e-5), not bitwise.
-os.environ.setdefault("SWEEP_VRZ_GRAD_SPLIT", "1")
 import numpy as np, torch, torch.distributed as dist
 
 REPO_ROOT = Path(__file__).resolve().parents[1]; SRC_ROOT = REPO_ROOT / "src"
@@ -76,12 +72,12 @@ def main():
         print(f"[DDVRZ-LOC] shape={_df.shape} max={_df.max():.3e}@{np.unravel_index(int(_df.argmax()), _df.shape)} "
               f"| x-prof peak@ix={int(_xp.argmax())} xp[nx/2={_xc}]/med={_xp[_xc]/(np.median(_xp)+1e-30):.1f} "
               f"| y-prof peak@iy={int(_yp.argmax())} yp[ny/2={_yc}]/med={_yp[_yc]/(np.median(_yp)+1e-30):.1f}", flush=True)
-    TOL = 1e-3   # post-fix grad rel should fall to ~forward level (~1e-5); rel~2 = the bug
-    ok = (dmax < TOL) and (vgr < TOL) and (zgr < TOL)
+    # one card and DD run the same kernels at every order: bit-exact
+    ok = bool(rec_bit) and bool(vpg_bit) and bool(zg_bit)
     if rank == 0:
         print(f"VRZ py{args.py}xpx{args.px} nt{nt} fs{args.fs}: rec(max_rel={dmax:.2e}) "
               f"vpgrad(rel={vgr:.2e}) zgrad(rel={zgr:.2e}) [bit rec={rec_bit} vp={vpg_bit} z={zg_bit}] "
-              f"-> {'PASS' if ok else 'FAIL'}(tol={TOL:.0e})", flush=True)
+              f"-> {'PASS' if ok else 'FAIL'}(bit-exact)", flush=True)
     fail = torch.tensor([0 if ok else 1], device=dev); dist.all_reduce(fail); dist.barrier(); dist.destroy_process_group()
     sys.exit(int(fail.item() > 0))
 

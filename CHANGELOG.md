@@ -9,6 +9,65 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Changed
+- **`Acoustic3D` and `AcousticVRZ3D` on `impl='c'` run 1.2-1.8x faster per
+  step.**  The forward step, the boundary-saving reconstruction and the
+  adjoint step each ran as one launch over the padded grid, every thread
+  carrying the CPML path.  The forward and adjoint steps now launch the
+  interior and the six PML slabs around it separately, with per-axis CPML
+  terms, and the reconstruction launches only its own box.  The
+  `AcousticVRZ3D` model gradient is one 2.5-D tiled kernel at orders 2-8
+  (z-taps in registers, or through L1/L2 on GPUs with a large L2; the result
+  is the same either way).  Boundary-saving step, orders 4-8, 200x240x320 to
+  400^3 with a 20-cell PML: `Acoustic3D` 1.4-1.8x on V100, A100 and H200;
+  `AcousticVRZ3D` 1.6-1.7x on V100, 1.4-1.8x on A100, 1.2-1.7x on H200;
+  order 2 1.2-1.5x.  Full-wavefield mode at orders 4 and 8: 1.2-1.8x.  Under
+  `ModelParallel` (4x V100, orders 4-8) 1.1-1.4x for `Acoustic3D` and
+  1.4-1.5x for `AcousticVRZ3D`: a tile's cut faces carry no PML.
+  `Acoustic3D` records are bit-identical; its gradients and the
+  `AcousticVRZ3D` records and gradients move in the last bits (rel <= 1.3e-6).
+- **`Acoustic` and `AcousticVRZ` (2-D) on `impl='c'` run 1.05-1.55x faster
+  per step.**  Their forward and adjoint steps now launch the interior with
+  its own kernel, which carries no CPML path (21-34 registers instead of
+  48-80), and the CPML ring around it as one launch.  The `AcousticVRZ` model
+  gradient is one 2-D tiled kernel at orders 4-8, and under boundary saving
+  it also forms the reverse step's reconstruction (orders 2-8): one pass
+  instead of the reconstruction, the source injection and the gradient as
+  three launches.  Boundary-saving step with a 20-cell PML, 1024^2 to 4096^2,
+  V100 / A100: `Acoustic` 1.07-1.21x / 1.05-1.27x; `AcousticVRZ` 1.27-1.32x /
+  1.26-1.38x at order 4, 1.47-1.55x / 1.25-1.30x at order 8.  Full-wavefield
+  mode at 2048^2: `Acoustic` 1.13-1.23x, `AcousticVRZ` 1.09-1.29x.  Records
+  are bit-identical at orders 2-8 and the `Acoustic` gradients mostly so; the
+  `AcousticVRZ` gradients (rel <= 1e-6) and orders above 8 move in the last
+  bits, from FMA contraction alone: built with `--fmad=false`, the old and
+  new kernels agree bit for bit.
+- **`AcousticVRZ3D` under `ModelParallel` matches one card bit for bit at
+  every order**; at orders 2 and 4 the two used to differ by ~1 ULP.  At
+  orders 2-8 its backward also exchanges halos once per reverse step instead
+  of twice (the pressure strips the gradient reads across a cut ride with
+  lambda and p), 1.04-1.10x per DD step on 4x V100; a tile cut on both sides
+  of an axis needs at least `spatial_order` cells along it.
+
+### Fixed
+- **Boundary-saving gradients on a thin physical box.**  Where the physical
+  box (PML excluded) is thinner than two restore strips along an axis -- fewer
+  than `2 * (spatial_order / 2 + 1)` cells -- the strip imaging of `Acoustic`
+  and `Acoustic3D` imaged the cells the two strips share twice, with two
+  racing `+=`: the gradient there came out too large and changed from run to
+  run (`Acoustic3D`, 3 cells in x: rel 4e-4 against full storage, now 7e-8).
+  Each strip cell is now imaged once.  The elastic carrier capture, which
+  enumerates the strips the same way (a copy, so the overlap was harmless),
+  is clipped the same.
+
+### Removed
+- **`SWEEP_VRZ_GRAD_SPLIT`.**  It put one card on the two-pass VRZ gradient so
+  it matched `ModelParallel`; that now holds without it.  Setting it raises.
+
+### Documentation
+- Notebook 33 re-run on the new kernels: on the 3-D acoustic case `c` is now
+  1.9x faster than eager for a full-storage gradient and 2.5x for a
+  boundary-saving one (was 1.2x and 1.6x).
+
 ## [0.3.5] - 2026-10-05
 
 ### Added
