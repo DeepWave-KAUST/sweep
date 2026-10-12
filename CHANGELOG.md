@@ -691,6 +691,11 @@ and this project adheres to
   also holds the gradient nearer the full tape's next to the surface. Records
   are unchanged, and so are the gradients, bit for bit, unless a source sits on
   the ring or a face is thinner than another.
+- **`Acoustic1st` refuses `free_surface=`.**  Its step has no free-surface
+  code, so a free surface only dropped the top PML and left the top at the
+  edge of the padded array, a reflector that moved with `spatial_order`.  The
+  refusal (`NotImplementedError`) says why and names equations that have one
+  (`Acoustic`, `Elastic`).
 - **`ElasticVRR` on `impl='eager'`: uncompiled steps compute the velocity gradients
   of their own models.** `vp_x, vp_z, vs_x, vs_z` were cached on `id(vp), id(vs)`, and
   an id is reused once its tensor is freed: boundary saving's backward makes new

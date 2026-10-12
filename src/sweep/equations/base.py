@@ -84,6 +84,9 @@ class WaveEquation:
     # propagator raises on any free_surface request instead of silently
     # running the wrong surface physics.
     supports_free_surface = True
+    # Why an equation with supports_free_surface = False refuses one, when the
+    # reason is not anisotropy (the default refusal text); None = anisotropy.
+    free_surface_unsupported_reason: str | None = None
 
     # Whether the CUDA backend of this equation can run the boundary-saving
     # gradient-memory strategy.  Equations whose step cannot be reverse-time

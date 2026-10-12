@@ -103,6 +103,14 @@ class Acoustic1st(FirstOrderEquation):
     default_pml_type = "cpmls"  # acoustic1st does not support 'cpmlr'; supported: ['cpmls', 'spml'].
     takes_invariants = True
 
+    # The step has no free-surface code: with free_surface=True the top would
+    # silently stay the edge of the padded array (a misplaced reflector that
+    # moves with spatial_order), so a request is refused instead.
+    supports_free_surface = False
+    free_surface_unsupported_reason = (
+        "its time step has no free-surface implementation (the top would stay the "
+        "edge of the padded array, not a pressure-release surface)")
+
     def __init__(self, spatial_order=4, device='cpu', backend='jax', **kwargs):
         """Build the first-order acoustic equation operator.
 
