@@ -2,7 +2,7 @@
 // for the pattern).  Line-faithful transcription of the hand-written drivers;
 // physics kernels untouched.  Deltas vs 2-D worth naming:
 //   * no ctx.set_per_edge anywhere — per-edge free surface is 2-D only;
-//   * the fused adjoint carries a psi AND zeta triple double-buffer
+//   * the adjoint carries a psi AND zeta triple double-buffer
 //     (15 adjoint tensors, adjoint_extra_nvar=3);
 //   * CKPT_STATE_COUNT = 9 (u triple + the 6 CPML aux slabs) per checkpoint
 //     replay state set of p.forward_wavefields;
@@ -29,6 +29,7 @@
 #include "../../common/cudautils.h"
 #include "../../common/boundarysaver.cuh"
 #include "../../common/boundary_runtime.cuh"
+#include "../../common/boundary/strip.cuh"
 #include "../../../core/input_core.h"
 #include "../../../core/outputs.h"
 #include "../../common/eq_driver.cuh"
@@ -115,7 +116,7 @@ struct Driver {
         return s;
     }
 
-    struct BwdWorkspace {};   // fused adjoint keeps scratch in psi/zeta buffers
+    struct BwdWorkspace {};   // the adjoint keeps its scratch in the psi/zeta buffers
     static BwdWorkspace make_bwd_workspace(const BackwardInputCore&, const State&,
                                            const SolverContext&, Wavefield&)
     { return {}; }
@@ -208,23 +209,8 @@ struct Driver {
         SolverContext sctx = ctx;
         sctx.x_base = xb;
         sctx.x_limit = xe;
-        auto lc = fdtd::Wave3D::make(xe - xb, s.ny, s.nz, s.B);
-        ACOUSTIC3D(
-            s.order,
-            lc.grid,
-            lc.block,
-            view,
-            save_all,
-            u_thist,
-            s.vp,
-            s.lap_ctx,
-            s.grad_ctx,
-            s.grad_ctx_x,
-            s.grad_ctx_y,
-            s.grad_ctx_z,
-            cpml,
-            sctx
-        );
+        launch_acoustic3d_forward(s.order, view, u_thist, s.vp, s.lap_ctx,
+            s.grad_ctx, s.grad_ctx_x, s.grad_ctx_y, s.grad_ctx_z, cpml, sctx);
     }
 
     static void save_boundary_fwd(BoundaryRuntime& rt, const State& s,
@@ -346,17 +332,16 @@ struct Driver {
         wf.bind(p.adjoint_wavefields, 3, true);
     }
 
-    // FUSED single-kernel exact 3D adjoint (see acoustic2d twin).
+    // Exact 3D adjoint: interior + PML-shell launches (adjoint_split.cu).
     static void adjoint_step(const State& s, const SolverContext& ctx,
                              AcousticWavefieldPointer adj_view,
                              AcousticCPMLPointer cpml, BwdWorkspace&,
                              const float* grad_forward_img, float* grad_out)
     {
         SWEEP_CHECK(adj_view.zetaxn != nullptr && adj_view.psixn != nullptr,
-            "fused 3D adjoint needs the adjoint wavefield bound with psi+zeta "
+            "the 3D adjoint needs the adjoint wavefield bound with psi+zeta "
             "double-buffer (15 tensors); set cuda_layout.adjoint_extra_nvar=3.");
-        ACOUSTIC3D_ADJOINT_FUSED(s.order, s.launch_config.grid, s.launch_config.block,
-            adj_view, s.vp, s.lap_ctx,
+        launch_acoustic3d_adjoint(s.order, adj_view, s.vp, s.lap_ctx,
             s.grad_ctx_x, s.grad_ctx_y, s.grad_ctx_z, cpml, ctx,
             adj_view.psixn, adj_view.psiyn, adj_view.psizn,
             adj_view.zetaxn, adj_view.zetayn, adj_view.zetazn,
@@ -503,19 +488,12 @@ struct Driver {
                                 int it, int bs_it0)
     {
         auto for_view = forward.view();
-        ACOUSTIC3D_NOPML(
-            s.order,
-            s.launch_config.grid,
-            s.launch_config.block,
-            for_view,
+        launch_acoustic3d_nopml(s.order, for_view,
             (float*)nullptr,   // f_this was a dead per-step store (nothing reads it)
-            s.vp,
-            s.lap_ctx,
-            ctx,
+            s.vp, s.lap_ctx, ctx,
             adjoint.u_now_t.data_ptr<float>(),   // fused vp-gradient imaging
             grads[1].data_ptr<float>(),
-            save_width
-        );
+            save_width);
         boundary_runtime.restore_backward_3d(
             it - bs_it0,
             for_view.u_next,
@@ -540,14 +518,17 @@ struct Driver {
         );
         {
             // Restore strips: the only box cells the fused imaging skipped.
-            const int wxl = ctx.cut_x_lo() ? 0 : save_width;
-            const int wxh = ctx.cut_x_hi() ? 0 : save_width;
-            const int wyl = ctx.cut_y_lo() ? 0 : save_width;
-            const int wyh = ctx.cut_y_hi() ? 0 : save_width;
-            const int wzl = ctx.cut_z_lo() ? 0 : save_width;
-            const int wzh = ctx.cut_z_hi() ? 0 : save_width;
+            int wxl = ctx.cut_x_lo() ? 0 : save_width;
+            int wxh = ctx.cut_x_hi() ? 0 : save_width;
+            int wyl = ctx.cut_y_lo() ? 0 : save_width;
+            int wyh = ctx.cut_y_hi() ? 0 : save_width;
+            int wzl = ctx.cut_z_lo() ? 0 : save_width;
+            int wzh = ctx.cut_z_hi() ? 0 : save_width;
             const int bx = ctx.phys_x1() - ctx.phys_x0();
             const int by = ctx.phys_y1() - ctx.phys_y0();
+            bs_strip_widths(ctx.phys_z1() - ctx.phys_z0(), wzl, wzh);   // a thin box: no cell twice
+            bs_strip_widths(by, wyl, wyh);
+            bs_strip_widths(bx, wxl, wxh);
             const int bzi = ctx.phys_z1() - ctx.phys_z0() - wzl - wzh;
             const int byi = by - wyl - wyh;
             const int n_strip = (wzl + wzh) * bx * by
@@ -681,24 +662,10 @@ struct Driver {
     static void replay_step(const State& s, const SolverContext& ctx,
                             AcousticWavefieldPointer view,
                             AcousticCPMLPointer cpml,
-                            bool save_all, float* u_this)
+                            bool /*save_all*/, float* u_this)
     {
-        ACOUSTIC3D(
-            s.order,
-            s.launch_config.grid,
-            s.launch_config.block,
-            view,
-            save_all,
-            u_this,
-            s.vp,
-            s.lap_ctx,
-            s.grad_ctx,
-            s.grad_ctx_x,
-            s.grad_ctx_y,
-            s.grad_ctx_z,
-            cpml,
-            ctx
-        );
+        launch_acoustic3d_forward(s.order, view, u_this, s.vp, s.lap_ctx,
+            s.grad_ctx, s.grad_ctx_x, s.grad_ctx_y, s.grad_ctx_z, cpml, ctx);
     }
 
     // Replay twin of the forward-loop inject_source_fwd in section [2].

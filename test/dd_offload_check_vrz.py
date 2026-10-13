@@ -22,7 +22,6 @@ from __future__ import annotations
 import os, sys
 from pathlib import Path
 
-os.environ.setdefault("SWEEP_VRZ_GRAD_SPLIT", "1")
 import numpy as np, torch, torch.distributed as dist
 
 # SWEEP_SRC lets one copy of this file drive ANOTHER tree's sweep -- the A/B

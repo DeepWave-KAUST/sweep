@@ -23,7 +23,7 @@ import pytest
 
 from sweep.equations.slot_table import slot_table_of
 from sweep.parallel.dd_propagator import check_dd_admission
-from sweep.parallel.dd_spec import ACOUSTIC_DD, ELASTIC_DD, LSRTM_DD, VRZ_DD
+from sweep.parallel.dd_spec import ACOUSTIC_DD, ELASTIC_DD, LSRTM_DD, VRZ_DD, VRZ_DD_TILED
 
 DEV = "cpu"
 
@@ -41,7 +41,9 @@ def _spec_of(eq):
     layout = eq.cuda_layout
     return (ELASTIC_DD if not table.u_blocks
             else LSRTM_DD if len(table.u_blocks) > 1
-            else VRZ_DD if layout.dd_coupling_nvar else ACOUSTIC_DD)
+            else ACOUSTIC_DD if not layout.dd_coupling_nvar
+            else VRZ_DD_TILED if eq.so in layout.dd_tiled_gradient_orders
+            else VRZ_DD)
 
 
 def test_accepted_equations_declare_their_capabilities():
@@ -130,3 +132,18 @@ def test_phase_need_is_derived_from_the_spec_not_hardcoded():
     assert not needs(LSRTM_DD)
     assert needs(ELASTIC_DD)
     assert needs(VRZ_DD)
+    assert needs(VRZ_DD_TILED)
+
+
+def test_vrz_schedule_follows_the_tiled_gradient_orders():
+    """AcousticVRZ3D picks the two-phase schedule (deep strips shipped with phase 1)
+    exactly at the orders its core serves with the tiled gradient, and the
+    three-phase coupling schedule above them; the core refuses a mismatch either
+    way (a phase 2 at a tiled order, a phase 3 without phase 2 at another)."""
+    import sweep.equations as eqs
+    for so, want in ((2, VRZ_DD_TILED), (4, VRZ_DD_TILED), (6, VRZ_DD_TILED),
+                     (8, VRZ_DD_TILED), (10, VRZ_DD), (12, VRZ_DD)):
+        eq = eqs.AcousticVRZ3D(spatial_order=so, device=DEV, backend="torch")
+        assert _spec_of(eq) is want, so
+    assert [ph.step_phase for ph in VRZ_DD_TILED.backward.phases] == [1, 3]
+    assert [ph.step_phase for ph in VRZ_DD.backward.phases] == [1, 2, 3]

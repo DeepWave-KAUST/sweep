@@ -103,7 +103,8 @@ __global__ void calculate_grad_utt_3d_band(
     int wxl, int wxh, int wyl, int wyh, int wzl, int wzh
 ) {
     // Slab enumeration: z-low / z-high (full x,y box), y-low / y-high (full x,
-    // inner z), x-low / x-high (inner y, inner z); every cell exactly once.
+    // inner z), x-low / x-high (inner y, inner z); every cell exactly once
+    // given widths clipped to the box (bs_strip_widths).
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     const int b  = blockIdx.y;
     const int bx = x1 - x0, by = y1 - y0;
@@ -282,17 +283,10 @@ __global__ void accumulate_source_grad_3d(
     grad_source[grad_idx] += u_backward[u_idx];
 }
 
-// Tables behind the order-dispatch macros in kernels.cuh (launch/by_order.cuh).
-
-SWEEP_BY_ORDER_TABLE(acoustic_forward_kernel_3d_fn, acoustic_forward_kernel_3d_by_order, acoustic_forward_kernel_3d);
-SWEEP_BY_ORDER_TABLE(acoustic_nopml_3d_fn, acoustic_nopml_3d_by_order, acoustic_nopml_3d);
-SWEEP_BY_ORDER_TABLE(acoustic_adjoint_fused_3d_fn, acoustic_adjoint_fused_3d_by_order, acoustic_adjoint_fused_3d);
-
 // Pre-pass: clear air cells (above per-(iy,ix) surface row).  Launched
-// BEFORE acoustic_forward_kernel_3d so the main kernel only reads (never
-// writes) air cells in the same launch — eliminates intra-launch RAW
-// races on PML aux fields (same fix as acoustic2d).  ``static`` so each
-// .cu including this header gets its own copy (avoids link conflicts).
+// BEFORE the forward step so the step only reads (never writes) air cells in
+// the same launch — eliminates intra-launch RAW races on PML aux fields (same
+// fix as acoustic2d).
 __global__ void acoustic3d_air_clear_kernel(
     AcousticWavefieldPointer wf,
     bool save_all_wavefields,

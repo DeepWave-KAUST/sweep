@@ -92,12 +92,8 @@ done
 # before it, which costs one fp32 ULP on one plane and is not a defect (item 30).
 dd_case 4 "dd_vs_mono_shotgroups" --equation Acoustic3D --grid-n 57 --shot-groups 2 \
         --py 1 --px 2
-# One card picks the FUSED VRZ gradient kernel and DD must use the SPLIT one;
-# same kernel, bit-exact. Without this the arm is red for a reason that is not
-# a defect.
-DD_EXTRA_ENV=SWEEP_VRZ_GRAD_SPLIT=1 \
-    dd_case 2 "dd_vs_mono_VRZ3D_1x2_split" --equation AcousticVRZ3D --py 1 --px 2
-unset DD_EXTRA_ENV
+dd_case 2 "dd_vs_mono_VRZ3D_1x2" --equation AcousticVRZ3D --py 1 --px 2
+dd_case 4 "dd_vs_mono_VRZ3D_2x2" --equation AcousticVRZ3D --py 2 --px 2
 
 echo "=== 6. the illumination path -- no gate tier ever enables it ==="
 run illumination_pin env OMP_NUM_THREADS=8 "$PY" -m pytest -q -p no:cacheprovider test/test_illumination_pin.py

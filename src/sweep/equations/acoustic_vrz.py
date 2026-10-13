@@ -388,7 +388,9 @@ class AcousticVRZ3D(SecondOrderEquation):
             illum_nvar=2,
             # DD: the variable-density gradient is div(c/e) with
             # c/e = lambda*vp*grad(p), so a cut seam needs the
-            # neighbour's coupling field before the divergence.
+            # neighbour's values (pressure beyond the halo at orders
+            # 2-8, c/e above) before the gradient.
             dd_coupling_nvar=6,
             dd_adjoint_coeff_nvar=4,
+            dd_tiled_gradient_orders=(2, 4, 6, 8),
         )

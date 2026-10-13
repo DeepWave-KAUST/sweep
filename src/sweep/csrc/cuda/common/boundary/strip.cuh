@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cuda_runtime.h>
+#include <algorithm>
 
 #include "../context.h"
 
@@ -50,6 +51,18 @@ __host__ __device__ __forceinline__ int bs_band_hi(int p1, int offset, int width
     int e = p1 - offset;
     if (e - width < 0) e = width;
     return e > n ? n : e;
+}
+
+// Widths of the low / high strip on one axis of the physical box, `extent`
+// cells long, for the kernels that enumerate the strip cells (the band
+// imaging, the elastic carrier capture): the low strip takes up to `lo` cells,
+// the high one what the low one leaves of `hi`.  On a box thinner than lo + hi
+// the two strips would overlap and their shared cells go to two threads --
+// imaged twice, the two unordered += racing.  No-op on any thicker box.
+inline void bs_strip_widths(int extent, int& lo, int& hi)
+{
+    lo = std::min(lo, std::max(extent, 0));
+    hi = std::min(hi, std::max(extent - lo, 0));
 }
 
 struct BsStripBands2D {

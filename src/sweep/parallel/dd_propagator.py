@@ -53,7 +53,7 @@ import numpy as np
 import torch
 
 from sweep.equations.slot_table import slot_table_of
-from sweep.parallel.dd_spec import ACOUSTIC_DD, ELASTIC_DD, LSRTM_DD, VRZ_DD
+from sweep.parallel.dd_spec import ACOUSTIC_DD, ELASTIC_DD, LSRTM_DD, VRZ_DD, VRZ_DD_TILED
 from sweep.propagator._c import (_canonical_to_cuda_record,
                                  _cuda_record_to_canonical)
 from sweep.parallel._topology import MeshTopology
@@ -437,7 +437,10 @@ class ModelParallel:
         # AcousticLSRTM3D: background + scattered), whose schedule ships every block.
         self._spec = (ELASTIC_DD if not table.u_blocks
                       else LSRTM_DD if len(table.u_blocks) > 1
-                      else VRZ_DD if self._dd_coupling_nvar else ACOUSTIC_DD)
+                      else ACOUSTIC_DD if not self._dd_coupling_nvar
+                      else VRZ_DD_TILED
+                      if self.so in tuple(getattr(_layout, "dd_tiled_gradient_orders", ()) or ())
+                      else VRZ_DD)
         # Admission is DECLARED, not name-listed (see check_dd_admission).
         check_dd_admission(equation, _layout, self._spec)
         self._nwf = table.n_forward
@@ -864,16 +867,18 @@ class ModelParallel:
             self.recon = [torch.zeros_like(self.bp.models[0])
                           for _ in range(self._nrecon)]
         # VRZ variable-density gradient is a spatial divergence of the coupling
-        # field c/e = lambda*vp*grad(p), so under DD the divergence at a cut seam
-        # needs the neighbour's c/e.  Materialise the six coupling buffers and bind
-        # them to bp.adjoint_workspace (the phased VRZ backward reads c/e from
-        # there) so _run_adjoint can halo-exchange them between the build and
-        # divergence sub-steps.  Plain acoustic's pointwise u_tt*lambda gradient
-        # needs no such exchange, so it keeps self.coupling empty.
+        # field c/e = lambda*vp*grad(p), so under DD the gradient at a cut seam
+        # needs values from the neighbour (its pressure beyond the halo at
+        # spatial orders 2-8, its c/e at higher orders).  Materialise the six
+        # coupling buffers and bind them to bp.adjoint_workspace (the phased VRZ
+        # backward fills and reads them there) so _run_adjoint can halo-exchange
+        # them before phase 3 (with phase 1's shipment at orders 2-8, after phase
+        # 2 above).  Plain acoustic's pointwise u_tt*lambda
+        # gradient needs no such exchange, so it keeps self.coupling empty.
         if self._dd_coupling_nvar:
             self.coupling = [torch.zeros_like(self.bp.models[0])
                              for _ in range(self._dd_coupling_nvar)]
-            # C0/Cx/Cy/Cz: the fused adjoint's transpose fast-path reads these coeffs
+            # C0/Cx/Cy/Cz: the adjoint's interior launch reads these coeffs
             # over [ix-M,ix+M] -> into the cut halo.  They are model-only (constant
             # within a backward), so build once + halo-exchange once (before the reverse
             # loop) rather than per step.  Without their exchanged halo, cut-adjacent
@@ -1276,6 +1281,8 @@ class ModelParallel:
             # families, both fields for a multi-field equation (LSRTM)
             return runner.at_all(ref.buf, ref.at)
         L = getattr(self, self._BUFS[ref.buf])
+        if ref.slots is not None:
+            return tuple(L[i] for i in ref.slots) if L else ()
         if ref.roles is None:
             return tuple(L)
         key = (ref.buf, ref.roles)
@@ -1464,7 +1471,7 @@ class ModelParallel:
             # are both the table's u_blocks, which is (0,) for the rotating
             # acoustic/VRZ lists and () for elastic's fixed slots -- exactly
             # what the three branches passed by hand.
-            # The VRZ coupling schedule drives three phases per step.  The
+            # The VRZ coupling schedules drive two or three phases per step.  The
             # SHARED template runner rejects step_phase != 0, so VRZ used to be
             # forced onto the per-call path -- and that path re-entered the
             # compiled binding 3 x nt times per iteration, rebuilding the whole

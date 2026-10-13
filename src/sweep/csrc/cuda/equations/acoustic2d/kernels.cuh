@@ -91,6 +91,20 @@ __global__ void acoustic2d_air_clear_kernel(
 #define ACOUSTIC2D_NOPML(order, grid, block, ...) \
     SWEEP_LAUNCH_BY_ORDER(acoustic2nd_nopml_by_order, order, grid, block, __VA_ARGS__)
 
+// The acoustic2d forward and adjoint steps (forward_split.cu, adjoint_split.cu):
+// the interior box plus one launch over the CPML ring around it, every order
+// (orders above 8 through the runtime-order instantiation).  The single-launch
+// kernels below stay for visco_acoustic2d.
+void launch_acoustic2d_forward(
+    int order, AcousticWavefieldPointer wf, float* u_this, const float* vp,
+    LaplaceParam lap_ctx, GradParam grad_ctx, GradParam grad_ctx_x, GradParam grad_ctx_z,
+    AcousticCPMLPointer cpml, SolverContext ctx);
+void launch_acoustic2d_adjoint(
+    int order, AcousticWavefieldPointer wf, const float* vp, LaplaceParam lap_ctx,
+    GradParam grad_ctx_x, GradParam grad_ctx_z, AcousticCPMLPointer cpml, SolverContext ctx,
+    float* psix_out, float* psiz_out, float* zetax_out, float* zetaz_out,
+    const float* grad_forward_img, float* grad_out);
+
 template<int Order>
 __global__ void acoustic2nd(
     AcousticWavefieldPointer wf,

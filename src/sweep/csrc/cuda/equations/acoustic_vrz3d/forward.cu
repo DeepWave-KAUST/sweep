@@ -222,32 +222,17 @@ ForwardOutputCore forward_core(const ForwardInputCore& in)
     for (int it = it0; it < it1; ++it) {
         auto view = wavefield.view();
 
-        // Ranged x stencil launch over [xb, xe); (0, nx) reproduces the legacy
-        // full launch bit-identically (same block dims, x_base = 0, x_end = nx).
-        // Only the launch RANGE changes per phase — each cell's in_pml branch,
-        // aux writes and time update are identical to the full launch.
+        // Ranged x stencil launch over [xb, xe): only the launch RANGE changes per
+        // phase -- each cell's CPML terms, aux writes and time update are those of
+        // the full launch (0, nx).
         auto launch_stencil = [&](int xb, int xe) {
             if (xe <= xb) return;
             SolverContext sctx = ctx;
             sctx.x_base  = xb;
             sctx.x_limit = xe;
-            auto lc = fdtd::Wave3D::make(xe - xb, ny, nz, B);
-            ACOUSTIC_VRZ3D(
-                order,
-                lc.grid,
-                lc.block,
-                view,
-                vp.data_ptr<float>(),
-                z.data_ptr<float>(),
-                inv_z.data_ptr<float>(),
-                lap_ctx,
-                grad_ctx,
-                grad_ctx_x,
-                grad_ctx_y,
-                grad_ctx_z,
-                cpml,
-                sctx
-            );
+            launch_acoustic_vrz3d_forward(order, view,
+                vp.data_ptr<float>(), z.data_ptr<float>(), inv_z.data_ptr<float>(),
+                lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, sctx);
         };
 
         if (phase == 1) {

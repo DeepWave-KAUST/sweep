@@ -12,6 +12,16 @@ struct LaunchConfig {
     dim3 grid;
 };
 
+// gridDim.y caps at 65535.  A block only one or two rows tall (the 32x1x8 boxes
+// of the split stencil launches) would hit that long before the 32x4x2 Wave3D
+// launch does, so trade z depth for y rows -- same thread count -- until the y
+// extent fits.  The block shape never changes which cells a launch computes.
+inline dim3 fit_grid_y(dim3 blk, int extent_y)
+{
+    while (ceil_div(extent_y, (int)blk.y) > 65535 && blk.z > 1) { blk.y *= 2; blk.z /= 2; }
+    return blk;
+}
+
 // --------------------------------------------------
 // 2D Wave
 // --------------------------------------------------

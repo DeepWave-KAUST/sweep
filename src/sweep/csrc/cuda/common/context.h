@@ -179,11 +179,12 @@ struct SolverContext {
     // The ONLY way to change the DD cut faces: re-runs refresh().
     __host__ __device__ inline void set_cut_mask(int mask) { cut_mask_ = mask; refresh(); }
 
-    // Ranged x stencil launch (DD phase-split forward): the kernel adds
-    // ``x_base`` to its block/thread-derived ix and early-returns at
-    // ``x_end()``.  Defaults (0, -1 = nx) leave every legacy launch
-    // bit-identical.  Only the acoustic2d/3d forward stencil + air-clear
-    // kernels honour these.
+    // Ranged x stencil launch (DD phase-split forward): the cells
+    // [x_base, x_end()) of the full launch.  Defaults (0, -1 = nx) are the
+    // full launch.  The acoustic2d forward stencil and the air-clear kernels
+    // add ``x_base`` to their ix in-kernel; the acoustic3d and acoustic_vrz3d
+    // forward launchers clip their boxes to the range on the host, and their
+    // adjoint / reconstruction launchers refuse a ranged context.
     int x_base = 0;
     int x_limit = -1;
 

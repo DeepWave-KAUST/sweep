@@ -125,10 +125,8 @@ has once produced a gradient keeps its adjoint machinery for its lifetime.
 On fp32 gpu-direct boundaries the DD gradient is **bit-identical** to the
 single-domain gradient (`test/test_dd_backward_two_tile*.py`,
 `test/dd_api_check.py`), including with boundary tail truncation
-(`test/test_dd_tail_two_tile.py`). The exception is `AcousticVRZ3D` at spatial
-order 2 or 4 (the default): its single-GPU backward uses a fused gradient
-kernel that DD cannot use, so the two differ by ~1 ULP per cell unless
-`SWEEP_VRZ_GRAD_SPLIT=1` puts the single-GPU run on the same split kernel.
+(`test/test_dd_tail_two_tile.py`). `AcousticVRZ3D` runs the same gradient
+kernels on one card and under DD at every order.
 `pad_to_mesh` pads the split axes up to the tile multiple; a padded run is a
 (slightly) different discrete problem than an unpadded one, so compare like
 against like — the example scripts' `--check` mode does exactly that.
@@ -142,7 +140,9 @@ against like — the example scripts' `--check` mode does exactly that.
   coupling-exchange phases),
   `AcousticVTI`/`AcousticVTI1st`, `AcousticTTI`, `ElasticTTI`, `ElasticVRR`
   and `ViscoAcoustic`.
-- Cuts: x strips in 2-D (`py=1`); x/y tile grids in 3-D.
+- Cuts: x strips in 2-D (`py=1`); x/y tile grids in 3-D. At spatial orders
+  2-8 an `AcousticVRZ3D` tile cut on both sides of an axis needs at least
+  `spatial_order` cells along it (refused at the first backward).
 - Free surface: top face only under DD (a cut face can never carry one).
 - Topography: not supported. `ModelParallel` refuses a propagator built with
   `topography=` (`NotImplementedError`): the tiles carry no surface, and

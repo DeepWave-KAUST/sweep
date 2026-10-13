@@ -13,15 +13,9 @@ PUBLIC level -- build ModelParallel, call it, call .backward() -- rather than th
 protocol level of dd_nccl_backward_check.py, because the question is what a user
 gets, not whether the exchange protocol is self-consistent.
 
-KNOWN, EXPLAINED, NOT A DEFECT -- AcousticVRZ3D is the one equation here that
-is not bit-exact against one card, by construction. Its DD backward must use the
-SPLIT gradient (materialise c/e, exchange, then take the divergence) because the
-fused nested-stencil kernel's accessor zeroes cut-side taps; the single-GPU path
-meanwhile picks AUTO, which is the FUSED kernel on Ada. Two arithmetic
-decompositions of the same expression, so the gradients differ by ~1 ULP per
-cell (rel 3.3e-09 vp / 1.3e-08 z here, deterministic and reproducible to every
-digit across processes). Run with SWEEP_VRZ_GRAD_SPLIT=1 -- which forces the
-single-GPU path onto the same split kernels -- and it is bit-exact.
+AcousticVRZ3D runs the same gradient kernels on one card and under DD (at
+orders 2-8 the tiled one, with the deep pressure strips it reads across a cut
+shipped alongside lambda and p after phase 1), so it is bit-exact too.
 
 Launch (one process per tile):
     torchrun --standalone --nproc-per-node=4 test/dd_vs_mono_grad_sweep.py \
@@ -389,14 +383,6 @@ def main() -> None:
               f"far={far / max(rec_peak, 1e-30):.2f}{rnote}", flush=True)
         for l in lines:
             print(l, flush=True)
-        if (bad and args.equation == "AcousticVRZ3D"
-                and os.environ.get("SWEEP_VRZ_GRAD_SPLIT", "0") == "0"):
-            print("    NOTE: VRZ3D single-GPU picks the FUSED gradient kernel and "
-                  "DD must use the SPLIT one\n"
-                  "          (the fused accessor zeroes cut-side taps). Re-run with "
-                  "SWEEP_VRZ_GRAD_SPLIT=1\n"
-                  "          to put both on the same kernel; that is bit-exact.",
-                  flush=True)
         print(f"    -> {'PASS' if bad == 0 else 'FAIL'}", flush=True)
 
     if args.dump:

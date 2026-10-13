@@ -3,12 +3,10 @@
 // (launch/by_order.cuh).
 #include "kernels.cuh"
 
-SWEEP_BY_ORDER_TABLE(acoustic_vrz2nd_fn, acoustic_vrz2nd_by_order, acoustic_vrz2nd);
 SWEEP_BY_ORDER_TABLE(acoustic_vrz2nd_nopml_fn, acoustic_vrz2nd_nopml_by_order, acoustic_vrz2nd_nopml);
 SWEEP_BY_ORDER_TABLE(calculate_grad_vrz2d_fn, calculate_grad_vrz2d_by_order, calculate_grad_vrz2d);
 SWEEP_BY_ORDER_TABLE(build_vrz_grad_fields_fn, build_vrz_grad_fields_by_order, build_vrz_grad_fields);
 SWEEP_BY_ORDER_TABLE(build_vrz_adjoint_coeffs_fn, build_vrz_adjoint_coeffs_by_order, build_vrz_adjoint_coeffs);
-SWEEP_BY_ORDER_TABLE(acoustic_vrz2nd_adjoint_fused_fn, acoustic_vrz2nd_adjoint_fused_by_order, acoustic_vrz2nd_adjoint_fused);
 SWEEP_BY_ORDER_TABLE(calculate_grad_vrz2d_fused_fn, calculate_grad_vrz2d_fused_by_order, calculate_grad_vrz2d_fused);
 
 // The p_tt imaging uses U_{it+1} − 2U_it + U_{it−1}, which at a source cell
