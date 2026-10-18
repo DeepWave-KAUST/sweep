@@ -161,9 +161,10 @@ CUDA (`UserWarning: ... The NVIDIA driver on your system is too old`) and
   `--force-reinstall`; sweep stays as is.
 
 !!! note
-    `sweepx` (Python >= 3.10) installs the solver plus the `sweep-agent` companion;
-    `pip install sweep-solver` installs the solver alone (Python >= 3.9). Either way
-    you `import sweep`: the bare name `sweep` is taken on PyPI.
+    `sweepx` (Python >= 3.10) installs the solver together with the sweepx toolkit
+    (task runner, agent, losses, I/O, networks, optimizers); `pip install sweep-solver`
+    installs the solver alone (Python >= 3.9). Either way you `import sweep`: the bare
+    name `sweep` is taken on PyPI.
 
 ## From source
 

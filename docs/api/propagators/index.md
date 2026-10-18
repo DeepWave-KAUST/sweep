@@ -74,11 +74,13 @@ the **canonical** shape
 where `nfield = len(receiver_type)`, one per recorded field (with the default
 receivers: `1` for acoustic pressure `h1`, `2` for elastic `vx`/`vz`, `2` for
 the Zhao DAS strain rates `exx_t`/`ezz_t`). This matches the layout expected
-by `sweep_loss` so the output of a solver can be fed straight into a misfit:
+by `sweepx.loss` so the output of a solver can be fed straight into a misfit:
 
 ```python
+from sweepx.loss import L2Loss
+
 syn = solver(wavelet, sources, receivers, models=models)
-loss = sweep_loss.L2()(syn, observed)  # both are (B, nt, nrec, nfield)
+loss = L2Loss()(syn, observed)  # both are (B, nt, nrec, nfield)
 ```
 
 ## API Tabs
