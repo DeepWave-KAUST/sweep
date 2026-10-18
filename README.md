@@ -45,8 +45,9 @@ pip install .
 python -m sweep.build   # optional: compile it now instead of on the first impl='c' call
 ```
 
-<sub>`sweepx` (Python >= 3.10) is the PyPI name and also installs the `sweep-agent` companion;
-you `import sweep`. `pip install sweep-solver` installs the solver alone (Python >= 3.9).
+<sub>`sweepx` (Python >= 3.10) installs the solver together with the sweepx toolkit (task
+runner, agent, losses, I/O, networks, optimizers); you `import sweep`. `pip install sweep-solver`
+installs the solver alone (Python >= 3.9).
 GPU coverage, custom cores and developer builds are covered in
 [Building the CUDA core](https://sweepx.deepwave.group/solver/dev/building/).</sub>
 

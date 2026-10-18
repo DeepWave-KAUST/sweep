@@ -37,7 +37,7 @@ pip install .
 python -m sweep.build   # 可选:现在就编,而不是等第一次调用 impl='c'
 ```
 
-<sub>`sweepx`(Python >= 3.10)是 PyPI 发行名,会顺带装上 `sweep-agent`;导入用 `import sweep`。只装求解器用 `pip install sweep-solver`(Python >= 3.9)。GPU 覆盖范围、自定义 core、开发者构建等细节见[Building the CUDA core](https://sweepx.deepwave.group/solver/dev/building/)。</sub>
+<sub>`sweepx`(Python >= 3.10)会连同 sweepx 工具包(任务运行器、agent、损失函数、I/O、网络、优化器)一起装上求解器;导入用 `import sweep`。只装求解器用 `pip install sweep-solver`(Python >= 3.9)。GPU 覆盖范围、自定义 core、开发者构建等细节见[Building the CUDA core](https://sweepx.deepwave.group/solver/dev/building/)。</sub>
 
 ## Hello SWEEP
 
