@@ -22,7 +22,7 @@ def load_models(examples_dir, cfg):
         raise FileNotFoundError(
             "Missing Overthrust 3D model files: "
             + ", ".join(missing)
-            + ". Generate them with the scripts in examples/models/overthrust/README.md."
+            + ". Generate them with `python3 examples/models/overthrust/download_3d_overthrust.py`."
         )
 
     true_model = prepare_model(np.load(true_path), cfg)

@@ -19,10 +19,35 @@ entry (`load("marmousi")` → the embedded `2d-demo`, `load("overthrust")` →
 the choices rather than guess.
 
 Optional deps: `pip install sweep-solver[datasets]` adds the HTTP client
-(requests/tqdm) for downloads. Parsing (SEG-Y / raw grids) is numpy-only.
+(requests/tqdm) for downloads, and h5py for the HDF5 copy that Overthrust 3-D
+falls back to. Parsing everything else (SEG-Y / raw grids) is numpy-only.
 
 Cache dir: `$SWEEP_DATASETS_CACHE` → `$XDG_CACHE_HOME/sweep-datasets` →
 `~/.cache/sweep-datasets`.
+
+**Sources.** Each downloaded file is pinned by the sha256 of the original
+bytes (and the md5 its host publishes, where there is one); its URLs are tried
+in order and a download that does not match is discarded; a cached file gets
+the same check on every load and is fetched again if it fails. If no source
+answers, the error names the cache path to put the original file at. The SEG
+open-data S3 bucket (`open.source.geoscience`) that served every file stopped serving
+anonymous downloads in 2026. The originals of five models are re-hosted on
+Zenodo, one record each, listed first, and in the Hugging Face dataset
+`shaowinw/seismic-benchmark-models` (one folder per record), listed second; the
+bucket stays last:
+
+| model | record |
+|---|---|
+| Overthrust 3-D (`Overthrust_3D_CD1.tar.gz`) | doi:10.5281/zenodo.23469292 |
+| SEG/EAGE Salt 3-D (`Salt_Model_3D.tar.gz`) | doi:10.5281/zenodo.23469308 |
+| Marmousi2 (`elastic-marmousi-model.tar.gz`, used by `marmousi` and `marmousi2`) | doi:10.5281/zenodo.23469300 |
+| BP 2004 (`vel_z6.25m_x12.5m_exact.segy.gz` with its README files) | doi:10.5281/zenodo.23469290 |
+| BP 2007 TTI (`ModelParams.tar.gz` with its terms of use) | doi:10.5281/zenodo.23475636 |
+
+`overthrust:3d-acoustic` falls back to the HDF5 copy of the model
+(doi:10.5281/zenodo.4252588) if no source serves the CD. `hess-vti` lists only
+the bucket: it loads from an existing cache, or from the original files placed
+at the path the error message names.
 
 ## CLI
 
@@ -39,18 +64,19 @@ sweep datasets where                    # print the cache directory
 
 | name | variant | kind | grid (loaded) | vp range (m/s) | license | re-host? | verified |
 |---|---|---|---|---|---|---|---|
-| `marmousi` | `2d-demo` | embedded | 281×1361 @ 12.5 m | 1028–4700 | SEG open (demo) | ✅ | ✅ |
+| `marmousi` | `2d-demo` | embedded | 281×1361 @ 12.5 m | 1028–4700 | CC-BY src (demo) | ✅ | ✅ |
 | `overthrust` | `2d-demo` | embedded | 187×801 @ 25 m | — | CC-BY src (demo) | ✅ | ✅ |
-| `marmousi` | `2d-acoustic` | download | 2801×13601 @ 1.25 m (native) | 1028–4700 | SEG open, cite | ➖ | ✅ |
+| `marmousi` | `2d-acoustic` | download | 2801×13601 @ 1.25 m (native) | 1028–4700 | **CC-BY-4.0** | ✅ | ✅ |
 | `overthrust` | `3d-acoustic` | download | 187×801×801 @ 25 m | 2179–6000 | **CC-BY-4.0** | ✅ | ✅ |
 | `seg-eage-salt` | `3d-acoustic` | download | 210×676×676 (nz,ny,nx) @ 20 m | 1500–4482 | **CC-BY-4.0** | ✅ | ✅ |
-| `marmousi2` | `2d-elastic` | download | 2801×13601 @ 1.25 m (vp/vs/rho) | 1028–4700 | open academic, cite | ➖ | ✅ |
+| `marmousi2` | `2d-elastic` | download | 2801×13601 @ 1.25 m (vp/vs/rho) | 1028–4700 | **CC-BY-4.0** | ✅ | ✅ |
 | `bp-2004` | `2d-acoustic` | download | 1911×5395, dz6.25/dx12.5 | 1429–4790 | free+attr, AS-IS | ➖ | ✅ |
 | `bp-2007-tti` | `2d-tti` | download | 1801×12596 @ 6.25 m (vp/ε/δ/θ) | 1492–4554 | free+attr, courtesy BP | ➖ | ✅ |
 | `hess-vti` | `2d-vti` | download | 1500×3617 @ ~7.62 m (vp/ε/δ) | 1524–4511¹ | free+attr, Hess AS-IS | ➖ | ✅¹ |
 
-**re-host?** ✅ = license permits re-hosting the bytes; ➖ = fetch from official
-source only (do not vendor/re-host).
+**re-host?** ✅ = CC-BY-4.0: anyone may re-host the files, with attribution;
+➖ = the files may be passed on only with their original documentation and terms
+(the project's BP records carry them; `hess-vti` is not re-hosted).
 
 **verified** ✅ = byte-verified against a real download (2026-07):
 shape, physical value range, and slice image confirmed for every entry.
@@ -64,7 +90,11 @@ Verification notes (resolved 2026-07-06):
   `3D-Velocity-Grid/overthrust.vites`), raw **big-endian IEEE float32**; the
   `.vites.h` sidecar gives n1=801 n2=801 n3=187, d=25 m, m/s (n1 fastest → read
   as C-order `(187,801,801)`). File size 479 917 548 = 801·801·187·4 confirms
-  the grid; values 2179–6000 m/s. ✅
+  the grid; values 2179–6000 m/s. ✅ The fallback when no source serves the CD
+  is the Zenodo HDF5 copy: dataset `m` is squared slowness (s²/km²), `(207,801,801)` on
+  axes (z, x, y) with 20 rows of 1500 m/s water on top; `1000/sqrt(m[20:])`
+  in float64, transposed to (z, y, x) and rounded to float32, equals the CD1
+  grid in every cell. ✅
 - **seg-eage-salt**: `tar.gz → SALTF.ZIP → Saltf@@` raw big-endian `>f4`,
   95 964 960 = 676·676·210, **x-fastest** (like `.vites`) → read as C-order
   `(nz,ny,nx) = (210,676,676)`; range 1500–4482. (Axis order confirmed by

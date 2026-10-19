@@ -63,9 +63,10 @@ torch = ["torch"]
 jax   = ["jax", "jaxlib"]
 all   = ["torch", "jax", "jaxlib"]
 # Benchmark dataset loaders (sweep.datasets). Embedded demo models need
-# nothing extra; parsing is numpy-only. This extra only adds the HTTP client
-# used to fetch the downloadable full-size benchmarks.
-datasets = ["requests>=2.25", "tqdm>=4.60"]
+# nothing extra; parsing is numpy-only. This extra adds the HTTP client used
+# to fetch the downloadable full-size benchmarks, and h5py for the HDF5 copy
+# that the Overthrust 3-D model falls back to.
+datasets = ["requests>=2.25", "tqdm>=4.60", "h5py>=3"]
 
 [project.urls]
 Homepage = "https://github.com/DeepWave-KAUST/sweep"
