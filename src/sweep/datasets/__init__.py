@@ -21,7 +21,8 @@ Back-compatible helpers (``load_marmousi`` / ``load_overthrust_2d`` and the
 ``*_DH`` / ``*_UNITS`` constants) are preserved.
 
 Optional dependency: ``pip install sweep-solver[datasets]`` adds the HTTP
-client (``requests``/``tqdm``) used to fetch the downloadable benchmarks.
+client (``requests``/``tqdm``) used to fetch the downloadable benchmarks, and
+``h5py`` for the HDF5 copy that the Overthrust 3-D model falls back to.
 Parsing (SEG-Y / raw grids) is numpy-only — no extra parser dependency.
 """
 
@@ -79,8 +80,8 @@ def _embedded_overthrust2d(*, name: str = "true") -> dict[str, Any]:
 register(Entry(
     name="marmousi", variant="2d-demo", loader=_embedded_marmousi,
     description="Embedded Marmousi demo (vp/vs/rho x true/smooth/linear, 281x1361).",
-    citation="Versteeg (1994), DOI 10.1190/1.1437051",
-    license="Derived demo of SEG open data — bundled for quick-start use.",
+    citation="Martin, Wiley, Marfurt (2006), DOI 10.1190/1.2172306; after Versteeg (1994), DOI 10.1190/1.1437051",
+    license="Derived demo (CC-BY-4.0 source, AGL/Univ. Houston) — bundled for quick-start use.",
     kind="embedded", redistributable=True, default=True, tags=["2d", "demo", "embedded"],
 ))
 register(Entry(

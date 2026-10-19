@@ -1,79 +1,62 @@
 #!/usr/bin/env python3
+"""Write the SEG/EAGE Overthrust 3-D cubes the 3-D examples load.
+
+- ``true_3d.npy``: the official velocity grid, 187 x 801 x 801 (z, y, x) at
+  25 m, in m/s, from ``sweep.datasets``. It downloads and checks the SEG/EAGE
+  CD on first use (re-hosted on Zenodo, doi:10.5281/zenodo.23469292) and reuses
+  a CD already in its cache.
+- ``smooth_3d.npy``: the initial model, the true model smoothed with
+  ``make_smooth_model.py`` (by default radii 6,6,6 and 3 passes).
+
+Needs ``pip install sweep-solver[datasets]``.
+"""
 from __future__ import annotations
 
 import argparse
-import hashlib
-import tarfile
-import urllib.request
 from pathlib import Path
 
+import numpy as np
 
-ARCHIVE_URL = (
-    "https://s3.amazonaws.com/open.source.geoscience/open_data/seg_eage_models_cd/"
-    "Overthrust_3D_CD1.tar.gz"
-)
-ARCHIVE_NAME = "Overthrust_3D_CD1.tar.gz"
-
-
-def file_md5(path: Path, chunk_size: int = 1024 * 1024) -> str:
-    digest = hashlib.md5()
-    with path.open("rb") as f:
-        while True:
-            chunk = f.read(chunk_size)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def download(url: str, dest: Path) -> None:
-    def report(block_count: int, block_size: int, total_size: int) -> None:
-        if total_size <= 0:
-            return
-        downloaded = min(block_count * block_size, total_size)
-        pct = downloaded * 100.0 / total_size
-        print(f"\rDownloading {dest.name}: {pct:6.2f}%", end="", flush=True)
-
-    urllib.request.urlretrieve(url, dest, reporthook=report)
-    print()
-
-
-def extract_archive(archive_path: Path, output_dir: Path) -> None:
-    with tarfile.open(archive_path, "r:gz") as tf:
-        tf.extractall(output_dir)
-    print(f"Extracted {archive_path.name} into {output_dir}")
+from make_smooth_model import parse_radii, smooth_nd
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Download and optionally extract the official SEG/EAGE Overthrust 3D CD1 archive.")
+    parser = argparse.ArgumentParser(description="Write true_3d.npy and smooth_3d.npy for the 3-D Overthrust examples.")
     parser.add_argument(
-        "--extract",
-        action="store_true",
-        help="Extract the archive after download.",
+        "--out-dir",
+        type=Path,
+        default=Path(__file__).resolve().parent,
+        help="Where to write the two files. Default: this script's directory.",
     )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Redownload even if the archive already exists.",
-    )
+    parser.add_argument("--radii", default="6,6,6", help="Smoothing radii for smooth_3d.npy, one value or z,y,x.")
+    parser.add_argument("--passes", type=int, default=3, help="Smoothing passes for smooth_3d.npy.")
+    parser.add_argument("--force", action="store_true", help="Rewrite the files even if they already exist.")
     args = parser.parse_args()
 
-    root = Path(__file__).resolve().parent
-    archive_path = root / ARCHIVE_NAME
-    extract_dir = root / "Overthrust_3D_CD1"
+    true_path = args.out_dir / "true_3d.npy"
+    smooth_path = args.out_dir / "smooth_3d.npy"
+    args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    if archive_path.exists() and not args.force:
-        print(f"Skip download: {archive_path} already exists (md5 {file_md5(archive_path)}).")
+    if true_path.exists() and not args.force:
+        print(f"Skip: {true_path} already exists.")
+        true_model = np.load(true_path).astype(np.float32)
     else:
-        print(f"Fetching {ARCHIVE_URL}")
-        download(ARCHIVE_URL, archive_path)
-        print(f"Saved {archive_path} (md5 {file_md5(archive_path)})")
+        from sweep.datasets import load
 
-    if args.extract:
-        if extract_dir.exists():
-            print(f"Archive already extracted at {extract_dir}")
-        else:
-            extract_archive(archive_path, root)
+        true_model = load("overthrust", "3d-acoustic")["vp"]
+        np.save(true_path, true_model)
+        print(f"Saved {true_path} shape={true_model.shape} "
+              f"vp {float(true_model.min()):.1f}-{float(true_model.max()):.1f} m/s")
+
+    if smooth_path.exists() and not args.force:
+        print(f"Skip: {smooth_path} already exists.")
+        return
+    radii = parse_radii(args.radii, true_model.ndim)
+    smooth = true_model
+    for _ in range(args.passes):
+        smooth = smooth_nd(smooth, radii)
+    np.save(smooth_path, smooth)
+    print(f"Saved {smooth_path} (radii {radii}, {args.passes} passes)")
 
 
 if __name__ == "__main__":

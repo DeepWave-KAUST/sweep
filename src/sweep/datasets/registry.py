@@ -31,9 +31,11 @@ class Entry:
     license
         Human-readable license / usage terms. Printed on first load.
     redistributable
-        ``True`` only when the license permits re-hosting the bytes
-        (e.g. CC-BY-4.0). ``False`` for "download-and-cite / AS-IS /
-        non-commercial" data that must be fetched from the official source.
+        ``True`` when anyone may re-host the bytes with attribution
+        (CC-BY-4.0). ``False`` when the terms ("AS IS", free download with
+        attribution) let the data be passed on only together with their
+        original documentation and terms; loading such an entry prints a
+        note saying so.
     """
 
     name: str
@@ -139,8 +141,8 @@ def _announce(entry: Entry) -> None:
         bits.append(f"  license: {entry.license}")
     if entry.kind == "download" and not entry.redistributable:
         bits.append(
-            "  note:    fetched from the official source under the terms above; "
-            "do not re-host the bytes."
+            "  note:    if you pass these data on, include their original "
+            "documentation and these terms."
         )
     if "unverified" in entry.tags:
         bits.append(

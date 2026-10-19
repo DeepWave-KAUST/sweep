@@ -58,6 +58,23 @@ and this project adheres to
   Each strip cell is now imaged once.  The elastic carrier capture, which
   enumerates the strips the same way (a copy, so the overlap was harmless),
   is clipped the same.
+- **`sweep.datasets` downloads work again.**  The SEG open-data S3 bucket that
+  served every download entry stopped serving anonymous downloads in 2026.
+  The original files of `overthrust`, `seg-eage-salt`, `marmousi` /
+  `marmousi2`, `bp-2004` and `bp-2007-tti` now come from the project's Zenodo
+  records (one per model), then from the same files on Hugging Face
+  (`shaowinw/seismic-benchmark-models`), with the bucket last.  A download is
+  kept only if its sha256 matches the original, and a cached file is checked
+  again on every load.  `overthrust:3d-acoustic` falls back to the HDF5 copy
+  of the model on Zenodo, which gives the same grid; the `datasets` extra now
+  installs h5py for it.  Existing caches are reused.  When no source answers,
+  the error lists every source tried and the path to put the file at, and
+  `sweep datasets download` prints it and exits with status 1 instead of a
+  traceback.  `hess-vti` has no public copy left: it loads only from a cache
+  or from its original files placed by hand.  `marmousi` (the full-size model,
+  read from the Marmousi2 archive, and the embedded demo derived from it) now
+  carries Marmousi2's CC-BY-4.0 license and cites Martin et al. (2006).  The
+  example download scripts under `examples/models/` use the same sources.
 
 ### Removed
 - **`SWEEP_VRZ_GRAD_SPLIT`.**  It put one card on the two-pass VRZ gradient so

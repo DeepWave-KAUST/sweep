@@ -37,7 +37,11 @@ def _cmd_download(args) -> int:
     kw = {}
     if args.downsample:
         kw["downsample"] = args.downsample[0] if len(args.downsample) == 1 else tuple(args.downsample)
-    out = load(args.name, args.variant, **kw)
+    try:
+        out = load(args.name, args.variant, **kw)
+    except (OSError, ImportError) as e:  # no source answered / a missing optional dependency
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     print(f"downloaded {out['name']}:{out['variant']}")
     for k, v in out.items():
         if hasattr(v, "shape"):
