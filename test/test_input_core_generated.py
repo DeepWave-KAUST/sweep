@@ -24,7 +24,8 @@ GEN = ROOT / "utils" / "gen_input_core.py"
 def test_generated_twins_match_wavetypes(tmp_path):
     core = tmp_path / "input_core.h"; adapt = tmp_path / "adapt_inputs.h"
     abi = tmp_path / "abi.py"; layout = tmp_path / "layout.cu"   # the ctypes mirror + the layout probe ride along
-    r = subprocess.run([sys.executable, str(GEN), str(CSRC / "shared" / "wavetypes.h"), str(core), str(adapt), str(abi), str(layout)],
+    sem = tmp_path / "sem_input_core.h"                            # the SEM twins, from cuda/equations/sem{2,3}d
+    r = subprocess.run([sys.executable, str(GEN), str(CSRC / "shared" / "wavetypes.h"), str(core), str(adapt), str(abi), str(layout), str(sem)],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert filecmp.cmp(core, CSRC / "core" / "input_core.h", shallow=False), \
@@ -36,6 +37,8 @@ def test_generated_twins_match_wavetypes(tmp_path):
         "sweep/backend/c/abi.py is stale: re-run utils/gen_input_core.py"
     assert layout.read_text() == (CSRC / "cuda" / "common" / "layout.cu").read_text(), \
         "cuda/common/layout.cu is stale: re-run utils/gen_input_core.py"
+    assert filecmp.cmp(sem, CSRC / "core" / "sem_input_core.h", shallow=False), \
+        "core/sem_input_core.h is stale: re-run utils/gen_input_core.py"
 
 def test_twins_compile_without_torch(tmp_path):
     gxx = shutil.which("g++") or shutil.which("c++")
@@ -48,8 +51,9 @@ def test_twins_compile_without_torch(tmp_path):
     if inc is None:
         pytest.skip("no CUDA headers for <cuda_bf16.h>")
     probe = tmp_path / "probe.cpp"
-    probe.write_text('#include "core/input_core.h"\nint main(){ ForwardInputCore f; BackwardInputCore b; '
-                     'return (int)(f.models.size() + b.grads_out.size()); }\n')
+    probe.write_text('#include "core/input_core.h"\n#include "core/sem_input_core.h"\n'
+                     'int main(){ ForwardInputCore f; BackwardInputCore b; SemFluidSolidBackwardInputCore s; '
+                     'return (int)(f.models.size() + b.grads_out.size() + s.ibool.numel()); }\n')
     r = subprocess.run([gxx, "-std=c++17", "-fsyntax-only", f"-I{CSRC}", f"-I{inc}", str(probe)],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr[-1500:]

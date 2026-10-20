@@ -35,6 +35,9 @@
 #include "../equations/elastic_vr2d/elastic_vr2d.h"
 #include "../equations/visco_acoustic2d/visco_acoustic2d.h"
 #include "../equations/visco_elastic2d/visco_elastic2d.h"
+#include "../equations/sem2d/sem2d.h"
+#include "../equations/sem3d/sem3d.h"
+#include "../../core/sem_input_core.h"
 #include "../equations/qp2d/qp2d.h"
 
 namespace {
@@ -154,9 +157,52 @@ const char* const ENTRY_NAMES[SWEEP_ENTRY_COUNT] = {
     "qp_tti_lsrtm2d_forward",
     "qp_tti_lsrtm2d_backward",
     "qp_tti_lsrtm2d_backward_bs",
-    "qp_tti_lsrtm2d_backward_ckpt"
+    "qp_tti_lsrtm2d_backward_ckpt",
+    "sem2d_acoustic_forward",
+    "sem2d_acoustic_backward",
+    "sem2d_elastic_forward",
+    "sem2d_elastic_backward",
+    "sem2d_acoustic_cpml_forward",
+    "sem2d_acoustic_cpml_dd_grads",
+    "sem2d_acoustic_cpml_dd_step",
+    "sem2d_acoustic_cpml_dd_bwd_pre",
+    "sem2d_acoustic_cpml_dd_bwd_mid",
+    "sem2d_acoustic_cpml_dd_bwd_end",
+    "sem2d_elastic_cpml_dd_asm",
+    "sem2d_elastic_cpml_dd_step",
+    "sem2d_elastic_cpml_dd_bwd_march_asm",
+    "sem2d_elastic_cpml_dd_bwd_march_fin",
+    "sem2d_elastic_cpml_dd_bwd_pre",
+    "sem2d_elastic_cpml_dd_bwd_end",
+    "sem2d_fluid_solid_dd_asm",
+    "sem2d_fluid_solid_dd_mid",
+    "sem2d_fluid_solid_dd_step",
+    "sem2d_fluid_solid_dd_bwd_a",
+    "sem2d_fluid_solid_dd_bwd_b",
+    "sem2d_fluid_solid_dd_bwd_c",
+    "sem2d_fluid_solid_dd_bwd_d",
+    "sem2d_fluid_solid_dd_bwd_e",
+    "sem2d_fluid_solid_dd_bwd_recon",
+    "sem2d_fluid_solid_dd_bwd_march_asm",
+    "sem2d_fluid_solid_dd_bwd_march_fin",
+    "sem2d_acoustic_cpml_backward",
+    "sem2d_elastic_cpml_forward",
+    "sem2d_elastic_cpml_backward",
+    "sem2d_fluid_solid_forward",
+    "sem2d_fluid_solid_backward",
+    "sem3d_acoustic_forward",
+    "sem3d_acoustic_backward",
+    "sem3d_acoustic_cpml_dd_asm",
+    "sem3d_acoustic_cpml_dd_step",
+    "sem3d_acoustic_cpml_dd_bwd_pre",
+    "sem3d_acoustic_cpml_dd_bwd_mid",
+    "sem3d_acoustic_cpml_dd_bwd_end",
+    "sem3d_elastic_forward",
+    "sem3d_elastic_backward",
+    "sem3d_elastic_vs_forward",
+    "sem3d_elastic_vs_backward"
 };
-const int ENTRY_KINDS[SWEEP_ENTRY_COUNT] = { 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1 };
+const int ENTRY_KINDS[SWEEP_ENTRY_COUNT] = { 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3 };
 
 void fill_err(char* err, int cap, const char* what)
 {
@@ -173,8 +219,109 @@ int guarded(F f, char* err, int cap)
     catch (...) { fill_err(err, cap, "sweep core: unknown exception"); return 1; }
 }
 
+// The SEM entries (kind 3) start here; each takes its own twin struct.
+constexpr int SEM_FIRST = SWEEP_ENTRY_SEM2D_ACOUSTIC_FORWARD;
+const char* const SEM_STRUCTS[SWEEP_ENTRY_COUNT - SEM_FIRST] = {
+    "SemForwardInputCore",
+    "SemBackwardInputCore",
+    "SemElasticForwardInputCore",
+    "SemElasticBackwardInputCore",
+    "SemAcousticCpmlForwardInputCore",
+    "SemAcousticCpmlForwardInputCore",
+    "SemAcousticCpmlForwardInputCore",
+    "SemAcousticCpmlBackwardInputCore",
+    "SemAcousticCpmlBackwardInputCore",
+    "SemAcousticCpmlBackwardInputCore",
+    "SemElasticCpmlForwardInputCore",
+    "SemElasticCpmlForwardInputCore",
+    "SemElasticCpmlBackwardInputCore",
+    "SemElasticCpmlBackwardInputCore",
+    "SemElasticCpmlBackwardInputCore",
+    "SemElasticCpmlBackwardInputCore",
+    "SemFluidSolidForwardInputCore",
+    "SemFluidSolidForwardInputCore",
+    "SemFluidSolidForwardInputCore",
+    "SemFluidSolidBackwardInputCore",
+    "SemFluidSolidBackwardInputCore",
+    "SemFluidSolidBackwardInputCore",
+    "SemFluidSolidBackwardInputCore",
+    "SemFluidSolidBackwardInputCore",
+    "SemFluidSolidBackwardInputCore",
+    "SemFluidSolidBackwardInputCore",
+    "SemFluidSolidBackwardInputCore",
+    "SemAcousticCpmlBackwardInputCore",
+    "SemElasticCpmlForwardInputCore",
+    "SemElasticCpmlBackwardInputCore",
+    "SemFluidSolidForwardInputCore",
+    "SemFluidSolidBackwardInputCore",
+    "Sem3dForwardInputCore",
+    "Sem3dBackwardInputCore",
+    "Sem3dCpmlForwardInputCore",
+    "Sem3dCpmlForwardInputCore",
+    "Sem3dCpmlBackwardInputCore",
+    "Sem3dCpmlBackwardInputCore",
+    "Sem3dCpmlBackwardInputCore",
+    "Sem3dElasticForwardInputCore",
+    "Sem3dElasticBackwardInputCore",
+    "Sem3dVsForwardInputCore",
+    "Sem3dVsBackwardInputCore"
+};
+
+void sem_dispatch(int entry, const void* in, int64_t arg)
+{
+    (void)arg;
+    switch (entry) {
+        case SWEEP_ENTRY_SEM2D_ACOUSTIC_FORWARD: sem2d::acoustic_forward(*static_cast<const SemForwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM2D_ACOUSTIC_BACKWARD: sem2d::acoustic_backward(*static_cast<const SemBackwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM2D_ELASTIC_FORWARD: sem2d::elastic_forward(*static_cast<const SemElasticForwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM2D_ELASTIC_BACKWARD: sem2d::elastic_backward(*static_cast<const SemElasticBackwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM2D_ACOUSTIC_CPML_FORWARD: sem2d::acoustic_cpml_forward(*static_cast<const SemAcousticCpmlForwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM2D_ACOUSTIC_CPML_DD_GRADS: sem2d::acoustic_cpml_dd_grads(*static_cast<const SemAcousticCpmlForwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM2D_ACOUSTIC_CPML_DD_STEP: sem2d::acoustic_cpml_dd_step(*static_cast<const SemAcousticCpmlForwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM2D_ACOUSTIC_CPML_DD_BWD_PRE: sem2d::acoustic_cpml_dd_bwd_pre(*static_cast<const SemAcousticCpmlBackwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM2D_ACOUSTIC_CPML_DD_BWD_MID: sem2d::acoustic_cpml_dd_bwd_mid(*static_cast<const SemAcousticCpmlBackwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM2D_ACOUSTIC_CPML_DD_BWD_END: sem2d::acoustic_cpml_dd_bwd_end(*static_cast<const SemAcousticCpmlBackwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM2D_ELASTIC_CPML_DD_ASM: sem2d::elastic_cpml_dd_asm(*static_cast<const SemElasticCpmlForwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM2D_ELASTIC_CPML_DD_STEP: sem2d::elastic_cpml_dd_step(*static_cast<const SemElasticCpmlForwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM2D_ELASTIC_CPML_DD_BWD_MARCH_ASM: sem2d::elastic_cpml_dd_bwd_march_asm(*static_cast<const SemElasticCpmlBackwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM2D_ELASTIC_CPML_DD_BWD_MARCH_FIN: sem2d::elastic_cpml_dd_bwd_march_fin(*static_cast<const SemElasticCpmlBackwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM2D_ELASTIC_CPML_DD_BWD_PRE: sem2d::elastic_cpml_dd_bwd_pre(*static_cast<const SemElasticCpmlBackwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM2D_ELASTIC_CPML_DD_BWD_END: sem2d::elastic_cpml_dd_bwd_end(*static_cast<const SemElasticCpmlBackwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_ASM: sem2d::fluid_solid_dd_asm(*static_cast<const SemFluidSolidForwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_MID: sem2d::fluid_solid_dd_mid(*static_cast<const SemFluidSolidForwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_STEP: sem2d::fluid_solid_dd_step(*static_cast<const SemFluidSolidForwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_BWD_A: sem2d::fluid_solid_dd_bwd_a(*static_cast<const SemFluidSolidBackwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_BWD_B: sem2d::fluid_solid_dd_bwd_b(*static_cast<const SemFluidSolidBackwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_BWD_C: sem2d::fluid_solid_dd_bwd_c(*static_cast<const SemFluidSolidBackwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_BWD_D: sem2d::fluid_solid_dd_bwd_d(*static_cast<const SemFluidSolidBackwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_BWD_E: sem2d::fluid_solid_dd_bwd_e(*static_cast<const SemFluidSolidBackwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_BWD_RECON: sem2d::fluid_solid_dd_bwd_recon(*static_cast<const SemFluidSolidBackwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_BWD_MARCH_ASM: sem2d::fluid_solid_dd_bwd_march_asm(*static_cast<const SemFluidSolidBackwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_BWD_MARCH_FIN: sem2d::fluid_solid_dd_bwd_march_fin(*static_cast<const SemFluidSolidBackwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM2D_ACOUSTIC_CPML_BACKWARD: sem2d::acoustic_cpml_backward(*static_cast<const SemAcousticCpmlBackwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM2D_ELASTIC_CPML_FORWARD: sem2d::elastic_cpml_forward(*static_cast<const SemElasticCpmlForwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM2D_ELASTIC_CPML_BACKWARD: sem2d::elastic_cpml_backward(*static_cast<const SemElasticCpmlBackwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM2D_FLUID_SOLID_FORWARD: sem2d::fluid_solid_forward(*static_cast<const SemFluidSolidForwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM2D_FLUID_SOLID_BACKWARD: sem2d::fluid_solid_backward(*static_cast<const SemFluidSolidBackwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM3D_ACOUSTIC_FORWARD: sem3d::acoustic3d_forward(*static_cast<const Sem3dForwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM3D_ACOUSTIC_BACKWARD: sem3d::acoustic3d_backward(*static_cast<const Sem3dBackwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM3D_ACOUSTIC_CPML_DD_ASM: sem3d::acoustic3d_cpml_dd_asm(*static_cast<const Sem3dCpmlForwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM3D_ACOUSTIC_CPML_DD_STEP: sem3d::acoustic3d_cpml_dd_step(*static_cast<const Sem3dCpmlForwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM3D_ACOUSTIC_CPML_DD_BWD_PRE: sem3d::acoustic3d_cpml_dd_bwd_pre(*static_cast<const Sem3dCpmlBackwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM3D_ACOUSTIC_CPML_DD_BWD_MID: sem3d::acoustic3d_cpml_dd_bwd_mid(*static_cast<const Sem3dCpmlBackwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM3D_ACOUSTIC_CPML_DD_BWD_END: sem3d::acoustic3d_cpml_dd_bwd_end(*static_cast<const Sem3dCpmlBackwardInputCore*>(in), arg); return;
+        case SWEEP_ENTRY_SEM3D_ELASTIC_FORWARD: sem3d::elastic3d_forward(*static_cast<const Sem3dElasticForwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM3D_ELASTIC_BACKWARD: sem3d::elastic3d_backward(*static_cast<const Sem3dElasticBackwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM3D_ELASTIC_VS_FORWARD: sem3d::elastic_vs3d_forward(*static_cast<const Sem3dVsForwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM3D_ELASTIC_VS_BACKWARD: sem3d::elastic_vs3d_backward(*static_cast<const Sem3dVsBackwardInputCore*>(in)); return;
+        default: SWEEP_CHECK(false, "sweep_sem_call: entry ", entry, " is not a SEM entry");
+    }
+}
+
 void dispatch(int entry, const void* in, void* out)
 {
+    SWEEP_CHECK(entry < SEM_FIRST || entry >= SWEEP_ENTRY_COUNT, "sweep_call: ", sweep_entry_name(entry),
+                " is a SEM entry; call it through sweep_sem_call");
     switch (entry) {
         case 0: *static_cast<ForwardOutputCore*>(out) = acoustic2d::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
         case 1: *static_cast<BackwardOutputCore*>(out) = acoustic2d::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
@@ -343,6 +490,12 @@ int sweep_call(int entry, const void* in, void* out, char* err, int err_cap)
 {
     return guarded([&] { dispatch(entry, in, out); }, err, err_cap);
 }
+
+int sweep_sem_call(int entry, const void* in, int64_t arg, char* err, int err_cap)
+{
+    return guarded([&] { sem_dispatch(entry, in, arg); }, err, err_cap);
+}
+const char* sweep_entry_struct(int entry) { return (entry >= SEM_FIRST && entry < SWEEP_ENTRY_COUNT) ? SEM_STRUCTS[entry - SEM_FIRST] : nullptr; }
 
 int sweep_forward_runner_create(int entry, const void* in, void** handle, char* err, int err_cap)
 {

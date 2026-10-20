@@ -46,6 +46,8 @@ def _declare(lib, path: str = "<core>") -> None:
     sig("sweep_entry_name", [c_int], c_char_p)
     sig("sweep_entry_kind", [c_int], c_int)
     sig("sweep_call", [c_int, c_void_p, c_void_p, c_char_p, c_int], c_int)
+    sig("sweep_sem_call", [c_int, c_void_p, c_int64, c_char_p, c_int], c_int)
+    sig("sweep_entry_struct", [c_int], c_char_p)
     for side in ("forward", "backward"):
         sig(f"sweep_{side}_runner_create", [c_int, c_void_p, POINTER(c_void_p), c_char_p, c_int], c_int)
         sig(f"sweep_{side}_runner_run", [c_void_p, c_int, c_int, c_int, c_void_p, c_char_p, c_int], c_int)

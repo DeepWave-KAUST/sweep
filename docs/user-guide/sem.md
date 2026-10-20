@@ -272,7 +272,7 @@ Each equation family's autograd Functions sit in one module of
 single-domain Function (the C entry runs the time loop) next to the strip
 Function `SEMModelParallel` steps (Python runs the stepped entries with one
 exchange per assembly). A module names
-its struct field families once and fills the forward and backward pybind
+its struct field families once and fills the forward and backward input
 structs through `sweep/sem/cdrive.py`: `fill` copies the constant tables,
 `Alloc` hands out the per-step buffers (families a C entry re-zeroes
 together are the rows of one buffer, so one memset covers them),
@@ -287,6 +287,20 @@ receiver gather, the source patterns, the ibool and geometry casts and the
 scalar tail, gathered once per call), on the strip side
 `SEMModelParallel._consts_*` on top of `_Strip` — each a single dict
 literal with the source of every C-side value beside its key.
+
+The kernels are entries of the same torch-free core as the FD equations
+(`libsweep_core.so`): kind 3 of the C API (`core/capi.h`), called through
+`sweep_sem_call` with the step index the DD phase entries take. Their input
+structs are generated: `utils/gen_input_core.py` turns the torch-typed specs
+`cuda/equations/sem2d/sem_types.h` and `sem3d/sem3d_types.h` into the twins the
+drivers take (`core/sem_input_core.h`), their ctypes mirror and the layout
+probe. On the Python side an input (`sweep._C.SemForwardInput` and the rest,
+`sweep/backend/c/sem.py`) writes each assignment straight into its twin, so a
+call hands the core a pointer — the C-PML paths call the DD phase entries
+several times a step, and re-packing a struct of up to ~230 fields per call
+would cost more than the step. Add a field to a spec (never rename or remove
+one) and re-run the generator; `test/test_input_core_generated.py` fails on a
+stale twin.
 
 ### The 3-D save-all backward keeps one tape
 

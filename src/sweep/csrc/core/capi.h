@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define SWEEP_CORE_ABI_VERSION 2
+#define SWEEP_CORE_ABI_VERSION 3
 SWEEP_CAPI int sweep_core_abi_version(void);
 
 // Layout probe for the ctypes mirror (sweep/_core_abi.py): sizeof / offsetof
@@ -31,7 +31,10 @@ SWEEP_CAPI int64_t sweep_layout_probe(int64_t i);
 // One id per bound <equation>_<op>; the names (sweep_entry_name) are the Python
 // module's function names.  Kind: 0 = forward (ForwardInputCore ->
 // ForwardOutputCore), 1 = backward (BackwardInputCore -> BackwardOutputCore),
-// 2 = rtm (BackwardInputCore -> RTMOutputCore).
+// 2 = rtm (BackwardInputCore -> RTMOutputCore), 3 = sem (the entry's own
+// Sem*InputCore, core/sem_input_core.h, named by sweep_entry_struct; nothing
+// comes back -- the outputs are the buffers the caller bound -- and it is
+// called through sweep_sem_call, not sweep_call).
 enum SweepEntry {
     SWEEP_ENTRY_ACOUSTIC2D_FORWARD = 0,
     SWEEP_ENTRY_ACOUSTIC2D_BACKWARD = 1,
@@ -148,7 +151,50 @@ enum SweepEntry {
     SWEEP_ENTRY_QP_TTI_LSRTM2D_BACKWARD = 112,
     SWEEP_ENTRY_QP_TTI_LSRTM2D_BACKWARD_BS = 113,
     SWEEP_ENTRY_QP_TTI_LSRTM2D_BACKWARD_CKPT = 114,
-    SWEEP_ENTRY_COUNT = 115
+    SWEEP_ENTRY_SEM2D_ACOUSTIC_FORWARD = 115,
+    SWEEP_ENTRY_SEM2D_ACOUSTIC_BACKWARD = 116,
+    SWEEP_ENTRY_SEM2D_ELASTIC_FORWARD = 117,
+    SWEEP_ENTRY_SEM2D_ELASTIC_BACKWARD = 118,
+    SWEEP_ENTRY_SEM2D_ACOUSTIC_CPML_FORWARD = 119,
+    SWEEP_ENTRY_SEM2D_ACOUSTIC_CPML_DD_GRADS = 120,
+    SWEEP_ENTRY_SEM2D_ACOUSTIC_CPML_DD_STEP = 121,
+    SWEEP_ENTRY_SEM2D_ACOUSTIC_CPML_DD_BWD_PRE = 122,
+    SWEEP_ENTRY_SEM2D_ACOUSTIC_CPML_DD_BWD_MID = 123,
+    SWEEP_ENTRY_SEM2D_ACOUSTIC_CPML_DD_BWD_END = 124,
+    SWEEP_ENTRY_SEM2D_ELASTIC_CPML_DD_ASM = 125,
+    SWEEP_ENTRY_SEM2D_ELASTIC_CPML_DD_STEP = 126,
+    SWEEP_ENTRY_SEM2D_ELASTIC_CPML_DD_BWD_MARCH_ASM = 127,
+    SWEEP_ENTRY_SEM2D_ELASTIC_CPML_DD_BWD_MARCH_FIN = 128,
+    SWEEP_ENTRY_SEM2D_ELASTIC_CPML_DD_BWD_PRE = 129,
+    SWEEP_ENTRY_SEM2D_ELASTIC_CPML_DD_BWD_END = 130,
+    SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_ASM = 131,
+    SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_MID = 132,
+    SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_STEP = 133,
+    SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_BWD_A = 134,
+    SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_BWD_B = 135,
+    SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_BWD_C = 136,
+    SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_BWD_D = 137,
+    SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_BWD_E = 138,
+    SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_BWD_RECON = 139,
+    SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_BWD_MARCH_ASM = 140,
+    SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_BWD_MARCH_FIN = 141,
+    SWEEP_ENTRY_SEM2D_ACOUSTIC_CPML_BACKWARD = 142,
+    SWEEP_ENTRY_SEM2D_ELASTIC_CPML_FORWARD = 143,
+    SWEEP_ENTRY_SEM2D_ELASTIC_CPML_BACKWARD = 144,
+    SWEEP_ENTRY_SEM2D_FLUID_SOLID_FORWARD = 145,
+    SWEEP_ENTRY_SEM2D_FLUID_SOLID_BACKWARD = 146,
+    SWEEP_ENTRY_SEM3D_ACOUSTIC_FORWARD = 147,
+    SWEEP_ENTRY_SEM3D_ACOUSTIC_BACKWARD = 148,
+    SWEEP_ENTRY_SEM3D_ACOUSTIC_CPML_DD_ASM = 149,
+    SWEEP_ENTRY_SEM3D_ACOUSTIC_CPML_DD_STEP = 150,
+    SWEEP_ENTRY_SEM3D_ACOUSTIC_CPML_DD_BWD_PRE = 151,
+    SWEEP_ENTRY_SEM3D_ACOUSTIC_CPML_DD_BWD_MID = 152,
+    SWEEP_ENTRY_SEM3D_ACOUSTIC_CPML_DD_BWD_END = 153,
+    SWEEP_ENTRY_SEM3D_ELASTIC_FORWARD = 154,
+    SWEEP_ENTRY_SEM3D_ELASTIC_BACKWARD = 155,
+    SWEEP_ENTRY_SEM3D_ELASTIC_VS_FORWARD = 156,
+    SWEEP_ENTRY_SEM3D_ELASTIC_VS_BACKWARD = 157,
+    SWEEP_ENTRY_COUNT = 158
 };
 SWEEP_CAPI int sweep_entry_count(void);
 SWEEP_CAPI const char* sweep_entry_name(int entry);   // NULL when out of range
@@ -156,6 +202,11 @@ SWEEP_CAPI int sweep_entry_kind(int entry);           // -1 when out of range
 
 // The monolithic call: ``in``/``out`` point at the structs of the entry's kind.
 SWEEP_CAPI int sweep_call(int entry, const void* in, void* out, char* err, int err_cap);
+
+// The SEM entries (kind 3): ``in`` points at the struct sweep_entry_struct names;
+// ``arg`` is the step index the DD phase entries take (n or k), ignored by the rest.
+SWEEP_CAPI int sweep_sem_call(int entry, const void* in, int64_t arg, char* err, int err_cap);
+SWEEP_CAPI const char* sweep_entry_struct(int entry);   // a kind-3 entry's input struct; NULL otherwise
 
 // Stepped runners (the DD time loop): built once from a core input whose spans
 // the caller keeps valid until destroy, run() per segment.  ``entry`` is the

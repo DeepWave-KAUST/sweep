@@ -65,6 +65,11 @@ and this project adheres to
   local-window FWI and an x-strip domain decomposition (`SEMModelParallel`).
   User guide: `docs/user-guide/sem.md`; examples: the SEM section (notebooks
   41-44).
+- **`impl='c'` for `sweep.sem`.**  The SEM CUDA kernels are 43 entries of the
+  core (kind 3 of the C API, called through `sweep_sem_call`), their input
+  structs generated from `cuda/equations/sem{2,3}d/*_types.h` like the FD ones.
+  The core's C ABI is now 3: a core built from an older tree is refused at
+  load -- rebuild it.
 
 ### Changed
 - **`ElasticCurvilinear` follows Bartana, Xu & Rickett: collocated fields,
