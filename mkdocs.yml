@@ -100,6 +100,7 @@ nav:
       - Operators: user-guide/operators.md
       - Propagators: user-guide/propagators.md
       - Domain decomposition: user-guide/parallel.md
+      - SEM: user-guide/sem.md
       - Datasets: user-guide/datasets.md
       - Extending: user-guide/extending.md
       - CLI: user-guide/cli.md
@@ -141,6 +142,12 @@ nav:
               - Elastic TTI · rotation (2-D RSG): notebooks/10_wavefield_elastic_tti.ipynb
               - Elastic TTI · 3-D: notebooks/27_wavefield_elastic_tti_3d.ipynb
               - Elastic TTI · displacement (Oh 2020): notebooks/28_wavefield_elastic_tti_2nd.ipynb
+          - SEM:
+              - examples/sem/index.md
+              - Hello · SEM · forward and backward: notebooks/43_sem_forward_backward.ipynb
+              - FD vs SEM · topography: notebooks/41_fd_vs_sem_topography.ipynb
+              - Acoustic · Marmousi · FWI: notebooks/42_fwi_acoustic_marmousi_sem.ipynb
+              - Batched local windows · FWI: notebooks/44_sem_batched_local_window_fwi.ipynb
           - Imaging:
               - examples/imaging/index.md
               - RTM · Marmousi: notebooks/08_rtm_acoustic_marmousi.ipynb

@@ -186,11 +186,15 @@ def test_boundary_saving_matches_full_tape(name):
 
 
 def _peak_mem(prop, cfg, init_m, obs, wavelet, src, rec):
+    # the peak this rollout adds to what the process already holds -- other tests'
+    # tensors, a cuBLAS workspace per (handle, stream) -- so that the ratios below
+    # compare the two memory modes and not the session's history
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
+    base = torch.cuda.memory_allocated()
     _first_grad(prop, cfg, init_m, obs, wavelet, src, rec)
     torch.cuda.synchronize()
-    return torch.cuda.max_memory_allocated()
+    return torch.cuda.max_memory_allocated() - base
 
 
 @pytest.mark.parametrize("name", ["acoustic2d", "elastic2d"])

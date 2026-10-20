@@ -63,6 +63,17 @@ linked at the bottom of this page.
 
     [:octicons-arrow-right-24: 5 notebooks](anisotropic/index.md)
 
+-   [![SEM](../figures/gallery/41_fd_vs_sem_topography.png){ loading=lazy }](sem/index.md)
+
+    **SEM**
+
+    ---
+
+    The spectral-element solver: forward and backward, topography against
+    finite differences, and Marmousi FWI.
+
+    [:octicons-arrow-right-24: 4 notebooks](sem/index.md)
+
 -   [![Imaging](../figures/gallery/08_rtm_acoustic_marmousi.png){ loading=lazy }](imaging/index.md)
 
     **Imaging**

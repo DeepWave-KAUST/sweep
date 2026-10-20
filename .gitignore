@@ -28,6 +28,7 @@ examples/models/**
 test/cuda
 test/test_outputs/
 test/outputs/
+_smoketest/
 slurm_logs/
 dcgm/
 # Anchored to the repo root on purpose. Unanchored, `scripts/` matches a

@@ -50,6 +50,21 @@ and this project adheres to
   Open-pore top free surface.  `biot_from_rock` builds the eight coefficients
   from rock properties (differentiable).  Boundary saving is refused (the
   drag is dissipative); gradients use checkpointing.
+- **`sweep.sem`: a spectral-element solver for irregular topography.**  Quad9 /
+  Hex27 curvilinear meshes fitted to the free surface and GLL points with a
+  diagonal mass matrix: the acoustic potential, elastic and coupled
+  fluid-solid equations in 2-D, acoustic and elastic in 3-D, all but 3-D
+  elastic with C-PML.  `PropSEM` takes `PropTorch`'s constructor and call:
+  `abcn` grid cells of C-PML (whole elements) outside the model, whose
+  gradient stops at the model edge as FD's does; the `free_surface` edge
+  spec; per-column `topography` rows; `memory=Full()` / `BoundarySaving()` /
+  `Ckpt()`; `impl=None` (auto); `nt` from the wavelet; the `source_type` names
+  (`["sxx", "szz"]` an explosion, `["vz"]` a vertical force, with FD's
+  waveform) and `return_wavefield` snapshots on the grid.  Boundary saving
+  (fp32 / bf16 / fp16 / int8 band rings), shot batching, per-shot models,
+  local-window FWI and an x-strip domain decomposition (`SEMModelParallel`).
+  User guide: `docs/user-guide/sem.md`; examples: the SEM section (notebooks
+  41-44).
 
 ### Changed
 - **`ElasticCurvilinear` follows Bartana, Xu & Rickett: collocated fields,
