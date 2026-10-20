@@ -55,7 +55,6 @@ Available equations:
   DASZhao3D              ['vp', 'vs', 'rho']                                                 yes            yes
   Elastic                ['vp', 'vs', 'rho']                                                 yes            yes
   Elastic3D              ['vp', 'vs', 'rho']                                                 yes            yes
-  ElasticAPM             ['vp', 'vs', 'rho']                                                 yes            yes
   ElasticCurvilinear     ['vp', 'vs', 'rho']                                                 no             no
   ElasticTTI             ['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']  no             no
   ElasticTTI2nd          ['vh', 'vs', 'rho', 'epsilon', 'eta', 'theta']                      yes            yes

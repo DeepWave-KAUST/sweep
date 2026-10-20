@@ -64,7 +64,6 @@ plugins:
               - "!^FIELD_SPECS$"
               - "!^MODEL_SPECS$"
               - "!^default_pml_type$"
-              - "!^supports_apm$"
 
 markdown_extensions:
   - admonition

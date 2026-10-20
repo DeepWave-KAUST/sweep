@@ -204,10 +204,10 @@ def test_air_cells_stay_zero_under_hill():
 # ---------------------------------------------------------------------------
 
 
-def test_topography_apm_on_acoustic_raises():
-    """With the unified ``topo_method=`` API, ``Acoustic`` cannot use APM
-    (Cao 2018 is elastic-only).  Asking for it must error cleanly."""
-    with pytest.raises(ValueError, match="topo_method='apm' requires"):
+def test_topography_apm_was_removed():
+    """``topo_method='apm'`` is gone; asking for it names what to use instead
+    rather than quietly running another method."""
+    with pytest.raises(ValueError, match="topo_method='apm' was removed"):
         _make_prop(topography=np.zeros(NX, dtype=np.int64), topo_method='apm')
 
 

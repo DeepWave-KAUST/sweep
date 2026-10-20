@@ -39,7 +39,6 @@
     "DASZhao3D",
     "Elastic",
     "Elastic3D",
-    "ElasticAPM",
     "ElasticCurvilinear",
     "ElasticTTI",
     "ElasticTTI2nd",
@@ -67,7 +66,6 @@
     "das",
     "elastic",
     "elastic3d",
-    "elastic_apm",
     "elastic_curvilinear",
     "elastic_tti",
     "elastic_tti_2nd",
@@ -127,7 +125,6 @@
     "DASZhao3D": "sweep.equations.das.DASZhao3D",
     "Elastic": "sweep.equations.elastic.Elastic",
     "Elastic3D": "sweep.equations.elastic3d.Elastic",
-    "ElasticAPM": "sweep.equations.elastic.Elastic",
     "ElasticCurvilinear": "sweep.equations.elastic_curvilinear.ElasticCurvilinear",
     "ElasticTTI": "sweep.equations.elastic_tti.ElasticTTI",
     "ElasticTTISG": "sweep.equations.elastic_tti_sg.ElasticTTISG",
@@ -153,7 +150,6 @@
     "das": "module",
     "elastic": "module",
     "elastic3d": "module",
-    "elastic_apm": "module",
     "elastic_curvilinear": "module",
     "elastic_tti": "module",
     "elastic_tti_sg": "module",
@@ -207,7 +203,6 @@
     "DASZhao3D": "sweep.equations.das.DASZhao3D",
     "Elastic": "sweep.equations.elastic.Elastic",
     "Elastic3D": "sweep.equations.elastic3d.Elastic",
-    "ElasticAPM": "sweep.equations.elastic.Elastic",
     "ElasticCurvilinear": "sweep.equations.elastic_curvilinear.ElasticCurvilinear",
     "ElasticTTI": "sweep.equations.elastic_tti.ElasticTTI",
     "ElasticTTI2nd": "sweep.equations.elastic_tti_2nd.ElasticTTI2nd",
@@ -246,7 +241,6 @@
     "DASZhao3D",
     "Elastic",
     "Elastic3D",
-    "ElasticAPM",
     "ElasticCurvilinear",
     "ElasticTTI2nd",
     "ElasticTTISG",
@@ -254,5 +248,5 @@
     "ElasticVRR",
     "ViscoAcoustic"
   ],
-  "_note": "Frozen at origin/dev. Updated 2026-08-28 for dev b895a93..4d025ea, which added exactly two equations (ElasticTTISG3D, ElasticTTI2nd). Updated 2026-09-17 for dev cf588fb6 (ViscoAcoustic CUDA backend, PR #78): torch_binding gains ViscoAcoustic, nothing else moved. Verified by diffing the live surface against this file: nothing disappeared, no class changed owner. NOT regenerated wholesale -- the refactor's own additions stay in check_equations_api.py's ALLOWED_NEW, so that this file keeps describing DEV's surface rather than rubber-stamping ours. Updated 2026-10-21 for feat/qp-tti-cuda: adds AcousticVTILSRTM / AcousticTTILSRTM (aliases AcousticVTIBorn / AcousticTTIBorn, module qP_lsrtm), and torch_binding gains the qP pair (AcousticVTI + AcousticVTIDefault / AcousticVTILiang, AcousticTTI + AcousticTTILiang) and the two Born classes with their aliases. Updated 2026-10-23 for feat/biot: adds Biot (and the biot submodule), eager-only, so torch_binding is unchanged."
+  "_note": "Frozen at origin/dev. Updated 2026-08-28 for dev b895a93..4d025ea, which added exactly two equations (ElasticTTISG3D, ElasticTTI2nd). Updated 2026-09-17 for dev cf588fb6 (ViscoAcoustic CUDA backend, PR #78): torch_binding gains ViscoAcoustic, nothing else moved. Verified by diffing the live surface against this file: nothing disappeared, no class changed owner. NOT regenerated wholesale -- the refactor's own additions stay in check_equations_api.py's ALLOWED_NEW, so that this file keeps describing DEV's surface rather than rubber-stamping ours. Updated 2026-10-21 for feat/qp-tti-cuda: adds AcousticVTILSRTM / AcousticTTILSRTM (aliases AcousticVTIBorn / AcousticTTIBorn, module qP_lsrtm), and torch_binding gains the qP pair (AcousticVTI + AcousticVTIDefault / AcousticVTILiang, AcousticTTI + AcousticTTILiang) and the two Born classes with their aliases. Updated 2026-10-23 for feat/biot: adds Biot (and the biot submodule), eager-only, so torch_binding is unchanged. Updated 2026-10-20 for the APM removal: ElasticAPM (an alias of Elastic) and the elastic_apm module leave dir(), equation_classes and torch_binding, nothing else moved. Verified by diffing the live surface against this file: nothing disappeared, no class changed owner."
 }

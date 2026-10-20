@@ -22,7 +22,7 @@ namespace visco_acoustic2d {
 // active iff its eq_aux filter grid is present.
 //
 // v1 scope (all guarded, never silent): no DD / stepped segments, no
-// topography / APM, no boundary saving (the dissipative term breaks the
+// topography, no boundary saving (the dissipative term breaks the
 // reverse-time reconstruction; use ckpt / full).  Per-edge free surface is
 // inherited from the acoustic2d region logic + the post-damping halo zeroing.
 //
@@ -50,7 +50,7 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
                 "amplitude damping is a global FFT)");
     SWEEP_CHECK(p.it_begin == 0 && (p.it_end < 0 || p.it_end == (int)p.nt),
                 "visco_acoustic2d does not support stepped forward segments");
-    SWEEP_CHECK(!p.has_topo && !p.use_apm,
+    SWEEP_CHECK(!p.has_topo,
                 "visco_acoustic2d does not support topography on impl='c' yet; "
                 "use impl='eager'");
     SWEEP_CHECK(!p.use_boundary_saving,
@@ -80,8 +80,6 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
                       dx, 0.f, dz};
     ctx.topo_rows    = nullptr;
     ctx.has_topo     = false;
-    ctx.topo_category = nullptr;
-    ctx.use_apm      = false;
     ctx.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
     ctx.set_cut_mask(0);
 

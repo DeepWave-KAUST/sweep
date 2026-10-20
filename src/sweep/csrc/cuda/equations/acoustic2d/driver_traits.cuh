@@ -15,7 +15,7 @@
 //   * one model, vp = p.models[0], held as a raw pointer in State beside the Laplace/gradient parameter blocks, the launch configs, order/M, nx/nz/B and has_topo;
 //   * BwdWorkspace and BsScratch are empty: the fused adjoint keeps its scratch in the psi/zeta buffers and the NOPML kernel writes no per-step scratch field;
 //   * validate_forward / validate_backward are no-ops;
-//   * setup_ctx installs topo_rows / has_topo (topo_category = nullptr, use_apm = false) and the per-edge free surface via ctx.set_per_edge(fs_faces, pad_lo, pad_hi);
+//   * setup_ctx installs topo_rows / has_topo and the per-edge free surface via ctx.set_per_edge(fs_faces, pad_lo, pad_hi);
 //   * init_aux_slabs = acoustic_init_aux_slabs (CPML aux slabs); alloc_cpml = cpml.bind(pml_vals, 2);
 //   * allt_shape = (nt, B, nz, nx): u only, written in-kernel through u_thist (capture_allt is a no-op);
 //   * save_width = abcn > 0 ? M + 1 : M; boundary save/restore offset 0;
@@ -157,8 +157,6 @@ struct Driver {
     {
         ctx.topo_rows    = p.has_topo ? p.topo_rows.template data_ptr<int>() : nullptr;
         ctx.has_topo     = p.has_topo;
-        ctx.topo_category = nullptr;
-        ctx.use_apm      = false;
         ctx.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
     }
 

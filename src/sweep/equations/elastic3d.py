@@ -14,12 +14,6 @@ from ._free_surface import (
     overwrite_top_row,
     overwrite_at_topo,
 )
-from ._topography import (
-    classify_topography_3d,
-    precompute_apm_moduli_3d,
-    enforce_apm_traction_bc_3d,
-    zero_at_air,
-)
 from ._registry import register_equation
 
 
@@ -253,119 +247,6 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
                           return_gradients=return_gradients)
 
 
-def step_apm(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
-             m_vxx, m_vxy, m_vxz,
-             m_vyx, m_vyy, m_vyz,
-             m_vzx, m_vzy, m_vzz,
-             m_sxxx, m_szzz,
-             m_sxyx, m_sxyy,
-             m_sxzx, m_sxzz,
-             m_syyy,
-             m_syzy, m_syzz,
-             # APM precomputed effective moduli + masked inverse densities.
-             alpha_xx, alpha_yy, alpha_zz,
-             lam_xx_yy, lam_xx_zz,
-             lam_yy_xx, lam_yy_zz,
-             lam_zz_xx, lam_zz_yy,
-             mu_xy_node, mu_xz_node, mu_yz_node,
-             inv_rho_x, inv_rho_y, inv_rho_z,
-             dt, h, b, pd,
-             pml=None,
-             ):
-    """One Virieux 3-D leapfrog step with APM-modified moduli.
-
-    Identical FD stencil to :func:`step`; only the modulus arrays
-    multiplying the stencil outputs change.  ``free_surface`` /
-    ``topo_rows`` are intentionally not parameters — APM implements the
-    surface BC entirely via the per-cell effective moduli and a
-    pointwise stress-zero applied by the caller (``_func_apm``).
-    """
-    az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh = pml
-
-    # ---- Stress-gradient derivatives feeding the velocity update ----
-    dsxx_dx = pd.x_forward(sxx)
-    dsxy_dy = pd.y_backward(sxy)
-    dsxz_dz = pd.z_backward(sxz)
-
-    dsxy_dx = pd.x_backward(sxy)
-    dsyy_dy = pd.y_forward(syy)
-    dsyz_dz = pd.z_backward(syz)
-
-    dsxz_dx = pd.x_backward(sxz)
-    dsyz_dy = pd.y_backward(syz)
-    dszz_dz = pd.z_forward(szz)
-
-    # CPML memory for stress-gradient derivatives (same staggering as
-    # ``step``).
-    dszz_dz, m_szzz = cpml_update(dszz_dz, m_szzz, azh, bzh, (szz, pd.kzf, pd._spacing["z"]))
-    dsxz_dx, m_sxzx = cpml_update(dsxz_dx, m_sxzx, ax, bx, (sxz, pd.kxb, pd._spacing["x"]))
-
-    dsxz_dz, m_sxzz = cpml_update(dsxz_dz, m_sxzz, az, bz, (sxz, pd.kzb, pd._spacing["z"]))
-    dsxx_dx, m_sxxx = cpml_update(dsxx_dx, m_sxxx, axh, bxh, (sxx, pd.kxf, pd._spacing["x"]))
-
-    dsxy_dy, m_sxyy = cpml_update(dsxy_dy, m_sxyy, ay, by, (sxy, pd.kyb, pd._spacing["y"]))
-
-    dsxy_dx, m_sxyx = cpml_update(dsxy_dx, m_sxyx, ax, bx, (sxy, pd.kxb, pd._spacing["x"]))
-
-    dsyy_dy, m_syyy = cpml_update(dsyy_dy, m_syyy, ayh, byh, (syy, pd.kyf, pd._spacing["y"]))
-    dsyz_dz, m_syzz = cpml_update(dsyz_dz, m_syzz, az, bz, (syz, pd.kzb, pd._spacing["z"]))
-
-    dsyz_dy, m_syzy = cpml_update(dsyz_dy, m_syzy, ay, by, (syz, pd.kyb, pd._spacing["y"]))
-
-    # Velocity update: per-component inverse density (already zeroed
-    # where the velocity node sits in air, so no NaN even if rho was
-    # logically "0" for those nodes).
-    vx = vx + dt * inv_rho_x * (dsxx_dx + dsxy_dy + dsxz_dz)
-    vy = vy + dt * inv_rho_y * (dsxy_dx + dsyy_dy + dsyz_dz)
-    vz = vz + dt * inv_rho_z * (dsxz_dx + dsyz_dy + dszz_dz)
-
-    # ---- Velocity-gradient derivatives feeding the stress update ----
-    dvx_dx = pd.x_backward(vx)
-    dvx_dy = pd.y_forward(vx)
-    dvx_dz = pd.z_forward(vx)
-
-    dvy_dx = pd.x_forward(vy)
-    dvy_dy = pd.y_backward(vy)
-    dvy_dz = pd.z_forward(vy)
-
-    dvz_dx = pd.x_forward(vz)
-    dvz_dy = pd.y_forward(vz)
-    dvz_dz = pd.z_backward(vz)
-
-    dvz_dz, m_vzz = cpml_update(dvz_dz, m_vzz, az, bz, (vz, pd.kzb, pd._spacing["z"]))
-    dvy_dy, m_vyy = cpml_update(dvy_dy, m_vyy, ay, by, (vy, pd.kyb, pd._spacing["y"]))
-    dvx_dx, m_vxx = cpml_update(dvx_dx, m_vxx, ax, bx, (vx, pd.kxb, pd._spacing["x"]))
-    dvx_dz, m_vxz = cpml_update(dvx_dz, m_vxz, azh, bzh, (vx, pd.kzf, pd._spacing["z"]))
-    dvz_dx, m_vzx = cpml_update(dvz_dx, m_vzx, axh, bxh, (vz, pd.kxf, pd._spacing["x"]))
-
-    dvx_dy, m_vxy = cpml_update(dvx_dy, m_vxy, ayh, byh, (vx, pd.kyf, pd._spacing["y"]))
-    dvy_dx, m_vyx = cpml_update(dvy_dx, m_vyx, axh, bxh, (vy, pd.kxf, pd._spacing["x"]))
-    dvy_dz, m_vyz = cpml_update(dvy_dz, m_vyz, azh, bzh, (vy, pd.kzf, pd._spacing["z"]))
-    dvz_dy, m_vzy = cpml_update(dvz_dy, m_vzy, ayh, byh, (vz, pd.kyf, pd._spacing["y"]))
-
-    # Normal stresses: per-cell effective α (diagonal) + λ (off-diagonal).
-    # Bulk: α = λ + 2μ on the diagonal and λ off-diagonal — identical to
-    # ``step``.  Surface cells: see ``precompute_apm_moduli_3d``.
-    sxx = sxx + dt * (alpha_xx * dvx_dx + lam_xx_yy * dvy_dy + lam_xx_zz * dvz_dz)
-    syy = syy + dt * (lam_yy_xx * dvx_dx + alpha_yy * dvy_dy + lam_yy_zz * dvz_dz)
-    szz = szz + dt * (lam_zz_xx * dvx_dx + lam_zz_yy * dvy_dy + alpha_zz * dvz_dz)
-
-    # Shear stresses: per-node μ (μ at bulk, μ/2 at half-air surface nodes).
-    sxy = sxy + dt * mu_xy_node * (dvx_dy + dvy_dx)
-    sxz = sxz + dt * mu_xz_node * (dvx_dz + dvz_dx)
-    syz = syz + dt * mu_yz_node * (dvy_dz + dvz_dy)
-
-    return vx, vy, vz, sxx, syy, szz, sxy, sxz, syz, \
-           m_vxx, m_vxy, m_vxz, \
-           m_vyx, m_vyy, m_vyz, \
-           m_vzx, m_vzy, m_vzz, \
-           m_sxxx, m_szzz, \
-           m_sxyx, m_sxyy, \
-           m_sxzx, m_sxzz, \
-           m_syyy, \
-           m_syzy, m_syzz
-
-
 @register_equation('Elastic3D')
 class Elastic(FirstOrderEquation):
     """First-order 3-D elastic wave equation on a staggered grid (Virieux 1986).
@@ -421,7 +302,6 @@ class Elastic(FirstOrderEquation):
     )
 
     default_pml_type = "cpmls"  # staggered-grid CPML: step() unpacks 12 profiles
-    supports_apm = True          # Cao & Chen 2018 3-D APM is implemented
     # The eager boundary-saving sub-steps carry the free-surface BC (the image
     # derivatives and the surface rows of stress_substep).
     supports_bs_free_surface = True
@@ -457,10 +337,6 @@ class Elastic(FirstOrderEquation):
                 on ``'torch'``. Defaults to ``'torch'``.
         """
         super().__init__(spatial_order, device, backend, ndim=3)
-        # APM (Cao & Chen 2018) cache: keyed by id() of the input tensors so it
-        # hits on every subsequent timestep within a propagator run.
-        self._apm_cache_key = None
-        self._apm_cache = None
 
     @property
     def default_source_fields(self):
@@ -489,17 +365,7 @@ class Elastic(FirstOrderEquation):
     def func(self, wavefields, models, dt, h, b, **kwargs):
         vp, vs, rho, lame_lambda, lame_mu = self._moduli(models)
 
-        # APM dispatch: if the propagator's ``topography=`` was a 3-D air
-        # mask it stored a replicate-padded runtime version on the
-        # equation.  Route through the parameter-modified step (Cao & Chen 2018).
-        air_mask_rt = getattr(self, "_apm_air_mask_runtime", None)
-        if air_mask_rt is not None:
-            return self._func_apm(
-                wavefields, lame_lambda, lame_mu, rho, air_mask_rt,
-                dt, h, b, **kwargs,
-            )
-
-        # Standard (image-method / flat) dispatch.  ``topo_rows`` is 2-D
+        # Image-method / flat step.  ``topo_rows`` is 2-D
         # ``(ny, nx)`` on the runtime grid for irregular topo; ``None``
         # for flat / no-FS.
         topo_rows = getattr(self, "_topo_rows_runtime", None)
@@ -528,8 +394,6 @@ class Elastic(FirstOrderEquation):
         but the free-surface BC kept, so the eager boundary-saving 'substep'
         driver inverts the step exactly by composing the list in reverse order
         at ``-dt``."""
-        if getattr(self, "_apm_air_mask_runtime", None) is not None:
-            raise NotImplementedError("Eager boundary saving with topo_method='apm' (Elastic3D).")
         pd = self.pd
         fs = bool(getattr(self, "free_surface", False))
         topo = getattr(self, "_topo_rows_runtime", None)
@@ -544,85 +408,6 @@ class Elastic(FirstOrderEquation):
 
         return [sub_v, sub_s]   # forward order; reverse = reversed(...) at -dt
 
-    def _func_apm(self, wavefields, lame_lambda, lame_mu, rho, air_mask_rt,
-                  dt, h, b, **kwargs):
-        """One leapfrog step with APM-modified moduli (Cao & Chen 2018, 3-D).
-
-        Caches the per-category effective moduli by the id() of the input
-        tensors — the same (air_mask, λ, μ, ρ) hit the cache on every
-        subsequent time step within a propagator run.
-        """
-        cache_key = (id(air_mask_rt), id(lame_lambda), id(lame_mu), id(rho))
-        if cache_key == self._apm_cache_key and self._apm_cache is not None:
-            cat, eff = self._apm_cache
-        else:
-            cat = classify_topography_3d(air_mask_rt)
-            eff = precompute_apm_moduli_3d(lame_lambda, lame_mu, rho, cat)
-            self._apm_cache_key = cache_key
-            self._apm_cache = (cat, eff)
-        (alpha_xx, alpha_yy, alpha_zz,
-         lam_xx_yy, lam_xx_zz,
-         lam_yy_xx, lam_yy_zz,
-         lam_zz_xx, lam_zz_yy,
-         mu_xy, mu_xz, mu_yz,
-         inv_rho_x, inv_rho_y, inv_rho_z) = eff
-
-        out = step_apm(
-            *wavefields,
-            alpha_xx, alpha_yy, alpha_zz,
-            lam_xx_yy, lam_xx_zz,
-            lam_yy_xx, lam_yy_zz,
-            lam_zz_xx, lam_zz_yy,
-            mu_xy, mu_xz, mu_yz,
-            inv_rho_x, inv_rho_y, inv_rho_z,
-            dt, h, b,
-            pd=self.pd,
-            pml=self.b,
-        )
-        (vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
-         m_vxx, m_vxy, m_vxz,
-         m_vyx, m_vyy, m_vyz,
-         m_vzx, m_vzy, m_vzz,
-         m_sxxx, m_szzz,
-         m_sxyx, m_sxyy,
-         m_sxzx, m_sxzz,
-         m_syyy,
-         m_syzy, m_syzz) = out
-
-        # APM traction-free BC: pointwise stress zero per cell category.
-        sxx, syy, szz, sxy, sxz, syz = enforce_apm_traction_bc_3d(
-            sxx, syy, szz, sxy, sxz, syz, cat,
-        )
-        # Vacuum approximation: zero all 9 wavefield components in pure-air.
-        vx = zero_at_air(vx, air_mask_rt)
-        vy = zero_at_air(vy, air_mask_rt)
-        vz = zero_at_air(vz, air_mask_rt)
-        sxx = zero_at_air(sxx, air_mask_rt)
-        syy = zero_at_air(syy, air_mask_rt)
-        szz = zero_at_air(szz, air_mask_rt)
-        sxy = zero_at_air(sxy, air_mask_rt)
-        sxz = zero_at_air(sxz, air_mask_rt)
-        syz = zero_at_air(syz, air_mask_rt)
-
-        return (
-            vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
-            m_vxx, m_vxy, m_vxz,
-            m_vyx, m_vyy, m_vyz,
-            m_vzx, m_vzy, m_vzz,
-            m_sxxx, m_szzz,
-            m_sxyx, m_sxyy,
-            m_sxzx, m_sxzz,
-            m_syyy,
-            m_syzy, m_syzz,
-        )
-    
-    def _C_apm(self):
-        """APM CUDA binding (Cao & Chen 2018, 3-D): the forward only.  There
-        is no compiled APM backward; ``_c.py``'s ``_guard_apm_backward``
-        sends gradients to eager autograd."""
-        import sweep._C as _C
-        return (_C.elastic3d_apm_forward,)
-    
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(

@@ -34,7 +34,7 @@
 //     so all three modes run one kernel sequence and agree bitwise;
 //   * refused: boundary saving (the attenuation is dissipative: no stable
 //     reverse reconstruction), stepped / phased / domain-decomposed calls,
-//     topography, APM, ADCIG.
+//     topography, ADCIG.
 //
 // Hook timing: see the HOOK TIMING MAP at the top of ../../common/sg_driver.cuh.
 #pragma once
@@ -242,8 +242,8 @@ struct DriverL : elastic2d::Driver {
     template <class P>
     static void check_supported(const P& p, const char* where)
     {
-        SWEEP_CHECK(!p.has_topo && !p.use_apm,
-                    "ViscoElastic (", where, "): topography / APM is not supported");
+        SWEEP_CHECK(!p.has_topo,
+                    "ViscoElastic (", where, "): topography is not supported");
         SWEEP_CHECK(p.cut_face_mask == 0 && p.step_phase == 0,
                     "ViscoElastic (", where, "): domain decomposition / phased calls are "
                     "not supported");

@@ -454,22 +454,23 @@ class _PropTorchEager(
 
     def _pad_models(self, models):
         """EdgePad physical models to runtime grid + apply equation prep."""
-        models_p = [
-            EdgePadding.apply(self._as_device_tensor(m, dtype=torch.float32),
-                              self._runtime_padding())
-            for m in models
-        ]
+        models_p = self._curvilinear_models(
+            [self._as_device_tensor(m, dtype=torch.float32) for m in models])
+        models_p = [EdgePadding.apply(m, self._runtime_padding()) for m in models_p]
         return models_p, self._prepare_runtime_models(models_p)
 
-    @staticmethod
-    def _crop_to_model(runtime_grid, model_shape):
-        """Center-crop a runtime-padded (…, nz_rt, nx_rt) tensor to the
-        physical model shape."""
-        rt_nz, rt_nx = runtime_grid.shape[-2], runtime_grid.shape[-1]
-        nz, nx = model_shape[-2], model_shape[-1]
-        pz = (rt_nz - nz) // 2
-        px = (rt_nx - nx) // 2
-        return runtime_grid[..., pz:pz + nz, px:px + nx]
+    def _crop_to_model(self, runtime_grid, model_shape):
+        """A runtime-grid (…, nz_rt, nx_rt) image as the gradient of the
+        model: cropped as EdgePadding.backward crops (the pads are per face,
+        so not centred: a free surface has none on top), then reshaped to the
+        model and, on a boundary-fitted grid, taken back to the model grid."""
+        crop = [slice(None)] * runtime_grid.dim()
+        pad = self._runtime_padding()
+        for i in range(len(pad) // 2):
+            lo, hi = pad[2 * i], pad[2 * i + 1]
+            crop[-(i + 1)] = slice(lo, -hi if hi > 0 else None)
+        g = runtime_grid[tuple(crop)].reshape(model_shape)
+        return self._curvilinear_model_grad(g)
 
     def _rollout_ckpt(self, wavefield, models, wavelet_steps, src, rec,
                       receivers, nt, adj):
@@ -571,6 +572,19 @@ class _PropTorchEager(
         mode, batch_size, nsrc_per_shot, _, source_encoding = self._normalize_io(
             wavelet, sources, receivers
         )
+        # physical grid indices onto a boundary-fitted grid, which counts its
+        # rows from the surface (identity on a Cartesian grid); both the
+        # autograd and the custom-gradient paths below take the mapped ones
+        sources = self._place_on_curvilinear(sources, "source")
+        receivers = self._place_on_curvilinear(receivers, "receiver")
+        # and its snapshots back onto the Cartesian grid, unless the caller
+        # wants the grid's own rows (the surface on row 0 of every column)
+        snapshot_grid = kwargs.pop("snapshot_grid", None)
+        if snapshot_grid is not None and not return_wavefield:
+            raise ValueError("snapshot_grid needs return_wavefield=True.")
+        if snapshot_grid not in (None, "physical", "computational"):
+            raise ValueError(
+                f"snapshot_grid must be 'physical' or 'computational'; got {snapshot_grid!r}")
         if models is not None and not isinstance(models, (list, tuple)):
             models = list(models)
 
@@ -637,7 +651,11 @@ class _PropTorchEager(
             snapshots = None
 
         models = models if models is not None else self.parameters()
-        models = [EdgePadding.apply(self._as_device_tensor(para, dtype=torch.float32), self._runtime_padding()) for para in models]
+        # physical-grid models onto a boundary-fitted grid's rows (identity on
+        # a Cartesian grid), differentiably: the gradient is on the model grid
+        models = self._curvilinear_models(
+            [self._as_device_tensor(para, dtype=torch.float32) for para in models])
+        models = [EdgePadding.apply(para, self._runtime_padding()) for para in models]
         self.models_padded = models
         # Insert a singleton channel axis for per-shot batched models so each
         # shot propagates in its own model; shared models pass through unchanged
@@ -678,7 +696,9 @@ class _PropTorchEager(
         if not has_aux:
             return record
         # ``snapshots`` is allocated per call above, so it aliases no workspace
-        # and needs no defensive copy.
+        # and needs no defensive copy -- and may be mapped in place.
+        if snapshot_grid != "computational":
+            snapshots = self._curvilinear_snapshots(snapshots)
         return record, snapshots
 
     forward_base = forward

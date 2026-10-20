@@ -91,8 +91,9 @@ def run_staircase(topo, vp_np, src_x_phys, src_z_phys, rec_x, rec_z_phys, device
     return record.detach().cpu().numpy(), p_snap, snap_times
 
 
-def run_curvilinear(topo, vp_np, src_x_phys, src_z_offset, rec_x, rec_z_offset, device):
-    """``AcousticCurvilinear`` on the COMPUTATIONAL grid (η = 0 = surface)."""
+def run_curvilinear(topo, vp_np, src_x_phys, src_z_phys, rec_x, rec_z_phys, device):
+    """``AcousticCurvilinear`` with the staircase run's physical indices: the
+    propagator maps them onto its boundary-fitted rows (η = 0 = surface)."""
     eq = AcousticCurvilinear(spatial_order=SO, device=device, backend="torch")
     prop = PropTorch(
         eq, shape=(NZ, NX), free_surface=True, topography=topo,
@@ -100,11 +101,10 @@ def run_curvilinear(topo, vp_np, src_x_phys, src_z_offset, rec_x, rec_z_offset, 
         eager_options={"use_compile": False},
     )
     sources = torch.from_numpy(
-        np.array([[src_x_phys, src_z_offset]], dtype=np.int64)
+        np.array([[src_x_phys, src_z_phys]], dtype=np.int64)
     ).to(device)
-    rec_z_comp = np.full_like(rec_x, rec_z_offset)
     receivers = torch.from_numpy(
-        np.stack([rec_x, rec_z_comp], axis=-1)[None, ...]
+        np.stack([rec_x, rec_z_phys], axis=-1)[None, ...]
     ).to(device)
     vp = torch.from_numpy(vp_np).to(device)
     snap_times = list(range(0, NT, NT // 30))
@@ -115,28 +115,6 @@ def run_curvilinear(topo, vp_np, src_x_phys, src_z_offset, rec_x, rec_z_offset, 
         )
     p_snap = snaps[:, 0, 0, 0].detach().cpu().numpy()
     return record.detach().cpu().numpy(), p_snap, snap_times
-
-
-def resample_curvilinear_to_physical(p_snap_comp, topo):
-    """Map ``p_snap_comp`` (shape (n_snap, nz_pad, nx_pad)) from the
-    computational (ξ, η) grid back to the physical (X, Z) grid. Cells
-    above ``topo[ix]`` stay zero. ``nz_pad`` is expected to equal
-    ``NZ + ABCN`` for free-surface."""
-    n_snap, nz_pad, nx_pad = p_snap_comp.shape
-    p_phys_grid = np.zeros_like(p_snap_comp)
-    # Crop PML margins so we operate on physical (NZ, NX).
-    p_comp_phys = p_snap_comp[:, :NZ, ABCN : ABCN + NX]
-    p_phys = np.zeros((n_snap, NZ, NX), dtype=np.float32)
-    eta_comp = np.linspace(0.0, 1.0, NZ, dtype=np.float32)
-    for ix in range(NX):
-        s = int(topo[ix])
-        depth = NZ - 1 - s
-        if depth <= 0:
-            continue
-        eta_phys = np.linspace(0.0, 1.0, depth + 1, dtype=np.float32)
-        for t in range(n_snap):
-            p_phys[t, s : NZ, ix] = np.interp(eta_phys, eta_comp, p_comp_phys[t, :, ix])
-    return p_phys
 
 
 def main():
@@ -159,15 +137,15 @@ def main():
         topo, vp_np, src_x, src_z_phys_stair, rec_x, rec_z_phys_stair, device
     )
 
-    # Curvilinear: computational z-row = offset (surface is η=0)
+    # Curvilinear: the same physical indices
     print("[compare] running curvilinear...")
-    rec_curv, snap_curv_comp, _ = run_curvilinear(
-        topo, vp_np, src_x, src_offset, rec_x, rec_offset, device
+    rec_curv, snap_curv, _ = run_curvilinear(
+        topo, vp_np, src_x, src_z_phys_stair, rec_x, rec_z_phys_stair, device
     )
-    # Resample curvilinear snapshot back to physical grid for visual compare
-    snap_curv_phys = resample_curvilinear_to_physical(snap_curv_comp, topo)
-    # Staircase snapshot is already on the (NZ_pad, NX_pad) grid in
-    # physical coords with vacuum cells above topo; crop to (NZ, NX).
+    # Both snapshots come back on the (NZ_pad, NX_pad) physical grid, zero
+    # above the surface (the curvilinear one mapped back from its own rows by
+    # the propagator); crop the PML to (NZ, NX).
+    snap_curv_phys = snap_curv[:, :NZ, ABCN : ABCN + NX]
     snap_stair_phys = snap_stair[:, :NZ, ABCN : ABCN + NX]
 
     # ----- Record comparison figure -----

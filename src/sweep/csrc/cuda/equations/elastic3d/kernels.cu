@@ -12,8 +12,6 @@ SWEEP_BY_ORDER_TABLE(elastic_velocity_adjoint_apply_3d_fn, elastic_velocity_adjo
 SWEEP_BY_ORDER_TABLE(elastic_stress_adjoint_prepare_3d_fn, elastic_stress_adjoint_prepare_3d_by_order, elastic_stress_adjoint_prepare_3d);
 SWEEP_BY_ORDER_TABLE(elastic_stress_adjoint_apply_3d_fn, elastic_stress_adjoint_apply_3d_by_order, elastic_stress_adjoint_apply_3d);
 SWEEP_BY_ORDER_TABLE(calculate_grad_elastic3d_bs_fn, calculate_grad_elastic3d_bs_by_order, calculate_grad_elastic3d_bs);
-SWEEP_BY_ORDER_TABLE(elastic3d_velocity_kernel_apm_fn, elastic3d_velocity_kernel_apm_by_order, elastic3d_velocity_kernel_apm);
-SWEEP_BY_ORDER_TABLE(elastic3d_stress_kernel_apm_fn, elastic3d_stress_kernel_apm_by_order, elastic3d_stress_kernel_apm);
 
 // 3-D twin of elastic_capture_strips_2d: the six restore slabs of the
 // physical box (x offset innermost so a warp shares memory sectors).

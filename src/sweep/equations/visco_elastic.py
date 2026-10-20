@@ -266,7 +266,7 @@ class ViscoElastic(FirstOrderEquation):
     ``full``, chunk- and recursive-checkpoint backwards with a hand-derived
     exact adjoint).  Not supported: boundary saving (the attenuation is
     dissipative, so reverse reconstruction is unstable; ``impl='c'`` defaults
-    to ``full``), topography / APM, domain decomposition, per-shot batched
+    to ``full``), topography, domain decomposition, per-shot batched
     models.
 
     References:

@@ -211,8 +211,7 @@ wavefields, and backend / binding behavior:
 
 **Elastic family**
 
-- [Elastic](elastic.md) (`ElasticAPM` is an alias of the same class; the APM
-  free surface is chosen with the propagator's `topo_method='apm'`)
+- [Elastic](elastic.md)
 - [Elastic3D](elastic3d.md)
 - [ViscoElastic](visco_elastic.md)
 - [ElasticTTI](elastic_tti.md)

@@ -43,7 +43,7 @@ SO = 4
 DOM_FREQ = 10.0
 DELAY = 0.06
 
-# Auto-select CUDA when available (matches test_elastic_apm.py).
+# Auto-select CUDA when available.
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # Uncompiled eager: torch.compile rebuilds the step for every new propagator
 # (5-40 s each on a CPU runner), and these tests are about the topography.
@@ -82,8 +82,7 @@ def _geometry(src_xz=None):
 
 def _make_prop(topography, *, impl="eager"):
     """Image-method (Robertsson 1996) elastic propagator with optional
-    topography.  ``topo_method='image'`` pins the staircase mirror —
-    Elastic's auto default would otherwise be APM."""
+    topography (``topo_method='image'``, the staircase mirror)."""
     eq = Elastic(spatial_order=SO, device=DEVICE, backend="torch")
     return PropTorch(
         eq,

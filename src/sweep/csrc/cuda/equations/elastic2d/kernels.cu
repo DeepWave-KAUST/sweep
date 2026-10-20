@@ -13,8 +13,6 @@ SWEEP_BY_ORDER_TABLE(elastic_stress_adjoint_prepare_fn, elastic_stress_adjoint_p
 SWEEP_BY_ORDER_TABLE(elastic_stress_adjoint_apply_fn, elastic_stress_adjoint_apply_by_order, elastic_stress_adjoint_apply);
 SWEEP_BY_ORDER_TABLE(elastic_velocity_adjoint_prepare_fn, elastic_velocity_adjoint_prepare_by_order, elastic_velocity_adjoint_prepare);
 SWEEP_BY_ORDER_TABLE(elastic_velocity_adjoint_apply_fn, elastic_velocity_adjoint_apply_by_order, elastic_velocity_adjoint_apply);
-SWEEP_BY_ORDER_TABLE(elastic_velocity_kernel_apm_fn, elastic_velocity_kernel_apm_by_order, elastic_velocity_kernel_apm);
-SWEEP_BY_ORDER_TABLE(elastic_stress_kernel_apm_fn, elastic_stress_kernel_apm_by_order, elastic_stress_kernel_apm);
 
 // Compact copy of the physical box's restore strips (width w* per non-cut
 // face) of vx/vz into the boundary-saving carriers: the box cells the NOPML

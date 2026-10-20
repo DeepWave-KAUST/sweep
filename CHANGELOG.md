@@ -52,6 +52,29 @@ and this project adheres to
   drag is dissipative); gradients use checkpointing.
 
 ### Changed
+- **`ElasticCurvilinear` follows Bartana, Xu & Rickett: collocated fields,
+  asymmetric first-derivative operators and a rotated traction-free surface.**
+  The momentum equation is discretised as a divergence, whose operator is the
+  negative transpose of the gradient, so the spatial operator is self-adjoint;
+  the metric terms are built with that same divergence, so a constant stress
+  state accelerates nothing.  The staggered chain-rule version this replaces
+  diverged on a Gaussian hill (a 30% slope went to NaN at 1.2 s); over 6 s the
+  new one stays finite and decays on every hill tried.  A Kreiss-Oliger filter
+  over the surface band (`surface_damping`, default 3e-2) removes the spurious
+  surface mode the ghost-free closure supports.  `spatial_order` defaults to 16
+  (the paper's L = 8).  On curvilinear equations `topography=` may hold
+  fractional rows, and sources and receivers are physical grid indices, as on
+  every other equation, fractional rows allowed -- they used to be the
+  boundary-fitted grid's own rows, counted from the surface, whose spacing is
+  not `dh`.  The propagator maps them onto the nearest computational row and
+  refuses one in the air; `PropTorch.to_computational()` shows where a
+  position lands.  Snapshots come back on the physical grid too, zero in the
+  air (`snapshot_grid='computational'` returns the grid's own rows).  And so
+  are models: each column is sampled, linearly and differentiably, at the
+  depth of the grid's rows, so the gradient comes back on the physical grid;
+  the rows above the surface are not read and get none.  Models used to be
+  read as the grid's own rows, which pushed a layer that follows the surface
+  down by the depth of the surface.
 - **`Acoustic3D` and `AcousticVRZ3D` on `impl='c'` run 1.2-1.8x faster per
   step.**  The forward step, the boundary-saving reconstruction and the
   adjoint step each ran as one launch over the padded grid, every thread
@@ -89,6 +112,18 @@ and this project adheres to
   of twice (the pressure strips the gradient reads across a cut ride with
   lambda and p), 1.04-1.10x per DD step on 4x V100; a tile cut on both sides
   of an axis needs at least `spatial_order` cells along it.
+
+### Removed
+- **The APM free surface (`topo_method='apm'`, `ElasticAPM`).**  Elastic
+  topography is now `ElasticCurvilinear` (2-D, boundary-fitted) or the
+  image-method staircase, which is also what `topo_method='auto'` resolves to
+  for `Elastic` and `Elastic3D` (it used to be APM).  `topo_method='apm'`
+  raises, and so does any name other than `'auto'` and `'image'` -- it used to
+  run the image method.  With APM goes the only `impl='c'` path for 3-D
+  elastic topography (forward only; it had no compiled backward); eager runs
+  it with the image method.  The core's two APM entries (65, 71) are retired
+  and their numbers not reused; the input-struct fields `topo_category` and
+  `use_apm` stay, unused.
 
 ### Fixed
 - **The second-order acoustic family's compiled backward is the exact
@@ -163,6 +198,13 @@ and this project adheres to
   per-block scales).  fp32, bf16, synchronous disk and 2-D were not affected.
   New kernel `boundary_kernel3d_compact_owned`; every other kernel's machine
   code is unchanged.
+- **Registered gradients under a free surface.**  `register_gradient(mode=
+  'gradient')` and `imaging()` crop the accumulated image to the model face by
+  face, as `EdgePadding` crops the autograd gradient; they cropped it centred,
+  which with a free surface (no pad on top) or uneven per-edge `abcn` put it
+  half the difference of the pads off.  On a curvilinear grid they also take
+  it back to the model grid, and `imaging()` maps its sources and receivers
+  as the forward does.
 - **Boundary-saving gradients on a thin physical box.**  Where the physical
   box (PML excluded) is thinner than two restore strips along an axis -- fewer
   than `2 * (spatial_order / 2 + 1)` cells -- the strip imaging of `Acoustic`

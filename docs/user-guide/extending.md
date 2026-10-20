@@ -413,7 +413,6 @@ when the corresponding capability is implemented (or, for
 | `supports_free_surface` | `True` | Whether a free surface is physically valid for this equation at all. **Set `False` for anisotropic media** — the isotropic image method does not satisfy the anisotropic stress-free condition, so the propagator raises `NotImplementedError` on any `free_surface=` request (see `AcousticVTI1st`, `ElasticTTI`). |
 | `supports_per_edge_free_surface` | `False` | Opt-in: the eager `func` honours `fs_faces` (a free surface on any subset of the faces, each with its own PML pad) rather than only the top-only bool. `Acoustic` and `Elastic` (2-D) opt in. |
 | `supports_per_edge_free_surface_c` | `False` | Same, for the compiled `impl='c'` CUDA path — set `True` only once the CUDA forward **and** adjoint honour `fs_faces`. |
-| `supports_apm` | `False` | Parameter-modified (APM) irregular topography path — see below. |
 | `supports_batched_models` | `False` | The CUDA kernels accept per-shot batched models `(B, *spatial)` in addition to a single shared model. |
 | `supports_boundary_saving_c` | `True` | Whether the compiled backend can run boundary saving. Set `False` when the step cannot be reverse-reconstructed from boundary strips (`ViscoAcoustic`, `DASZhao3D`): the `impl='c'` default strategy then falls back to `'full'` and an explicit boundary request raises. |
 | `supports_boundary_saving_eager` | `True` | The same for eager (and `PropJax`) boundary saving, whose reverse drivers reconstruct the wavefield backwards in time. Set `False` when that reconstruction leaves the gradient inaccurate (`ViscoAcoustic`, `AcousticVTI`, `AcousticTTI`): a boundary request then raises. |
@@ -427,13 +426,11 @@ when the corresponding capability is implemented (or, for
 A few features require touching the propagator base or `_c.py` rather than
 just the equation:
 
-- **Irregular free-surface topography (APM / curvilinear).** Set
-  `supports_apm = True` and implement `_C_apm()` returning `(forward,)`: the
-  compiled APM path is forward-only, and a gradient through it is refused on
-  `impl='c'` (gradients go through `impl='eager'`). See `Elastic` /
-  `Elastic3D` (APM) and `ElasticCurvilinear` (the separate curvilinear path)
-  for references, plus the `topography=` and `free_surface=` plumbing in
-  `src/sweep/propagator/base.py`.
+- **A boundary-fitted free surface.** The image-method staircase is the
+  `supports_image_topography` / `_c` flags above; a surface that follows the
+  topography is its own equation with metric terms. See `AcousticCurvilinear`
+  / `ElasticCurvilinear` for references, plus the `topography=` and
+  `free_surface=` plumbing in `src/sweep/propagator/base.py`.
 - **RTM imaging.** No equation in the tree implements a `_C_rtm()` hook today;
   the core's C API reserves an `rtm` entry kind for it (`csrc/core/capi.h`,
   kind 2). This is a propagator-level addition.

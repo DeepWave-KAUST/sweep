@@ -14,16 +14,10 @@ from ._free_surface import (
     zero_surface_row,
     sides_from_fs_faces_2d,
 )
-from ._topography import (
-    classify_topography,
-    enforce_apm_traction_bc,
-    precompute_apm_moduli,
-    zero_at_air,
-)
 from ._registry import register_equation
 
 
-@register_equation(aliases=('ElasticAPM',))
+@register_equation()
 class Elastic(FirstOrderEquation):
     """First-order 2-D elastic wave equation on a staggered grid (Virieux 1986).
 
@@ -66,7 +60,6 @@ class Elastic(FirstOrderEquation):
     )
 
     default_pml_type = "cpmls"  # staggered-grid CPML: step() unpacks 8 profiles
-    supports_apm = True          # APM (Cao & Chen 2018) dispatch in ``func``
     # Eager ``func`` honours a per-edge free surface (``self.fs_faces``): the
     # staggered image method on any subset of the 4 faces, with the z<->x
     # Robertsson analogue and traction zeroing per face.  See ``_fs_zero_traction``.
@@ -119,14 +112,6 @@ class Elastic(FirstOrderEquation):
                 Defaults to ``'torch'``.
         """
         super().__init__(spatial_order, device, backend)
-        # APM (Cao & Chen 2018) cache.  The propagator's ``_process_topography``
-        # attaches ``_apm_air_mask_runtime`` when the user passes a 2-D
-        # ``topography=`` array; ``func`` then computes the per-category
-        # effective moduli once per (air_mask, models) pair and reuses them
-        # across every time step.  ``cache_key`` keys on the tuple of
-        # ``id()`` of (air_mask, vp, vs, rho).
-        self._apm_cache_key = None
-        self._apm_cache = None
 
     @property
     def default_source_fields(self):
@@ -169,21 +154,8 @@ class Elastic(FirstOrderEquation):
     def func(self, wavefields, models, dt, h, b, **kwargs):
         vp, vs, rho, lame_lambda, lame_mu, lame_lambda_2mu = self._lame(models)
 
-        # ---- APM dispatch ---------------------------------------------------
-        # If the propagator's ``topography=`` was a 2-D air_mask it stored a
-        # padded runtime version on the equation.  Re-route through the
-        # parameter-modified step (Cao & Chen 2018).
-        air_mask_rt = getattr(self, "_apm_air_mask_runtime", None)
-        if air_mask_rt is not None:
-            return self._func_apm(
-                wavefields, lame_lambda, lame_mu, rho, air_mask_rt,
-                dt, h, b, **kwargs,
-            )
-
-        # ---- Standard (image-method / flat) dispatch -----------------------
         # The wave equation (Virieux 1986 first-order velocity-stress) is
-        # solved by ``elastic_step_core`` — shared verbatim with the APM
-        # branch above.  For the bulk path we alias ρ_x = ρ_z = ρ and
+        # solved by ``elastic_step_core``.  We alias ρ_x = ρ_z = ρ and
         # μ_xz = μ (no node-centred averaging, no per-cell modifications).
         free_surface = getattr(self, "free_surface", False)
         topo_rows = getattr(self, "_topo_rows_runtime", None)
@@ -258,10 +230,6 @@ class Elastic(FirstOrderEquation):
         saving reconstructs only the lossless interior) but the free-surface BC
         KEPT, so the eager boundary-saving 'substep' driver inverts the step
         exactly by composing the list in reverse order at ``-dt``."""
-        if getattr(self, "_apm_air_mask_runtime", None) is not None:
-            # The APM step zeroes the air cells after the stress update, from
-            # velocities the reverse sub-step no longer has: not invertible.
-            raise NotImplementedError("Eager boundary saving with topo_method='apm' (Elastic).")
         pd = self.pd
         fs = bool(getattr(self, "free_surface", False))
         topo = getattr(self, "_topo_rows_runtime", None)
@@ -290,64 +258,6 @@ class Elastic(FirstOrderEquation):
             return out
 
         return [sub_v, sub_s]   # forward order; reverse = reversed(...) at -dt
-
-    def _func_apm(self, wavefields, lame_lambda, lame_mu, rho, air_mask_rt,
-                  dt, h, b, **kwargs):
-        """One leapfrog step with APM-modified moduli (Cao & Chen 2018).
-
-        Caches the per-category effective moduli by the id() of the input
-        tensors — the same (air_mask, λ, μ, ρ) inputs hit the cache on
-        every subsequent time step within a propagator run.
-        """
-        cache_key = (id(air_mask_rt), id(lame_lambda), id(lame_mu), id(rho))
-        if cache_key == self._apm_cache_key and self._apm_cache is not None:
-            cat, lam_eff, mu_eff, mu_xz, rho_x, rho_z = self._apm_cache
-        else:
-            cat = classify_topography(air_mask_rt)
-            lam_eff, mu_eff, mu_xz, rho_x, rho_z = precompute_apm_moduli(
-                lame_lambda, lame_mu, rho, cat
-            )
-            self._apm_cache_key = cache_key
-            self._apm_cache = (cat, lam_eff, mu_eff, mu_xz, rho_x, rho_z)
-
-        out = elastic_step_core(
-            *wavefields,
-            lame_lambda=lam_eff,
-            lame_mu=mu_eff,
-            mu_xz=mu_xz,
-            rho_x=rho_x,
-            rho_z=rho_z,
-            dt=dt, h=h, b=b, pd=self.pd, pml=self.b,
-            free_surface=False,    # APM IS the free surface
-            topo_rows=None,
-        )
-        (vx, vz, sxx, szz, sxz,
-         m_vxx, m_vxz, m_vzx, m_vzz,
-         m_txxx, m_txxz, m_tzzx, m_tzzz,
-         m_txzx, m_txzz) = out
-
-        # APM traction-free BC: pointwise stress zero per cell type.
-        sxx, szz, sxz = enforce_apm_traction_bc(sxx, szz, sxz, cat)
-        # Vacuum approximation: kill any wavefield in pure-air cells.
-        vx = zero_at_air(vx, air_mask_rt)
-        vz = zero_at_air(vz, air_mask_rt)
-        sxx = zero_at_air(sxx, air_mask_rt)
-        szz = zero_at_air(szz, air_mask_rt)
-        sxz = zero_at_air(sxz, air_mask_rt)
-
-        return (
-            vx, vz, sxx, szz, sxz,
-            m_vxx, m_vxz, m_vzx, m_vzz,
-            m_txxx, m_txxz, m_tzzx, m_tzzz,
-            m_txzx, m_txzz,
-        )
-    
-    def _C_apm(self):
-        """CUDA APM (Cao & Chen 2018) entry point: the forward only.  There is
-        no compiled APM backward; gradients go through eager autograd (see
-        :func:`_func_apm` and ``_c.py``'s ``_guard_apm_backward``)."""
-        import sweep._C as _C
-        return (_C.elastic2d_apm_forward,)
 
     @property
     def cuda_layout(self):

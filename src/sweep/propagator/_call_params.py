@@ -92,9 +92,6 @@ class CompiledCallParams:
     # (cuda_layout.grads_out_wavelet_written): False when the driver sizes the
     # slot but never writes it (acoustic_vrz*), so the wavelet gradient stays None.
     grads_out_wavelet_written: bool = True
-    # How many leading models receive a gradient of their own; the rest (the
-    # derived APM tensors) share one zero placeholder. None = all of them.
-    n_grad_models: int = None
     # Illumination grids the backward is handed as ``illum_out`` when the
     # caller asked for illumination (cuda_layout.illum_nvar); 0 = none.
     illum_nvar: int = 0
@@ -121,8 +118,6 @@ class CompiledCallParams:
     adcig_max_lag: int = 0
     topo_rows_param: torch.Tensor = None   # runtime padded surface row per col
     has_topo_param: bool = False
-    topo_category_param: torch.Tensor = None   # runtime padded APM category int32
-    use_apm_param: bool = False
     fs_faces: int = -1   # per-edge free-surface bitmask (-1 => legacy z-min)
     cut_face_mask: int = 0   # DD cut faces (0 => single domain)
     # Equation-specific aux tensors, opaque to the wrapper (e.g. the

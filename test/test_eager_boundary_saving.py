@@ -284,26 +284,6 @@ def test_no_cross_iteration_drift(name):
     assert (g2 - g0).abs().max() <= 1e-5 * scale
 
 
-@pytest.mark.parametrize("name", ["elastic2d", "elastic3d"])
-def test_apm_topography_is_refused(name):
-    """APM zeroes the air cells after the stress update, from velocities the
-    reverse sub-step no longer has, so boundary saving cannot invert it.  It must
-    refuse up front: the self-check only caught it at fp32 -- int8/bf16's looser
-    tolerance let a wrong gradient through."""
-    cfg = CASES[name]
-    shape = _shape(cfg["ndim"])
-    topo = np.full(shape[1:], 2, dtype=np.int64)
-    _, init_m, wavelet, src, rec, _ = _setup(cfg)
-    eq = cfg["cls"](spatial_order=SO, device="cuda", backend="torch")
-    int8 = MemoryOptions(strategy="boundary", boundary=BoundaryOptions(storage="gpu", storage_dtype="int8"))
-    prop = PropTorch(eq, impl="eager", eager_options=EagerOptions(use_compile=False), memory=int8,
-                     shape=shape, dev="cuda", dh=DH, dt=DT, source_type=cfg["st"], receiver_type=cfg["rt"],
-                     abcn=ABCN, nt=NT, B=1, topography=topo, topo_method="apm")
-    m = [torch.tensor(a, device="cuda", requires_grad=(i == 0)) for i, a in enumerate(init_m)]
-    with pytest.raises(NotImplementedError, match="apm"):
-        prop(wavelet, src.copy(), rec.copy(), models=m)
-
-
 @pytest.mark.parametrize("name", ["ViscoAcoustic", "AcousticVTI", "AcousticTTI"])
 def test_refused_where_the_reconstruction_spoils_the_gradient(name):
     """``supports_boundary_saving_eager = False``: reconstructing these wavefields

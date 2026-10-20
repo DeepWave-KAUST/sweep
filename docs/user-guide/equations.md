@@ -47,7 +47,6 @@ is supported for every class.
 | --- | --- | --- | --- | --- |
 | `Elastic` | `['vp', 'vs', 'rho']` | 2D | Velocity-stress elastic propagation (Virieux 1986) | ✅ |
 | `Elastic3D` | `['vp', 'vs', 'rho']` | 3D | 3D counterpart of `Elastic` | ✅ |
-| `ElasticAPM` | `['vp', 'vs', 'rho']` | 2D | Alias of `Elastic` (Cao & Chen 2018 APM free surface) | ✅ |
 | `ElasticCurvilinear` | `['vp', 'vs', 'rho']` | 2D | `Elastic` on a curvilinear grid for irregular topography (`topography=`); eager only | ❌ |
 | `ElasticVRR` | `['vp', 'vs', 'Rp_x', 'Rp_z', 'Rs_x', 'Rs_z']` | 2D | Vector-reflectivity elastic (Soares & Sacchi 2025), momentum-stress form, no density model | ✅ |
 | `ViscoElastic` | `['vp', 'vs', 'rho', 'Qp', 'Qs']` | 2D | Nearly constant-Q visco-elastic, generalized standard linear solid (as SPECFEM2D); `vp`/`vs` given at `f_ref`, all five models differentiable | ✅ |

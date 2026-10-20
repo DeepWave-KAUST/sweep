@@ -51,7 +51,7 @@ class _GradBridgeFn(torch.autograd.Function):
             buf = ctx.holder.get(i)
             if buf is None:
                 continue
-            out[i] = ctx.crop_fn(buf, ctx.model_shapes[i]).reshape(ctx.model_shapes[i])
+            out[i] = ctx.crop_fn(buf, ctx.model_shapes[i])
         return (None, None, None, None, *out)
 
 
@@ -383,6 +383,8 @@ class _CustomGradientMixin:
                 "imaging() called but no mode='imaging' gradient is registered."
             )
         mode, B, _, _, source_encoding = self._normalize_io(wavelet, sources, receivers)
+        sources = self._place_on_curvilinear(sources, "source")
+        receivers = self._place_on_curvilinear(receivers, "receiver")
         if models is not None and not isinstance(models, (list, tuple)):
             models = list(models)
         if models is None:
@@ -420,7 +422,6 @@ class _CustomGradientMixin:
         # (models are detached; wavelet_leaf is an internal helper).
         record.backward(gradient=adj_src.view_as(record))
 
-        return {self.model_names[i]:
-                self._crop_to_model(holder[i], model_shapes[i]).reshape(model_shapes[i])
+        return {self.model_names[i]: self._crop_to_model(holder[i], model_shapes[i])
                 for i in registered}
 

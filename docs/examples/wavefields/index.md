@@ -47,9 +47,9 @@ solver settings change the wavefield.
 
     ---
 
-    Image-method irregular free-surface for acoustic & elastic 2-D — drape
-    a non-flat surface along the top of the model and see how the topography
-    reshapes the surface waves and primaries.
+    Irregular free surface for acoustic & elastic 2-D, two ways on one
+    Gaussian hill: the image method on the grid and a boundary-fitted
+    curvilinear grid -- wavefields and shot gathers side by side.
 
     [:material-notebook-outline: Open notebook](../../notebooks/15_wavefield_topography.ipynb)
 

@@ -9,7 +9,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-OPS = ("forward", "apm_forward", "backward", "backward_bs", "backward_ckpt", "backward_recursive_ckpt", "rtm")
+OPS = ("forward", "backward", "backward_bs", "backward_ckpt", "backward_recursive_ckpt", "rtm")
 
 
 def _lib():
@@ -49,7 +49,7 @@ def test_abi_version_and_entry_table_match_the_module():
     assert sorted(names) == bound, set(names) ^ set(bound)
     for i, nm in enumerate(names):
         op = next(op for op in OPS if nm.endswith("_" + op))
-        assert lib.sweep_entry_kind(i) == {"forward": 0, "apm_forward": 0, "rtm": 2}.get(op, 1), nm
+        assert lib.sweep_entry_kind(i) == {"forward": 0, "rtm": 2}.get(op, 1), nm
 
 
 def test_session_stream_and_fft_query_round_trip():
