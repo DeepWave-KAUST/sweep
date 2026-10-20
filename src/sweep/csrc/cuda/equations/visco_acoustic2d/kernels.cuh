@@ -112,20 +112,25 @@ struct ViscoSpectral {
     Buf Gd1, Gd2;              // dt^2 * B1, dt^2 * B2
 };
 
+// A grid is shared by the batch, (nz, nx), or one per batch element,
+// (B, nz, nx): per-shot models whose frozen exponents differ (the filter
+// strides it per batch index, see visco_acoustic2d_lop_into).
 inline void visco_acoustic2d_check_grid(
-    const Buf& g, int nz, int nx, const char* name)
+    const Buf& g, int64_t batch, int nz, int nx, const char* name)
 {
-    SWEEP_CHECK(g.dim() == 2 && g.size(0) == nz && g.size(1) == nx,
+    const bool shared = g.dim() == 2 && g.size(0) == nz && g.size(1) == nx;
+    const bool per_batch = g.dim() == 3 && g.size(0) == batch && g.size(1) == nz && g.size(2) == nx;
+    SWEEP_CHECK(shared || per_batch,
                 "visco eq_aux grid ", name,
                 " must be (nz_runtime, nx_runtime) = (", nz, ", ", nx,
-                "), got ", g.sizes());
+                ") or (B, nz_runtime, nx_runtime) with B = ", batch, ", got ", g.sizes());
     SWEEP_CHECK(g.is_cuda() && g.scalar_type() == BoundaryDtype::FP32,
                 "visco eq_aux grid ", name, " must be a float32 CUDA tensor");
 }
 
 // The term switches and filter grids from the eq_aux composition (no tables).
 inline ViscoSpectral visco_acoustic2d_spectral_grids(
-    const BufList& eq_aux, int nz, int nx)
+    const BufList& eq_aux, int64_t batch, int nz, int nx)
 {
     ViscoSpectral s;
     const size_t n = eq_aux.size();
@@ -134,13 +139,13 @@ inline ViscoSpectral visco_acoustic2d_spectral_grids(
     s.disp = (n >= 2);
     if (s.active) {
         s.kmul = eq_aux[0];
-        visco_acoustic2d_check_grid(s.kmul, nz, nx, "D_loss");
+        visco_acoustic2d_check_grid(s.kmul, batch, nz, nx, "D_loss");
     }
     if (s.disp) {
         s.Dk2 = eq_aux[n - 2];
         s.Dfrac = eq_aux[n - 1];
-        visco_acoustic2d_check_grid(s.Dk2, nz, nx, "D_k2");
-        visco_acoustic2d_check_grid(s.Dfrac, nz, nx, "D_frac");
+        visco_acoustic2d_check_grid(s.Dk2, batch, nz, nx, "D_k2");
+        visco_acoustic2d_check_grid(s.Dfrac, batch, nz, nx, "D_frac");
     }
     return s;
 }
@@ -161,7 +166,7 @@ inline ViscoSpectral visco_acoustic2d_make_spectral_from(
 {
     SWEEP_CHECK(models.size() == 4, what, ": visco_acoustic2d expects the prepared models "
                 "(vp_step, B1, B2, A); got ", models.size());
-    ViscoSpectral s = visco_acoustic2d_spectral_grids(eq_aux, nz, nx);
+    ViscoSpectral s = visco_acoustic2d_spectral_grids(eq_aux, models[0].size(0), nz, nx);
     const float dt2 = dt * dt;   // float on the host: the scalar of the replaced ``model * (dt * dt)`` products
     const auto c = derived::visco_coefficients(
         derived_models, models[1], models[2], models[3], s.active, s.disp, mode, dt, dt2, what);
@@ -195,7 +200,7 @@ inline ViscoSpectral visco_acoustic2d_make_spectral_from(
 //    builds the same CuFFTParams and issues the same three calls, with the
 //    work area taken from the pool.  The same plan on the same data gives the
 //    same bits.
-//  * kmul * F, a float (nz, nx) grid times the complex (B, 1, nz, nx)
+//  * kmul * F, a float (nz, nx) [or (B, nz, nx)] grid times the complex (B, 1, nz, nx)
 //    spectrum: mul_kernel_cuda on the common dtype complex64, kmul loaded as
 //    (k, 0) and c10::complex operator* evaluated as (a*c - b*d, a*d + b*c)
 //    with (a, b) = (k, 0).  Here: at::mul_out(C0, kmul, F) -- functional mul
@@ -461,16 +466,21 @@ inline ViscoScratch visco_acoustic2d_bind_scratch(
 // is consumed by the promote before C1 is overwritten) but NOT in C0's.
 // ---------------------------------------------------------------------------
 // ``x``: a contiguous float grid of the slot's shape (a wavefield, a real
-// alias, a history row); ``kmul``: the (nz, nx) filter.  The result is the
+// alias, a history row); ``kmul``: the (nz, nx) filter, or (B, nz, nx) with
+// one filter per batch element (cmul_grid indexes it modulo its own size, so
+// the shared grid is read exactly as before).  The result is the
 // real part of C1 -- visco_acoustic2d_real_ptr(ws.C1) at VISCO_REAL_STRIDE --
 // valid until C1 is next written.
-inline void visco_acoustic2d_lop_into(const float* x, const float* kmul, ViscoScratch& ws)
+inline void visco_acoustic2d_lop_into(const float* x, const Buf& kmul, ViscoScratch& ws)
 {
     const int64_t n = ws.C1.numel() / 2;
-    const int64_t ng = ws.C1.size(-3) * ws.C1.size(-2);   // (nz, nx) of the (..., nz, nx, 2) slot
+    const int64_t ng = kmul.numel();
+    SWEEP_CHECK(ng == ws.C1.size(-3) * ws.C1.size(-2) || ng == n,
+                "visco filter grid of ", ng, " cells matches neither one (nz, nx) plane nor the "
+                "whole ", n, "-cell batch of the spectral slot");
     visco_ops::promote(visco_acoustic2d_complex_ptr(ws.C0), x, n);
     ws.fft->forward(ws.C0, ws.C1, ws.fft_ws);
-    visco_ops::cmul_grid(visco_acoustic2d_complex_ptr(ws.C0), kmul, visco_acoustic2d_complex_ptr(ws.C1), n, ng);
+    visco_ops::cmul_grid(visco_acoustic2d_complex_ptr(ws.C0), kmul.data_ptr<float>(), visco_acoustic2d_complex_ptr(ws.C1), n, ng);
     ws.fft->inverse(ws.C0, ws.C1, ws.fft_ws);
 }
 
@@ -485,7 +495,7 @@ inline void visco_acoustic2d_lop_into(const float* x, const float* kmul, ViscoSc
 // subtracted in place, as before.
 inline void visco_acoustic2d_apply_damping_into(
     AcousticWavefieldTensor& wf,
-    const Buf& kmul,   // (nz, nx) D_loss grid
+    const Buf& kmul,   // (nz, nx) or (B, nz, nx) D_loss grid
     const Buf& dt2A,             // (B, 1, nz, nx) dt^2 * A (derived table)
     float dt, ViscoScratch& ws)
 {
@@ -495,7 +505,7 @@ inline void visco_acoustic2d_apply_damping_into(
                                         wf.u_now_t.template data_ptr<float>(), 1,
                                         wf.u_prev_t.template data_ptr<float>(), 1, n);
     visco_ops::scale(dudt.data_ptr<float>(), 1.0f / dt, n);            // div_(dt): times the reciprocal
-    visco_acoustic2d_lop_into(dudt.data_ptr<float>(), kmul.data_ptr<float>(), ws);   // C1.re = L; dudt is gone
+    visco_acoustic2d_lop_into(dudt.data_ptr<float>(), kmul, ws);   // C1.re = L; dudt is gone
     const Buf R = visco_acoustic2d_real_alias(ws.C0);
     visco_ops::binary<visco_ops::MulOp>(R.data_ptr<float>(), dt2A.data_ptr<float>(), 1,
                                         visco_acoustic2d_real_ptr(ws.C1), VISCO_REAL_STRIDE, n);
@@ -527,17 +537,16 @@ inline void visco_acoustic2d_apply_spectral_into(
         SWEEP_CHECK(ws.C2.defined(), "visco_acoustic2d: the dispersion pipeline needs the C2 slot "
                     "(bind the scratch with dispersion on, in forward / ckpt / recursive mode)");
         const int64_t n = ws.C1.numel() / 2;
-        const int64_t ng = ws.C1.size(-3) * ws.C1.size(-2);
         float2* C0 = visco_acoustic2d_complex_ptr(ws.C0);
         visco_ops::promote(C0, wf.u_now_t.template data_ptr<float>(), n);
         ws.fft->forward(ws.C0, ws.C1, ws.fft_ws);            // C1 = F, alive across both products
-        visco_ops::cmul_grid(C0, s.Dk2.data_ptr<float>(), visco_acoustic2d_complex_ptr(ws.C1), n, ng);   // C0 = Dk2 * F
+        visco_ops::cmul_grid(C0, s.Dk2.data_ptr<float>(), visco_acoustic2d_complex_ptr(ws.C1), n, s.Dk2.numel());   // C0 = Dk2 * F
         ws.fft->inverse(ws.C0, ws.C2, ws.fft_ws);            // C2 = IFFT2(Dk2 * F)
         const Buf R = visco_acoustic2d_real_alias(ws.C0);     // the product in C0 is dead
         visco_ops::binary<visco_ops::MulOp>(R.data_ptr<float>(), s.Gd1.data_ptr<float>(), 1,
                                             visco_acoustic2d_real_ptr(ws.C2), VISCO_REAL_STRIDE, n);
         visco_ops::inplace<visco_ops::AddOp>(wf.u_next_t.template data_ptr<float>(), R.data_ptr<float>(), 1, n);
-        visco_ops::cmul_grid(C0, s.Dfrac.data_ptr<float>(), visco_acoustic2d_complex_ptr(ws.C1), n, ng); // C0 = Dfrac * F (R's bits are dead)
+        visco_ops::cmul_grid(C0, s.Dfrac.data_ptr<float>(), visco_acoustic2d_complex_ptr(ws.C1), n, s.Dfrac.numel()); // C0 = Dfrac * F (R's bits are dead)
         ws.fft->inverse(ws.C0, ws.C2, ws.fft_ws);            // C2 = IFFT2(Dfrac * F)
         visco_ops::binary<visco_ops::MulOp>(R.data_ptr<float>(), s.Gd2.data_ptr<float>(), 1,
                                             visco_acoustic2d_real_ptr(ws.C2), VISCO_REAL_STRIDE, n);
