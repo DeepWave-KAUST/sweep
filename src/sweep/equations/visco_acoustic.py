@@ -271,7 +271,7 @@ class ViscoAcoustic(SecondOrderEquation):
         vp, Q, omega = models
         op = self.op
         gamma = op.arctan(1.0 / Q) / np.pi
-        self._gbar = op.mean(gamma)
+        self._gbar = self._average_exponent(gamma)
         if self.phase_shift:
             csq_fac = op.cos(np.pi * gamma / 2)
             vp_step = vp * csq_fac
@@ -290,10 +290,29 @@ class ViscoAcoustic(SecondOrderEquation):
             A = op.zeros_like(vp)
         return (vp_step, B1, B2, A)
 
+    def _average_exponent(self, gamma):
+        """The frozen exponent ``gbar``: the mean of ``gamma`` over the model.
+
+        A shared model ``(nz, nx)`` gets one scalar.  Per-shot batched models
+        (``(B, 1, nz, nx)``: the eager layout, and every impl='c' model) get
+        one mean per batch element, shaped ``(B, 1, 1, 1)``, so a shot's
+        filter exponent depends on its own Q only -- each mean is the same
+        reduction a single-shot run takes over that model.  When all the
+        per-element means agree (a shared model the C path repeated across
+        the batch), the historical whole-batch scalar is kept bit-for-bit."""
+        op = self.op
+        if gamma.ndim <= 2 or gamma.shape[0] == 1:
+            return op.mean(gamma)
+        g = op.stack([op.mean(gamma[b]) for b in range(gamma.shape[0])])
+        if self.backend == 'torch' and bool((g == g[0]).all()):
+            return op.mean(gamma)
+        return g.reshape((gamma.shape[0],) + (1,) * (gamma.ndim - 1))
+
     def _spectral_grids(self, k):
         """(D_k2, D_frac, D_loss) fractional-power grids on the runtime |k|
         grid, using the average exponent ``self._gbar`` from the latest
-        :meth:`prepare_models` call.  Cached per (gbar tensor, k shape): one
+        :meth:`prepare_models` call (one per batch element for per-shot
+        models, giving ``(B, 1, nz, nx)`` fractional grids).  Cached per (gbar tensor, k shape): one
         rebuild per forward on torch (prepare runs once outside the loop), one
         per step inside a jax trace (where it stays trace-local).  ``k = 0``
         rows go through a safe branch so the pow's exponent-gradient stays
@@ -352,8 +371,11 @@ class ViscoAcoustic(SecondOrderEquation):
         from .base import init_wavenumbers
         shape = tuple(int(v) for v in prop.shape_cuda)[-2:]
         h = float(np.asarray(prop._grid_spacing).reshape(-1)[0])
-        gbar = float(self._gbar.detach().cpu())
-        key = (shape, h, str(prop.dev), round(gbar, 9),
+        # One exponent for a shared model; per-shot models with differing Q
+        # carry one per batch element, and the fractional grids become
+        # (B, nz, nx) stacks (the CUDA filter strides them per batch index).
+        gbars = [float(g) for g in self._gbar.detach().cpu().reshape(-1)]
+        key = (shape, h, str(prop.dev), tuple(round(g, 9) for g in gbars),
                self.phase_shift, self.amplitude_damping)
         cached = getattr(self, "_c_kmul_cache", None)
         if cached is None or cached[0] != key:
@@ -361,14 +383,16 @@ class ViscoAcoustic(SecondOrderEquation):
             def t(a):
                 return torch.as_tensor(
                     a.astype(np.float32), device=prop.dev).contiguous()
+            def frac(p):
+                g = [np.where(k_np > 0, np.power(k_np, 2.0*gbar + p, where=k_np > 0), 0.0)
+                     for gbar in gbars]
+                return t(g[0] if len(g) == 1 else np.stack(g))
             grids = []
             if self.amplitude_damping:
-                grids.append(t(np.where(
-                    k_np > 0, np.power(k_np, 2.0*gbar + 1.0, where=k_np > 0), 0.0)))
+                grids.append(frac(1.0))
             if self.phase_shift:
                 grids.append(t(k_np * k_np))
-                grids.append(t(np.where(
-                    k_np > 0, np.power(k_np, 2.0*gbar + 2.0, where=k_np > 0), 0.0)))
+                grids.append(frac(2.0))
             self._c_kmul_cache = (key, tuple(grids))
         return self._c_kmul_cache[1]
 

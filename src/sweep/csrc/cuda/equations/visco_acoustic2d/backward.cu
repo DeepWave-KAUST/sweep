@@ -224,10 +224,10 @@ void adjoint_damping_extra(AcousticWavefieldTensor& adj, const ViscoSpectral& d,
     if (d.disp) {
         const Buf X = visco_acoustic2d_real_alias(ws.C1);
         visco_ops::binary<visco_ops::MulOp>(X.data_ptr<float>(), d.Gd1.data_ptr<float>(), 1, u_now, 1, n);   // Gd1 * u_now
-        visco_acoustic2d_lop_into(X.data_ptr<float>(), d.Dk2.data_ptr<float>(), ws);                          // C1.re = L_Dk2
+        visco_acoustic2d_lop_into(X.data_ptr<float>(), d.Dk2, ws);                          // C1.re = L_Dk2
         visco_ops::real_copy(ws.R1.data_ptr<float>(), visco_acoustic2d_complex_ptr(ws.C1), n);                          // R1 = L_Dk2
         visco_ops::binary<visco_ops::MulOp>(X.data_ptr<float>(), d.Gd2.data_ptr<float>(), 1, u_now, 1, n);   // Gd2 * u_now (L_Dk2 is in R1)
-        visco_acoustic2d_lop_into(X.data_ptr<float>(), d.Dfrac.data_ptr<float>(), ws);                        // C1.re = L_Dfrac
+        visco_acoustic2d_lop_into(X.data_ptr<float>(), d.Dfrac, ws);                        // C1.re = L_Dfrac
         visco_ops::inplace<visco_ops::SubOp>(ws.R1.data_ptr<float>(), visco_acoustic2d_real_ptr(ws.C1), VISCO_REAL_STRIDE, n);   // R1 = L_Dk2 - L_Dfrac = e
         m = ws.R1.data_ptr<float>(); m_stride = 1;
     }
@@ -235,7 +235,7 @@ void adjoint_damping_extra(AcousticWavefieldTensor& adj, const ViscoSpectral& d,
         const Buf X = visco_acoustic2d_real_alias(ws.C1);
         visco_ops::binary<visco_ops::SubOp>(X.data_ptr<float>(), u_prev, 1, u_now, 1, n);                    // u_prev - u_now
         visco_ops::inplace<visco_ops::MulOp>(X.data_ptr<float>(), d.Gp.data_ptr<float>(), 1, n);             // == Gp * (u_prev - u_now)
-        visco_acoustic2d_lop_into(X.data_ptr<float>(), d.kmul.data_ptr<float>(), ws);                         // C1.re = L
+        visco_acoustic2d_lop_into(X.data_ptr<float>(), d.kmul, ws);                         // C1.re = L
         if (d.disp)
             visco_ops::inplace<visco_ops::AddOp>(ws.R1.data_ptr<float>(), visco_acoustic2d_real_ptr(ws.C1), VISCO_REAL_STRIDE, n);   // e + m == m + e
         else {
@@ -272,7 +272,7 @@ void accumulate_grad_A(float* grad_A,
 {
     if (!d.active) return;
     const int64_t n = ws.C1.numel() / 2;
-    visco_acoustic2d_lop_into(du, d.kmul.data_ptr<float>(), ws);                       // C1.re = L(du)
+    visco_acoustic2d_lop_into(du, d.kmul, ws);                       // C1.re = L(du)
     const Buf P = visco_acoustic2d_real_alias(ws.C0);
     visco_ops::binary<visco_ops::MulOp>(P.data_ptr<float>(), lam, 1,
                                         visco_acoustic2d_real_ptr(ws.C1), VISCO_REAL_STRIDE, n);
@@ -294,10 +294,10 @@ void accumulate_grad_disp(float* grad_B1, float* grad_B2,
     // add_(P, Scalar(dt2)): the double dt*dt, loaded as the float alpha
     const float dt2 = static_cast<float>(static_cast<double>(dt) * static_cast<double>(dt));
     const Buf P = visco_acoustic2d_real_alias(ws.C0);
-    visco_acoustic2d_lop_into(u_it, d.Dk2.data_ptr<float>(), ws);
+    visco_acoustic2d_lop_into(u_it, d.Dk2, ws);
     visco_ops::binary<visco_ops::MulOp>(P.data_ptr<float>(), lam, 1, visco_acoustic2d_real_ptr(ws.C1), VISCO_REAL_STRIDE, n);
     visco_ops::axpy(grad_B1, P.data_ptr<float>(), 1, dt2, n);
-    visco_acoustic2d_lop_into(u_it, d.Dfrac.data_ptr<float>(), ws);
+    visco_acoustic2d_lop_into(u_it, d.Dfrac, ws);
     visco_ops::binary<visco_ops::MulOp>(P.data_ptr<float>(), lam, 1, visco_acoustic2d_real_ptr(ws.C1), VISCO_REAL_STRIDE, n);
     visco_ops::axpy(grad_B2, P.data_ptr<float>(), 1, -dt2, n);
 }
