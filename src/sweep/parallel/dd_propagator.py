@@ -443,6 +443,12 @@ class ModelParallel:
                       else VRZ_DD)
         # Admission is DECLARED, not name-listed (see check_dd_admission).
         check_dd_admission(equation, _layout, self._spec)
+        # LSRTM's stepped drivers refuse disk staging across a cut but would run
+        # it on a single tile; refuse it here, up front, on every mesh.
+        if self._spec is LSRTM_DD and self._bstorage == "disk":
+            raise NotImplementedError(
+                f"domain decomposition of {type(equation).__name__} does not support "
+                f"BoundarySaving(storage='disk'). Use storage='gpu' or 'cpu'.")
         self._nwf = table.n_forward
         # FORWARD and ADJOINT list lengths are different quantities for the
         # acoustic family (9/12 vs 11/15: the fused adjoint double-buffers zeta

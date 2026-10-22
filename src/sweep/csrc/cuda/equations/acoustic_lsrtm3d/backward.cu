@@ -6,6 +6,7 @@
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
 #include "../../common/boundary_runtime.cuh"
+#include "../../common/boundary/session.cuh"
 #include "../../common/cudautils.h"
 #include "../../common/checkpoint_runtime.cuh"
 #include "../../common/boundarysaver.cuh"
@@ -892,9 +893,21 @@ void run_bs_imaging(
     GradParam grad_ctx_y{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
-    AsyncCopyContext async_copy(staged_boundary);
+    // A Python-owned BoundarySession, when bound (ModelParallel binds one for
+    // cpu/disk storage), keeps the copy stream and its ring events alive ACROSS
+    // calls, as in the template drivers (eq_driver.cuh).  DD drives this
+    // backward one step per call.  With a copy stream of its own per call, the
+    // next step's H2D that prefetch_next_backward_chunk_if_needed issues at the
+    // end of a call stayed queued on a stream nothing waited on again; landing
+    // late, it overwrote the ring slot a later call had just refilled and was
+    // restoring from (the cpu-staged DD gradient changed from run to run, by up
+    // to 12 % of its peak).  On the session's one stream every copy queues
+    // behind the earlier calls' and every restore waits on the event of the copy
+    // it reads.
     const std::vector<std::string> disk_files = p.boundary_disk_files.vec();   // the runtime keeps a pointer to it
-    BoundaryRuntime boundary_runtime(
+    BoundaryScope boundary_scope(
+        p.boundary_session ? p.boundary_session->impl() : nullptr,
+        BoundarySessionImpl::Phase::Backward,
         boundary_saver,
         3,
         true,
@@ -903,11 +916,16 @@ void run_bs_imaging(
         p.boundary_disk_async_read,
         p.transfer_interval,
         p.boundary_ring_buffers,
-        disk_files,
-        async_copy.compute_stream,
-        async_copy.copy_stream
+        disk_files
     );
-    boundary_runtime.prefetch_initial_backward_chunk(p.nt, it_hi);   // prime the ring for THIS segment
+    BoundaryRuntime& boundary_runtime = boundary_scope.runtime();
+    // Segments partition [0, nt) in descending order (SteppedBackwardRunner), so
+    // the session's runtime is primed by the first one and walks the chunks by
+    // global step from there (prefetch_next below), as the persistent runner
+    // does; re-priming every call re-copied the chunk prefix every step.  A
+    // per-call runtime starts empty and primes the ring for THIS segment.
+    if (first_segment || boundary_scope.owns())
+        boundary_runtime.prefetch_initial_backward_chunk(p.nt, it_hi);
 
     for (int it = it_hi - 1; it >= std::max(it_lo, 1); --it) {
         auto for_view = forward.view();
@@ -1080,6 +1098,13 @@ void run_bs_imaging(
             forward_nsrc
         );
     }
+
+    // A per-call runtime dies with this call, so a stepped call drains its copy
+    // stream: the prefetch it issued for the next step would otherwise be the
+    // orphan described at the scope above.  The monolithic call has nothing left
+    // in flight -- its last prefetch is the one its last restore waited on.
+    if (boundary_scope.owns() && (it_hi < static_cast<int>(p.nt) || it_lo > 0))
+        boundary_runtime.synchronize();
 }
 
 BackwardOutputCore backward_bs_imaging_impl(const BackwardInputCore& p)

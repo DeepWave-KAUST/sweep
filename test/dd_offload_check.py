@@ -1,7 +1,13 @@
-"""DD boundary CPU-staging equivalence check (acoustic 2-D and 3-D).
+"""DD boundary CPU-staging equivalence check (acoustic or LSRTM, 2-D and 3-D).
 
     torchrun --standalone --nproc-per-node=<P> test/dd_offload_check.py
-    env: DIM(2|3) MESH_PY MESH_PX MESH_NY BND_DTYPE(fp32|fp16|bf16|int8) TAIL
+    env: EQ(acoustic|lsrtm) DIM(2|3) MESH_PY MESH_PX MESH_NY
+         BND_DTYPE(fp32|fp16|bf16|int8) TAIL
+
+EQ=lsrtm runs AcousticLSRTM / AcousticLSRTM3D: the record is the scattered
+field and both gradients are compared, the reflectivity mp and the RWI vp
+(from a nonzero mp, without which the vp gradient vanishes).  LSRTM has no
+boundary tail truncation, so gate B is skipped there.
 
 CPU staging only changes WHERE the boundary lives and WHEN it is copied, never
 the arithmetic, so the DD gradient must be **bit-identical** to the gpu-direct
@@ -30,7 +36,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from sweep.equations import Acoustic, Acoustic3D
+from sweep.equations import Acoustic, Acoustic3D, AcousticLSRTM, AcousticLSRTM3D
 from sweep.parallel import MeshTopology, ModelParallel
 from sweep.propagator.torch import PropTorch
 
@@ -72,7 +78,21 @@ else:
     gx, gy = np.meshgrid(np.arange(2, nx, 4), np.arange(2, ny, 4), indexing="xy")
     rec = np.stack([gx.ravel(), gy.ravel(), np.ones(gx.size, np.int32)], -1)[None].astype(np.int32)
 
-EQ = Acoustic if DIM == 2 else Acoustic3D
+LSRTM = os.environ.get("EQ", "acoustic") == "lsrtm"
+if LSRTM:
+    EQ = AcousticLSRTM if DIM == 2 else AcousticLSRTM3D
+    RECV = ["sh1"]
+    # a dipping reflectivity sheet across every cut, plus lateral variation
+    idx = np.indices(shape).astype(np.float32)
+    xs = idx[-1] / max(shape[-1] - 1, 1)
+    mp_true = (0.08 * np.exp(-((idx[0] - (0.45 + 0.2 * xs) * nz) / 2.0) ** 2)
+               * (1.0 + 0.3 * np.sin(6.0 * xs))).astype(np.float32)
+    TRUE = [vp_true, mp_true]
+    INIT = [vp_init, 0.5 * mp_true]
+else:
+    EQ = Acoustic if DIM == 2 else Acoustic3D
+    RECV = ["h1"]
+    TRUE, INIT = [vp_true], [vp_init]
 
 
 def run(storage, tail=None):
@@ -83,15 +103,17 @@ def run(storage, tail=None):
         cfg["tail_steps"] = tail
     prop = PropTorch(EQ(spatial_order=order, device=dev), backend="torch", impl="c",
                      shape=shape, dh=dh, dt=dt, nt=nt, abcn=abcn,
-                     source_type=["h1"], receiver_type=["h1"], dev=dev,
+                     source_type=["h1"], receiver_type=RECV, dev=dev,
                      boundary_saving_config=cfg)
     ddp = ModelParallel(prop, MeshTopology(py=PY, px=PX, shot_groups=1,
                                            world_size=world, rank=rank))
-    obs = ddp(wav, src, rec, models=[vp_true]).detach().clone()
-    vp_g = torch.tensor(vp_init, device=dev, requires_grad=True)
-    (0.5 * (ddp(wav, src, rec, models=[vp_g]) - obs).pow(2).sum()).backward()
+    obs = ddp(wav, src, rec, models=TRUE).detach().clone()
+    ms = [torch.tensor(m, device=dev, requires_grad=True) for m in INIT]
+    (0.5 * (ddp(wav, src, rec, models=ms) - obs).pow(2).sum()).backward()
     torch.cuda.synchronize()
-    return vp_g.grad.detach().clone(), torch.cuda.max_memory_allocated() / 1e9
+    # every model's gradient, flattened back to back (vp first)
+    return (torch.cat([m.grad.detach().flatten() for m in ms]),
+            torch.cuda.max_memory_allocated() / 1e9)
 
 
 def compare(label, ga, gb, ref_peak=None, peak=None):
@@ -116,15 +138,16 @@ def compare(label, ga, gb, ref_peak=None, peak=None):
 
 g_gpu, peak_gpu = run("gpu")
 g_cpu, peak_cpu = run("cpu")
-g_gpu_t, _ = run("gpu", tail=TAIL)
-g_cpu_t, peak_cpu_t = run("cpu", tail=TAIL)
+if not LSRTM:
+    g_gpu_t, _ = run("gpu", tail=TAIL)
+    g_cpu_t, peak_cpu_t = run("cpu", tail=TAIL)
 g_cpu_2, _ = run("cpu")
 
 gsum = torch.tensor([float(g_gpu.abs().sum())], device=dev)
 dist.all_reduce(gsum)
 
 if rank == 0:
-    print(f"=== DD cpu-staging check  {DIM}-D  py={PY} px={PX} "
+    print(f"=== DD cpu-staging check  {EQ.__name__}  {DIM}-D  py={PY} px={PX} "
           f"shape={shape} dtype={BND} tail={TAIL}/{nt} ===")
     print(f"  gradient |sum| over all ranks = {float(gsum):.6e}  (nonzero => a real gradient)")
 
@@ -139,14 +162,14 @@ def disk_is_refused():
         with tempfile.TemporaryDirectory() as td:
             prop = PropTorch(EQ(spatial_order=order, device=dev), backend="torch",
                              impl="c", shape=shape, dh=dh, dt=dt, nt=nt, abcn=abcn,
-                             source_type=["h1"], receiver_type=["h1"], dev=dev,
+                             source_type=["h1"], receiver_type=RECV, dev=dev,
                              boundary_saving_config={"enabled": True, "storage": "disk",
                                                      "disk_dir": td,
                                                      "storage_dtype": "fp32"})
             ddp = ModelParallel(prop, MeshTopology(py=PY, px=PX, shot_groups=1,
                                                    world_size=world, rank=rank))
-            vp_g = torch.tensor(vp_init, device=dev, requires_grad=True)
-            ddp(wav, src, rec, models=[vp_g]).pow(2).sum().backward()
+            ms = [torch.tensor(m, device=dev, requires_grad=True) for m in INIT]
+            ddp(wav, src, rec, models=ms).pow(2).sum().backward()
         torch.cuda.synchronize()
         return False, "no error raised"
     except Exception as e:
@@ -156,7 +179,8 @@ def disk_is_refused():
 
 ok = True
 ok &= compare("A  cpu vs gpu", g_cpu, g_gpu, peak_gpu, peak_cpu)
-ok &= compare(f"B  cpu vs gpu, tail={TAIL}", g_cpu_t, g_gpu_t, peak_gpu, peak_cpu_t)
+if not LSRTM:
+    ok &= compare(f"B  cpu vs gpu, tail={TAIL}", g_cpu_t, g_gpu_t, peak_gpu, peak_cpu_t)
 ok &= compare("C  cpu run twice", g_cpu_2, g_cpu)
 d_ok, d_msg = disk_is_refused()
 dflag = torch.tensor([1.0 if d_ok else 0.0], device=dev)

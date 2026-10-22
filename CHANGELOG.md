@@ -120,6 +120,24 @@ and this project adheres to
   and left `wavelet.grad` at None (`Acoustic` included, whose single-domain
   backward does return it).  Take that gradient from a single-domain
   `PropTorch` run.
+- **`AcousticLSRTM` / `AcousticLSRTM3D` under `ModelParallel` with
+  `BoundarySaving(storage='cpu')`: the gradient no longer changes from run to
+  run.**  Their stepped backward built a copy stream of its own on every call
+  -- DD makes one call per time step -- and the prefetch of the next step's
+  boundaries that a call issued last stayed queued on that stream, which
+  nothing waited on again; landing late, it overwrote the ring slot a later
+  call had just refilled and was restoring from.  In 3-D two identical runs,
+  and cpu against gpu staging, differed by up to 12 % of the gradient's peak,
+  on one tile and across cuts; the 2-D backward has the same copies, small
+  enough at the test sizes to land in time, but not at production sizes.  Both
+  now run on the `BoundarySession` `ModelParallel` already holds, as the other
+  DD equations do: every copy queues on one stream and every restore waits for
+  the copy it reads (a stepped call without a session drains its stream before
+  returning).  cpu staging under DD is bit-identical to gpu-direct and to
+  itself in fp32 (`test/dd_offload_check.py` with `EQ=lsrtm`,
+  `test/lsrtm_staging_check.py`).  `storage='disk'` is refused for the pair at
+  construction: the drivers refused it across a cut but ran it on a single
+  tile.
 - **Boundary-saving gradients on a thin physical box.**  Where the physical
   box (PML excluded) is thinner than two restore strips along an axis -- fewer
   than `2 * (spatial_order / 2 + 1)` cells -- the strip imaging of `Acoustic`

@@ -126,7 +126,9 @@ On fp32 gpu-direct boundaries the DD gradient is **bit-identical** to the
 single-domain gradient (`test/test_dd_backward_two_tile*.py`,
 `test/dd_api_check.py`), including with boundary tail truncation
 (`test/test_dd_tail_two_tile.py`). `AcousticVRZ3D` runs the same gradient
-kernels on one card and under DD at every order.
+kernels on one card and under DD at every order. `AcousticLSRTM` and
+`AcousticLSRTM3D` are bit-identical too, record and both gradients
+(`test/dd_corner_check_lsrtm2d.py`, `test/dd_corner_check_lsrtm3d.py`).
 `pad_to_mesh` pads the split axes up to the tile multiple; a padded run is a
 (slightly) different discrete problem than an unpadded one, so compare like
 against like — the example scripts' `--check` mode does exactly that.
@@ -134,7 +136,12 @@ against like — the example scripts' `--check` mode does exactly that.
 ## Scope and limits
 
 - Equations: those with stepped compiled kernels — `Acoustic` (2-D),
-  `Acoustic3D`, `AcousticVRZ3D`, `Elastic` (2-D) and `Elastic3D`. Everything
+  `Acoustic3D`, `AcousticVRZ3D`, `AcousticLSRTM` (2-D), `AcousticLSRTM3D`,
+  `Elastic` (2-D) and `Elastic3D`. The LSRTM pair carries two coupled fields
+  (background and scattered), and DD rotates and halo-exchanges both; its
+  backward returns the reflectivity `mp` gradient and, when `vp` requires
+  grad, the RWI `vp` gradient, and its forward always takes the serial
+  step-then-exchange path (no comm/compute overlap). Everything
   else is refused at construction with an error that names the equation,
   including the **2-D** `AcousticVRZ` (stepped, but its backward has no
   coupling-exchange phases),
@@ -174,13 +181,13 @@ but not every value is wired for the DD backward — which Python drives one
 step per kernel call, unlike the monolithic loop the staged paths were built
 for. What is refused, is refused loudly at the first backward:
 
-| `BoundarySaving.storage` | Acoustic 2-D / 3-D, VRZ 3-D | Elastic 2-D / 3-D, Elastic APM |
-| --- | --- | --- |
-| `"gpu"` (default, gpu-direct) | yes | yes |
-| `"cpu"` (pinned-host staging) | **yes** | **yes** — it used to raise |
-| `"disk"` | no — raises | no — raises |
+| `BoundarySaving.storage` | Acoustic 2-D / 3-D, VRZ 3-D | Elastic 2-D / 3-D, Elastic APM | LSRTM 2-D / 3-D |
+| --- | --- | --- | --- |
+| `"gpu"` (default, gpu-direct) | yes | yes | yes |
+| `"cpu"` (pinned-host staging) | **yes** | **yes** — it used to raise | **yes** — the 3-D one used to race |
+| `"disk"` | no — raises | no — raises | no — raises at construction |
 
-Those two columns are the whole DD-admissible set: admission is *declared* by
+Those three columns are the whole DD-admissible set: admission is *declared* by
 the equation's `cuda_layout` (see `check_dd_admission`), and nothing else
 declares it today. The refusal was lifted in the shared staggered driver, so the
 rest of that family (DAS-mu, elastic TTI SG, elastic VR) is no longer blocked by
@@ -197,7 +204,8 @@ Every `storage_dtype` works with either storage. On fp32 and bf16 the
 cpu-staged gradient is **bit-identical** to the gpu-direct one; fp16 and int8
 differ only within their own run-to-run quantisation floor, i.e. by no more
 than two runs of the *same* configuration differ from each other
-(`test/dd_offload_check.py` checks exactly that, on both counts).
+(`test/dd_offload_check.py` checks exactly that, on both counts; `EQ=lsrtm`
+runs it for the LSRTM pair).
 
 Staging trades PCIe traffic for GPU memory. The DD backward is driven one step
 per kernel call from Python, so the boundary runtime — a copy stream beside the
@@ -206,7 +214,10 @@ issued while the current one is still being consumed — used to be built and
 destroyed inside every call, and a prefetch never survived to the step it was
 meant for. It is now owned by a **`BoundarySession` held on the Python side**
 for the whole reverse loop, so the stream and its ring events outlive the call
-that created them.
+that created them. The LSRTM pair's backward takes the same session: built per
+call, it left the next step's prefetch on a stream nothing waited on, and in
+3-D that copy could land after a later step had refilled the ring slot, so the
+cpu-staged gradient changed from run to run.
 
 What it costs, measured on 2×V100 with a 3-D elastic tile
 (`test/dd_elastic_staged_check.py`), every arm bit-exact against gpu-direct:
