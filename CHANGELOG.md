@@ -109,6 +109,17 @@ and this project adheres to
   2-D, 1.8e-4 in 3-D); domain-decomposed runs stay bit-identical to one card.
   Wall time on a V100 changes by -5 % to +2 %.  Records and gradients of these
   equations change accordingly.
+- **`AcousticLSRTM` / `AcousticLSRTM3D` and `AcousticVRZ` / `AcousticVRZ3D`
+  on `impl='c'` refuse the gradients their backward never computed**: the
+  wavelet's (LSRTM 2-D returned zeros, LSRTM 3-D the scattered adjoint sampled
+  at the source, VRZ left `wavelet.grad` at None) and, for LSRTM with
+  `memory=Ckpt(...)`, the RWI vp gradient (zeros).  Use `impl='eager'` for
+  those.
+- **`ModelParallel` refuses a wavelet that requires grad**, for every
+  equation: the domain-decomposed backward returns the model gradients only
+  and left `wavelet.grad` at None (`Acoustic` included, whose single-domain
+  backward does return it).  Take that gradient from a single-domain
+  `PropTorch` run.
 - **Boundary-saving gradients on a thin physical box.**  Where the physical
   box (PML excluded) is thinner than two restore strips along an axis -- fewer
   than `2 * (spatial_order / 2 + 1)` cells -- the strip imaging of `Acoustic`

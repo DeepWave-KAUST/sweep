@@ -1020,7 +1020,9 @@ class ModelParallel:
         populates each model's ``.grad`` (== :meth:`gradient` of the residual),
         exactly like the single-domain ``PropTorch`` autograd path. Otherwise it
         stays on the forward-only stepped path; the explicit :meth:`gradient`
-        adjoint API remains for manual control.
+        adjoint API remains for manual control.  The wavelet gets no gradient:
+        a ``wavelet`` that ``requires_grad`` (with grad mode on) raises
+        ``NotImplementedError``.
 
         MEMORY: the forward-only path allocates neither the adjoint wavefields
         nor the nt-scaled boundary ring — the capture that binds them is
@@ -1031,6 +1033,16 @@ class ModelParallel:
         its lifetime (``use_boundary_saving`` is frozen at capture), so build a
         separate ``ModelParallel`` for pure-forward work if you want it to stay
         light."""
+        # The domain-decomposed backward returns the model gradients only, for
+        # every equation (_DDForward.backward hands autograd None for the
+        # wavelet), so a wavelet that asks for its gradient is refused here,
+        # before the capture or anything else runs, instead of coming back with
+        # grad None.  Under no_grad nothing is asked, as for the models below.
+        if torch.is_grad_enabled() and torch.is_tensor(wavelet) and wavelet.requires_grad:
+            raise NotImplementedError(
+                "ModelParallel does not return the wavelet gradient: the domain-decomposed "
+                "backward returns the model gradients only. Detach the wavelet, or take that "
+                "gradient from a single-domain PropTorch run.")
         # ``torch.is_grad_enabled()`` is part of the predicate because
         # ``requires_grad`` is a TENSOR property, blind to grad mode: without it
         # a caller who writes ``with torch.no_grad(): ddp(..., models=[vp])``

@@ -2,6 +2,7 @@ import functools
 
 from ._cpml import cpml_axis_update
 from .base import SecondOrderEquation
+from .acoustic_lsrtm import refuse_c_grads
 from .cuda_layout import CUDALayoutSpec, history_fields, history_plain, record_single
 from .slot_table import ACOUSTIC_LSRTM3D, ACOUSTIC_LSRTM3D_MP
 
@@ -261,6 +262,10 @@ class AcousticLSRTM3D(SecondOrderEquation):
             # BackwardOutput.grads = {grad_wavelet, <model grads>}; the
             # propagator sizes grads_out from this.
             grads_out_has_wavelet=True,
+            # ... but the slot is not a gradient (the backward accumulates the
+            # scattered adjoint there): the wavelet gradient is refused
+            # (refuse_c_grads), so wavelet.grad stays None
+            grads_out_wavelet_written=False,
             rwi_split_iii=rwi,   # term III -> grad_split_iii_out (full / bs)
             # Domain decomposition: the forward and backward_bs drivers honour the
             # stepped it_begin/it_end (bw_it_begin/bw_it_end) range and the cut-face
@@ -289,3 +294,9 @@ class AcousticLSRTM3D(SecondOrderEquation):
         """The layout of a call whose models need these gradients
         (``grad_mask[i]``: model i requires grad; None: all of them)."""
         return self._layout(grad_mask is None or bool(grad_mask[0]))
+
+    def c_refuse_grads(self, wavelet_grad, model_grad_mask, boundary_saving=False, boundary_dtype=None,
+                       checkpoint=False):
+        """impl='c': the wavelet gradient, and vp's in the checkpoint modes, are
+        refused (refuse_c_grads)."""
+        refuse_c_grads(self, wavelet_grad, model_grad_mask, checkpoint)

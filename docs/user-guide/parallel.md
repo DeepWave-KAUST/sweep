@@ -150,6 +150,10 @@ against like — the example scripts' `--check` mode does exactly that.
 - Gradient memory: boundary saving only. Each tile reconstructs its forward
   wavefield from saved boundaries, so a wrapped prop built with
   `memory=Full()` or `memory=Ckpt(...)` is refused at construction.
+- Gradients: the models' only. A `wavelet` that requires grad is refused
+  (`NotImplementedError`) before the forward runs, for every equation: the
+  domain-decomposed backward returns no source-wavelet gradient. Take that
+  gradient from a single-domain `PropTorch` run.
 - Boundary storage and dtype: see the table below.
 - `BoundarySaving.tail_steps`: Acoustic 2-D/3-D (see
   [Propagators](propagators.md#boundary-tail-truncation-boundarysavingtail_steps));

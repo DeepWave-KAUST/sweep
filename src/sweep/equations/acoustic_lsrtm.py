@@ -89,6 +89,33 @@ def _adjoint_workspace_shapes(B, nt, shape, mode, rwi=True):
     n = 2 if mode == "recursive" else 1
     return n * [[B, 1, *shape]]
 
+
+def refuse_c_grads(equation, wavelet_grad, model_grad_mask, checkpoint):
+    """The gradients impl='c' AcousticLSRTM / AcousticLSRTM3D do not return,
+    refused before anything runs (a silently zero or wrong gradient is what
+    this guards):
+
+    * the wavelet's: the source enters the background field, so its gradient
+      is the background adjoint at the source; the compiled backward runs that
+      adjoint for the RWI vp gradient only, and never images the source there;
+    * vp's in the checkpoint modes: they replay the background field alone and
+      return the mp gradient only (the RWI terms need the scattered field and
+      the background adjoint too, which only the full and boundary-saving
+      backwards carry).
+    """
+    name = type(equation).__name__
+    if wavelet_grad:
+        raise NotImplementedError(
+            f"impl='c' {name} does not return the wavelet gradient (it needs the background "
+            "adjoint at the source). Detach the wavelet, or use impl='eager', whose autograd "
+            "returns every gradient.")
+    vp_grad = bool(model_grad_mask[list(equation.models).index("vp")])
+    if checkpoint and vp_grad:
+        raise NotImplementedError(
+            f"impl='c' {name} computes the RWI vp gradient with memory=Full() or "
+            "BoundarySaving() only; the checkpoint modes replay the background field alone "
+            "and return the mp gradient. Use one of those, detach vp, or use impl='eager'.")
+
 @register_equation()
 class AcousticLSRTM(SecondOrderEquation):
     """Second-order 2-D acoustic Born / LSRTM wave equation.
@@ -207,6 +234,9 @@ class AcousticLSRTM(SecondOrderEquation):
             # BackwardOutput.grads = {grad_wavelet, <model grads>}; the
             # propagator sizes grads_out from this.
             grads_out_has_wavelet=True,
+            # ... but the slot is never written: the wavelet gradient is refused
+            # (refuse_c_grads), so wavelet.grad stays None
+            grads_out_wavelet_written=False,
             rwi_split_iii=rwi,   # term III -> grad_split_iii_out (full / bs)
             # Domain decomposition: the forward and backward_bs drivers honour the
             # stepped it_begin/it_end (bw_it_begin/bw_it_end) range and the cut-face
@@ -237,4 +267,10 @@ class AcousticLSRTM(SecondOrderEquation):
         """The layout of a call whose models need these gradients
         (``grad_mask[i]``: model i requires grad; None: all of them)."""
         return self._layout(grad_mask is None or bool(grad_mask[0]))
+
+    def c_refuse_grads(self, wavelet_grad, model_grad_mask, boundary_saving=False, boundary_dtype=None,
+                       checkpoint=False):
+        """impl='c': the wavelet gradient, and vp's in the checkpoint modes, are
+        refused (refuse_c_grads)."""
+        refuse_c_grads(self, wavelet_grad, model_grad_mask, checkpoint)
     

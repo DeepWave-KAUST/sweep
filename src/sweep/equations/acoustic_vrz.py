@@ -141,6 +141,16 @@ def _adjoint_workspace_shapes(B, nt, shape, mode):
     return 7 * [[B, 1, *shape]]
 
 
+def refuse_c_grads(equation, wavelet_grad):
+    """impl='c' AcousticVRZ / AcousticVRZ3D return the model gradients only
+    (``grads_out_wavelet_written=False``): a wavelet that asks for its gradient
+    is refused before anything runs, instead of coming back with grad None."""
+    if wavelet_grad:
+        raise NotImplementedError(
+            f"impl='c' {type(equation).__name__} does not return the wavelet gradient. "
+            "Detach the wavelet, or use impl='eager', whose autograd returns every gradient.")
+
+
 @register_equation()
 class AcousticVRZ(SecondOrderEquation):
     """Second-order 2-D acoustic wave equation in variable-density VRZ form.
@@ -255,6 +265,7 @@ class AcousticVRZ(SecondOrderEquation):
             slots=slot_table.ACOUSTIC_VRZ2D,
             stepped=True,
             grads_out_has_wavelet=True,
+            # never written: the wavelet gradient is refused (refuse_c_grads)
             grads_out_wavelet_written=False,
             illum_nvar=2,
             # Same divergence-form gradient as the 3-D sibling.  DD still
@@ -264,6 +275,11 @@ class AcousticVRZ(SecondOrderEquation):
             dd_coupling_nvar=6,
             dd_adjoint_coeff_nvar=4,
         )
+
+    def c_refuse_grads(self, wavelet_grad, model_grad_mask, boundary_saving=False, boundary_dtype=None,
+                       checkpoint=False):
+        """impl='c': the wavelet gradient is refused (refuse_c_grads)."""
+        refuse_c_grads(self, wavelet_grad)
 
 
 @register_equation()
@@ -386,6 +402,7 @@ class AcousticVRZ3D(SecondOrderEquation):
             stepped=True,
             dd_backward_phases=True,
             grads_out_has_wavelet=True,
+            # never written: the wavelet gradient is refused (refuse_c_grads)
             grads_out_wavelet_written=False,
             illum_nvar=2,
             # DD: the variable-density gradient is div(c/e) with
@@ -396,3 +413,8 @@ class AcousticVRZ3D(SecondOrderEquation):
             dd_adjoint_coeff_nvar=4,
             dd_tiled_gradient_orders=(2, 4, 6, 8),
         )
+
+    def c_refuse_grads(self, wavelet_grad, model_grad_mask, boundary_saving=False, boundary_dtype=None,
+                       checkpoint=False):
+        """impl='c': the wavelet gradient is refused (refuse_c_grads)."""
+        refuse_c_grads(self, wavelet_grad)

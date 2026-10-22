@@ -21,6 +21,7 @@ from conftest import requires_binding
 
 from sweep.equations import AcousticLSRTM, AcousticLSRTM3D
 from sweep.propagator import BoundarySaving, Full, PropTorch
+from sweep.propagator.options import Ckpt
 
 # workspace slots (rwi, mp only) per mode: 2-D full/bs, 3-D full/bs
 SLOTS = {(2, "full"): (2, 1), (2, "bs"): (2, 1), (3, "full"): (2, 1), (3, "bs"): (3, 2)}
@@ -72,3 +73,34 @@ def test_vp_gradient_only_when_asked(dim, mode):
     assert torch.equal(r0, r1), "the record depends on vp.requires_grad"
     assert torch.equal(gm0, gm1), "the mp gradient depends on vp.requires_grad"
     assert ws2 == ws1 and torch.equal(gv2, gv1) and torch.equal(gm2, gm1) and torch.equal(r2, r1)
+
+
+@requires_binding("acoustic_lsrtm2d_forward", "acoustic_lsrtm3d_forward")
+@pytest.mark.parametrize("dim", (2, 3))
+@pytest.mark.parametrize("what", ("wavelet", "ckpt_vp"))
+def test_gradients_the_backward_does_not_return_are_refused(dim, what):
+    """The compiled backward returns no wavelet gradient (the background adjoint
+    at the source), and no vp gradient in the checkpoint modes (they replay the
+    background field alone): both are refused before anything runs, instead of
+    coming back as zeros (2-D) or as the scattered adjoint (3-D wavelet).  The
+    checkpoint modes keep serving the mp gradient."""
+    shape, src, rec, vp0, mp0 = _case(dim)
+    eq = (AcousticLSRTM if dim == 2 else AcousticLSRTM3D)(spatial_order=4, device="cuda", backend="torch")
+    prop = PropTorch(eq, impl="c", memory=Ckpt(mode="chunk", chunks=4) if what == "ckpt_vp" else Full(),
+                     shape=shape, dh=10.0, dt=0.0015, nt=60, abcn=10, device="cuda",
+                     pml_type="cpmlr", source_type=["h1"], receiver_type=["sh1"], backend="torch")
+    t = np.arange(60, dtype=np.float32) * 0.0015 - 0.03
+    a = (np.pi * 15.0 * t) ** 2
+    w0 = (1 - 2 * a) * np.exp(-a)
+
+    def run(wavelet_grad, vp_grad):
+        wavelet = torch.tensor(w0, dtype=torch.float32, device="cuda", requires_grad=wavelet_grad)
+        vp = torch.tensor(vp0, device="cuda", requires_grad=vp_grad)
+        mp = torch.tensor(mp0, device="cuda", requires_grad=True)
+        (prop(wavelet, src, rec, models=[vp, mp]).double() ** 2).sum().backward()
+        return mp.grad
+
+    with pytest.raises(NotImplementedError, match="wavelet gradient" if what == "wavelet" else "RWI vp gradient"):
+        run(what == "wavelet", what == "ckpt_vp")
+    gm = run(False, False)
+    assert torch.isfinite(gm).all() and float(gm.abs().max()) > 0
