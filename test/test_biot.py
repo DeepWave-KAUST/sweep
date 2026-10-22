@@ -179,6 +179,19 @@ def test_decoupled_pore_fluid_sees_a_pressure_release_surface():
         assert err < 5e-3, (xr, zr, err)
 
 
+def test_boundary_saving_is_refused():
+    # dissipative drag: no reverse-time reconstruction, so a boundary-saving request raises
+    from sweep.propagator.options import BoundarySaving
+
+    shape = (30, 30)
+    coef = _fields(biot_from_biot_constants(**DAI1, b=3e3, phi=0.3), shape)
+    coef[1].requires_grad_()
+    prop = PropTorch(Biot(device=DEV), shape=shape, dev=DEV, dh=10.0, dt=1e-3, abcn=10, free_surface=False,
+                     backend="torch", impl="eager", memory=BoundarySaving())
+    with pytest.raises(NotImplementedError, match="not supported for Biot"):
+        prop(_wavelet(50, 1e-3, 10.0), np.array([[15, 15]]), np.array([[[10, 15]]]), models=coef)
+
+
 def test_per_edge_free_surface_is_refused():
     shape = (30, 30)
     with pytest.raises(NotImplementedError, match="per-edge"):

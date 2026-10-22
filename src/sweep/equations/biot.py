@@ -184,6 +184,11 @@ class Biot(FirstOrderEquation):
 
     default_pml_type = "cpmls"
     supports_batched_models = True
+    # The viscous drag is dissipative and acts at every node: stepping back in time multiplies
+    # round-off by exp(gamma dt) per step, so the reverse reconstruction boundary saving relies
+    # on does not exist (as for ViscoAcoustic / ViscoElastic).  Gradients use checkpointing.
+    supports_boundary_saving_eager = False
+    supports_boundary_saving_c = False
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch"):
         """Build the Biot operator.
