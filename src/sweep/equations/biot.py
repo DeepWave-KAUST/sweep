@@ -30,7 +30,14 @@ see :func:`biot_fast_p_velocity`.
 Discretisation follows ``Elastic``: ``vx, qx`` share the ``vx`` node and ``vz, qz`` the
 ``vz`` node, ``p`` sits with ``sxx, szz``; one CPML memory field per first derivative
 (``cpmls``).  Material arrays are used at every node without averaging, as in ``Elastic``.
-Eager only; no free surface yet.
+
+A flat top free surface is open-pore: traction-free total stress and ``p = 0`` (Carcione,
+sec. 7.11.4).  It uses ``Elastic``'s image method on the ``szz`` row, with ``p`` mirrored like
+``szz`` and ``qz`` evenly (the pressure-release image of the pore fluid), and Robertsson's
+surface ``sxx``: ``d vz/dz`` eliminated with ``sigma_zz = 0`` and ``d qz/dz`` extrapolated from
+the two rows below.  The surface is then as drained as the grid resolves: undrained while the
+drainage boundary layer ``sqrt(2 D / w)`` is thinner than a cell (``b -> inf`` reproduces
+``Elastic``'s free surface), drained once it spans cells.  Eager only.
 
 References: M. A. Biot (1962), J. Appl. Phys. 33(4), 1482-1498; N. Dai, A. Vafidis &
 E. R. Kanasewich (1995), Geophysics 60(2), 327-340; J. M. Carcione & G. Quiroga-Goode (1995),
@@ -44,6 +51,15 @@ import math
 import torch
 
 from ._cpml import cpml_update
+from ._elastic_step_core import _fsd
+from ._free_surface import (
+    FS_MOD_SXX,
+    FS_NEARSURF_O2,
+    get_o2_pd,
+    near_surface_o2_count,
+    overwrite_top_row,
+    zero_top_row,
+)
 from ._registry import register_equation
 from .base import FirstOrderEquation
 from .fields import FieldSpec, ModelSpec
@@ -109,6 +125,15 @@ def biot_fast_p_velocity(models):
     """Largest fast-P velocity of the models; sets the explicit time step like ``vp`` does."""
     vfast = biot_wave_velocities(models)[0]
     return float(vfast.max()) if isinstance(vfast, torch.Tensor) else float(vfast)
+
+
+def _dz(pd, fs, name, field, odd, half=False):
+    """``pd.<name>(field)``; with a top free surface ``fs`` the image-method derivative of
+    ``Elastic`` (``odd``: mirrored with a sign flip; ``half``: nodes half a cell below)."""
+    if fs is None:
+        return getattr(pd, name)(field)
+    halo, n_o2, pd2 = fs
+    return _fsd(pd, pd2, name, field, odd, -2, ["low"], halo, n_o2, half=half)
 
 
 @register_equation()
@@ -195,15 +220,21 @@ class Biot(FirstOrderEquation):
     def prepare_models(self, models):
         return list(self._derived(models))
 
-    def _check_boundaries(self):
+    def _top_free_surface(self):
+        """``None``, or ``(halo, n_o2, o2 operators)`` of the flat top free surface."""
         fs_faces = getattr(self, "fs_faces", None)
-        if getattr(self, "free_surface", False) or (fs_faces is not None and any(fs_faces)):
-            raise NotImplementedError("Biot: free surfaces are not implemented yet; run with free_surface=False")
+        if fs_faces is not None and any(fs_faces[1:]):
+            raise NotImplementedError("Biot: only a top free surface is implemented")
         if getattr(self, "_apm_air_mask_runtime", None) is not None or getattr(self, "_topo_rows_runtime", None) is not None:
             raise NotImplementedError("Biot: topography is not implemented")
+        if not getattr(self, "free_surface", False):
+            return None
+        halo = self.pd.coes.shape[0]
+        n_o2 = near_surface_o2_count(halo, FS_NEARSURF_O2)
+        return halo, n_o2, (get_o2_pd(self.pd) if n_o2 else None)
 
     def func(self, wavefields, models, dt, h, b, **kwargs):
-        self._check_boundaries()
+        fs = self._top_free_surface()
         (vx, vz, qx, qz, sxx, szz, sxz, p,
          m_sxx_x, m_sxz_z, m_sxz_x, m_szz_z, m_p_x, m_p_z,
          m_vx_x, m_vz_z, m_vx_z, m_vz_x, m_qx_x, m_qz_z) = wavefields
@@ -215,11 +246,12 @@ class Biot(FirstOrderEquation):
 
         # ---- velocities and fluxes (stresses and pressure frozen at t^n) ----------------
         sxx_x, m_sxx_x = cpml_update(pd.x_forward(sxx), m_sxx_x, axh, bxh, (sxx, pd.kxf, hx))
-        sxz_z, m_sxz_z = cpml_update(pd.z_backward(sxz), m_sxz_z, az, bz, (sxz, pd.kzb, hz))
+        sxz_z, m_sxz_z = cpml_update(_dz(pd, fs, "z_backward", sxz, True, half=True), m_sxz_z, az, bz,
+                                     (sxz, pd.kzb, hz))
         sxz_x, m_sxz_x = cpml_update(pd.x_backward(sxz), m_sxz_x, ax, bx, (sxz, pd.kxb, hx))
-        szz_z, m_szz_z = cpml_update(pd.z_forward(szz), m_szz_z, azh, bzh, (szz, pd.kzf, hz))
+        szz_z, m_szz_z = cpml_update(_dz(pd, fs, "z_forward", szz, True), m_szz_z, azh, bzh, (szz, pd.kzf, hz))
         p_x, m_p_x = cpml_update(pd.x_forward(p), m_p_x, axh, bxh, (p, pd.kxf, hx))
-        p_z, m_p_z = cpml_update(pd.z_forward(p), m_p_z, azh, bzh, (p, pd.kzf, hz))
+        p_z, m_p_z = cpml_update(_dz(pd, fs, "z_forward", p, True), m_p_z, azh, bzh, (p, pd.kzf, hz))
 
         decay = torch.exp(-gamma * dt)
         # (1 - exp(-gamma dt)) / gamma, -> dt as gamma -> 0
@@ -236,17 +268,31 @@ class Biot(FirstOrderEquation):
 
         # ---- stresses and pressure -------------------------------------------------------
         vx_x, m_vx_x = cpml_update(pd.x_backward(vx), m_vx_x, ax, bx, (vx, pd.kxb, hx))
-        vz_z, m_vz_z = cpml_update(pd.z_backward(vz), m_vz_z, az, bz, (vz, pd.kzb, hz))
+        vz_z, m_vz_z = cpml_update(_dz(pd, fs, "z_backward", vz, True, half=True), m_vz_z, az, bz,
+                                   (vz, pd.kzb, hz))
         qx_x, m_qx_x = cpml_update(pd.x_backward(qx), m_qx_x, ax, bx, (qx, pd.kxb, hx))
-        qz_z, m_qz_z = cpml_update(pd.z_backward(qz), m_qz_z, az, bz, (qz, pd.kzb, hz))
+        qz_z, m_qz_z = cpml_update(_dz(pd, fs, "z_backward", qz, False, half=True), m_qz_z, az, bz,
+                                   (qz, pd.kzb, hz))
         div_v = vx_x + vz_z
         div_q = qx_x + qz_z
+        sxx_old = sxx
         sxx = sxx + dt * (hmod * vx_x + lam_u * vz_z + c * div_q)
         szz = szz + dt * (lam_u * vx_x + hmod * vz_z + c * div_q)
         p = p - dt * (c * div_v + biot_m * div_q)
-        vx_z, m_vx_z = cpml_update(pd.z_forward(vx), m_vx_z, azh, bzh, (vx, pd.kzf, hz))
+        vx_z, m_vx_z = cpml_update(_dz(pd, fs, "z_forward", vx, False), m_vx_z, azh, bzh, (vx, pd.kzf, hz))
         vz_x, m_vz_x = cpml_update(pd.x_forward(vz), m_vz_x, axh, bxh, (vz, pd.kxf, hx))
         sxz = sxz + dt * mu * (vx_z + vz_x)
+
+        if fs is not None:
+            halo = fs[0]
+            if FS_MOD_SXX:
+                # surface sxx with d vz/dz from sigma_zz = 0, (H - lam_u^2 / H) d vx/dx
+                # + C (1 - lam_u / H) div q, and d qz/dz extrapolated linearly from below
+                qz_z_surf = 2.0 * qz_z.roll(-1, -2) - qz_z.roll(-2, -2)
+                surf = sxx_old + dt * (4.0 * mu * (lam_u + mu) * vx_x + 2.0 * mu * c * (qx_x + qz_z_surf)) / hmod
+                sxx = overwrite_top_row(sxx, surf, halo, axis=-2)
+            szz = zero_top_row(szz, halo, axis=-2)
+            p = zero_top_row(p, halo, axis=-2)
 
         return (vx, vz, qx, qz, sxx, szz, sxz, p,
                 m_sxx_x, m_sxz_z, m_sxz_x, m_szz_z, m_p_x, m_p_z,
