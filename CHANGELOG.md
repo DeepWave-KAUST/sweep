@@ -138,6 +138,24 @@ and this project adheres to
   `test/lsrtm_staging_check.py`).  `storage='disk'` is refused for the pair at
   construction: the drivers refused it across a cut but ran it on a single
   tile.
+- **3-D boundary saving with `storage_dtype='int8'` / `'fp16'`: a race in the
+  restore.**  The band-only restore kernel visits a cell on an edge or corner of
+  the saved strip (or, on an axis thinner than two bands, a cell both opposite
+  bands cover) once per band, and every visit wrote it.  int8 and fp16 storage
+  quantize each face with its own per-block scales, so those copies differ, and
+  the cell kept whichever thread wrote last: the gradient changed from run to
+  run (`Acoustic3D` 2e-7 / 3e-6 relative with fp16 / int8 on
+  `test/test_boundary_compact_kernel.py`), and under `ModelParallel` the
+  cpu-staged gradient did not match gpu-direct bit for bit; the forward record
+  was never affected.  Such a cell is now restored from one band only, the one the
+  full-grid restore writes last, so the result equals the full-grid kernel's
+  (`SWEEP_BOUNDARY_NO_COMPACT=1`) bit for bit at any block order, and cpu
+  staging under DD is bit-identical to gpu-direct in every storage dtype.  It
+  affected every compiled 3-D equation with boundary saving on gpu, cpu or
+  async-disk storage: int8 since 0.1.0, fp16 since 0.2.0 (when it gained
+  per-block scales).  fp32, bf16, synchronous disk and 2-D were not affected.
+  New kernel `boundary_kernel3d_compact_owned`; every other kernel's machine
+  code is unchanged.
 - **Boundary-saving gradients on a thin physical box.**  Where the physical
   box (PML excluded) is thinner than two restore strips along an axis -- fewer
   than `2 * (spatial_order / 2 + 1)` cells -- the strip imaging of `Acoustic`

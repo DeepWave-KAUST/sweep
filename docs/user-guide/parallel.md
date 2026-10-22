@@ -200,12 +200,10 @@ reaches a reconstruction indexing that is not exercised by any multi-tile run.
 Use gpu-direct there, or a plain `PropTorch` backward, which supports cpu and
 disk staging as usual.
 
-Every `storage_dtype` works with either storage. On fp32 and bf16 the
-cpu-staged gradient is **bit-identical** to the gpu-direct one; fp16 and int8
-differ only within their own run-to-run quantisation floor, i.e. by no more
-than two runs of the *same* configuration differ from each other
-(`test/dd_offload_check.py` checks exactly that, on both counts; `EQ=lsrtm`
-runs it for the LSRTM pair).
+Every `storage_dtype` works with either storage, and with every one of them
+(fp32, bf16, fp16, int8) the cpu-staged gradient is **bit-identical** to the
+gpu-direct one and to a repeat of itself (`test/dd_offload_check.py` checks
+both; `EQ=lsrtm` runs it for the LSRTM pair).
 
 Staging trades PCIe traffic for GPU memory. The DD backward is driven one step
 per kernel call from Python, so the boundary runtime — a copy stream beside the

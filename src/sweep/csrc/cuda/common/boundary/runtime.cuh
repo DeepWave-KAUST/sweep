@@ -101,9 +101,13 @@ public:
     {
         profile_enabled_ = std::getenv("SWEEP_BOUNDARY_PROFILE") != nullptr;
         // Escape hatch back to the full-grid scan kernels.  The compact and
-        // scan paths are bit-identical by construction, so this exists to prove
-        // that in a test (and to isolate the compact kernels if they are ever
-        // suspected), not to change results.
+        // scan paths give bit-identical results: a cell in two or three bands
+        // (an edge or corner of the strip) ends up with the value of the scan
+        // kernel's last face write -- every face holds the same bits for fp32 /
+        // bf16 storage, and the int8 / scaled-fp16 restore writes it from that
+        // face only (boundary_kernel3d_compact_owned).  So this exists to prove
+        // that in a test (test_boundary_compact_kernel.py) and to isolate the
+        // compact kernels if they are ever suspected, not to change results.
         no_compact_kernel_ = std::getenv("SWEEP_BOUNDARY_NO_COMPACT") != nullptr;
         if (!enabled_ || !staged_)
             return;
@@ -1179,8 +1183,10 @@ public:
                     u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
                     backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
             } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
+                // per-face lossy copies of an edge/corner cell differ: restore
+                // each from its owning face (boundary/kernels.cuh)
                 dequantize_step_3d(b, backward_time_index(it));
-                boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
+                boundary_kernel3d_compact_owned<<<compact_blocks, compact_threads>>>(
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
                     /*it=*/0, width, offset, ctx, BOUNDARY_RESTORE);
             } else {
@@ -1276,8 +1282,10 @@ public:
                     u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
                     backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
             } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
+                // per-face lossy copies of an edge/corner cell differ: restore
+                // each from its owning face (boundary/kernels.cuh)
                 dequantize_step_3d(b, backward_time_index_field(it));
-                boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
+                boundary_kernel3d_compact_owned<<<compact_blocks, compact_threads>>>(
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
                     /*it=*/0, width, offset, ctx, BOUNDARY_RESTORE);
             } else {

@@ -11,7 +11,10 @@ boundary tail truncation, so gate B is skipped there.
 
 CPU staging only changes WHERE the boundary lives and WHEN it is copied, never
 the arithmetic, so the DD gradient must be **bit-identical** to the gpu-direct
-one in fp32 (the low-precision rings keep their own quantisation floor).
+one, in every storage dtype: the fp16 / int8 rings quantize the same faces
+with the same block scales either way.  (Those two used to be held to 1e-2 of
+the peak only, which hid the 3-D restore race fixed by
+boundary_kernel3d_compact_owned.)
 Four gates:
 
   A  storage='cpu' vs storage='gpu'                      bitwise
@@ -124,9 +127,7 @@ def compare(label, ga, gb, ref_peak=None, peak=None):
     dist.all_reduce(flag, op=dist.ReduceOp.MIN)
     mt = torch.tensor([mad], device=dev)
     dist.all_reduce(mt, op=dist.ReduceOp.MAX)
-    scale = torch.tensor([float(gb.abs().max())], device=dev)
-    dist.all_reduce(scale, op=dist.ReduceOp.MAX)
-    ok = bool(flag.item() == 1.0) if BND == "fp32" else float(mt) <= 1e-2 * float(scale)
+    ok = bool(flag.item() == 1.0)
     if rank == 0:
         extra = ""
         if peak is not None and ref_peak is not None:

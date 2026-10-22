@@ -26,8 +26,9 @@ __global__ void boundary_kernel2d(
 // threads of which only ~4% (at production sizes) land inside a band; every
 // other thread still pays the prologue -- four SolverContext::phys_*()
 // evaluations -- which is essentially this kernel's whole cost.  Mirrors
-// boundary_kernel3d_compact.  FP32 save/restore only; the bf16 / fp16 / int8
-// paths keep the scan kernel.
+// boundary_kernel3d_compact.  FP32 save/restore only; the 2-D bf16 / fp16 /
+// int8 paths keep the scan kernel (in 3-D every dtype is compact, and the int8 /
+// fp16 restore goes through boundary_kernel3d_compact_owned).
 __global__ void boundary_kernel2d_compact(
     float* __restrict__ u,
 
@@ -65,6 +66,37 @@ __global__ void boundary_kernel3d(
 );
 
 __global__ void boundary_kernel3d_compact(
+    float* __restrict__ u,
+
+    float* __restrict__ top,
+    float* __restrict__ bottom,
+
+    float* __restrict__ front,
+    float* __restrict__ back,
+
+    float* __restrict__ left,
+    float* __restrict__ right,
+
+    int it,
+    int width,
+    int offset,
+    SolverContext ctx,
+    int mode,
+    int tangent_pad = 0
+);
+
+// boundary_kernel3d_compact for the INT8 / scaled-FP16 staging buffers.  The
+// compact kernel visits a cell that lies in several bands (an edge or corner of
+// the strip or, on an axis thinner than two bands, a cell both opposite bands
+// cover) once per band; on RESTORE every visit writes it.  With FP32 storage the copies are
+// equal, so the unordered writes agree; the lossy storage quantizes each face
+// with its own block scales, so they do not, and the cell would end up with
+// whichever thread ran last.  This variant restores such a cell from the band
+// boundary_kernel3d writes last (top, bottom, front, back, left, right) only:
+// the result is the scan kernel's, at any thread count or block order.  The
+// runtime launches it for RESTORE only; its SAVE would be
+// boundary_kernel3d_compact's.
+__global__ void boundary_kernel3d_compact_owned(
     float* __restrict__ u,
 
     float* __restrict__ top,
@@ -207,7 +239,9 @@ __global__ void boundary_kernel3d_compact_bf16(
 // FP32 staging buffer (one timestep's worth, shape == one face slice);
 // then ``launch_quantize_int8`` reduces and stores into the persistent
 // uint8 buffer plus a per-block FP32 scale.  Backward reverses the
-// order — dequantize first, then run the FP32 restore kernel.
+// order — dequantize first, then run the FP32 restore kernel
+// (boundary_kernel2d / boundary_kernel3d, or boundary_kernel3d_compact_owned on
+// the 3-D compact path, where the per-face copies of an edge cell differ).
 void launch_quantize_int8(const float* src, uint8_t* dst, float* scale,
                           int64_t total_cells, cudaStream_t stream);
 
