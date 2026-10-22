@@ -300,11 +300,14 @@ struct AcousticWavefieldTensor {
         int dim_
     )
     {
+        // u triple + CPML aux, optionally + the psi double-buffer the replay
+        // writes into (a driver whose forward kernel reads neighbours' psi).
         const size_t n = (dim_ == 2) ? 7 : 9;
-        SWEEP_CHECK(tensors.size() == n,
+        const size_t n_dbuf = (dim_ == 2) ? 9 : 12;
+        SWEEP_CHECK(tensors.size() == n || tensors.size() == n_dbuf,
                     "acoustic ", dim_, "D checkpoint replay state expects ", n,
-                    " tensors (u triple + CPML aux, no psi double-buffer), got ",
-                    tensors.size());
+                    " tensors (u triple + CPML aux) or ", n_dbuf,
+                    " (+ psi double-buffer), got ", tensors.size());
         const size_t n_snaps = (dim_ == 2) ? 6 : 8;
         SWEEP_CHECK(snaps.size() == n_snaps,
                     "acoustic ", dim_, "D checkpoint set expects ", n_snaps, " tensors");

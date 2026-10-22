@@ -160,6 +160,9 @@ class Acoustic(SecondOrderEquation):
             # recursive bisection keeps one scratch state set per level on
             # top of set 0.
             recursive_state_depth=True,
+            # the replay's forward kernel reads neighbours' psi (d(a psi)): replay
+            # with the psi double-buffer, as the forward (acoustic2d driver).
+            checkpoint_replay_psi_dbuf=True,
             # ckpt mode: the recomputed chunk, allt_shape rows (chunk, B, nz, nx)
             # (ACOUSTIC_CKPT_CHUNK_FORWARD); recursive mode images from the leaf's
             # scratch instead and keeps no history.

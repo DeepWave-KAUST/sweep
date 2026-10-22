@@ -106,11 +106,14 @@ def step_cpml(
 
 
 # The checkpoint replay state (u_prev, u_now, u_next, psix, psiz, zetax, zetaz,
-# psiy, zetay of the background field, AcousticWavefieldTensor 3-D bind order):
-# one acoustic state set, declared explicitly because the LSRTM forward slot list
-# is two acoustic layouts back to back (``checkpoint_state_nvar``); the recursive
-# backward keeps one scratch set per bisection level (``recursive_state_depth``).
-_CKPT_REPLAY_STATE_NVAR = 9
+# psiy, zetay, psixn, psizn, psiyn of the background field,
+# AcousticWavefieldTensor 3-D bind order): one acoustic state set, declared
+# explicitly because the LSRTM forward slot list is two acoustic layouts back to
+# back (``checkpoint_state_nvar``); the recursive backward keeps one scratch set
+# per bisection level (``recursive_state_depth``).  The psi double-buffer is in
+# it because the replay runs the forward kernel, which reads the neighbours' psi
+# (acoustic_lsrtm3d/backward.cu).
+_CKPT_REPLAY_STATE_NVAR = 12
 
 
 def _adjoint_workspace_shapes(B, nt, shape, mode, rwi=True):
@@ -120,11 +123,10 @@ def _adjoint_workspace_shapes(B, nt, shape, mode, rwi=True):
     recursive-checkpoint mode (the replayed step's field).
     """
     # rwi (vp needs its RWI gradient): full and bs append the background adjoint's
-    # v2 scratch and its combined field lambda_bg + mp*lambda_sc (differentiated in
-    # the CPML band) as their LAST two slots (full: V2_LAMBDA + them; bs:
-    # V2_LAMBDA, F_THIS + them).
+    # v2 scratch, vp^2 * (lambda_bg + mp*lambda_sc), as their LAST slot (full:
+    # V2_LAMBDA, it; bs: V2_LAMBDA, F_THIS, it).
     if rwi and mode in ("full", "bs"):
-        return (3 if mode == "full" else 4) * [[B, 1, *shape]]
+        return (2 if mode == "full" else 3) * [[B, 1, *shape]]
     n = 2 if mode in ("bs", "recursive") else 1
     return n * [[B, 1, *shape]]
 
@@ -270,6 +272,8 @@ class AcousticLSRTM3D(SecondOrderEquation):
             # 2 wavefields (bg+sc); each: psix,psiy,psiz,zetax,zetay,zetaz (6) +
             # psixn,psiyn,psizn (3) for the race-free forward double-buffer -> 2*9=18.
             pml_nvar=18,
+            # the zeta shadow triple of each adjoint field (slot table, adjoint_only)
+            adjoint_extra_nvar=6,
             last_two_nvar=2,
             last_two_storage_nvar=2 if rwi else 1,   # rwi: bg + scattered
             checkpoint_nvar=8,

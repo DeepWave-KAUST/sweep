@@ -212,8 +212,10 @@ template<int Order>
 void launch_fwd(const FwdArgs& a, const SolverContext& ctx)
 {
     const Box all = fdtd::computed_box(ctx);
-    // interior = the physical box (in_pml_3d false) within the x range
-    const Box in = fdtd::intersect(fdtd::phys_box(ctx, 0), all);
+    // interior = the physical box less the db leak cell next to each band
+    // (in_cpml_3d false) within the x range: the shell's per-axis CPML terms
+    // carry db = np.gradient(b), nonzero on that cell (dropping it reflected)
+    const Box in = fdtd::intersect(fdtd::phys_box(ctx, 1), all);
     if (!fdtd::empty(in)) {
         const auto L = fdtd::box_launch(in, ctx.B, fdtd::kBoxBlock);
         vrz3d_fwd_interior<Order><<<L.grid, L.block>>>(a.wf, a.vp, a.z, a.iz, a.lap, a.g, ctx, in);

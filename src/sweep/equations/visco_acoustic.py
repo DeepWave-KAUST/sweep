@@ -1,6 +1,6 @@
 import numpy as np
 from .base import SecondOrderEquation
-from .cuda_layout import CUDALayoutSpec, history_plain, record_single
+from .cuda_layout import CUDALayoutSpec, record_single
 
 from .fields import FieldSpec, ModelSpec
 from ._free_surface import zero_above_topo
@@ -90,6 +90,15 @@ def _zero_outer_halo(u, halo, backend):
     out[..., :halo, :] = 0; out[..., -halo:, :] = 0
     out[..., :, :halo] = 0; out[..., :, -halo:] = 0
     return out
+
+
+def _ring_tail_slices(steps, grid, M):
+    """Extra (B, *grid) time slices after ``steps`` raw ones that hold the
+    forward's update on the ring of M physical cells next to the CPML bands,
+    2 M (nx + nz) floats per step and shot (visco_acoustic2d/kernels.cuh
+    visco_ring_tail_slices: the same ceil)."""
+    nz, nx = (int(v) for v in grid[-2:])
+    return -(-int(steps) * 2 * M * (nx + nz) // (nz * nx))
 
 
 def _fft_work_area_slot(B, grid):
@@ -408,11 +417,13 @@ class ViscoAcoustic(SecondOrderEquation):
         grid_slot = lambda B, grid: [B, 1, *grid]
 
         def forward_workspace_shapes(B, grid):
-            # C0, C1 for the Lop pipeline, C2 keeps the dispersion spectrum alive
-            # across its two products; plus the cuFFT work area.
+            # UTHIS, the step's update vp^2 * w_sum (its ring goes to the
+            # history, see save_all_shape); C0, C1 for the Lop pipeline, C2 keeps
+            # the dispersion spectrum alive across its two products; plus the
+            # cuFFT work area.
             if not spectral:
-                return []
-            return [complex_slot(B, grid)] * (3 if d else 2) + [_fft_work_area_slot(B, grid)]
+                return [grid_slot(B, grid)]
+            return [grid_slot(B, grid)] + [complex_slot(B, grid)] * (3 if d else 2) + [_fft_work_area_slot(B, grid)]
 
         def backward_workspace_shapes(B, nt, grid, mode):
             # [0] the reverse step's vp^2*Lap(u) carrier (every mode), then the
@@ -440,20 +451,32 @@ class ViscoAcoustic(SecondOrderEquation):
                 return a + 2 * d
             return 2 * a + 2 * d
 
+        M = self.so // 2
+
+        def history_shape(B, nt, grid):
+            # the raw pressure of every step, then the ring slices: the vp
+            # carrier is recomputed from the raw field, except on the M cells
+            # next to a CPML band, where the backward takes the update the
+            # forward applied (it reads the band's psi)
+            return (nt + _ring_tail_slices(nt, grid, M), B, *grid)
+
         return CUDALayoutSpec(
             record_shape=record_single(),
-            # chunk_raw: the replayed chunk's raw pressure (chunk mode; the
-            # recursive leaf replays from its start state)
-            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: [(seg, B, *grid)] if mode == "ckpt" else [],
+            # chunk_raw: the replayed chunk's raw pressure + its ring slices
+            # (chunk mode; the recursive leaf replays from its start state)
+            checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: (
+                [(seg + _ring_tail_slices(seg, grid, M), B, *grid)] if mode == "ckpt" else []),
             # replay state = u_prev, u_now, u_next + the 4 checkpointed CPML aux
-            # (slab-shaped), one set per bisection level in recursive mode
-            checkpoint_state_nvar=7,
+            # (slab-shaped) + the psi double buffer the replay steps into (its
+            # stencil reads the neighbours' psi), one set per bisection level in
+            # recursive mode
+            checkpoint_state_nvar=9,
             recursive_state_depth=True,
             backward_workspace_shapes=backward_workspace_shapes,
             forward_workspace_shapes=forward_workspace_shapes,
             derived_model_nvar=derived_model_nvar,
             illum_nvar=2,
-            save_all_shape=history_plain(),
+            save_all_shape=history_shape,
             # BackwardOutput.grads = {grad_wavelet, <model grads>}; the
             # propagator sizes grads_out from this.
             grads_out_has_wavelet=True,

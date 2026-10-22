@@ -72,6 +72,10 @@ class CUDALayoutSpec:
     # ``forward_wavefields``. None = derive that count from the forward slots;
     # 0 = the driver keeps its replay state elsewhere (LSRTM: workspace slots).
     checkpoint_state_nvar: int | None = None
+    # Keep the forward psi double-buffer shadows in that replay state set: a
+    # driver whose forward kernel reads its neighbours' psi must replay with
+    # the double-buffer too, or the in-place psi update races those reads.
+    checkpoint_replay_psi_dbuf: bool = False
     # The recursive-checkpoint backward bisects each segment and keeps one
     # scratch state set per recursion level (the acoustic skeleton): the
     # propagator then hands ``1 + depth(max_segment)`` state sets instead of one.

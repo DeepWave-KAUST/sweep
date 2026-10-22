@@ -23,7 +23,7 @@ from sweep.equations import AcousticLSRTM, AcousticLSRTM3D
 from sweep.propagator import BoundarySaving, Full, PropTorch
 
 # workspace slots (rwi, mp only) per mode: 2-D full/bs, 3-D full/bs
-SLOTS = {(2, "full"): (3, 1), (2, "bs"): (3, 1), (3, "full"): (3, 1), (3, "bs"): (4, 2)}
+SLOTS = {(2, "full"): (2, 1), (2, "bs"): (2, 1), (3, "full"): (2, 1), (3, "bs"): (3, 2)}
 
 
 def _case(dim):

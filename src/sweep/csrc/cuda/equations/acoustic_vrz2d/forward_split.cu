@@ -5,7 +5,7 @@
 // registers (61-66 on sm_70) although only the ring, a few percent of a 2-D
 // grid, takes it.  Here:
 //
-//   interior  the physical box (in_pml_2d false): the plain update;
+//   interior  the physical box less the db leak cells (in_cpml_2d false): the plain update;
 //   ring      the other computed cells as ONE launch (launch/box.cuh SlabSet):
 //             the CPML update of both axes, full-grid aux.
 //
@@ -140,8 +140,10 @@ template<int Order>
 void launch_fwd(const FwdArgs& a, const SolverContext& ctx)
 {
     const Box all = fdtd::computed_box(ctx);
-    // interior = the physical box (in_pml_2d false)
-    const Box in = fdtd::intersect(fdtd::phys_box(ctx, 0), all);
+    // interior = the physical box less the db leak cell next to each band
+    // (in_cpml_2d false): the ring runs the CPML update there, where
+    // db = np.gradient(b) is still nonzero (dropping it reflected off the CPML)
+    const Box in = fdtd::intersect(fdtd::phys_box(ctx, 1), all);
     if (!fdtd::empty(in)) {
         const auto L = fdtd::box_launch(in, ctx.B, fdtd::kBoxBlock);
         vrz2d_fwd_interior<Order><<<L.grid, L.block>>>(a.wf, a.vp, a.z, a.iz, a.lap, a.g, ctx, in);

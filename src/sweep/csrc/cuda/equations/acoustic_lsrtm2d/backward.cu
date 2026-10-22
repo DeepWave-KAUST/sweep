@@ -30,9 +30,10 @@ static BufList grad_slots(const BackwardInputCore& p)
 
 namespace {
 
-// Proper transpose adjoint step for the lsrtm scattered field: v2_lambda =
-// vp^2 * lambda_now, then L* = lap(v2_lambda) (interior) / forward CPML (PML).
-// Replaces the old forward-operator adjoint (acoustic2d_single = vp^2*lap), which is
+// Adjoint step of one lsrtm field: v2_lambda = vp^2 * lambda_now, then the exact
+// transpose of the forward step, CPML band included
+// (acoustic_lsrtm2nd_adjoint_exact).  Replaces the old forward-operator adjoint
+// (acoustic2d_single = vp^2*lap), which is
 
 // Layout of p.adjoint_workspace, declared on the Python side by
 // AcousticLSRTM.cuda_layout.backward_workspace_shapes (one padded grid per shot
@@ -40,13 +41,12 @@ namespace {
 // vp^2*lambda scratch of every adjoint step, and -- in the
 // recursive-checkpoint mode only -- the background u_tt of the replayed step.
 enum WorkspaceSlot : int { V2_LAMBDA = 0, BG_UTT, N_SLOTS_RECURSIVE, N_SLOTS_PLAIN = 1 };
-// RWI (full / bs): the two slots after V2_LAMBDA hold the background adjoint's
-// v2 = vp^2*g and g = lambda_bg + mp*lambda_sc itself, which the adjoint step's
-// CPML band differentiates (the recursive mode keeps BG_UTT in slot 1 and carries
-// no vp gradient).  _adjoint_workspace_shapes declares 3 slots for these modes.
+// RWI (full / bs): the slot after V2_LAMBDA holds the background adjoint's
+// v2 = vp^2*(lambda_bg + mp*lambda_sc) (the recursive mode keeps BG_UTT in slot
+// 1 and carries no vp gradient).  _adjoint_workspace_shapes declares 2 slots for
+// these modes.
 constexpr int V2_LAMBDA_BG = 1;
-constexpr int G_BG = 2;
-constexpr int N_SLOTS_RWI = 3;
+constexpr int N_SLOTS_RWI = 2;
 
 // Exactly the count this mode declares.  The propagator allocates the pool for
 // every gradient-bearing forward (_ensure_adjoint_workspace_buffers, driven by
@@ -64,15 +64,15 @@ static BufList workspace_slots(const BackwardInputCore& p, int n_slots)
 
 // The checkpoint replay state of the background field: one 2-D
 // AcousticWavefieldTensor in its bind order (u_prev, u_now, u_next, psix, psiz,
-// zetax, zetaz -- 7 model-shaped grids, no psi double-buffer shadow, so bind()
-// keeps double_buffer_psi=false and the replay keeps its u-only swap(): the
-// in-place psi path allocate(vp, 2, true) gives).  Declared on the Python side
+// zetax, zetaz, psixn, psizn -- 9 model-shaped grids: the replay's forward
+// reads the neighbours' psi, so it runs double-buffered and rotates with
+// swap_pml(), as the forward does; in place it raced those reads).  Declared on the Python side
 // as AcousticLSRTM.cuda_layout.checkpoint_state_nvar and handed over as
 // p.forward_wavefields, K sets back to back, zeroed per backward call (the
 // state allocate() started from): K = 1 in the chunk mode (the replay state),
 // K = 1 + depth in the recursive mode (set 0 = the segment start state, sets
 // 1..depth = the bisection's scratch states, one per recursion level).
-constexpr int REPLAY_STATE_NVAR = 7;
+constexpr int REPLAY_STATE_NVAR = 9;
 
 // Bind set `set` of p.forward_wavefields.  The propagator hands the sets over on
 // every checkpoint-mode backward (_c.py _forward_state_buffers over
@@ -92,21 +92,32 @@ static void bind_replay_state(AcousticWavefieldTensor& wf, const BackwardInputCo
     wf.bind(state, 2, /*use_pml=*/true);
 }
 
-// The adjoint state: the first 9 of the propagator's 18 adjoint wavefield slots
-// (cuda_layout base_nvar + pml_nvar; the background field's u triple + CPML quad
-// + psi double-buffer pair).  _c.py binds cp.adjoint_wavefields on every backward
-// -- _ensure_wavefield_buffers allocates them whenever the forward required a
-// gradient -- so the list is never empty here.
+// The propagator's adjoint wavefield slots (cuda_layout base_nvar + pml_nvar +
+// adjoint_extra_nvar = 6 + 12 + 4): the two fields' 9-slot forward lists, then
+// the zeta double-buffer pair of each (slot_table.ACOUSTIC_LSRTM2D, adjoint_only).
+// The exact adjoint reads the neighbours' zeta*, so each adjoint binds 11
+// tensors -- u triple, CPML quad, psi pair, zeta pair -- and rotates with
+// swap_aux().  _c.py binds cp.adjoint_wavefields on every backward, so the list
+// is never empty here.
+static constexpr int ADJ_SLOTS = 22;
+static std::vector<Buf> adjoint_field_slots(const BackwardInputCore& p, int field, const char* mode)
+{
+    SWEEP_CHECK(static_cast<int>(p.adjoint_wavefields.size()) == ADJ_SLOTS,
+                "acoustic_lsrtm2d/", mode, " requires the propagator-bound "
+                "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar + adjoint_extra_nvar = ",
+                ADJ_SLOTS, " tensors), got ", p.adjoint_wavefields.size());
+    std::vector<Buf> slots(p.adjoint_wavefields.begin() + 9 * field,
+                           p.adjoint_wavefields.begin() + 9 * field + 9);
+    slots.push_back(p.adjoint_wavefields[18 + 2 * field]);       // zetaxn
+    slots.push_back(p.adjoint_wavefields[18 + 2 * field + 1]);   // zetazn
+    return slots;
+}
+
+// The scattered adjoint lambda_sc: field 0 of the adjoint slots.
 static void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInputCore& p,
                                const char* mode)
 {
-    SWEEP_CHECK(p.adjoint_wavefields.size() >= 9,
-                "acoustic_lsrtm2d/", mode, " requires the propagator-bound "
-                "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar = 18 tensors; "
-                "the background field takes the first 9), got ",
-                p.adjoint_wavefields.size());
-    wf.bind(std::vector<Buf>(p.adjoint_wavefields.begin(),
-                                       p.adjoint_wavefields.begin() + 9), 2, true);
+    wf.bind(adjoint_field_slots(p, 0, mode), 2, true);
 }
 
 // The background adjoint lambda_bg = mu (Wu & Alkhalifah 2015): the second 9 of the
@@ -116,12 +127,7 @@ static void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInputC
 static void bind_bg_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInputCore& p,
                                   const char* mode)
 {
-    SWEEP_CHECK(p.adjoint_wavefields.size() >= 18,
-                "acoustic_lsrtm2d/", mode, " needs all 18 adjoint_wavefields "
-                "(cuda_layout.base_nvar + pml_nvar) for the RWI background adjoint, got ",
-                p.adjoint_wavefields.size());
-    wf.bind(std::vector<Buf>(p.adjoint_wavefields.begin() + 9,
-                                       p.adjoint_wavefields.begin() + 18), 2, true);
+    wf.bind(adjoint_field_slots(p, 1, mode), 2, true);
 }
 
 // Scratch state sets the bisecting recursive backward keeps: one per recursion
@@ -152,8 +158,7 @@ static inline void run_lsrtm2d_adjoint_step(
     compute_v2_lambda_lsrtm2d<<<grid, block>>>(
         vp.data_ptr<float>(), adj_view.u_now, v2_lambda.data_ptr<float>(), ctx.nx, ctx.nz, ctx.B);
     ACOUSTIC_LSRTM2D_ADJOINT(order, grid, block,
-        adj_view, v2_lambda.data_ptr<float>(), /*pml_field=*/nullptr, vp.data_ptr<float>(),
-        lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx);
+        adj_view, v2_lambda.data_ptr<float>(), lap_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx);
 }
 
 void advance_forward_interval_2d(
@@ -204,7 +209,7 @@ void advance_forward_interval_2d(
             ctx
         );
 
-        forward.swap();
+        forward.swap_pml();   // the replay writes psi*n (double-buffered state)
     }
 }
 
@@ -280,7 +285,7 @@ void process_recursive_interval_2d(
             ctx
         );
 
-        start_state.swap();
+        start_state.swap_pml();
 
         auto adj_view = adjoint.view();
         run_lsrtm2d_adjoint_step(
@@ -296,7 +301,7 @@ void process_recursive_interval_2d(
             ctx
         );
 
-        adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
+        adjoint.swap_aux();   // rotate u, psi<->psin and zeta<->zetan (exact adjoint)
 
         calculate_grad_lsrtm_mp<<<wave_grid, wave_block>>>(
             bg_utt.data_ptr<float>(),
@@ -418,11 +423,10 @@ void run_full_imaging(const BackwardInputCore& p, Buf& grad_vp, Buf& grad_mp, fl
     bind_adjoint_state(adjoint, p, "backward");
     // rwi (vp needs its gradient): the background adjoint and its scratch.
     AcousticWavefieldTensor bg_adjoint;
-    Buf v2lbg, gbg;
+    Buf v2lbg;
     if (rwi) {
         bind_bg_adjoint_state(bg_adjoint, p, "backward");
         v2lbg = pool_required(p.adjoint_workspace, V2_LAMBDA_BG, vp, "adjoint_workspace");
-        gbg = pool_required(p.adjoint_workspace, G_BG, vp, "adjoint_workspace");
     }
 
     AcousticCPMLTensor cpml_tensor;
@@ -451,12 +455,11 @@ void run_full_imaging(const BackwardInputCore& p, Buf& grad_vp, Buf& grad_mp, fl
             compute_v2_lambda_bg_lsrtm2d<<<launch_config.grid, launch_config.block>>>(
                 vp.data_ptr<float>(), mp.data_ptr<float>(),
                 bg_adjoint.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
-                v2lbg.data_ptr<float>(), gbg.data_ptr<float>(), nx, nz, B);
+                v2lbg.data_ptr<float>(), nx, nz, B);
             ACOUSTIC_LSRTM2D_ADJOINT(
                 order, launch_config.grid, launch_config.block,
-                bg_adj_view, v2lbg.data_ptr<float>(), gbg.data_ptr<float>(), vp.data_ptr<float>(),
-                lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx);
-            bg_adjoint.swap_pml();   // bg_adjoint.u_now = lambda_bg(it)
+                bg_adj_view, v2lbg.data_ptr<float>(), lap_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx);
+            bg_adjoint.swap_aux();   // bg_adjoint.u_now = lambda_bg(it)
         }
 
         // ---- scattered adjoint (lambda_sc): the receiver residual ----
@@ -475,7 +478,7 @@ void run_full_imaging(const BackwardInputCore& p, Buf& grad_vp, Buf& grad_mp, fl
             ctx
         );
 
-        adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
+        adjoint.swap_aux();   // rotate u, psi<->psin and zeta<->zetan (exact adjoint)
 
         // u_forward[it] is (B, nz, nx) = bg_utt, or with rwi (2, B, nz, nx) =
         // [bg_utt, sc_utt] (history_fields(2))
@@ -637,11 +640,9 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
     auto grad_wavelet = pool_required(gs, 0, p.forward_source, "grads_out");
     auto grad_vp = pool_required(gs, 1, p.models[0], "grads_out");
     auto grad_mp = pool_required(gs, 2, p.models[1], "grads_out");
-    Buf v2lbg, gbg;
-    if (rwi) {
+    Buf v2lbg;
+    if (rwi)
         v2lbg = pool_required(p.adjoint_workspace, V2_LAMBDA_BG, vp, "adjoint_workspace");
-        gbg = pool_required(p.adjoint_workspace, G_BG, vp, "adjoint_workspace");
-    }
     SWEEP_CHECK(rwi || !p.grad_split_iii_out.defined(),
                 "acoustic_lsrtm2d: grad_split_iii_out needs the RWI vp gradient (vp requires grad)");
     float* grad_iii = p.grad_split_iii_out.defined()
@@ -727,12 +728,11 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
             compute_v2_lambda_bg_lsrtm2d<<<launch_config.grid, launch_config.block>>>(
                 vp.data_ptr<float>(), mp.data_ptr<float>(),
                 bg_adjoint.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
-                v2lbg.data_ptr<float>(), gbg.data_ptr<float>(), nx, nz, B);
+                v2lbg.data_ptr<float>(), nx, nz, B);
             ACOUSTIC_LSRTM2D_ADJOINT(
                 order, launch_config.grid, launch_config.block,
-                bg_adj_view, v2lbg.data_ptr<float>(), gbg.data_ptr<float>(), vp.data_ptr<float>(),
-                lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx);
-            bg_adjoint.swap_pml();   // bg_adjoint.u_now = lambda_bg(it)
+                bg_adj_view, v2lbg.data_ptr<float>(), lap_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx);
+            bg_adjoint.swap_aux();   // bg_adjoint.u_now = lambda_bg(it)
         }
 
         // ---- scattered adjoint (lambda_sc): the receiver residual ----
@@ -750,7 +750,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
             ctx
         );
 
-        adjoint.swap_pml();   // adjoint.u_now = lambda_sc(it)
+        adjoint.swap_aux();   // adjoint.u_now = lambda_sc(it)
 
         // ---- background reconstruction bg[it-1] (boundary field 0) ----
         ACOUSTIC_LSRTM2D_SINGLE_NOPML(
@@ -863,7 +863,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
             ctx
         );
 
-        adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
+        adjoint.swap_aux();   // rotate u, psi<->psin and zeta<->zetan (exact adjoint)
     }
 
     out.grads = {grad_wavelet, grad_vp, grad_mp};
@@ -988,7 +988,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
                 ctx
             );
 
-            forward.swap();
+            forward.swap_pml();   // the replay writes psi*n (double-buffered state)
         }
 
         for (int it = end - 1; it >= start; --it) {
@@ -1007,7 +1007,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
                 ctx
             );
 
-            adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
+            adjoint.swap_aux();   // rotate u, psi<->psin and zeta<->zetan (exact adjoint)
 
             calculate_grad_lsrtm_mp<<<launch_config.grid, launch_config.block>>>(
                 chunk_forward.select(0, it - start).data_ptr<float>(),

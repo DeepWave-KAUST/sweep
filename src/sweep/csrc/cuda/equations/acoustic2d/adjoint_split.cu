@@ -170,8 +170,10 @@ struct AdjArgs {
 template<int Order>
 void launch_adj(const AdjArgs& a, const SolverContext& ctx)
 {
-    // the cells whose taps stay out of every band
-    const Box in = fdtd::phys_box(ctx, ctx.M);
+    // the cells whose taps stay out of every band and off the one cell past
+    // it where dbdx (np.gradient of b) is still nonzero: the forward applies
+    // that dbdx there, so its transpose reaches cells up to M past it.
+    const Box in = fdtd::phys_box(ctx, ctx.M + 1);
     if (!fdtd::empty(in)) {
         const auto L = fdtd::box_launch(in, ctx.B, fdtd::kBoxBlock);
         a2d_adj_interior<Order><<<L.grid, L.block>>>(a.wf, a.vp, a.lap, ctx, in, a.img, a.grad);

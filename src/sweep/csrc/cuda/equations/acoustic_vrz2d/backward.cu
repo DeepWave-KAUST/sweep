@@ -22,7 +22,9 @@ namespace {
 // snapshot slots u_prev, u_now, psix, psiz, zetax, zetaz plus u_next -- the
 // forward slot list without the psi double-buffer shadows -- in the struct's
 // bind order u_prev, u_now, u_next, psix, psiz, zetax, zetaz.
-constexpr int REPLAY_STATE_NVAR = Driver::CKPT_NVAR + 1;   // 7
+// u triple + 4 CPML aux + psixn/psizn: the replay's forward reads the
+// neighbours' psi, so it runs double-buffered (swap_pml) as the forward does.
+constexpr int REPLAY_STATE_NVAR = Driver::CKPT_NVAR + 3;   // 9
 
 // p.checkpoint_replay (cuda_layout.checkpoint_replay_shapes): allocated by the
 // propagator next to the checkpoint snapshots, never re-zeroed.
@@ -94,8 +96,8 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
     AcousticWavefieldTensor forward;
     SWEEP_CHECK(static_cast<int>(p.forward_wavefields.size()) == REPLAY_STATE_NVAR,
                 "acoustic_vrz2d/backward_ckpt requires the propagator-bound "
-                "forward_wavefields (cuda_layout.slots, the forward slots without the "
-                "psi double-buffer shadows): one replay state set of ",
+                "forward_wavefields (cuda_layout.slots with the psi double-buffer "
+                "shadows, checkpoint_replay_psi_dbuf): one replay state set of ",
                 REPLAY_STATE_NVAR, " tensors, got ", p.forward_wavefields.size());
     forward.bind(wavefield_set(p.forward_wavefields, 0, REPLAY_STATE_NVAR,
                                "acoustic_vrz2d ckpt replay state"), 2, true);
@@ -245,7 +247,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 
             // store U_it (pre-swap u_now); after the swap this buffer is U_{it+1}
             copy_tensor_device_to_device_async(chunk_forward.select(0, it - start + 1), forward.u_now_t);
-            forward.swap();
+            forward.swap_pml();
         }
         copy_tensor_device_to_device_async(chunk_forward.select(0, end - start + 1), forward.u_now_t);   // U_end
 

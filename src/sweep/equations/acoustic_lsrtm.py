@@ -71,7 +71,9 @@ def step(u_now, u_pre, psix, psiz, zetax, zetaz,
 # generic "forward slots minus shadows" rule does not apply and the count is
 # declared explicitly (``checkpoint_state_nvar``); the recursive backward bisects
 # each segment and keeps one scratch set per level (``recursive_state_depth``).
-_CKPT_REPLAY_STATE_NVAR = 7
+# the background field's 7 + its psi double-buffer: the replay runs the forward
+# kernel, which reads the neighbours' psi (acoustic_lsrtm2d/backward.cu)
+_CKPT_REPLAY_STATE_NVAR = 9
 
 
 def _adjoint_workspace_shapes(B, nt, shape, mode, rwi=True):
@@ -79,11 +81,11 @@ def _adjoint_workspace_shapes(B, nt, shape, mode, rwi=True):
     one padded grid per shot each: the vp^2*lambda grid of every adjoint step,
     plus the replayed step's background u_tt in the recursive-checkpoint mode, or
     -- in the full and boundary-saving modes when vp needs its RWI tomographic
-    gradient (``rwi``) -- the background adjoint's own v2 scratch and its combined
-    field lambda_bg + mp*lambda_sc (differentiated in the CPML band).
+    gradient (``rwi``) -- the background adjoint's own v2 scratch,
+    vp^2 * (lambda_bg + mp*lambda_sc).
     """
     if rwi and mode in ("full", "bs"):
-        return 3 * [[B, 1, *shape]]
+        return 2 * [[B, 1, *shape]]
     n = 2 if mode == "recursive" else 1
     return n * [[B, 1, *shape]]
 
@@ -216,6 +218,8 @@ class AcousticLSRTM(SecondOrderEquation):
             # 2 wavefields (bg+sc); each: psix,psiz,zetax,zetaz (4) + psixn,psizn (2)
             # for the race-free forward psi double-buffer -> 2*(4+2)=12.
             pml_nvar=12,
+            # the zeta shadow pair of each adjoint field (slot table, adjoint_only)
+            adjoint_extra_nvar=4,
             last_two_nvar=2,
             # rwi: 2 fields (bg + scattered) are boundary-saved so the bs backward can
             # reconstruct the scattered field for the vp (tomographic) gradient.

@@ -108,13 +108,19 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
 
     // Full-mode store: RAW pressure u(t) (NOT the acoustic vp^2*Lap(u)
     // carrier) — the attenuation adjoint needs du/dt and its |k| filter; the
-    // vp_step-gradient carrier is recomputed in backward (kernels.cuh).
-    // Bound whenever save_all_wavefields is on: cuda_layout declares
-    // save_all_shape, so cp.u_allt_shape is never None.
+    // vp_step-gradient carrier is recomputed in backward (kernels.cuh) --
+    // except on the ring next to the CPML bands, where it is the update this
+    // forward applied, stored in the K slices after the nt raw ones
+    // (visco_ring_tail_slices).  Bound whenever save_all_wavefields is on:
+    // cuda_layout declares save_all_shape, so cp.u_allt_shape is never None.
     Buf u_allt;
-    if (p.save_all_wavefields)
-        u_allt = bound_required(p.u_allt_out, {p.nt, B, nz, nx},
+    float* ring_tail = nullptr;
+    if (p.save_all_wavefields) {
+        const int64_t K = visco_ring_tail_slices(p.nt, p.M, nz, nx);
+        u_allt = bound_required(p.u_allt_out, {static_cast<int64_t>(p.nt) + K, B, nz, nx},
                                 "u_allt_out (visco_acoustic2d/forward, cuda_layout.save_all_shape)");
+        ring_tail = u_allt.select(0, p.nt).data_ptr<float>();
+    }
 
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,
@@ -133,8 +139,8 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
     // composition (kernels.cuh).  Tables from p.derived_models in the forward
     // slot order [dt2A if damping, Gd1, Gd2 if dispersion]
     // (derived::visco_tables); per-step scratch from p.forward_workspace in
-    // the order [C0, C1, (C2 if dispersion), FFT_WS] (visco_slots) -- both
-    // count-checked against the flags at entry.
+    // the order [UTHIS, C0, C1, (C2 if dispersion), FFT_WS] (visco_slots) --
+    // both count-checked against the flags at entry.
     ViscoSpectral spectral = visco_acoustic2d_make_spectral_from(
         p.eq_aux, p.models, p.derived_models, derived::ViscoMode::Forward, p.dt, nz, nx,
         "visco_acoustic2d::forward");
@@ -164,8 +170,8 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
             launch_config.grid,
             launch_config.block,
             view,
-            false,
-            nullptr,
+            u_allt.defined(),
+            u_allt.defined() ? scratch.UTHIS.data_ptr<float>() : nullptr,
             vp.data_ptr<float>(),
             lap_ctx,
             grad_ctx,
@@ -174,6 +180,8 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
             cpml,
             ctx
         );
+        if (u_allt.defined())
+            visco_acoustic2d_ring_store(scratch.UTHIS.data_ptr<float>(), ring_tail, it, ctx);
 
         // Dispersion + damping corrections on the bound slots; the FFTs write
         // into the halo bands, so the helper restores the stencil-kernel

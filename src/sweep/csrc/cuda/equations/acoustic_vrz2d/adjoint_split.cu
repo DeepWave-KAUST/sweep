@@ -100,7 +100,8 @@ __global__ void __launch_bounds__(256) vrz2d_adj_ring(
     const float invdx = 1.0f / grad_ctx.dx;
     const float invdz = 1.0f / grad_ctx.dz;
 
-    // The forward runs its CPML branch only where in_pml_2d(cell) holds; every
+    // The forward runs its CPML branch only where in_cpml_2d(cell) holds (the
+    // band plus the db leak cell past it, forward_split.cu); every
     // other cell takes the interior formula and never touches aux.  The
     // transpose must mirror that per TAP: a coefficient enters a tap's term
     // only if the forward evaluated it there.  b is exactly 0 outside the band
@@ -108,8 +109,8 @@ __global__ void __launch_bounds__(256) vrz2d_adj_ring(
     // the band edge and a = exp(-alpha dt) is not zero in the interior, so
     // both are gated.  A tap on the x axis shares this row's z answer (and
     // vice versa), so the 2-D predicate costs one compare per tap.
-    const bool px0 = solver.in_pml_x(ix, halo);
-    const bool pz0 = solver.in_pml_z(iz, halo);
+    const bool px0 = solver.in_cpml_x(ix, halo);
+    const bool pz0 = solver.in_cpml_z(iz, halo);
     const bool own_pml = px0 || pz0;
 
     const float ax_ = cpml.ax[ix], az_ = cpml.az[iz];
@@ -129,8 +130,8 @@ __global__ void __launch_bounds__(256) vrz2d_adj_ring(
     #pragma unroll
     for (int k = 1; k <= halo; ++k) {
         int np = idx + k, nm = idx - k, nixp = ix + k, nixm = ix - k;
-        bool Pp = pz0 || solver.in_pml_x(nixp, halo);
-        bool Pm = pz0 || solver.in_pml_x(nixm, halo);
+        bool Pp = pz0 || solver.in_cpml_x(nixp, halo);
+        bool Pm = pz0 || solver.in_cpml_x(nixm, halo);
         float tp = VRZ_GTMP_X(np, nixp), tm = VRZ_GTMP_X(nm, nixm);
         float bxp = cpml.bx[nixp], bxm = cpml.bx[nixm];
         float dbp = Pp ? cpml.dbxdx[nixp] : 0.0f, dbm = Pm ? cpml.dbxdx[nixm] : 0.0f;
@@ -148,8 +149,8 @@ __global__ void __launch_bounds__(256) vrz2d_adj_ring(
     #pragma unroll
     for (int k = 1; k <= halo; ++k) {
         int np = idx + k * sz, nm = idx - k * sz, nizp = iz + k, nizm = iz - k;
-        bool Pp = px0 || solver.in_pml_z(nizp, halo);
-        bool Pm = px0 || solver.in_pml_z(nizm, halo);
+        bool Pp = px0 || solver.in_cpml_z(nizp, halo);
+        bool Pm = px0 || solver.in_cpml_z(nizm, halo);
         float tp = VRZ_GTMP_Z(np, nizp), tm = VRZ_GTMP_Z(nm, nizm);
         float bzp = cpml.bz[nizp], bzm = cpml.bz[nizm];
         float dbp = Pp ? cpml.dbzdz[nizp] : 0.0f, dbm = Pm ? cpml.dbzdz[nizm] : 0.0f;
@@ -191,8 +192,9 @@ struct AdjArgs {
 template<int Order>
 void launch_adj(const AdjArgs& a, const SolverContext& ctx)
 {
-    // the cells whose taps stay out of every band
-    const Box in = fdtd::phys_box(ctx, ctx.M);
+    // the cells whose taps stay out of every band and off the db leak cell
+    // past it (the forward's CPML branch covers that cell)
+    const Box in = fdtd::phys_box(ctx, ctx.M + 1);
     if (!fdtd::empty(in)) {
         const auto L = fdtd::box_launch(in, ctx.B, fdtd::kBoxBlock);
         vrz2d_adj_interior<Order><<<L.grid, L.block>>>(a.wf, a.C0, a.Cx, a.Cz, a.lap, a.g, ctx, in);

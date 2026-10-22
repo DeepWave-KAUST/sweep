@@ -73,6 +73,58 @@ SWEEP_BY_ORDER_DECL(visco_acoustic2d_carrier_fn, visco_acoustic2d_carrier_by_ord
     SWEEP_LAUNCH_BY_ORDER(visco_acoustic2d_carrier_by_order, order, grid, block, __VA_ARGS__)
 
 // ---------------------------------------------------------------------------
+// The carrier's ring.  On the M physical cells next to a CPML band the
+// forward's update is vp^2 * w_sum, not vp^2 * Lap(u): db = np.gradient(b)
+// leaks onto the first of them and the d(a psi)/dx stencil reads the band from
+// all M.  The raw history cannot rebuild that (it needs the band's psi), so
+// the forward stores the update itself there -- acoustic2nd's u_this -- as
+// four strips per step and shot, R = 2 M (nx + nz) floats:
+//   [z_lo: M rows x nx | z_hi: M rows x nx | x_lo: nz rows x M | x_hi: nz rows x M]
+// at rows [phys_z0, phys_z0 + M) / [phys_z1 - M, phys_z1) and columns
+// [phys_x0, phys_x0 + M) / [phys_x1 - M, phys_x1) (a free-surface face's
+// strip holds the bare update, which the recomputed carrier has too).  They
+// ride in the K extra time slices at the end of the raw history
+// (ViscoAcoustic.cuda_layout save_all_shape / checkpoint_replay_shapes, the
+// same visco_ring_tail_slices), flat and step-major: step s, shot b at
+// (s * B + b) * R.  The backward overwrites the recomputed carrier's physical
+// cells in the strips with them, so its carrier is the forward's update
+// everywhere -- what acoustic2d stores whole.
+// ---------------------------------------------------------------------------
+__host__ __device__ inline int64_t visco_ring_floats(int M, int nz, int nx)
+{
+    return 2LL * M * (static_cast<int64_t>(nx) + nz);
+}
+
+inline int64_t visco_ring_tail_slices(int64_t steps, int M, int nz, int nx)
+{
+    const int64_t grid = static_cast<int64_t>(nz) * nx;
+    return (steps * visco_ring_floats(M, nz, nx) + grid - 1) / grid;
+}
+
+// tail[(step * B + b) * R + r] = u_this[b, cell(r)]   (every strip cell)
+__global__ void visco_acoustic2d_ring_pack(const float* __restrict__ u_this, float* __restrict__ tail,
+                                           int64_t step, SolverContext solver);
+// carrier[b, cell(r)] = tail[(step * B + b) * R + r]  (the strip cells in the physical box)
+__global__ void visco_acoustic2d_ring_unpack(const float* __restrict__ tail, float* __restrict__ carrier,
+                                             int64_t step, SolverContext solver);
+
+inline void visco_acoustic2d_ring_store(const float* u_this, float* tail, int64_t step,
+                                        const SolverContext& ctx)
+{
+    const int64_t R = visco_ring_floats(ctx.M, ctx.nz, ctx.nx);
+    visco_acoustic2d_ring_pack<<<dim3(static_cast<unsigned>((R + 255) / 256), ctx.B), 256>>>(
+        u_this, tail, step, ctx);
+}
+
+inline void visco_acoustic2d_ring_restore(const float* tail, float* carrier, int64_t step,
+                                          const SolverContext& ctx)
+{
+    const int64_t R = visco_ring_floats(ctx.M, ctx.nz, ctx.nx);
+    visco_acoustic2d_ring_unpack<<<dim3(static_cast<unsigned>((R + 255) / 256), ctx.B), 256>>>(
+        tail, carrier, step, ctx);
+}
+
+// ---------------------------------------------------------------------------
 // Host-side helpers shared by forward.cu / backward.cu (inline, header-only).
 // ---------------------------------------------------------------------------
 
@@ -288,16 +340,19 @@ private:
 // Workspace slots: the ONE (a, d, mode) -> index mapping of the spectral
 // scratch pools, mirroring ViscoAcoustic.cuda_layout verbatim:
 //   forward_workspace (mode Forward):
-//       spectral ? [C0, C1, (C2 if d), FFT_WS] : []
+//       [UTHIS] + (spectral ? [C0, C1, (C2 if d), FFT_WS] : [])
 //   adjoint_workspace (every backward mode):
 //       [CARRIER] + (spectral ? [C0, C1, (C2 if d and mode in ckpt/recursive),
 //                               (R1 if d), (UPREV if a and mode == ckpt), FFT_WS]
 //                            : [])
 // C0/C1/C2 are complex64 grids (float32 [B, 1, nz, nx, 2] on the Python side),
-// R1/UPREV/CARRIER float32 [B, 1, nz, nx], FFT_WS the flat float32 cuFFT work
-// area.  -1 = the slot does not exist for these flags / this mode.
+// R1/UPREV/CARRIER/UTHIS float32 [B, 1, nz, nx], FFT_WS the flat float32
+// cuFFT work area.  UTHIS is the forward's update vp^2 * w_sum of the step, the
+// source of the ring the history stores (visco_ring_floats).  -1 = the slot
+// does not exist for these flags / this mode.
 // ---------------------------------------------------------------------------
 struct ViscoSlots {
+    int uthis = -1;
     int carrier = -1;
     int c0 = -1, c1 = -1, c2 = -1;
     int r1 = -1, uprev = -1;
@@ -311,6 +366,7 @@ inline ViscoSlots visco_slots(bool damping, bool dispersion, derived::ViscoMode 
     ViscoSlots s;
     const bool forward = (mode == ViscoMode::Forward);
     const bool replay = (mode == ViscoMode::Checkpoint || mode == ViscoMode::Recursive);
+    if (forward) s.uthis = s.count++;
     if (!forward) s.carrier = s.count++;
     if (!(damping || dispersion)) return s;
     s.c0 = s.count++;
@@ -407,6 +463,7 @@ struct ViscoScratch {
     std::shared_ptr<ViscoFFT> fft;      // the plan for the bound geometry
     Buf C0, C1, C2;           // complex64 as (like.sizes(), 2) float pairs
     Buf R1, UPREV, CARRIER;   // float32, like.sizes() (backward pools only)
+    Buf UTHIS;                // float32, like.sizes() (forward pool only)
     Buf fft_ws;               // flat float32 cuFFT work area
 };
 
@@ -418,8 +475,7 @@ struct ViscoScratch {
 // flags come from the SAME constructor switches on both sides (the eq_aux
 // composition c_eq_aux builds is what visco_acoustic2d_spectral_grids reads
 // back) -- so a bound pool of any other size means the declaration drifted.
-// count == 0 happens only in the forward mode with both spectral terms off,
-// where the propagator legitimately hands over an empty tuple.
+// Every mode binds at least one slot (UTHIS forward, CARRIER backward).
 inline ViscoScratch visco_acoustic2d_bind_scratch(
     const BufList& pool, const Buf& like,
     bool damping, bool dispersion, derived::ViscoMode mode, const char* what)
@@ -429,6 +485,8 @@ inline ViscoScratch visco_acoustic2d_bind_scratch(
     SWEEP_CHECK(static_cast<int>(pool.size()) == ws.slots.count,
                 what, ": requires the propagator-bound workspace pool of ", ws.slots.count,
                 " tensors (visco_slots for this mode and eq_aux composition), got ", pool.size());
+    if (ws.slots.uthis >= 0)
+        ws.UTHIS = (pool_required(pool, ws.slots.uthis, like, what));
     if (ws.slots.carrier >= 0)
         ws.CARRIER = (pool_required(pool, ws.slots.carrier, like, what));
     if (!(damping || dispersion))

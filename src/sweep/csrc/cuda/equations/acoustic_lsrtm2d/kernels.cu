@@ -69,7 +69,7 @@ __global__ void calculate_grad_lsrtm_mp_utt(
 SWEEP_BY_ORDER_TABLE(acoustic2d_single_fn, acoustic2d_single_by_order, acoustic2d_single);
 SWEEP_BY_ORDER_TABLE(acoustic2d_single_nopml_fn, acoustic2d_single_nopml_by_order, acoustic2d_single_nopml);
 SWEEP_BY_ORDER_TABLE(acoustic_lsrtm2nd_fn, acoustic_lsrtm2nd_by_order, acoustic_lsrtm2nd);
-SWEEP_BY_ORDER_TABLE(acoustic_lsrtm2nd_adjoint_fn, acoustic_lsrtm2nd_adjoint_by_order, acoustic_lsrtm2nd_adjoint);
+SWEEP_BY_ORDER_TABLE(acoustic_lsrtm2nd_adjoint_exact_fn, acoustic_lsrtm2nd_adjoint_exact_by_order, acoustic_lsrtm2nd_adjoint_exact);
 
 // v2_lambda = vp^2 * lambda  (per-cell, race-free pre-pass for the L* adjoint).
 __global__ void compute_v2_lambda_lsrtm2d(
@@ -90,16 +90,13 @@ __global__ void compute_v2_lambda_lsrtm2d(
 // RWI (Wu & Alkhalifah 2015): the background adjoint lambda_bg = mu.  Its own
 // propagation plus the transpose of the scattered-source coupling arrive in one
 // combined right-hand side, so the shared lsrtm adjoint step can inject both:
-//   v2 = vp^2 * g,  g = lambda_bg + mp * lambda_sc.
-// g is kept too: the adjoint step's CPML band does not read v2 and differentiates
-// g instead (its pml_field).
+//   v2 = vp^2 * (lambda_bg + mp * lambda_sc).
 __global__ void compute_v2_lambda_bg_lsrtm2d(
     const float* __restrict__ vp,
     const float* __restrict__ mp,
     const float* __restrict__ lambda_bg,
     const float* __restrict__ lambda_sc,
     float* __restrict__ v2_lambda,
-    float* __restrict__ g,
     int nx, int nz, int B
 ) {
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -109,7 +106,6 @@ __global__ void compute_v2_lambda_bg_lsrtm2d(
     int sp = nx * nz; int idx = b * sp + iz * nx + ix;
     float v2 = vp[idx] * vp[idx];
     float gi = lambda_bg[idx] + mp[idx] * lambda_sc[idx];
-    g[idx] = gi;
     v2_lambda[idx] = v2 * gi;
 }
 

@@ -293,6 +293,50 @@ struct SolverContext {
     inline bool in_pml_3d(int ix, int iy, int iz, int halo) const {
         return in_pml_x(ix, halo) || in_pml_y(iy, halo) || in_pml_z(iz, halo);
     }
+    // ---- Cells a CPML update must run on: the band plus the db leak cell ----
+    // db = np.gradient(b) (equations/pml.py) is nonzero on the first cell past
+    // a band, so a kernel whose CPML branch carries db * du must run it there
+    // too, and its adjoint must gate the taps' coefficients the same way.  A
+    // DD cut face has no band and no leak cell.  (a and b are 0 off the band,
+    // and so is the own psi; a d(a psi)/dx taken as one stencil reaches M
+    // cells further -- acoustic2d -- which these do not cover.)
+    __host__ __device__
+    inline bool in_cpml_x(int ix, int halo) const {
+        return ix < phys_x0(halo) + (cut_x_lo() ? 0 : 1) || ix >= phys_x1(halo) - (cut_x_hi() ? 0 : 1);
+    }
+    __host__ __device__
+    inline bool in_cpml_y(int iy, int halo) const {
+        return iy < phys_y0(halo) + (cut_y_lo() ? 0 : 1) || iy >= phys_y1(halo) - (cut_y_hi() ? 0 : 1);
+    }
+    __host__ __device__
+    inline bool in_cpml_z(int iz, int halo) const {
+        return iz < phys_z0(halo) + (cut_z_lo() ? 0 : 1) || iz >= phys_z1(halo) - (cut_z_hi() ? 0 : 1);
+    }
+    __host__ __device__
+    inline bool in_cpml_2d(int ix, int iz, int halo) const {
+        return in_cpml_x(ix, halo) || in_cpml_z(iz, halo);
+    }
+    __host__ __device__
+    inline bool in_cpml_3d(int ix, int iy, int iz, int halo) const {
+        return in_cpml_x(ix, halo) || in_cpml_y(iy, halo) || in_cpml_z(iz, halo);
+    }
+    // A stencil reaching `reach` cells either side of a cell meets the in_cpml
+    // cells of a band face.  Cut faces are skipped: their halo is the
+    // neighbour tile's interior, which in_cpml (like in_pml) counts as outside
+    // the physical box, so probing it would send cells next to a cut down a
+    // CPML path the single-domain run does not take there.
+    __host__ __device__
+    inline bool taps_in_cpml_x(int ix, int halo, int reach) const {
+        return (!cut_x_lo() && ix - reach < phys_x0(halo) + 1) || (!cut_x_hi() && ix + reach >= phys_x1(halo) - 1);
+    }
+    __host__ __device__
+    inline bool taps_in_cpml_y(int iy, int halo, int reach) const {
+        return (!cut_y_lo() && iy - reach < phys_y0(halo) + 1) || (!cut_y_hi() && iy + reach >= phys_y1(halo) - 1);
+    }
+    __host__ __device__
+    inline bool taps_in_cpml_z(int iz, int halo, int reach) const {
+        return (!cut_z_lo() && iz - reach < phys_z0(halo) + 1) || (!cut_z_hi() && iz + reach >= phys_z1(halo) - 1);
+    }
 
     __host__ __device__ inline int nx_phys() const { return phys_hi_[2] - phys_lo_[2]; }
     __host__ __device__ inline int ny_phys() const { return phys_hi_[1] - phys_lo_[1]; }

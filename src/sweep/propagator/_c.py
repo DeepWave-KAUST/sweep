@@ -1008,8 +1008,12 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
     def _build_fd_coefficients(self, M):
         lap_coes = torch.zeros(M + 1, dtype=torch.float32, device=self.dev)
 
-        lap_coes[1:] = torch.from_numpy(fd_coefficients(2, 2 * M)).to(self.dev).float()
-        lap_coes[0] = torch.sum(lap_coes[1:]) * 2
+        coes = fd_coefficients(2, 2 * M)
+        lap_coes[1:] = torch.from_numpy(coes).to(self.dev).float()
+        # Summed in fp64 and rounded once, as eager's kernel centre
+        # (generate_convolution_kernel): the fp32 sum of the rounded
+        # coefficients is one ulp off at orders 8 and 10.
+        lap_coes[0] = float(2 * coes.sum())
 
         # First-order CUDA equations use staggered-grid forward/backward
         # derivatives (`sgradient`), so their first-derivative coefficients
@@ -1536,7 +1540,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         elif layout.slots is not None:
             forward_slots = [slot for slot in layout.slots.slots if not slot.adjoint_only]
             assert len(forward_slots) == len(shapes), "slot table / forward shapes mismatch"
-            shapes = [sh for slot, sh in zip(forward_slots, shapes) if slot.role != "dbuf"]
+            keep_dbuf = bool(getattr(layout, "checkpoint_replay_psi_dbuf", False))
+            shapes = [sh for slot, sh in zip(forward_slots, shapes) if slot.role != "dbuf" or keep_dbuf]
         sets = 1
         if mode == "recursive" and layout.recursive_state_depth:
             sets += _recursive_scratch_depth(int(max_segment))

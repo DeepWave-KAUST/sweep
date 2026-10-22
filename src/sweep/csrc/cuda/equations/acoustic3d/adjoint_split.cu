@@ -275,7 +275,9 @@ void launch_acoustic3d_adjoint(
     SWEEP_CHECK(ctx.x_base == 0 && ctx.x_limit < 0,
                 "acoustic3d adjoint: an x-ranged context is not supported (the adjoint "
                 "step always covers the whole tile)");
-    const Box box = fdtd::phys_box(ctx, ctx.M);   // the pure interior
+    // the pure interior: taps clear of the band AND of the db leak cell past
+    // it (the forward applies db there), the shell's per-axis M + 1 margin
+    const Box box = fdtd::phys_box(ctx, ctx.M + 1);
     float* const out[6] = {psixn, psiyn, psizn, zetaxn, zetayn, zetazn};
     if (!fdtd::empty(box)) {
         switch (order) {

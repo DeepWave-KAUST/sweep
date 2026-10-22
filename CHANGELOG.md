@@ -84,6 +84,31 @@ and this project adheres to
   of an axis needs at least `spatial_order` cells along it.
 
 ### Fixed
+- **The second-order acoustic family's compiled backward is the exact
+  transpose of its compiled forward, CPML band included** (`Acoustic`,
+  `Acoustic3D`, `AcousticVRZ`, `AcousticVRZ3D`, `AcousticLSRTM`,
+  `AcousticLSRTM3D`, `ViscoAcoustic` on `impl='c'`).  `db = np.gradient(b)` is nonzero one cell
+  past the band and the 2-D `d(a psi)/dx` stencil reads M cells into it, but
+  the forward ran the bare Laplacian there (the 2-D first reflection off the
+  CPML was 6x larger than eager's), and the adjoints' interior bounds stopped
+  one cell short of the forward's.  The LSRTM adjoint applied the forward CPML
+  operator to the adjoint field inside the band, a discretisation of the
+  continuous adjoint rather than a transpose (reflectivity dot test 0.11, now
+  1e-6); its RWI backward no longer allocates the grid only that operator read
+  (one padded grid per shot less in full and boundary-saving modes).  Checkpoint replays now step the CPML memory double-buffered (in
+  place they raced the neighbours' reads, so two checkpointed backwards
+  differed), and the vp image is the update actually applied,
+  `vp^2 * w_sum`.  `ViscoAcoustic` runs the same 2-D forward kernel; its vp
+  carrier, recomputed from the raw history, now takes the stored update on the
+  M cells next to each CPML band (the history gains a few time slices, about
+  1.5 % at production sizes), so with both attenuation terms off it matches
+  `Acoustic` bit for bit again, and its checkpoint replay is double-buffered
+  too.  Against an eager twin of each compiled forward (outer halo zeroed, the
+  kernel's CPML form): records 5e-7 to 2e-5 and gradients 2e-6 to 2e-5 in
+  every memory mode, the LSRTM RWI vp gradient at its fp32 floor (7e-5 in
+  2-D, 1.8e-4 in 3-D); domain-decomposed runs stay bit-identical to one card.
+  Wall time on a V100 changes by -5 % to +2 %.  Records and gradients of these
+  equations change accordingly.
 - **Boundary-saving gradients on a thin physical box.**  Where the physical
   box (PML excluded) is thinner than two restore strips along an axis -- fewer
   than `2 * (spatial_order / 2 + 1)` cells -- the strip imaging of `Acoustic`

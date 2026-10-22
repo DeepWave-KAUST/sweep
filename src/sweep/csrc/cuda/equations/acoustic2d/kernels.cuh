@@ -160,13 +160,17 @@ __global__ void acoustic2nd(
     float v  = vp_b[idx];
     float v2_dt2 = (v * v) * solver.dt * solver.dt;
 
-    // Position-based PML / interior split. ax/bx/dbxdx coefficient arrays are
-    // exactly zero outside the PML band, and the centered gradient of those
-    // arrays vanishes once the stencil clears the band (>= pad + halo from
-    // the edge). Skipping the full PML update there is bit-equivalent and
-    // avoids ~8 aux-field loads/stores per cell. The check is warp-coherent
-    // (same outcome for 32 consecutive ix values), so warps diverge only at
-    // the band boundary.
+    // Position-based PML / interior split. ax/bx coefficient arrays are
+    // exactly zero outside the PML band (which ends pad + halo from the edge),
+    // but the CPML terms are not: the d(a psi)/dx taps reach halo cells past
+    // the band and dbxdx (np.gradient of bx) is nonzero one cell past it.  So
+    // the bare Laplacian is only exact from pad + 2 halo on -- the bound the
+    // adjoint's pure_interior uses; cutting at pad + halo dropped those terms
+    // on the halo cells next to every band (stronger reflection off the
+    // CPML, and a forward the adjoint is not the transpose of).  Skipping the
+    // PML update beyond the bound avoids ~8 aux-field loads/stores per cell.
+    // The check is warp-coherent (same outcome for 32 consecutive ix values),
+    // so warps diverge only at the band boundary.
     //
     // These are the ``phys_*()`` bounds spelled out against ``halo`` rather
     // than ``solver.M``, so the static-M specialisation keeps folding them
@@ -180,9 +184,12 @@ __global__ void acoustic2nd(
     int pml_x1 = solver.nx - (solver.cut_x_hi() ? halo : solver.padHi(2) + halo);
     int pml_z0 = solver.cut_z_lo() ? halo : solver.padLo(0) + halo;
     int pml_z1 = solver.nz - (solver.cut_z_hi() ? halo : solver.padHi(0) + halo);
-    bool in_x = (ix < pml_x0) || (ix >= pml_x1);
-    bool in_z = (iz < pml_z0) || (iz >= pml_z1);
-    bool in_pml = in_x || in_z;
+    // pml_x0 + halo on a band face, pml_x0 (= halo) on a cut face.
+    int fast_x0 = solver.cut_x_lo() ? pml_x0 : pml_x0 + halo;
+    int fast_x1 = solver.cut_x_hi() ? pml_x1 : pml_x1 - halo;
+    int fast_z0 = solver.cut_z_lo() ? pml_z0 : pml_z0 + halo;
+    int fast_z1 = solver.cut_z_hi() ? pml_z1 : pml_z1 - halo;
+    bool in_pml = (ix < fast_x0) || (ix >= fast_x1) || (iz < fast_z0) || (iz >= fast_z1);
 
     if (!in_pml) {
         f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] +
@@ -260,8 +267,11 @@ __global__ void acoustic2nd(
         f.u_prev[idx] +
         v2_dt2 * w_sum;
 
+    // The vp image is the update actually applied, v^2 * w_sum: on the halo
+    // cells next to a band (now on this branch) w_sum is not the bare
+    // Laplacian, and boundary saving's u_tt images exactly this.
     if (u_this_b != nullptr)
-        u_this_b[idx] = (v * v) * (lap_x + lap_z);
+        u_this_b[idx] = (v * v) * w_sum;
 }
 
 using acoustic2nd_fn = void (*)(AcousticWavefieldPointer, bool, float*, const float*,
@@ -352,11 +362,13 @@ __global__ void acoustic2nd_adjoint_fused(
     // interior cells and must take the SAME fast path (same FP expression)
     // as the matching single-domain cells — taps read lambda from the
     // exchanged M-halo and vp from the tile model's halo slice.
+    // + 1: dbdx (np.gradient of b) is nonzero one cell past the band, the
+    // forward applies it there, and its transpose reaches M cells further.
     bool pure_interior =
-        (ix >= (solver.cut_x_lo() ? halo : solver.padLo(2) + 2 * halo)) &&
-        (ix < solver.nx - (solver.cut_x_hi() ? halo : solver.padHi(2) + 2 * halo)) &&
-        (iz >= (solver.cut_z_lo() ? halo : solver.padLo(0) + 2 * halo)) &&
-        (iz < solver.nz - (solver.cut_z_hi() ? halo : solver.padHi(0) + 2 * halo));
+        (ix >= (solver.cut_x_lo() ? halo : solver.padLo(2) + 2 * halo + 1)) &&
+        (ix < solver.nx - (solver.cut_x_hi() ? halo : solver.padHi(2) + 2 * halo + 1)) &&
+        (iz >= (solver.cut_z_lo() ? halo : solver.padLo(0) + 2 * halo + 1)) &&
+        (iz < solver.nz - (solver.cut_z_hi() ? halo : solver.padHi(0) + 2 * halo + 1));
     if (pure_interior) {
         float lapx = -lc[0] * gw, lapz = -lc[0] * gw;
         #pragma unroll

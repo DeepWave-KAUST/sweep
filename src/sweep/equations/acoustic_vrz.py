@@ -249,6 +249,7 @@ class AcousticVRZ(SecondOrderEquation):
             last_two_nvar=2,
             last_two_storage_nvar=1,
             checkpoint_nvar=6,
+            checkpoint_replay_psi_dbuf=True,   # backward_ckpt replays double-buffered
             boundary_tangent_pad=self.so // 2,
             boundary_save_nvar=1,
             slots=slot_table.ACOUSTIC_VRZ2D,
@@ -378,6 +379,7 @@ class AcousticVRZ3D(SecondOrderEquation):
             last_two_nvar=2,
             last_two_storage_nvar=1,
             checkpoint_nvar=8,
+            checkpoint_replay_psi_dbuf=True,   # backward_ckpt replays double-buffered
             boundary_tangent_pad=self.so // 2,
             boundary_save_nvar=1,
             slots=slot_table.ACOUSTIC_VRZ3D,
