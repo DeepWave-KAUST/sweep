@@ -97,6 +97,7 @@
 
 #include <algorithm>
 #include <optional>
+#include <type_traits>
 
 #include "common.cuh"
 #include "context.h"
@@ -170,6 +171,25 @@ inline SolverContext make_ctx(const P& p, const Dims& d)
 inline int stencil_order(int M)
 {
     return (M <= 4) ? 2 * M : -1;
+}
+
+// Tangential pad of the boundary-saving bands, in cells: TANGENT_PAD stencil
+// halos (VRZ: 1, everyone else 0), unless the equation sizes it itself with
+// ``static int bs_tangent_pad(int abcn, int M)`` -- a band that covers the
+// whole CPML frame runs abcn past the box (qp2d).  Must match the Python
+// Layout(tangent_pad=...) the boundary buffers were allocated with.
+template <class Eq, class = void>
+struct has_bs_tangent_pad : std::false_type {};
+template <class Eq>
+struct has_bs_tangent_pad<Eq, std::void_t<decltype(Eq::bs_tangent_pad(0, 0))>> : std::true_type {};
+
+template <class Eq, class P>
+inline int bs_tangent_pad(const P& p)
+{
+    if constexpr (has_bs_tangent_pad<Eq>::value)
+        return Eq::bs_tangent_pad(p.abcn, p.M);
+    else
+        return Eq::TANGENT_PAD * p.M;
 }
 
 // ------------------------------------------------------------------------- //
@@ -285,12 +305,12 @@ public:
             boundary_saver.allocate(p.use_boundary_saving, Eq::NDIM, Eq::BS_NVAR, ctx, vp,
                                     save_width, Eq::BS_LAST_TWO_NVAR, true, false,
                                     p.transfer_interval, p.boundary_cpu, p.boundary_gpu,
-                                    p.last_two, p.use_pinned_memory, Eq::TANGENT_PAD * p.M, p.boundary_staging);
+                                    p.last_two, p.use_pinned_memory, bs_tangent_pad<Eq>(p), p.boundary_staging);
         else
             boundary_saver.allocate(p.use_boundary_saving, Eq::NDIM, Eq::BS_NVAR, ctx, vp,
                                     save_width, Eq::BS_LAST_TWO_NVAR, true, true,
                                     1, {}, p.boundary_gpu,
-                                    p.last_two, p.use_pinned_memory, Eq::TANGENT_PAD * p.M, p.boundary_staging);
+                                    p.last_two, p.use_pinned_memory, bs_tangent_pad<Eq>(p), p.boundary_staging);
         bs = boundary_saver.view();
 
         launch_config = wave_config<Eq::NDIM>(d);
@@ -747,11 +767,11 @@ public:
             boundary_saver.allocate(true, Eq::NDIM, Eq::BS_NVAR, ctx, vp, save_width,
                                     Eq::BS_LAST_TWO_NVAR, true, false,
                                     p.transfer_interval, p.boundary_cpu, p.boundary_gpu,
-                                    last_two_bound, p.use_pinned_memory, Eq::TANGENT_PAD * p.M, p.boundary_staging);
+                                    last_two_bound, p.use_pinned_memory, bs_tangent_pad<Eq>(p), p.boundary_staging);
         } else {
             boundary_saver.allocate(true, Eq::NDIM, Eq::BS_NVAR, ctx, vp, save_width,
                                     Eq::BS_LAST_TWO_NVAR, true, true, 1, {}, p.boundary_gpu,
-                                    last_two_bound, p.use_pinned_memory, Eq::TANGENT_PAD * p.M, p.boundary_staging);
+                                    last_two_bound, p.use_pinned_memory, bs_tangent_pad<Eq>(p), p.boundary_staging);
             if (p.boundary_gpu.empty())
                 boundary_saver.load_from_vector(p.u_boundary, vp);
         }

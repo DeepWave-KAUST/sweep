@@ -33,8 +33,10 @@ is supported for every class.
 | Equation | Models | Dim | Notes | `impl="c"` |
 | --- | --- | --- | --- | --- |
 | `AcousticAniso` | varies (see facade) | 2D / 3D | **Unified facade** — `method=` picks duveneck / liang / alkhalifah; mirrors the `DAS` facade | varies |
-| `AcousticVTI` | `['vp', 'epsilon', 'delta']` | 2D | qP acoustic VTI, Liang K. et al. 2022 — aliases `AcousticVTILiang` / `AcousticVTIDefault` | ❌ |
-| `AcousticTTI` | `['vp', 'epsilon', 'delta', 'theta']` | 2D | qP acoustic TTI, Liang K. et al. 2022 — alias `AcousticTTILiang` | ❌ |
+| `AcousticVTI` | `['vp', 'epsilon', 'delta']` | 2D | Pure qP VTI, new acoustic approximation (Liang K. et al. 2023) — aliases `AcousticVTILiang` / `AcousticVTIDefault`; `s_gradient=` picks the adjoint ([forward, adjoint and Born](qp_born.md)) | ✅ full / bs |
+| `AcousticTTI` | `['vp', 'epsilon', 'delta', 'theta']` | 2D | Pure qP TTI (Liang K. et al. 2023, appendix A) — alias `AcousticTTILiang` | ✅ full / bs |
+| `AcousticVTILSRTM` | `['vp', 'epsilon', 'delta', 'mp']` | 2D | Born / LSRTM pair of `AcousticVTI` (background `h1`, scattered `sh1`, reflectivity `mp`) — alias `AcousticVTIBorn` | ✅ full / bs, `mp` gradient |
+| `AcousticTTILSRTM` | `['vp', 'epsilon', 'delta', 'theta', 'mp']` | 2D | Born / LSRTM pair of `AcousticTTI` — alias `AcousticTTIBorn` | ✅ full / bs, `mp` gradient |
 | `AcousticTariq` | `['vv', 'v', 'eta']` | 2D | qP η-formulation, Alkhalifah 2000 — aliases `AcousticVTIAlkhalifah` / `AcousticTTIAlkhalifah` | ❌ |
 | `AcousticVTI1st` | `['vp', 'epsilon', 'delta', 'rho']` | 2D | 1st-order velocity-stress, Duveneck et al. 2008 — alias `AcousticVTIDuveneck` | ✅ |
 | `AcousticVTI1st3D` | `['vp', 'epsilon', 'delta', 'rho']` | 3D | 3D counterpart of `AcousticVTI1st` — aliases `AcousticVTIDuveneck3D` / `AcousticVTIDefault3D` | ✅ |

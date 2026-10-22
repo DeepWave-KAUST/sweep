@@ -13,7 +13,7 @@ Dispatch table:
     --------------+----------+------+-------------------------------------
     "duveneck"    | vti      | 2    | AcousticVTI1st        (Duveneck 2008)
     "duveneck"    | vti      | 3    | AcousticVTI1st3D
-    "liang"       | vti      | 2    | AcousticVTI           (Liang K. 2022)
+    "liang"       | vti      | 2    | AcousticVTI           (Liang K. 2023)
     "liang"       | tti      | 2    | AcousticTTI
     "alkhalifah"  | vti / tti| 2    | AcousticTariq         (Alkhalifah 2000)
 
@@ -87,7 +87,7 @@ def _select_equation_class(method: str, symmetry: str, ndim: int):
     if method == "liang":
         if ndim != 2:
             raise NotImplementedError(
-                "Liang K. et al. (2022) classes are 2-D only in this repo; "
+                "Liang K. et al. (2023) classes are 2-D only in this repo; "
                 "use method='duveneck' for 3-D VTI."
             )
         if symmetry == "vti":

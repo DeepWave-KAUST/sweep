@@ -58,10 +58,10 @@ linked at the bottom of this page.
 
     ---
 
-    Pseudo-acoustic VTI, rotated staggered-grid TTI in 2-D and 3-D, and the
-    displacement formulation.
+    Pseudo-acoustic VTI, pure-qP Born and LSRTM, rotated staggered-grid TTI in
+    2-D and 3-D, and the displacement formulation.
 
-    [:octicons-arrow-right-24: 4 notebooks](anisotropic/index.md)
+    [:octicons-arrow-right-24: 5 notebooks](anisotropic/index.md)
 
 -   [![Imaging](../figures/gallery/08_rtm_acoustic_marmousi.png){ loading=lazy }](imaging/index.md)
 

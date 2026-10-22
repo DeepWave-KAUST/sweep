@@ -124,6 +124,22 @@ constexpr int ID_visco_elastic2d_backward = 95;
 constexpr int ID_visco_elastic2d_backward_bs = 96;
 constexpr int ID_visco_elastic2d_backward_ckpt = 97;
 constexpr int ID_visco_elastic2d_backward_recursive_ckpt = 98;
+constexpr int ID_qp_vti2d_forward = 99;
+constexpr int ID_qp_vti2d_backward = 100;
+constexpr int ID_qp_vti2d_backward_bs = 101;
+constexpr int ID_qp_vti2d_backward_ckpt = 102;
+constexpr int ID_qp_tti2d_forward = 103;
+constexpr int ID_qp_tti2d_backward = 104;
+constexpr int ID_qp_tti2d_backward_bs = 105;
+constexpr int ID_qp_tti2d_backward_ckpt = 106;
+constexpr int ID_qp_vti_lsrtm2d_forward = 107;
+constexpr int ID_qp_vti_lsrtm2d_backward = 108;
+constexpr int ID_qp_vti_lsrtm2d_backward_bs = 109;
+constexpr int ID_qp_vti_lsrtm2d_backward_ckpt = 110;
+constexpr int ID_qp_tti_lsrtm2d_forward = 111;
+constexpr int ID_qp_tti_lsrtm2d_backward = 112;
+constexpr int ID_qp_tti_lsrtm2d_backward_bs = 113;
+constexpr int ID_qp_tti_lsrtm2d_backward_ckpt = 114;
 
 [[noreturn]] void raise_core(const char* err) { throw std::runtime_error(err); }
 
@@ -335,6 +351,22 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("visco_elastic2d_backward_bs", wrap_backward([](const BackwardInput& in) { return call_backward(ID_visco_elastic2d_backward_bs, in); }), "Visco-elastic backward 2D boundary-saving (unsupported: raises)");
     m.def("visco_elastic2d_backward_ckpt", wrap_backward([](const BackwardInput& in) { return call_backward(ID_visco_elastic2d_backward_ckpt, in); }), "Visco-elastic backward 2D with checkpointing (CUDA only)");
     m.def("visco_elastic2d_backward_recursive_ckpt", wrap_backward([](const BackwardInput& in) { return call_backward(ID_visco_elastic2d_backward_recursive_ckpt, in); }), "Visco-elastic backward 2D with recursive checkpointing (CUDA only)");
+    m.def("qp_vti2d_forward", wrap_forward([](const ForwardInput& in) { return call_forward(ID_qp_vti2d_forward, in); }), "Pure-qP VTI forward 2D (CUDA)");
+    m.def("qp_vti2d_backward", wrap_backward([](const BackwardInput& in) { return call_backward(ID_qp_vti2d_backward, in); }), "Pure-qP VTI backward 2D (CUDA)");
+    m.def("qp_vti2d_backward_bs", wrap_backward([](const BackwardInput& in) { return call_backward(ID_qp_vti2d_backward_bs, in); }), "Pure-qP VTI backward_bs 2D (CUDA)");
+    m.def("qp_vti2d_backward_ckpt", wrap_backward([](const BackwardInput& in) { return call_backward(ID_qp_vti2d_backward_ckpt, in); }), "Pure-qP VTI backward_ckpt 2D (CUDA)");
+    m.def("qp_tti2d_forward", wrap_forward([](const ForwardInput& in) { return call_forward(ID_qp_tti2d_forward, in); }), "Pure-qP TTI forward 2D (CUDA)");
+    m.def("qp_tti2d_backward", wrap_backward([](const BackwardInput& in) { return call_backward(ID_qp_tti2d_backward, in); }), "Pure-qP TTI backward 2D (CUDA)");
+    m.def("qp_tti2d_backward_bs", wrap_backward([](const BackwardInput& in) { return call_backward(ID_qp_tti2d_backward_bs, in); }), "Pure-qP TTI backward_bs 2D (CUDA)");
+    m.def("qp_tti2d_backward_ckpt", wrap_backward([](const BackwardInput& in) { return call_backward(ID_qp_tti2d_backward_ckpt, in); }), "Pure-qP TTI backward_ckpt 2D (CUDA)");
+    m.def("qp_vti_lsrtm2d_forward", wrap_forward([](const ForwardInput& in) { return call_forward(ID_qp_vti_lsrtm2d_forward, in); }), "Pure-qP VTI Born forward 2D (CUDA)");
+    m.def("qp_vti_lsrtm2d_backward", wrap_backward([](const BackwardInput& in) { return call_backward(ID_qp_vti_lsrtm2d_backward, in); }), "Pure-qP VTI Born backward 2D (CUDA)");
+    m.def("qp_vti_lsrtm2d_backward_bs", wrap_backward([](const BackwardInput& in) { return call_backward(ID_qp_vti_lsrtm2d_backward_bs, in); }), "Pure-qP VTI Born backward_bs 2D (CUDA)");
+    m.def("qp_vti_lsrtm2d_backward_ckpt", wrap_backward([](const BackwardInput& in) { return call_backward(ID_qp_vti_lsrtm2d_backward_ckpt, in); }), "Pure-qP VTI Born backward_ckpt 2D (CUDA)");
+    m.def("qp_tti_lsrtm2d_forward", wrap_forward([](const ForwardInput& in) { return call_forward(ID_qp_tti_lsrtm2d_forward, in); }), "Pure-qP TTI Born forward 2D (CUDA)");
+    m.def("qp_tti_lsrtm2d_backward", wrap_backward([](const BackwardInput& in) { return call_backward(ID_qp_tti_lsrtm2d_backward, in); }), "Pure-qP TTI Born backward 2D (CUDA)");
+    m.def("qp_tti_lsrtm2d_backward_bs", wrap_backward([](const BackwardInput& in) { return call_backward(ID_qp_tti_lsrtm2d_backward_bs, in); }), "Pure-qP TTI Born backward_bs 2D (CUDA)");
+    m.def("qp_tti_lsrtm2d_backward_ckpt", wrap_backward([](const BackwardInput& in) { return call_backward(ID_qp_tti_lsrtm2d_backward_ckpt, in); }), "Pure-qP TTI Born backward_ckpt 2D (CUDA)");
 
     m.def("visco_acoustic2d_fft_workspace_bytes",
           [](int64_t B, int64_t nz, int64_t nx) { return sweep_visco_fft_workspace_bytes(B, nz, nx); },

@@ -700,7 +700,8 @@ public:
         int offset,
         SolverContext ctx,
         int field_idx,
-        bool flush_chunk
+        bool flush_chunk,
+        int tangent_pad = 0    // bands run this many cells past the box (the qp2d frame)
     )
     {
         BoundaryChunk chunk = forward_chunk(it, nt);
@@ -710,23 +711,23 @@ public:
         if (b.dtype == BoundaryDtype::BF16) {
             boundary_kernel2d_bf16<<<grid, block>>>(
                 u, b.top_bf, b.bottom_bf, b.left_bf, b.right_bf,
-                boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
+                boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE, tangent_pad);
         } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
             boundary_kernel2d<<<grid, block>>>(
                 u, b.top, b.bottom, b.left, b.right,
-                /*it=*/0, width, offset, ctx, BOUNDARY_SAVE);
+                /*it=*/0, width, offset, ctx, BOUNDARY_SAVE, tangent_pad);
             quantize_step_2d(b, boundary_time_index_field(chunk));
         } else if (use_compact_boundary_kernel()) {
-            int compact_total = compact_boundary_count_2d(ctx, width, 0);
+            int compact_total = compact_boundary_count_2d(ctx, width, tangent_pad);
             int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
             boundary_kernel2d_compact<<<compact_blocks, compact_threads>>>(
                 u, b.top, b.bottom, b.left, b.right,
-                boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
+                boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE, tangent_pad);
         } else {
             boundary_kernel2d<<<grid, block>>>(
                 u, b.top, b.bottom, b.left, b.right,
-                boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
+                boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE, tangent_pad);
         }
 
         if (flush_chunk)
@@ -1217,7 +1218,8 @@ public:
         SolverContext ctx,
         int field_idx,
         bool wait_chunk,
-        bool record_done
+        bool record_done,
+        int tangent_pad = 0    // as save_forward_2d_field
     )
     {
         if (wait_chunk)
@@ -1226,23 +1228,23 @@ public:
         if (b.dtype == BoundaryDtype::BF16) {
             boundary_kernel2d_bf16<<<grid, block>>>(
                 u, b.top_bf, b.bottom_bf, b.left_bf, b.right_bf,
-                backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
+                backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE, tangent_pad);
         } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
             dequantize_step_2d(b, backward_time_index_field(it));
             boundary_kernel2d<<<grid, block>>>(
                 u, b.top, b.bottom, b.left, b.right,
-                /*it=*/0, width, offset, ctx, BOUNDARY_RESTORE);
+                /*it=*/0, width, offset, ctx, BOUNDARY_RESTORE, tangent_pad);
         } else if (use_compact_boundary_kernel()) {
-            int compact_total = compact_boundary_count_2d(ctx, width, 0);
+            int compact_total = compact_boundary_count_2d(ctx, width, tangent_pad);
             int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
             boundary_kernel2d_compact<<<compact_blocks, compact_threads>>>(
                 u, b.top, b.bottom, b.left, b.right,
-                backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
+                backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE, tangent_pad);
         } else {
             boundary_kernel2d<<<grid, block>>>(
                 u, b.top, b.bottom, b.left, b.right,
-                backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
+                backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE, tangent_pad);
         }
         if (record_done)
             record_backward_restore_done(it);

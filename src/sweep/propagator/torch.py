@@ -635,6 +635,11 @@ class PropTorch(torch.nn.Module):
         return self._backend_impl.parameters()
 
     def forward(self, wavelet, sources, receivers, models=None, adj=False, return_wavefield=False, **kwargs):
+        # An equation with a known stability condition (the pure-qP pair) checks
+        # this call's models against dt and the grid; it warns, it does not stop.
+        check = getattr(self._backend_impl.equation, "check_stability", None)
+        if callable(check) and models is not None:
+            check(models, self._backend_impl._dt, self._backend_impl._grid_spacing)
         return self._backend_impl(
             wavelet,
             sources,

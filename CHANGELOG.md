@@ -9,6 +9,41 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+- **`AcousticVTI` / `AcousticTTI` on `impl='c'` (`qp_vti2d` / `qp_tti2d`).**
+  The pure-qP equations of Liang et al. (2023, doi:10.1190/geo2022-0292.1,
+  eqs 19-20 and A-7) get CUDA kernels for the forward, the full-storage
+  backward and the boundary-saving backward (gpu / cpu / disk, fp32 / fp16 /
+  bf16; int8 is refused), orders 2-8 and runtime order; records match eager to
+  1e-6-2e-4.
+  The backward needs the forward state of step it+1 at reverse step it, in the
+  absorbing layer too, so full mode stores five fields per step and boundary
+  saving stores them on the whole CPML frame (`cuda_layout.boundary_frame`:
+  the band starts `abcn` cells outside the physical box and runs `abcn` past it
+  tangentially) and rebuilds the deep interior. No checkpointing.
+  `PropTorch` warns once when `dt` breaks the scheme's stability condition
+  (the paper's eq. B-9 for VTI; a bound from the safe side for TTI).
+- **`s_gradient=` on the qP equations: `'adjoint'` (default), `'frozen'`,
+  `'exact'`.** S_n takes its direction from the wavefield, so the step is
+  nonlinear in `h1`, and its exact derivative is ill-conditioned: eager fp32
+  and fp64 differ by 2-3 % on the canonical gradient test (1e-7 when
+  epsilon == delta), and two eager runs do not agree bit for bit. `'exact'` is
+  that derivative (`memory=Full()` only on `impl='c'`); `'frozen'` transposes the
+  step with S_n held at the forward field (linear adjoint, consistent to
+  rounding); `'adjoint'` propagates the adjoint wavefield with its own S_n, the
+  adjoint of the wavenumber-domain eq. 14. The forward is the same in all
+  three. **This changes the default eager gradient of `AcousticVTI` /
+  `AcousticTTI`** (it was `'exact'`).
+- **`AcousticVTILSRTM` / `AcousticTTILSRTM`** (aliases `AcousticVTIBorn` /
+  `AcousticTTIBorn`): the Born equations of the qP pair -- background and
+  scattered qP fields, each with its own S_n, the scattered one driven by the
+  reflectivity `mp` times the background update (derivation in
+  docs/user-guide/qp_born.md). Eager and `impl='c'` (`qp_vti_lsrtm2d` /
+  `qp_tti_lsrtm2d`, full and boundary saving); the compiled backward returns
+  the `mp` gradient and refuses the background models' and the wavelet's.
+  Example: `docs/notebooks/34_lsrtm_qp_vti_tti.ipynb` (RTM and LSRTM of a
+  tilted anisotropic bed with the isotropic, VTI and TTI operators).
+
 ### Changed
 - **`Acoustic3D` and `AcousticVRZ3D` on `impl='c'` run 1.2-1.8x faster per
   step.**  The forward step, the boundary-saving reconstruction and the

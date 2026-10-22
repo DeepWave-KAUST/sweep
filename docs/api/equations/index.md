@@ -240,8 +240,8 @@ The raw equation classes (API on [Other equations](others.md)) are:
 
 | Class | Symmetry | Dim | Reference |
 | --- | --- | --- | --- |
-| `AcousticVTI` | VTI | 2D | Liang K. et al. 2022 (2nd-order pseudo-acoustic) |
-| `AcousticTTI` | TTI | 2D | Liang K. et al. 2022 (TTI extension) |
+| `AcousticVTI` | VTI | 2D | Liang K. et al. 2023 (2nd-order pure qP) |
+| `AcousticTTI` | TTI | 2D | Liang K. et al. 2023 (TTI extension) |
 | `AcousticTariq` | VTI / TTI | 2D | Alkhalifah 2000 (qP η-formulation) |
 | `AcousticVTI1st` / `AcousticVTI1st3D` | VTI | 2D / 3D | Duveneck et al. 2008 (1st-order velocity-stress) |
 
