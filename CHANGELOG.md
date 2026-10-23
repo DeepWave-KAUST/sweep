@@ -202,6 +202,9 @@ and this project adheres to
   three parameterizations (Morency et al. 2009).
 - Notebook 39: poroelastic radiation patterns, Born analytic against `Biot`,
   four parameterizations (after Yang et al. 2019).
+- Notebook 40: `Biot` wavefields -- fast P, slow P and S, four viscous regimes
+  against the analytic solution, Dai et al.'s two layers under an open-pore
+  free surface.
 - API page and equations-table row for `Biot`.
 
 ## [0.3.5] - 2026-10-05

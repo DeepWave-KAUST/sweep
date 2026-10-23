@@ -1,8 +1,8 @@
 # Wavefields
 
 Forward modelling: elastic sources, DAS, topography and per-edge free surfaces,
-visco-acoustic and visco-elastic attenuation, and how solver settings change the
-wavefield.
+visco-acoustic and visco-elastic attenuation, poroelastic (Biot) waves, and how
+solver settings change the wavefield.
 
 <div class="grid cards" markdown>
 
@@ -91,6 +91,19 @@ wavefield.
     dispersion and attenuation cannot be switched apart.
 
     [:material-notebook-outline: Open notebook](../../notebooks/30_wavefield_visco_elastic.ipynb)
+
+-   ![Wavefield poroelastic](../../figures/gallery/40_wavefield_poroelastic.png){ loading=lazy }
+
+    **Wavefield · Poroelastic · Biot**
+
+    ---
+
+    `Biot`: fast P, slow P and S in a fluid-saturated rock — the slow wave
+    going from propagating to diffusive as the viscous drag grows, checked
+    against the analytic solution, and Dai et al.'s two-layer model under an
+    open-pore free surface.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/40_wavefield_poroelastic.ipynb)
 
 -   ![Solver hyperparameters](../../figures/gallery/09_solver_hyperparams.png){ loading=lazy }
 

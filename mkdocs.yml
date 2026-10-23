@@ -133,6 +133,7 @@ nav:
               - Per-edge free surface (4 faces): notebooks/24_wavefield_per_edge_free_surface.ipynb
               - Visco-acoustic · constant-Q: notebooks/29_wavefield_visco_acoustic.ipynb
               - Visco-elastic · GSLS (Qp, Qs): notebooks/30_wavefield_visco_elastic.ipynb
+              - Poroelastic · Biot (fast P, slow P, S): notebooks/40_wavefield_poroelastic.ipynb
               - Solver hyperparameters: notebooks/09_solver_hyperparams.ipynb
           - Anisotropic:
               - examples/anisotropic/index.md
