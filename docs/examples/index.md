@@ -101,9 +101,10 @@ linked at the bottom of this page.
 
     ---
 
-    Radiation patterns of the scattering sources behind multiparameter trade-off.
+    Radiation patterns and sensitivity kernels behind multiparameter trade-off,
+    acoustic to poroelastic.
 
-    [:octicons-arrow-right-24: 2 notebooks](sensitivity/index.md)
+    [:octicons-arrow-right-24: 4 notebooks](sensitivity/index.md)
 
 </div>
 

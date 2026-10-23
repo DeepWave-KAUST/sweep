@@ -220,6 +220,11 @@ wavefields, and backend / binding behavior:
 - [ElasticTTISG3D](elastic_tti_sg3d.md)
 - [ElasticTTI2nd](elastic_tti_2nd.md)
 
+**Poroelastic**
+
+- [Biot](biot.md) — low-frequency Biot poroelastic waves (solid velocity, Darcy
+  flux, total stress, pore pressure); eager only
+
 **DAS family**
 
 - [DAS family overview](das.md) — covers `DAS` (the unified facade, formerly

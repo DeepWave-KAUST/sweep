@@ -163,6 +163,8 @@ nav:
               - examples/sensitivity/index.md
               - Acoustic · radiation (Vp, ρ): notebooks/20_radiation_acoustic.ipynb
               - Elastic · radiation P-P/P-S/S-S: notebooks/21_radiation_elastic.ipynb
+              - Poroelastic · traveltime kernels: notebooks/38_kernels_poroelastic.ipynb
+              - Poroelastic · radiation (fast P → P, S): notebooks/39_radiation_poroelastic.ipynb
       - Scripts:
           - Multi-GPU DDP: examples/multi_gpu_dist.md
   - Playground:
@@ -189,6 +191,7 @@ nav:
           - ElasticTTISG: api/equations/elastic_tti_sg.md
           - ElasticTTISG3D: api/equations/elastic_tti_sg3d.md
           - ElasticTTI2nd: api/equations/elastic_tti_2nd.md
+          - Biot: api/equations/biot.md
           - DAS family: api/equations/das.md
           - Other equations: api/equations/others.md
       - Operators:
