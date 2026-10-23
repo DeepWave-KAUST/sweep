@@ -9,7 +9,8 @@
 //             that axis' ψ*/ζ*.
 //
 // Per-axis exactness.  Along axis d the CPML transpose reads b_d, and — at taps
-// whose forward ran its CPML branch (gated by in_pml of the tap cell, i.e.
+// whose forward ran its CPML branch (gated by in_cpml of the tap cell -- the
+// band plus the db leak cell past it, forward_split.cu's shell -- i.e.
 // also by the cell's band membership on the OTHER axes) — a_d and db_d.  b_d
 // is exactly 0 off-band and a_d is masked to the band, but db_d =
 // np.gradient(b_d) leaks one cell past the band edge into the physical box
@@ -135,9 +136,9 @@ __global__ void __launch_bounds__(256) vrz3d_adj_shell(
     const float invdy = 1.0f / grad_ctx.dy;
     const float invdz = 1.0f / grad_ctx.dz;
 
-    const bool px0 = solver.in_pml_x(ix, halo);
-    const bool py0 = solver.in_pml_y(iy, halo);
-    const bool pz0 = solver.in_pml_z(iz, halo);
+    const bool px0 = solver.in_cpml_x(ix, halo);
+    const bool py0 = solver.in_cpml_y(iy, halo);
+    const bool pz0 = solver.in_cpml_z(iz, halo);
     const bool own_pml = px0 || py0 || pz0;
 
     const float gw0 = C0_b[idx] * dt2 * lam[idx];
@@ -157,8 +158,8 @@ __global__ void __launch_bounds__(256) vrz3d_adj_shell(
         #pragma unroll
         for (int k = 1; k <= halo; ++k) {
             int np = idx + k, nm = idx - k, nixp = ix + k, nixm = ix - k;
-            bool Pp = py0 || pz0 || solver.in_pml_x(nixp, halo);
-            bool Pm = py0 || pz0 || solver.in_pml_x(nixm, halo);
+            bool Pp = py0 || pz0 || solver.in_cpml_x(nixp, halo);
+            bool Pm = py0 || pz0 || solver.in_cpml_x(nixm, halo);
             float tp = VRZ_GTMP_X(np, nixp), tm = VRZ_GTMP_X(nm, nixm);
             float bp = cpml.bx[nixp], bm = cpml.bx[nixm];
             float dbp = Pp ? cpml.dbxdx[nixp] : 0.0f, dbm = Pm ? cpml.dbxdx[nixm] : 0.0f;
@@ -194,8 +195,8 @@ __global__ void __launch_bounds__(256) vrz3d_adj_shell(
         #pragma unroll
         for (int k = 1; k <= halo; ++k) {
             int np = idx + k * sy, nm = idx - k * sy, niyp = iy + k, niym = iy - k;
-            bool Pp = px0 || pz0 || solver.in_pml_y(niyp, halo);
-            bool Pm = px0 || pz0 || solver.in_pml_y(niym, halo);
+            bool Pp = px0 || pz0 || solver.in_cpml_y(niyp, halo);
+            bool Pm = px0 || pz0 || solver.in_cpml_y(niym, halo);
             float tp = VRZ_GTMP_Y(np, niyp), tm = VRZ_GTMP_Y(nm, niym);
             float bp = cpml.by[niyp], bm = cpml.by[niym];
             float dbp = Pp ? cpml.dbydy[niyp] : 0.0f, dbm = Pm ? cpml.dbydy[niym] : 0.0f;
@@ -232,8 +233,8 @@ __global__ void __launch_bounds__(256) vrz3d_adj_shell(
         #pragma unroll
         for (int k = 1; k <= halo; ++k) {
             int np = idx + k * sz, nm = idx - k * sz, nizp = iz + k, nizm = iz - k;
-            bool Pp = px0 || py0 || solver.in_pml_z(nizp, halo);
-            bool Pm = px0 || py0 || solver.in_pml_z(nizm, halo);
+            bool Pp = px0 || py0 || solver.in_cpml_z(nizp, halo);
+            bool Pm = px0 || py0 || solver.in_cpml_z(nizm, halo);
             float tp = VRZ_GTMP_Z(np, nizp), tm = VRZ_GTMP_Z(nm, nizm);
             float bp = cpml.bz[nizp], bm = cpml.bz[nizm];
             float dbp = Pp ? cpml.dbzdz[nizp] : 0.0f, dbm = Pm ? cpml.dbzdz[nizm] : 0.0f;
@@ -281,8 +282,9 @@ template<int Order>
 void launch_split(const SplitArgs& a)
 {
     const SolverContext& ctx = *a.ctx;
-    // the cells whose taps on every axis stay out of the CPML band and its aux
-    const Box inner = fdtd::phys_box(ctx, ctx.M);
+    // the cells whose taps on every axis stay out of the CPML band, its aux
+    // and the db leak cell past it (where the forward's shell now runs)
+    const Box inner = fdtd::phys_box(ctx, ctx.M + 1);
     // per axis, the range whose taps cannot reach a non-zero a/b/db (see above)
     const Box clear = fdtd::phys_box(ctx, ctx.M + 1);
     if (!fdtd::empty(inner)) {

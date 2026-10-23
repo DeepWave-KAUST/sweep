@@ -485,7 +485,10 @@ __global__ void boundary_kernel3d_bf16(
 // SAVE is identical.  On RESTORE the two threads write the same wavefield cell,
 // but both read the value the same SAVE wrote, so the (unordered) duplicate
 // write is bit-identical either way -- which is why this path is FP32 only:
-// under a lossy storage dtype the two copies could differ.
+// under a lossy storage dtype the two copies could differ.  (In 3-D the
+// compact kernels do serve the lossy dtypes: the int8 / scaled-fp16 RESTORE
+// goes through boundary_kernel3d_compact_owned, which writes such a cell from
+// one band only.)
 __global__ void boundary_kernel2d_compact(
     float* __restrict__ u,
 
@@ -733,9 +736,20 @@ __global__ void boundary_kernel3d_compact(
         u_b[idx3] = boundary[idx];
 }
 
-// Templated body for boundary_kernel3d_compact: pick one of the six faces
-// based on tid, then SAVE / LOAD with FP32 ↔ T cast at the storage boundary.
-template<typename T>
+// Templated body of boundary_kernel3d_compact's storage-typed variants (_fp16,
+// _bf16) and of boundary_kernel3d_compact_owned (T = float, Owned): pick one
+// of the six faces based on tid, then SAVE / LOAD with FP32 ↔ T cast at the
+// storage boundary.  boundary_kernel3d_compact itself is a separate FP32
+// kernel with the same index math.
+//
+// Owned (boundary_kernel3d_compact_owned only): on RESTORE a cell that lies
+// in several bands -- an edge or corner of the strip, or on a thin axis a cell
+// both opposite bands cover -- is written only by
+// the band boundary_kernel3d writes it from LAST (top, bottom, front, back,
+// left, right), instead of by every band's thread in whatever order they
+// run.  Needed when the per-face copies of such a cell differ: the INT8 /
+// scaled-FP16 storage quantizes each face with its own per-block scales.
+template<typename T, bool Owned = false>
 __device__ __forceinline__ void boundary_kernel3d_compact_body(
     float* __restrict__ u,
     T* __restrict__ top, T* __restrict__ bottom,
@@ -770,6 +784,7 @@ __device__ __forceinline__ void boundary_kernel3d_compact_body(
     int ix = 0, iy = 0, iz = 0;
     int64_t idx = 0;
     T* boundary = nullptr;
+    int face = 0;   // 0..5 in the scan kernel's write order (Owned only)
 
     if (local < top_count) {
         int plane = ny_boundary * nx_boundary;
@@ -788,6 +803,7 @@ __device__ __forceinline__ void boundary_kernel3d_compact_body(
         idx = ((((int64_t)it * ctx.B + b) * width + zloc) * ny_boundary + yloc) * nx_boundary + xloc;
         if (ctx.cut_z_hi()) return;
         boundary = bottom;
+        face = 1;
     } else if (local < 2 * top_count + front_count) {
         local -= 2 * top_count;
         int plane = width * nx_boundary;
@@ -797,6 +813,7 @@ __device__ __forceinline__ void boundary_kernel3d_compact_body(
         idx = ((((int64_t)it * ctx.B + b) * nz_boundary + zloc) * width + yloc) * nx_boundary + xloc;
         if (ctx.cut_y_lo()) return;
         boundary = front;
+        face = 2;
     } else if (local < 2 * top_count + 2 * front_count) {
         local -= 2 * top_count + front_count;
         int plane = width * nx_boundary;
@@ -806,6 +823,7 @@ __device__ __forceinline__ void boundary_kernel3d_compact_body(
         idx = ((((int64_t)it * ctx.B + b) * nz_boundary + zloc) * width + yloc) * nx_boundary + xloc;
         if (ctx.cut_y_hi()) return;
         boundary = back;
+        face = 3;
     } else if (local < 2 * top_count + 2 * front_count + left_count) {
         local -= 2 * top_count + 2 * front_count;
         int plane = ny_boundary * width;
@@ -815,6 +833,7 @@ __device__ __forceinline__ void boundary_kernel3d_compact_body(
         idx = ((((int64_t)it * ctx.B + b) * nz_boundary + zloc) * ny_boundary + yloc) * width + xloc;
         if (ctx.cut_x_lo()) return;
         boundary = left;
+        face = 4;
     } else {
         local -= 2 * top_count + 2 * front_count + left_count;
         int plane = ny_boundary * width;
@@ -824,9 +843,18 @@ __device__ __forceinline__ void boundary_kernel3d_compact_body(
         idx = ((((int64_t)it * ctx.B + b) * nz_boundary + zloc) * ny_boundary + yloc) * width + xloc;
         if (ctx.cut_x_hi()) return;
         boundary = right;
+        face = 5;
     }
 
     if (ix < 0 || ix >= ctx.nx || iy < 0 || iy >= ctx.ny || iz < 0 || iz >= ctx.nz) return;
+    if constexpr (Owned) {
+        if (mode == BOUNDARY_RESTORE) {
+            const BsStripFaces3D f = bs_strip_faces_3d(ctx, g, ix, iy, iz);
+            const bool later = (face < 1 && f.bottom) || (face < 2 && f.front) || (face < 3 && f.back)
+                            || (face < 4 && f.left) || (face < 5 && f.right);
+            if (later) return;
+        }
+    }
     int idx3 = iz * ctx.nx * ctx.ny + iy * ctx.nx + ix;
     float* u_b = u + b * ctx.nx * ctx.ny * ctx.nz;
     bndry_xfer(boundary, idx, u_b, idx3, mode);
@@ -854,6 +882,22 @@ __global__ void boundary_kernel3d_compact_bf16(
 {
     boundary_kernel3d_compact_body<__nv_bfloat16>(u, top, bottom, front, back, left, right,
                                                   it, width, offset, ctx, mode, tangent_pad);
+}
+
+// boundary_kernel3d_compact for the INT8 / scaled-FP16 staging buffers: the
+// same SAVE, and a RESTORE that writes each multi-band cell from its owning
+// band only (boundary_kernel3d_compact_body, Owned), so the result does not
+// depend on thread order and equals boundary_kernel3d's.
+__global__ void boundary_kernel3d_compact_owned(
+    float* __restrict__ u,
+    float* __restrict__ top, float* __restrict__ bottom,
+    float* __restrict__ front, float* __restrict__ back,
+    float* __restrict__ left, float* __restrict__ right,
+    int it, int width, int offset,
+    SolverContext ctx, int mode, int tangent_pad)
+{
+    boundary_kernel3d_compact_body<float, true>(u, top, bottom, front, back, left, right,
+                                                it, width, offset, ctx, mode, tangent_pad);
 }
 
 // ====================================================================

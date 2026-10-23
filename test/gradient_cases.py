@@ -206,35 +206,35 @@ KNOWN_MISSING_GRADIENTS = {
     ("elastic", "wavelet"): "impl='c' elastic backward returns no source-wavelet gradient",
     ("das", "wavelet"): "impl='c' DAS backward returns no source-wavelet gradient",
     ("das_mu", "wavelet"): "impl='c' DAS-mu backward returns no source-wavelet gradient",
-    ("acoustic_vrz", "wavelet"): "impl='c' VRZ backward returns no source-wavelet gradient",
-    ("acoustic_lsrtm2d", "wavelet"): "impl='c' LSRTM2D backward returns no source-wavelet gradient",
-    # NOTE lsrtm3d is deliberately absent from the wavelet list: it DOES return
-    # one, and it is wrong (cos -0.005, rel 4.0 vs eager) — that must stay a
-    # failure, not a declared gap.
     # Verified by construction, not inferred from a mismatch: on impl='c'
     # ``wavelet.grad`` comes back as None for both, while eager returns a real
     # one (|g|max 1.07e-1 on the cuda-suite grid). The MODEL gradients (vp,
     # epsilon, delta, rho) do match eager -- it is only the source-wavelet slot
     # that the compiled backward never fills.
     ("acoustic_vti_1st", "wavelet"): "impl='c' VTI-1st backward returns no source-wavelet gradient",
-    # LSRTM's C backward returns the RWI tomographic vp gradient (terms II+III+IV,
-    # Wu & Alkhalifah 2015) in the full and boundary-saving modes only; the
-    # checkpoint modes still return vp zero.  (reason, modes): those modes only.
-    ("acoustic_lsrtm2d", "vp"): ("impl='c' LSRTM2D checkpoint backward returns no vp gradient (mp only)",
-                                 ("ckpt_chunk", "ckpt_recursive")),
-    ("acoustic_lsrtm3d", "vp"): ("impl='c' LSRTM3D checkpoint backward returns no vp gradient (mp only)",
-                                 ("ckpt_chunk", "ckpt_recursive")),
+}
+
+# Gradients impl='c' REFUSES: the equation's ``c_refuse_grads`` raises
+# NotImplementedError before anything runs when one of them requires grad.  The
+# matrix never asks the compiled backend for them (``run_case(refuse=...)``
+# creates those tensors without requires_grad) and reports them as declared
+# gaps, like the entries above.  Keep this table in step with the refusals.
+KNOWN_REFUSED_GRADIENTS = {
+    ("acoustic_vrz", "wavelet"): "impl='c' VRZ refuses the source-wavelet gradient",
+    ("acoustic_lsrtm", "wavelet"): "impl='c' LSRTM refuses the source-wavelet gradient",
+    # the RWI tomographic vp gradient (terms II+III+IV, Wu & Alkhalifah 2015)
+    # comes from the full and boundary-saving backwards only.  (reason, modes):
+    # those modes only.
+    ("acoustic_lsrtm", "vp"): ("impl='c' LSRTM refuses the RWI vp gradient in the checkpoint modes",
+                               ("ckpt_chunk", "ckpt_recursive")),
 }
 
 
-def known_missing_gradient(case_name: str, grad_name: str, mode: str | None = None) -> str | None:
-    """Longest matching prefix wins, so ``acoustic_lsrtm3d`` can declare a gap
-    that ``acoustic_lsrtm`` does not.  A ``(reason, modes)`` entry declares the
-    gap in those modes only (``mode`` may carry a ``/<backend>`` suffix)."""
+def _declared(table, case_name: str, grad_name: str, mode: str | None) -> str | None:
     if (mode or "").partition("/")[2].startswith("eager"):
         return None                      # the gaps are the compiled backward's
     best = None
-    for (prefix, name), entry in KNOWN_MISSING_GRADIENTS.items():
+    for (prefix, name), entry in table.items():
         reason, modes = (entry, None) if isinstance(entry, str) else entry
         if name != grad_name or not case_name.startswith(prefix):
             continue
@@ -243,6 +243,20 @@ def known_missing_gradient(case_name: str, grad_name: str, mode: str | None = No
         if best is None or len(prefix) > best[0]:
             best = (len(prefix), reason)
     return None if best is None else best[1]
+
+
+def refused_gradient(case_name: str, grad_name: str, mode: str | None = None) -> str | None:
+    """The KNOWN_REFUSED_GRADIENTS reason for this gradient, or None."""
+    return _declared(KNOWN_REFUSED_GRADIENTS, case_name, grad_name, mode)
+
+
+def known_missing_gradient(case_name: str, grad_name: str, mode: str | None = None) -> str | None:
+    """Longest matching prefix wins, so ``acoustic_lsrtm3d`` can declare a gap
+    that ``acoustic_lsrtm`` does not.  A ``(reason, modes)`` entry declares the
+    gap in those modes only (``mode`` may carry a ``/<backend>`` suffix).
+    Refused gradients count as declared gaps too."""
+    return (_declared(KNOWN_MISSING_GRADIENTS, case_name, grad_name, mode)
+            or refused_gradient(case_name, grad_name, mode))
 
 
 MODES = ("full", "bs", "ckpt_chunk", "ckpt_recursive")
@@ -425,19 +439,23 @@ def run_case(
     case: Case,
     device: torch.device | None = None,
     config: RunConfig = DEFAULT_CONFIG,
+    refuse: tuple[str, ...] = (),
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """``refuse``: names ("wavelet" or a model) created without requires_grad --
+    the gradients the solver refuses (KNOWN_REFUSED_GRADIENTS); they come back
+    as zeros."""
     device = device or torch.device("cpu")
     wavelet = torch.tensor(
         ricker(nt=config.nt, dt=config.dt, fm=config.freq, delay=config.delay),
         dtype=torch.float32,
         device=device,
-        requires_grad=True,
+        requires_grad="wavelet" not in refuse,
     )
     sources, receivers = geometry(case.shape, config)
     model_names = make_equation(case, device, config).models
     models = [
-        torch.tensor(array, dtype=torch.float32, device=device, requires_grad=True)
-        for array in model_arrays(model_names, case.shape)
+        torch.tensor(array, dtype=torch.float32, device=device, requires_grad=name not in refuse)
+        for name, array in zip(model_names, model_arrays(model_names, case.shape))
     ]
 
     record = solver(wavelet, sources, receivers, models=models)

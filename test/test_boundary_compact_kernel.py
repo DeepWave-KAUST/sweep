@@ -71,7 +71,7 @@ def _acoustic_grad(force_scan, *, shape, free_surface, batch, storage_dtype="fp3
     return vp.grad.detach().cpu().numpy(), float(loss.detach())
 
 
-def _acoustic3d_grad(force_scan, *, shape=(48, 44, 52), nt=500):
+def _acoustic3d_grad(force_scan, *, shape=(48, 44, 52), nt=500, storage_dtype="fp32"):
     nz, ny, nx = shape
     dev = torch.device("cuda")
     z = np.arange(nz, dtype=np.float32)[:, None, None]
@@ -90,7 +90,8 @@ def _acoustic3d_grad(force_scan, *, shape=(48, 44, 52), nt=500):
         solver = PropTorch(
             Acoustic3D(spatial_order=4, device=dev, backend="torch"),
             shape=shape, dh=20.0, dt=_DT, impl="c",
-            boundary_saving_config={"enabled": True, "storage": "gpu"},
+            boundary_saving_config={"enabled": True, "storage": "gpu",
+                                    "storage_dtype": storage_dtype},
         )
         wavelet = _wavelet(nt=nt)
         with torch.no_grad():
@@ -195,9 +196,10 @@ def test_compact_matches_scan_acoustic2d(shape, batch, free_surface):
 @cuda_only
 @pytest.mark.parametrize("storage_dtype", ["bf16", "int8"])
 def test_lossy_storage_keeps_scan_kernel(storage_dtype):
-    """Lossy storage dtypes are excluded from the compact path -- their two
-    copies of a corner cell need not round-trip identically -- so forcing the
-    scan must be a no-op for them."""
+    """In 2-D the lossy storage dtypes are excluded from the compact path --
+    their two copies of a corner cell need not round-trip identically -- so
+    forcing the scan must be a no-op for them (3-D:
+    test_compact_matches_scan_acoustic3d_lossy)."""
     kw = dict(shape=(60, 96), free_surface=False, batch=2, storage_dtype=storage_dtype)
     _assert_bit_identical(_acoustic_grad(False, **kw), _acoustic_grad(True, **kw),
                           f"acoustic2d {storage_dtype}")
@@ -217,3 +219,18 @@ def test_compact_matches_scan_acoustic3d():
     """The 3-D compact path shares the gate; pin it against the scan too."""
     _assert_bit_identical(_acoustic3d_grad(False), _acoustic3d_grad(True),
                           "acoustic3d")
+
+
+@cuda_only
+@pytest.mark.parametrize("storage_dtype", ["bf16", "fp16", "int8"])
+def test_compact_matches_scan_acoustic3d_lossy(storage_dtype):
+    """3-D lossy storage does take the compact path.  int8 / scaled fp16
+    quantize each face with its own block scales, so the copies of an edge or
+    corner cell differ; boundary_kernel3d_compact_owned restores such a cell
+    from the band the scan kernel writes last.  Two compact runs (block order)
+    and the scan agree to the bit."""
+    a = _acoustic3d_grad(False, storage_dtype=storage_dtype)
+    _assert_bit_identical(a, _acoustic3d_grad(False, storage_dtype=storage_dtype),
+                          f"acoustic3d {storage_dtype} rerun")
+    _assert_bit_identical(a, _acoustic3d_grad(True, storage_dtype=storage_dtype),
+                          f"acoustic3d {storage_dtype}")

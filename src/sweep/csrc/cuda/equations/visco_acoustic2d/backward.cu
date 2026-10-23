@@ -105,16 +105,18 @@ void pack_outputs(BackwardOutputCore& out, const ViscoGrads& g, const RTMOutputC
     out.adcig = illumination.adcig;
 }
 
-// Checkpoint replay state: p.forward_wavefields holds K sets of the 7 tensors
+// Checkpoint replay state: p.forward_wavefields holds K sets of the 9 tensors
 // (u_prev, u_now, u_next model-shaped; psix, psiz, zetax, zetaz slab-shaped
-// like the checkpoint slots -- cuda_layout.checkpoint_state_nvar = 7 with
-// checkpoint_slot_axes), zeroed per backward call: K = 1 (chunk mode) or
+// like the checkpoint slots, then the psixn, psizn double buffer -- the
+// replay's forward reads the neighbours' psi, so it rotates with swap_pml()
+// as the forward does; in place it raced those reads --
+// cuda_layout.checkpoint_state_nvar = 9), zeroed per backward call: K = 1 (chunk mode) or
 // 1 + the bisection depth (recursive mode, cuda_layout.recursive_state_depth).
 // _c.py hands the sets over on every checkpoint-mode backward
 // (_forward_state_buffers over cp.forward_state_shapes), and visco refuses both
 // boundary saving and DD, so the checkpoint modes are the only callers -- the
 // binding is required.
-constexpr int CKPT_STATE_COUNT = 7;
+constexpr int CKPT_STATE_COUNT = 9;
 
 void check_replay_state_sets(const BackwardInputCore& p, int sets, const char* what)
 {
@@ -322,11 +324,13 @@ inline void run_visco2d_adjoint_step(
 }
 
 // Imaging for one reverse step: recompute the vp_step-gradient carrier
-// (vp^2 * Lap u) from the RAW pressure, then reuse the shared acoustic
-// calculate_grad / accumulate_illumination_2d kernels.
+// (vp^2 * Lap u) from the RAW pressure, put the stored update back on the
+// ring next to the CPML bands (ring_tail, step ring_step: kernels.cuh), then
+// reuse the shared acoustic calculate_grad / accumulate_illumination_2d kernels.
 void image_step_from_raw(
     int order, dim3 grid, dim3 block,
     const float* u_raw_ptr,
+    const float* ring_tail, int64_t ring_step,
     const float* lam_ptr,
     const Buf& vp,
     const Buf& carrier,             // (B, nz, nx) scratch (the CARRIER slot), halo stays 0
@@ -340,6 +344,7 @@ void image_step_from_raw(
     VISCO_ACOUSTIC2D_CARRIER(order, grid, block,
         u_raw_ptr, vp.data_ptr<float>(), carrier.data_ptr<float>(),
         lap_ctx, ctx);
+    visco_acoustic2d_ring_restore(ring_tail, carrier.data_ptr<float>(), ring_step, ctx);
     if (grad != nullptr) {
         // Imaging runs over the PHYSICAL box only: EdgePadding.backward crops the
         // pad gradients, so the skipped cells never reach the model. (This
@@ -441,6 +446,15 @@ void run_full_imaging_visco(
         p.adjoint_workspace, adjoint.u_now_t, spectral.active, spectral.disp,
         ViscoMode::Full, "visco_acoustic2d::backward adjoint_workspace");
 
+    // The raw history (nt steps) and, after it, the forward's update on the
+    // ring next to the CPML bands (visco_ring_tail_slices, forward.cu).
+    const int64_t ring_k = visco_ring_tail_slices(p.nt, M, nz, nx);
+    SWEEP_CHECK(p.u_forward.dim() == 4 && p.u_forward.size(0) == static_cast<int64_t>(p.nt) + ring_k,
+                "visco_acoustic2d backward: the forward history must hold nt = ", p.nt,
+                " raw steps + ", ring_k, " ring slices (cuda_layout.save_all_shape), got ",
+                p.u_forward.sizes());
+    const float* ring_tail = p.u_forward.select(0, p.nt).data_ptr<float>();
+
     for (int it = p.nt - 1; it >= 0; --it) {
 
         auto adj_view = adjoint.view();
@@ -479,6 +493,7 @@ void run_full_imaging_visco(
         image_step_from_raw(
             order, launch_config.grid, launch_config.block,
             p.u_forward.select(0, it).data_ptr<float>(),
+            ring_tail, it,
             adjoint.u_now_t.data_ptr<float>(),
             vp, ws.CARRIER, grad, rtm_out,
             lap_ctx, ctx, nx, nz, dt);
@@ -630,11 +645,15 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
     int chunk_size = p.checkpoint_interval;
     int num_chunks = (p.nt + chunk_size - 1) / chunk_size;
     // RAW pressure store for the chunk (the acoustic twin stores the
-    // vp^2*Lap(u) carrier; visco recomputes it from raw — see kernels.cuh).
+    // vp^2*Lap(u) carrier; visco recomputes it from raw — see kernels.cuh),
+    // then the replay's update on the ring next to the CPML bands in the
+    // ring_k slices after it (visco_ring_tail_slices).
     // Python-allocated with the checkpoint snapshots; every row is written by the replay before the reverse pass reads it.
-    auto chunk_raw = pool_required(p.checkpoint_replay, 0, {chunk_size, B, nz, nx},
+    const int64_t ring_k = visco_ring_tail_slices(chunk_size, M, nz, nx);
+    auto chunk_raw = pool_required(p.checkpoint_replay, 0, {chunk_size + ring_k, B, nz, nx},
                                    "checkpoint_replay (visco_acoustic2d/backward_ckpt, "
                                    "cuda_layout.checkpoint_replay_shapes)");
+    float* ring_tail = chunk_raw.select(0, chunk_size).data_ptr<float>();
 
     for (int chunk_id = num_chunks - 1; chunk_id >= 0; --chunk_id) {
         int start = chunk_id * chunk_size;
@@ -653,13 +672,15 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 
             copy_tensor_device_to_device_async(chunk_raw.select(0, it - start), forward.u_now_t);
 
+            // CARRIER is free until the reverse pass: the update lands there
+            // and its ring goes to the chunk's tail.
             ACOUSTIC2D(
                 order,
                 launch_config.grid,
                 launch_config.block,
                 for_view,
-                false,
-                nullptr,
+                true,
+                ws.CARRIER.data_ptr<float>(),
                 vp.data_ptr<float>(),
                 lap_ctx,
                 grad_ctx,
@@ -668,6 +689,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
                 cpml,
                 ctx
             );
+            visco_acoustic2d_ring_store(ws.CARRIER.data_ptr<float>(), ring_tail, it - start, ctx);
 
             visco_acoustic2d_apply_spectral_into(forward, spectral, ws, dt, M);
 
@@ -680,7 +702,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
                 ctx
             );
 
-            forward.swap();
+            forward.swap_pml();
         }
 
         for (int it = end - 1; it >= start; --it) {
@@ -718,6 +740,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
             image_step_from_raw(
                 order, launch_config.grid, launch_config.block,
                 chunk_raw.select(0, it - start).data_ptr<float>(),
+                ring_tail, it - start,
                 adjoint.u_now_t.data_ptr<float>(),
                 vp, ws.CARRIER, &grads.vp, rtm_out,
                 lap_ctx, ctx, nx, nz, dt);
@@ -744,8 +767,8 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 // ---------------------------------------------------------------------------
 // Recursive (binary) checkpointing.  Mirrors acoustic2d's driver; the leaf
 // replays one visco forward step (stencil + spectral terms) from the interval
-// state, recomputes the carrier from the raw pressure, and layers the damping
-// terms onto the fused adjoint.  The checkpoint state is the same 6-tensor
+// state, takes the carrier from that step's own update (the stencil kernel's
+// u_this), and layers the damping terms onto the fused adjoint.  The checkpoint state is the same 6-tensor
 // acoustic state — the amplitude damping is memoryless in (u_now, u_prev).
 // ---------------------------------------------------------------------------
 namespace visco_acoustic2d {
@@ -812,7 +835,7 @@ void advance_forward_interval_visco_2d(
             ctx
         );
 
-        forward.swap();
+        forward.swap_pml();
     }
 }
 
@@ -856,14 +879,9 @@ void process_recursive_interval_visco_2d(
         return;
 
     if (end - start == 1) {
-        // Pre-step: the state holds (u_prev, u_now) = (u(start-1), u(start));
-        // the carrier is recomputed from u(start) before the replay step.
-        VISCO_ACOUSTIC2D_CARRIER(order, wave_grid, wave_block,
-            start_state.u_now_t.data_ptr<float>(),
-            vp.data_ptr<float>(),
-            ws.CARRIER.data_ptr<float>(),
-            lap_ctx, ctx);
-
+        // The state holds (u_prev, u_now) = (u(start-1), u(start)); the replay
+        // step writes its update vp^2 * w_sum into CARRIER -- the carrier
+        // itself, ring included (CARRIER's halo stays 0).
         auto fwd_view = start_state.view();
 
         ACOUSTIC2D(
@@ -871,8 +889,8 @@ void process_recursive_interval_visco_2d(
             wave_grid,
             wave_block,
             fwd_view,
-            false,
-            nullptr,
+            true,
+            ws.CARRIER.data_ptr<float>(),
             vp.data_ptr<float>(),
             lap_ctx,
             grad_ctx,
@@ -893,11 +911,11 @@ void process_recursive_interval_visco_2d(
             ctx
         );
 
-        start_state.swap();
+        start_state.swap_pml();
 
         // The gradient bases used to be captured BEFORE the replay step
         // (du = u_now - u_prev and the two Lops of u_now, three fresh tensors).
-        // swap() rotates (u_prev, u_now, u_next) <- (u_now, u_next, u_prev), so
+        // swap_pml() rotates (u_prev, u_now, u_next) <- (u_now, u_next, u_prev), so
         // afterwards u_prev_t IS the pre-step u_now (u(start)) and u_next_t the
         // pre-step u_prev (u(start-1)); the replay wrote only the old u_next
         // (now u_now_t) and the CPML aux, so both hold exactly the bits the
@@ -1085,9 +1103,9 @@ BackwardOutputCore backward_recursive_ckpt_core(const BackwardInputCore& in)
     // Tables [Gp, dt2A if a, Gd1, Gd2 if d] from p.derived_models; the scratch
     // [CARRIER, C0, C1, (C2 if d), (R1 if d), FFT_WS] from p.adjoint_workspace
     // -- both count-checked against the flags at entry.  CARRIER is zero at
-    // entry (the pool's per-backward zeroing / zeros here): the carrier kernel
-    // writes non-halo cells only and the halo band must stay 0 for the reused
-    // grad/RTM kernels.
+    // entry (the pool's per-backward zeroing / zeros here): the leaf's replay
+    // step writes its non-halo cells only and the halo band must stay 0 for
+    // the reused grad/RTM kernels.
     ViscoSpectral spectral = visco_acoustic2d_make_spectral_from(
         p.eq_aux, p.models, p.derived_models, ViscoMode::Recursive, dt, nz, nx,
         "visco_acoustic2d::backward_recursive_ckpt");

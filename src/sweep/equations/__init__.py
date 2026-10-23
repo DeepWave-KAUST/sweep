@@ -10,8 +10,8 @@ nothing to edit here and no ``globals()`` scan to keep honest.
 Alias sets live next to their classes, so the citation-to-class mapping is
 visible where the physics is:
 
-* ``AcousticVTILiang`` / ``AcousticTTILiang`` -- Liang K. et al. (2022),
-  2nd-order pseudo-acoustic, 10.1190/geo2022-0292.1
+* ``AcousticVTILiang`` / ``AcousticTTILiang`` -- Liang K. et al. (2023),
+  2nd-order pure qP (new acoustic approximation), 10.1190/geo2022-0292.1
 * ``AcousticVTIAlkhalifah`` / ``AcousticTTIAlkhalifah`` -- Tariq Alkhalifah
   (2000), qP eta-formulation, 10.1190/1.1444815 (one class covers VTI and TTI)
 * ``AcousticVTIDuveneck``/``3D`` -- Duveneck et al. (2008), 1st-order
@@ -86,6 +86,12 @@ try:
     from . import qP_tti  # noqa: F401  (registers AcousticTTI + AcousticTTILiang)
 except ModuleNotFoundError:
     AcousticTTI = AcousticTTILiang = None
+
+# The Born / LSRTM pair of the qP operators builds on qP_tti, so the same guard.
+try:
+    from . import qP_lsrtm  # noqa: F401  (registers AcousticVTILSRTM + AcousticTTILSRTM)
+except ModuleNotFoundError:
+    AcousticVTILSRTM = AcousticTTILSRTM = None
 
 # Bind every registered public name at module scope, so
 # ``from sweep.equations import Acoustic`` / ``AcousticVTILiang`` / ``Elastic3D``

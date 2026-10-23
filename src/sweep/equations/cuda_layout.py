@@ -72,6 +72,10 @@ class CUDALayoutSpec:
     # ``forward_wavefields``. None = derive that count from the forward slots;
     # 0 = the driver keeps its replay state elsewhere (LSRTM: workspace slots).
     checkpoint_state_nvar: int | None = None
+    # Keep the forward psi double-buffer shadows in that replay state set: a
+    # driver whose forward kernel reads its neighbours' psi must replay with
+    # the double-buffer too, or the in-place psi update races those reads.
+    checkpoint_replay_psi_dbuf: bool = False
     # The recursive-checkpoint backward bisects each segment and keeps one
     # scratch state set per recursion level (the acoustic skeleton): the
     # propagator then hands ``1 + depth(max_segment)`` state sets instead of one.
@@ -95,6 +99,15 @@ class CUDALayoutSpec:
     # ``BOUNDARY_BUFFER_REACH`` instead: the propagator then pads a sigma=0
     # buffer so the shell sits out of the imaging stencil's reach.
     boundary_save_reach: int = 1
+    # The saved shell reaches outward through the whole absorbing pad: each
+    # face's band starts ``abcn`` cells outside the physical box (offset
+    # -abcn), is ``abcn + reach*M + 1`` wide and runs ``abcn`` cells past the
+    # box tangentially, so the four bands cover the full CPML frame, corners
+    # included.  For an equation whose ADJOINT reads the forward state in the
+    # absorbing layer (the nonlinear qP operators: their adjoint coefficients
+    # depend on the forward wavefield and its CPML memory there), which a
+    # reverse step cannot rebuild.  Needs one uniform pad on every face.
+    boundary_frame: bool = False
     boundary_save_nvar: int | None = None
     # Padded per-shot grids the boundary-saving backward is handed as its
     # reconstruction state (``BackwardInput.forward_wavefields``: the forward's

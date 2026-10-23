@@ -166,10 +166,10 @@ def test_dd_wavefield_counts():
         "AcousticVRZ3D": (12, 15, 3, 0),
         "Elastic": (15, 15, 7, 2),
         "Elastic3D": (36, 36, 12, 3),
-        # two coupled acoustic fields (bg + scattered), psi-only double buffer,
-        # so adjoint == forward; reconstruction is 3 + 3
-        "AcousticLSRTM3D": (24, 24, 6, 0),
-        "AcousticLSRTM": (18, 18, 6, 0),
+        # two coupled acoustic fields (bg + scattered), psi double buffer; the
+        # exact CPML adjoint adds a zeta shadow per axis and field; recon 3 + 3
+        "AcousticLSRTM3D": (24, 30, 6, 0),
+        "AcousticLSRTM": (18, 22, 6, 0),
     }
     for name, want in expected.items():
         t = getattr(E, name)(device="cpu", backend="torch").cuda_layout.slots
@@ -339,7 +339,9 @@ def test_lsrtm2d_rotates_and_ships_both_fields():
     assert t.recon_u_blocks == (0, 3)
     bg = ((3, 7), (4, 8))
     assert t.pairs(adjoint=False) == bg + tuple((a + 9, b + 9) for a, b in bg)
-    assert t.pairs(adjoint=True) == t.pairs(adjoint=False)
+    # the exact CPML adjoint double-buffers zeta too: each field's zeta pair
+    # shadows in the adjoint-only tail (lambda_sc 18..19, lambda_bg 20..21)
+    assert t.pairs(adjoint=True) == t.pairs(adjoint=False) + ((5, 18), (6, 19), (14, 20), (15, 21))
 
 
 def test_lsrtm3d_rotates_and_ships_both_fields():
@@ -356,7 +358,10 @@ def test_lsrtm3d_rotates_and_ships_both_fields():
     assert t.recon_u_blocks == (0, 3)
     bg = ((3, 9), (4, 10), (7, 11))
     assert t.pairs(adjoint=False) == bg + tuple((a + 12, b + 12) for a, b in bg)
-    assert t.pairs(adjoint=True) == t.pairs(adjoint=False)
+    # the exact CPML adjoint double-buffers zeta too: each field's zeta triple
+    # shadows in the adjoint-only tail (lambda_sc 24..26, lambda_bg 27..29)
+    assert t.pairs(adjoint=True) == t.pairs(adjoint=False) + (
+        (5, 24), (6, 25), (8, 26), (17, 27), (18, 28), (20, 29))
 
 
 @pytest.mark.parametrize("eq_name, rwi_table, mp_table", [

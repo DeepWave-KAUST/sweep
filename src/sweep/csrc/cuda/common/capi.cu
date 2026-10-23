@@ -35,6 +35,7 @@
 #include "../equations/elastic_vr2d/elastic_vr2d.h"
 #include "../equations/visco_acoustic2d/visco_acoustic2d.h"
 #include "../equations/visco_elastic2d/visco_elastic2d.h"
+#include "../equations/qp2d/qp2d.h"
 
 namespace {
 
@@ -137,9 +138,25 @@ const char* const ENTRY_NAMES[SWEEP_ENTRY_COUNT] = {
     "visco_elastic2d_backward",
     "visco_elastic2d_backward_bs",
     "visco_elastic2d_backward_ckpt",
-    "visco_elastic2d_backward_recursive_ckpt"
+    "visco_elastic2d_backward_recursive_ckpt",
+    "qp_vti2d_forward",
+    "qp_vti2d_backward",
+    "qp_vti2d_backward_bs",
+    "qp_vti2d_backward_ckpt",
+    "qp_tti2d_forward",
+    "qp_tti2d_backward",
+    "qp_tti2d_backward_bs",
+    "qp_tti2d_backward_ckpt",
+    "qp_vti_lsrtm2d_forward",
+    "qp_vti_lsrtm2d_backward",
+    "qp_vti_lsrtm2d_backward_bs",
+    "qp_vti_lsrtm2d_backward_ckpt",
+    "qp_tti_lsrtm2d_forward",
+    "qp_tti_lsrtm2d_backward",
+    "qp_tti_lsrtm2d_backward_bs",
+    "qp_tti_lsrtm2d_backward_ckpt"
 };
-const int ENTRY_KINDS[SWEEP_ENTRY_COUNT] = { 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1 };
+const int ENTRY_KINDS[SWEEP_ENTRY_COUNT] = { 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1 };
 
 void fill_err(char* err, int cap, const char* what)
 {
@@ -258,6 +275,22 @@ void dispatch(int entry, const void* in, void* out)
         case 96: *static_cast<BackwardOutputCore*>(out) = visco_elastic2d::backward_bs_core(*static_cast<const BackwardInputCore*>(in)); return;
         case 97: *static_cast<BackwardOutputCore*>(out) = visco_elastic2d::backward_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
         case 98: *static_cast<BackwardOutputCore*>(out) = visco_elastic2d::backward_recursive_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 99: *static_cast<ForwardOutputCore*>(out) = qp_vti2d::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
+        case 100: *static_cast<BackwardOutputCore*>(out) = qp_vti2d::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 101: *static_cast<BackwardOutputCore*>(out) = qp_vti2d::backward_bs_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 102: *static_cast<BackwardOutputCore*>(out) = qp_vti2d::backward_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 103: *static_cast<ForwardOutputCore*>(out) = qp_tti2d::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
+        case 104: *static_cast<BackwardOutputCore*>(out) = qp_tti2d::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 105: *static_cast<BackwardOutputCore*>(out) = qp_tti2d::backward_bs_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 106: *static_cast<BackwardOutputCore*>(out) = qp_tti2d::backward_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 107: *static_cast<ForwardOutputCore*>(out) = qp_vti_lsrtm2d::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
+        case 108: *static_cast<BackwardOutputCore*>(out) = qp_vti_lsrtm2d::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 109: *static_cast<BackwardOutputCore*>(out) = qp_vti_lsrtm2d::backward_bs_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 110: *static_cast<BackwardOutputCore*>(out) = qp_vti_lsrtm2d::backward_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 111: *static_cast<ForwardOutputCore*>(out) = qp_tti_lsrtm2d::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
+        case 112: *static_cast<BackwardOutputCore*>(out) = qp_tti_lsrtm2d::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 113: *static_cast<BackwardOutputCore*>(out) = qp_tti_lsrtm2d::backward_bs_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 114: *static_cast<BackwardOutputCore*>(out) = qp_tti_lsrtm2d::backward_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
         default: SWEEP_CHECK(false, "sweep_call: no entry ", entry);
     }
 }

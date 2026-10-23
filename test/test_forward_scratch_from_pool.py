@@ -29,8 +29,10 @@ CASES = {
     "das2d": 4,
     "das3d": 9,
     "elastic_tti_2nd2d": 3,
-    # visco2d: C0, C1, C2 complex spectra + the cuFFT work area (both spectral terms on)
-    "visco2d": 4,
+    # visco2d: UTHIS (the step's update, whose ring next to the CPML goes to the
+    # history), the C0, C1, C2 complex spectra and the cuFFT work area (both
+    # spectral terms on)
+    "visco2d": 5,
 }
 BINDING = {"visco2d": "visco_acoustic2d"}
 

@@ -32,8 +32,8 @@
 //   * seed_reconstruction: u_prev <- u_last_two[:, 1], u_now <- u_last_two[:, 0], then set_boundary_zeros on both over the abcn + M rim with the cut faces excluded (ctx.cut_mask()); make_bs_scratch returns {};
 //   * bs_recon_step order: ACOUSTIC2D_NOPML (+ fused vp imaging on the cells the restore will not overwrite) -> restore_backward_2d -> sub_source_in_restore_strip (strip source cells back to w^{it-1} - s^{it}) -> calculate_grad_utt_band on the restore strips -> forward-source add_source into u_next -> forward.swap();
 //   * bs_rtm_tap, after the prefetch: accumulate_illumination_2d gated by compute_illumination, then accumulate_adcig_2d when illumination.adcig is non-empty, both on the co-resident (forward.u_now, adjoint.u_now) pair;
-//   * ckpt: CKPT_STATE_COUNT = 7 (u triple + the 4 CPML aux slabs, bind order) per replay state set of p.forward_wavefields; bind_or_alloc_recon_ckpt binds set 0 (bind_replay_state: wavefield_set + geometry check), bind_or_alloc_recursive_scratch sets 1..depth -- both MANDATORY;
-//   * ckpt replay: replay_step = full-domain launch_acoustic2d_forward (no air-clear prepass, no x range) -> inject_source_fwd (BackwardInput overload) -> rotate_recon_buffers = swap().
+//   * ckpt: CKPT_STATE_COUNT = 9 (u triple + the 4 CPML aux slabs + psixn/psizn, bind order) per replay state set of p.forward_wavefields; bind_or_alloc_recon_ckpt binds set 0 (bind_replay_state: wavefield_set + geometry check), bind_or_alloc_recursive_scratch sets 1..depth -- both MANDATORY;
+//   * ckpt replay: replay_step = full-domain launch_acoustic2d_forward (no air-clear prepass, no x range) -> inject_source_fwd (BackwardInput overload) -> rotate_recon_buffers = swap_pml().
 //
 // Hook timing: see the HOOK TIMING MAP at the top of ../../common/eq_driver.cuh.
 #pragma once
@@ -81,8 +81,12 @@ struct Driver {
     static constexpr int ADJ_WF_COUNT = 11;     // u triple + psi/zeta double-buffer
     static constexpr int RECON_WF_COUNT = 3;
     // One checkpoint replay state set (ckpt / recursive backward), in bind
-    // order: u_prev, u_now, u_next + the 4 CPML aux slabs = CKPT_NVAR + u_next.
-    static constexpr int CKPT_STATE_COUNT = CKPT_NVAR + 1;
+    // order: u_prev, u_now, u_next + the 4 CPML aux slabs + the psi
+    // double-buffer (psixn, psizn) = CKPT_NVAR + u_next + 2.  The replay runs
+    // the forward kernel, whose d(a psi) taps read the neighbours' psi: with
+    // psi updated in place they raced the neighbours' writes (run-to-run
+    // different ckpt gradients, cuda_layout.checkpoint_replay_psi_dbuf).
+    static constexpr int CKPT_STATE_COUNT = CKPT_NVAR + 3;
     // Full mode folds the lagged vp-gradient imaging into the adjoint kernel.
     static constexpr bool HAS_FUSED_FULL_IMG = true;
     // 2-D serves ADCIG from full/ckpt modes too (raw-pressure imaging).
@@ -668,9 +672,9 @@ struct Driver {
 
     // Replay state set ``set`` of p.forward_wavefields, which holds K sets of
     // CKPT_STATE_COUNT tensors back to back (ckpt: K = 1; recursive: 1 + the
-    // bisection depth, cuda_layout.recursive_state_depth).  The 7-tensor bind
-    // is the in-place psi layout the checkpoint snapshots carry (use_pml, no
-    // psi double-buffer: the replay pairs with the u-only swap()).
+    // bisection depth, cuda_layout.recursive_state_depth).  The 9-tensor bind
+    // is the snapshots' 7 plus the psi double-buffer the replay writes into
+    // (rotated by swap_pml, as the forward).
     static void bind_replay_state(Wavefield& wf, const BackwardInputCore& p,
                                   const Buf& vp, int set)
     {
@@ -742,7 +746,8 @@ struct Driver {
         );
     }
 
-    static void rotate_recon_buffers(Wavefield& wf) { wf.swap(); }
+    // swap_pml: the replay writes psi*n (the state set binds the double-buffer).
+    static void rotate_recon_buffers(Wavefield& wf) { wf.swap_pml(); }
 };
 
 } // namespace acoustic2d

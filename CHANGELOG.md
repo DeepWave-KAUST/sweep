@@ -9,6 +9,41 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+- **`AcousticVTI` / `AcousticTTI` on `impl='c'` (`qp_vti2d` / `qp_tti2d`).**
+  The pure-qP equations of Liang et al. (2023, doi:10.1190/geo2022-0292.1,
+  eqs 19-20 and A-7) get CUDA kernels for the forward, the full-storage
+  backward and the boundary-saving backward (gpu / cpu / disk, fp32 / fp16 /
+  bf16; int8 is refused), orders 2-8 and runtime order; records match eager to
+  1e-6-2e-4.
+  The backward needs the forward state of step it+1 at reverse step it, in the
+  absorbing layer too, so full mode stores five fields per step and boundary
+  saving stores them on the whole CPML frame (`cuda_layout.boundary_frame`:
+  the band starts `abcn` cells outside the physical box and runs `abcn` past it
+  tangentially) and rebuilds the deep interior. No checkpointing.
+  `PropTorch` warns once when `dt` breaks the scheme's stability condition
+  (the paper's eq. B-9 for VTI; a bound from the safe side for TTI).
+- **`s_gradient=` on the qP equations: `'adjoint'` (default), `'frozen'`,
+  `'exact'`.** S_n takes its direction from the wavefield, so the step is
+  nonlinear in `h1`, and its exact derivative is ill-conditioned: eager fp32
+  and fp64 differ by 2-3 % on the canonical gradient test (1e-7 when
+  epsilon == delta), and two eager runs do not agree bit for bit. `'exact'` is
+  that derivative (`memory=Full()` only on `impl='c'`); `'frozen'` transposes the
+  step with S_n held at the forward field (linear adjoint, consistent to
+  rounding); `'adjoint'` propagates the adjoint wavefield with its own S_n, the
+  adjoint of the wavenumber-domain eq. 14. The forward is the same in all
+  three. **This changes the default eager gradient of `AcousticVTI` /
+  `AcousticTTI`** (it was `'exact'`).
+- **`AcousticVTILSRTM` / `AcousticTTILSRTM`** (aliases `AcousticVTIBorn` /
+  `AcousticTTIBorn`): the Born equations of the qP pair -- background and
+  scattered qP fields, each with its own S_n, the scattered one driven by the
+  reflectivity `mp` times the background update (derivation in
+  docs/user-guide/qp_born.md). Eager and `impl='c'` (`qp_vti_lsrtm2d` /
+  `qp_tti_lsrtm2d`, full and boundary saving); the compiled backward returns
+  the `mp` gradient and refuses the background models' and the wavelet's.
+  Example: `docs/notebooks/34_lsrtm_qp_vti_tti.ipynb` (RTM and LSRTM of a
+  tilted anisotropic bed with the isotropic, VTI and TTI operators).
+
 ### Changed
 - **`Acoustic3D` and `AcousticVRZ3D` on `impl='c'` run 1.2-1.8x faster per
   step.**  The forward step, the boundary-saving reconstruction and the
@@ -49,6 +84,78 @@ and this project adheres to
   of an axis needs at least `spatial_order` cells along it.
 
 ### Fixed
+- **The second-order acoustic family's compiled backward is the exact
+  transpose of its compiled forward, CPML band included** (`Acoustic`,
+  `Acoustic3D`, `AcousticVRZ`, `AcousticVRZ3D`, `AcousticLSRTM`,
+  `AcousticLSRTM3D`, `ViscoAcoustic` on `impl='c'`).  `db = np.gradient(b)` is nonzero one cell
+  past the band and the 2-D `d(a psi)/dx` stencil reads M cells into it, but
+  the forward ran the bare Laplacian there (the 2-D first reflection off the
+  CPML was 6x larger than eager's), and the adjoints' interior bounds stopped
+  one cell short of the forward's.  The LSRTM adjoint applied the forward CPML
+  operator to the adjoint field inside the band, a discretisation of the
+  continuous adjoint rather than a transpose (reflectivity dot test 0.11, now
+  1e-6); its RWI backward no longer allocates the grid only that operator read
+  (one padded grid per shot less in full and boundary-saving modes).  Checkpoint replays now step the CPML memory double-buffered (in
+  place they raced the neighbours' reads, so two checkpointed backwards
+  differed), and the vp image is the update actually applied,
+  `vp^2 * w_sum`.  `ViscoAcoustic` runs the same 2-D forward kernel; its vp
+  carrier, recomputed from the raw history, now takes the stored update on the
+  M cells next to each CPML band (the history gains a few time slices, about
+  1.5 % at production sizes), so with both attenuation terms off it matches
+  `Acoustic` bit for bit again, and its checkpoint replay is double-buffered
+  too.  Against an eager twin of each compiled forward (outer halo zeroed, the
+  kernel's CPML form): records 5e-7 to 2e-5 and gradients 2e-6 to 2e-5 in
+  every memory mode, the LSRTM RWI vp gradient at its fp32 floor (7e-5 in
+  2-D, 1.8e-4 in 3-D); domain-decomposed runs stay bit-identical to one card.
+  Wall time on a V100 changes by -5 % to +2 %.  Records and gradients of these
+  equations change accordingly.
+- **`AcousticLSRTM` / `AcousticLSRTM3D` and `AcousticVRZ` / `AcousticVRZ3D`
+  on `impl='c'` refuse the gradients their backward never computed**: the
+  wavelet's (LSRTM 2-D returned zeros, LSRTM 3-D the scattered adjoint sampled
+  at the source, VRZ left `wavelet.grad` at None) and, for LSRTM with
+  `memory=Ckpt(...)`, the RWI vp gradient (zeros).  Use `impl='eager'` for
+  those.
+- **`ModelParallel` refuses a wavelet that requires grad**, for every
+  equation: the domain-decomposed backward returns the model gradients only
+  and left `wavelet.grad` at None (`Acoustic` included, whose single-domain
+  backward does return it).  Take that gradient from a single-domain
+  `PropTorch` run.
+- **`AcousticLSRTM` / `AcousticLSRTM3D` under `ModelParallel` with
+  `BoundarySaving(storage='cpu')`: the gradient no longer changes from run to
+  run.**  Their stepped backward built a copy stream of its own on every call
+  -- DD makes one call per time step -- and the prefetch of the next step's
+  boundaries that a call issued last stayed queued on that stream, which
+  nothing waited on again; landing late, it overwrote the ring slot a later
+  call had just refilled and was restoring from.  In 3-D two identical runs,
+  and cpu against gpu staging, differed by up to 12 % of the gradient's peak,
+  on one tile and across cuts; the 2-D backward has the same copies, small
+  enough at the test sizes to land in time, but not at production sizes.  Both
+  now run on the `BoundarySession` `ModelParallel` already holds, as the other
+  DD equations do: every copy queues on one stream and every restore waits for
+  the copy it reads (a stepped call without a session drains its stream before
+  returning).  cpu staging under DD is bit-identical to gpu-direct and to
+  itself in fp32 (`test/dd_offload_check.py` with `EQ=lsrtm`,
+  `test/lsrtm_staging_check.py`).  `storage='disk'` is refused for the pair at
+  construction: the drivers refused it across a cut but ran it on a single
+  tile.
+- **3-D boundary saving with `storage_dtype='int8'` / `'fp16'`: a race in the
+  restore.**  The band-only restore kernel visits a cell on an edge or corner of
+  the saved strip (or, on an axis thinner than two bands, a cell both opposite
+  bands cover) once per band, and every visit wrote it.  int8 and fp16 storage
+  quantize each face with its own per-block scales, so those copies differ, and
+  the cell kept whichever thread wrote last: the gradient changed from run to
+  run (`Acoustic3D` 2e-7 / 3e-6 relative with fp16 / int8 on
+  `test/test_boundary_compact_kernel.py`), and under `ModelParallel` the
+  cpu-staged gradient did not match gpu-direct bit for bit; the forward record
+  was never affected.  Such a cell is now restored from one band only, the one the
+  full-grid restore writes last, so the result equals the full-grid kernel's
+  (`SWEEP_BOUNDARY_NO_COMPACT=1`) bit for bit at any block order, and cpu
+  staging under DD is bit-identical to gpu-direct in every storage dtype.  It
+  affected every compiled 3-D equation with boundary saving on gpu, cpu or
+  async-disk storage: int8 since 0.1.0, fp16 since 0.2.0 (when it gained
+  per-block scales).  fp32, bf16, synchronous disk and 2-D were not affected.
+  New kernel `boundary_kernel3d_compact_owned`; every other kernel's machine
+  code is unchanged.
 - **Boundary-saving gradients on a thin physical box.**  Where the physical
   box (PML excluded) is thinner than two restore strips along an axis -- fewer
   than `2 * (spatial_order / 2 + 1)` cells -- the strip imaging of `Acoustic`

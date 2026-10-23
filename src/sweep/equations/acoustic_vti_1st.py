@@ -2,7 +2,7 @@
 
 Implements the Duveneck et al. (2008) first-order velocity-stress system for
 acoustic VTI media in 2-D (``AcousticVTI1st``) and 3-D (``AcousticVTI1st3D``).
-This is an independent sibling to the second-order pseudo-acoustic
+This is an independent sibling to the second-order pure-qP
 ``AcousticVTI`` class; the two coexist with different trade-offs:
 
 * ``AcousticVTI1st`` — variable-density, free-surface, 4 wavefields, 4 models.

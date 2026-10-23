@@ -15,8 +15,10 @@ saving and recursive checkpointing are compiled-backend modes, so those eager
 cells are reported as N/A.
 
 Cell states: PASS, FAIL, ``PASS*`` (passed, but the backend declares one of the
-gradients missing — see ``KNOWN_MISSING_GRADIENTS``; the declared list is
-printed after the summary and a stale entry fails the run), N/A, REF.
+gradients missing or refuses it — see ``KNOWN_MISSING_GRADIENTS`` /
+``KNOWN_REFUSED_GRADIENTS``; a refused one is never asked of the compiled
+backend; the declared list is printed after the summary and a stale entry fails
+the run), N/A, REF.
 
 Tolerances are peak-relative, not absolute (``--atol-scale`` /
 ``--record-atol-scale``): the compared tensors span ~1e-20 to ~1e9 across this
@@ -56,6 +58,7 @@ from gradient_cases import (  # noqa: E402
     config_for_scale,
     make_equation,
     make_solver as make_c_solver,
+    refused_gradient,
     run_case,
     scaled_cases,
 )
@@ -158,7 +161,11 @@ def one_line_error(exc: BaseException) -> str:
 def run_backend(case: Case, mode: str, backend: BackendSpec, config: RunConfig):
     device = torch.device(backend.device)
     solver = make_solver(case, mode, backend, config)
-    return run_case(solver, case, device, config)
+    refuse = ()
+    if backend.family not in ("eager", "eager-strips"):
+        names = ["wavelet", *make_equation(case, device, config).models]
+        refuse = tuple(n for n in names if refused_gradient(case.name, n, mode))
+    return run_case(solver, case, device, config, refuse=refuse)
 
 
 def parse_args() -> argparse.Namespace:

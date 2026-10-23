@@ -4,7 +4,7 @@
 //   * no ctx.set_per_edge anywhere — per-edge free surface is 2-D only;
 //   * the adjoint carries a psi AND zeta triple double-buffer
 //     (15 adjoint tensors, adjoint_extra_nvar=3);
-//   * CKPT_STATE_COUNT = 9 (u triple + the 6 CPML aux slabs) per checkpoint
+//   * CKPT_STATE_COUNT = 12 (u triple + the 6 CPML aux slabs + psi double-buffer) per checkpoint
 //     replay state set of p.forward_wavefields;
 //   * the boundary-saving reverse step images BEFORE the forward source
 //     injection (2-D images after injection + swap), and its NOPML kernel
@@ -62,8 +62,10 @@ struct Driver {
     static constexpr int ADJ_WF_COUNT = 15;     // u triple + psi/zeta triple double-buffer
     static constexpr int RECON_WF_COUNT = 3;
     // One checkpoint replay state set (ckpt / recursive backward), in bind
-    // order: u_prev, u_now, u_next + the 6 CPML aux slabs = CKPT_NVAR + u_next.
-    static constexpr int CKPT_STATE_COUNT = CKPT_NVAR + 1;
+    // order: u_prev, u_now, u_next + the 6 CPML aux slabs + the psi
+    // double-buffer (psixn, psizn, psiyn) = CKPT_NVAR + u_next + 3: the
+    // replay's forward reads the neighbours' psi (see acoustic2d).
+    static constexpr int CKPT_STATE_COUNT = CKPT_NVAR + 4;
     static constexpr bool HAS_FUSED_FULL_IMG = true;
     static constexpr bool ADCIG_IN_FULL_MODES = false;
     static constexpr bool BS_HAS_IT0_ADJOINT_TAIL = true;
@@ -683,7 +685,7 @@ struct Driver {
         );
     }
 
-    static void rotate_recon_buffers(Wavefield& wf) { wf.swap(); }
+    static void rotate_recon_buffers(Wavefield& wf) { wf.swap_pml(); }
 };
 
 } // namespace acoustic3d

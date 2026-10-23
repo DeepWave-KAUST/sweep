@@ -245,3 +245,32 @@ def test_vrz_compiled_bs_has_the_buffer():
     M = SO // 2
     p = _prop(AcousticVRZ, impl="c", dev="cuda", memory=BoundarySaving())
     assert p.boundary_buffer == M + 1 and p.pad == tuple(10 + M + 1 for _ in range(4))
+
+
+@pytest.mark.skipif(not _binding_ready(), reason="CUDA + compiled sweep._C required")
+@pytest.mark.parametrize("ndim", [2, 3])
+def test_vrz_compiled_refuses_the_wavelet_gradient(ndim):
+    """impl='c' returns the model gradients only: a wavelet that asks for its
+    gradient is refused before anything runs, instead of coming back with grad
+    None.  A wavelet that does not ask still gets the model gradients."""
+    import torch
+    from sweep.equations import AcousticVRZ, AcousticVRZ3D
+    from sweep.propagator.options import Full
+    from sweep.propagator.torch import PropTorch
+
+    shape, abcn, nt, src, rec, vp, z = _setup(ndim)
+    eq = (AcousticVRZ if ndim == 2 else AcousticVRZ3D)(spatial_order=SO, device="cuda", backend="torch")
+    prop = PropTorch(eq, backend="torch", impl="c", memory=Full(), shape=shape, abcn=abcn, dh=DH, dt=DT,
+                     nt=nt, dev="cuda")
+
+    def run(wavelet_grad):
+        wav = torch.tensor(_ricker(nt, DT), device="cuda", requires_grad=wavelet_grad)
+        m = [torch.tensor(vp, device="cuda", requires_grad=True),
+             torch.tensor(z, device="cuda", requires_grad=True)]
+        (prop(wav, src, rec, models=m).double() ** 2).sum().backward()
+        return wav.grad, m[0].grad
+
+    with pytest.raises(NotImplementedError, match="wavelet gradient"):
+        run(True)
+    gw, gvp = run(False)
+    assert gw is None and torch.isfinite(gvp).all() and float(gvp.abs().max()) > 0

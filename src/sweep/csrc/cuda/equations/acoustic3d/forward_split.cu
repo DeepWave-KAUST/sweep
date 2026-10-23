@@ -112,9 +112,15 @@ __global__ void __launch_bounds__(256) a3d_fwd_shell(
     float*       u_this_b = u_this ? u_this + spatial_size * b : nullptr;
     const float* vp_b     = vp     + spatial_size * b;
 
-    const bool in_pml_x = (ix < solver.phys_x0()) || (ix >= solver.phys_x1());
-    const bool in_pml_y = (iy < solver.phys_y0()) || (iy >= solver.phys_y1());
-    const bool in_pml_z = (iz < solver.phys_z0()) || (iz >= solver.phys_z1());
+    // Per axis, the CPML branch runs on the band plus the one cell past it
+    // where db = np.gradient(b) is still nonzero (a and the own psi are 0
+    // there, so only db * du survives); a DD cut face has no band, no margin.
+    const bool in_pml_x = (ix < solver.phys_x0() + (solver.cut_x_lo() ? 0 : 1)) ||
+                          (ix >= solver.phys_x1() - (solver.cut_x_hi() ? 0 : 1));
+    const bool in_pml_y = (iy < solver.phys_y0() + (solver.cut_y_lo() ? 0 : 1)) ||
+                          (iy >= solver.phys_y1() - (solver.cut_y_hi() ? 0 : 1));
+    const bool in_pml_z = (iz < solver.phys_z0() + (solver.cut_z_lo() ? 0 : 1)) ||
+                          (iz >= solver.phys_z1() - (solver.cut_z_hi() ? 0 : 1));
 
     float lap_x = laplace<3, Order, X>(f.u_now, ix, iy, iz, lap_ctx);
     float lap_y = laplace<3, Order, Y>(f.u_now, ix, iy, iz, lap_ctx);
@@ -199,8 +205,9 @@ __global__ void __launch_bounds__(256) a3d_fwd_shell(
         f.u_prev[idx] +
         (v * v) * solver.dt * solver.dt * w_sum;
 
+    // the vp image is the update actually applied (boundary saving's u_tt)
     if (u_this_b != nullptr)
-        u_this_b[idx] = (v * v) * (lap_x + lap_y + lap_z);
+        u_this_b[idx] = (v * v) * w_sum;
 }
 
 // ----------------------------------------------------------------- nopml
@@ -283,8 +290,8 @@ template<int Order>
 void launch_fwd(const FwdArgs& a, const SolverContext& ctx)
 {
     const Box all = fdtd::computed_box(ctx);
-    // the cells with no axis in its CPML band
-    const RowBox in{fdtd::intersect(fdtd::phys_box(ctx, 0), all)};
+    // the cells with no axis in its CPML band or on the db leak cell past it
+    const RowBox in{fdtd::intersect(fdtd::phys_box(ctx, 1), all)};
     if (!fdtd::empty(in)) {
         const auto L = launch_of(in, ctx.B);
         a3d_fwd_interior<Order><<<L.grid, L.block>>>(a.wf, a.u_this, a.vp, a.lap, ctx, in);

@@ -58,7 +58,9 @@ void zero_wavefield_state_vrz3d(AcousticWavefieldTensor& wf)
 // the struct's bind order u_prev, u_now, u_next, psix, psiz, zetax, zetaz,
 // psiy, zetay.
 constexpr int CKPT_NVAR = 8;
-constexpr int REPLAY_STATE_NVAR = CKPT_NVAR + 1;   // 9
+// + psixn, psizn, psiyn: the replay's forward reads the neighbours' psi, so it
+// runs double-buffered (swap_pml) as the forward does.
+constexpr int REPLAY_STATE_NVAR = CKPT_NVAR + 4;   // 12
 
 // p.checkpoint_replay (cuda_layout.checkpoint_replay_shapes): allocated by the
 // propagator next to the checkpoint snapshots, never re-zeroed.
@@ -863,8 +865,8 @@ BackwardOutputCore backward_ckpt_impl(const BackwardInputCore& in)
     zero_wavefield_state_vrz3d(adjoint);
 
     // The replay state (REPLAY_STATE_NVAR above), bound through the struct's
-    // full PML bind: with no psi shadows in the set the replay writes psi in
-    // place (swap() rotates u only) and the propagator zeroed the set per call.
+    // full PML bind with the psi shadows: the replay writes psi*n and
+    // swap_pml() rotates them, and the propagator zeroed the set per call.
     // _c.py hands it over on every checkpoint-mode backward
     // (_forward_state_buffers over cp.forward_state_shapes, derived from
     // slot_table.ACOUSTIC_VRZ3D's forward slots without the psi shadows), so
@@ -872,8 +874,8 @@ BackwardOutputCore backward_ckpt_impl(const BackwardInputCore& in)
     AcousticWavefieldTensor forward;
     SWEEP_CHECK(static_cast<int>(p.forward_wavefields.size()) == REPLAY_STATE_NVAR,
                 "acoustic_vrz3d/backward_ckpt requires the propagator-bound "
-                "forward_wavefields (cuda_layout.slots, the forward slots without the "
-                "psi double-buffer shadows): one replay state set of ",
+                "forward_wavefields (cuda_layout.slots with the psi double-buffer "
+                "shadows, checkpoint_replay_psi_dbuf): one replay state set of ",
                 REPLAY_STATE_NVAR, " tensors, got ", p.forward_wavefields.size());
     forward.bind(wavefield_set(p.forward_wavefields, 0, REPLAY_STATE_NVAR,
                                "acoustic_vrz3d ckpt replay state"), 3, true);
@@ -1024,7 +1026,7 @@ BackwardOutputCore backward_ckpt_impl(const BackwardInputCore& in)
 
             // store U_it (pre-swap u_now); after the swap this buffer is U_{it+1}
             copy_tensor_device_to_device_async(chunk_forward.select(0, it - start + 1), forward.u_now_t);
-            forward.swap();
+            forward.swap_pml();
         }
         copy_tensor_device_to_device_async(chunk_forward.select(0, end - start + 1), forward.u_now_t);   // U_end
 

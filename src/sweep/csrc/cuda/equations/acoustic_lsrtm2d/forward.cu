@@ -59,7 +59,7 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
 
     SolverContext ctx{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
                       p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
-    // DD cut-aware: the CPML band (solver.in_pml_2d) shrinks to the M halo on a
+    // DD cut-aware: the CPML band (solver.in_cpml_2d) shrinks to the M halo on a
     // cut face, and the boundary save kernels SKIP cut faces -- whose boundary
     // buffers are numel-0 under DD -- only if the mask reaches the context.
     ctx.set_cut_mask(p.cut_face_mask);

@@ -2,14 +2,14 @@
 forward, CPML band included (impl='c', 2-D).
 
 Reference: eager autograd, which differentiates the eager forward exactly.
-The eager forward differs from the CUDA one in two details: the CPML memory
+The eager forward differs from the CUDA one in one detail: the CPML memory
 update takes D(a*psi) fused where CUDA takes the product rule
-(D a)*psi + a*(D psi), and eager applies the db*du profile term everywhere
-while CUDA runs its CPML branch only inside the band (db = np.gradient(b)
-leaks one nonzero cell past the band edge, ~1e-3 of the operator there).
-With both patched to the CUDA form the two forwards agree to fp32 rounding
-(the record rel below is the floor), so the gradients must too -- unless the
-compiled adjoint is not the transpose of the compiled forward.
+(D a)*psi + a*(D psi).  (Both apply the db*du profile term wherever db is
+nonzero: db = np.gradient(b) leaks one cell past the band edge, and the CUDA
+CPML branch covers that cell too -- solver.in_cpml_*.)  With the eager step
+patched to the CUDA form the two forwards agree to fp32 rounding (the record
+rel below is the floor), so the gradients must too -- unless the compiled
+adjoint is not the transpose of the compiled forward.
 
 The previous CUDA adjoint applied the FORWARD CPML operator to lambda inside
 the band (a discretisation of the continuous adjoint, not a transpose).  Its
@@ -115,13 +115,6 @@ def _run(impl, ndim, geometry, product_rule_pml=False, vp_override=None, want_gr
     orig = vrz_mod.cpml_axis_update
 
     def cuda_form(lap_axis, du, psi, zeta, a, b, dbd, h, axis, grad_op, kernels=None):
-        # CUDA runs the CPML branch only where the cell is in SOME axis's band
-        # (in_pml_2d/3d); b is exactly 0 off-band, so the band is b != 0.
-        inband = None
-        for i in range(0, len(eq.b), 3):
-            m_ = eq.b[i + 1] != 0
-            inband = m_ if inband is None else (inband | m_)
-        dbd = dbd * inband.to(dbd.dtype)
         # (D a)*psi + a*(D psi): the product-rule form of the CUDA forward.
         # Differentiate the profile on the full grid: grad_op zeroes the
         # stencil halo of its output, which on a 1-row/1-column broadcast

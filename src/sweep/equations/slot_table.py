@@ -247,12 +247,20 @@ def _acoustic2d_field(prefix: str = "") -> list[Slot]:
 
 #: AcousticLSRTM (csrc/cuda/equations/acoustic_lsrtm2d): the 2-D twin of
 #: ACOUSTIC_LSRTM3D -- background in slots 0..8, scattered field in 9..17 (bound
-#: as ``bg.bind(slice(0, 9))`` / ``sc.bind(slice(9, 9))``), psi-only double
-#: buffer so the adjoint list is the forward one (lambda_sc 0..8, lambda_bg
-#: 9..17), 3+3 reconstruction, full-size aux grids.  Two rotating blocks:
+#: as ``bg.bind(slice(0, 9))`` / ``sc.bind(slice(9, 9))``), psi double buffer in
+#: the forward; the adjoint list appends a zeta shadow pair per field (lambda_sc
+#: 0..8 + 18..19, lambda_bg 9..17 + 20..21), 3+3 reconstruction, full-size aux grids.  Two rotating blocks:
 #: ``u_blocks`` ``(0, 9)``, ``recon_u_blocks`` ``(0, 3)``.
 ACOUSTIC_LSRTM2D = SlotTable(
-    slots=tuple(_acoustic2d_field() + _acoustic2d_field("sc_")),
+    slots=tuple(_acoustic2d_field() + _acoustic2d_field("sc_") + [
+        # adjoint-only zeta shadows of the two adjoint fields (lambda_sc binds
+        # 0..8 + 18..19, lambda_bg 9..17 + 20..21): the exact CPML adjoint
+        # reads the neighbours' zeta* and rotates with swap_aux().
+        Slot("zetaxn", "dbuf", "x", dbuf_of="zetax", adjoint_only=True),
+        Slot("zetazn", "dbuf", "z", dbuf_of="zetaz", adjoint_only=True),
+        Slot("sc_zetaxn", "dbuf", "x", dbuf_of="sc_zetax", adjoint_only=True),
+        Slot("sc_zetazn", "dbuf", "z", dbuf_of="sc_zetaz", adjoint_only=True),
+    ]),
     recon=("u_prev", "u_now", "u_next", "sc_u_prev", "sc_u_now", "sc_u_next"),
 )
 
@@ -285,14 +293,24 @@ def _acoustic3d_field(prefix: str = "") -> list[Slot]:
 #: AcousticLSRTM3D (csrc/cuda/equations/acoustic_lsrtm3d): TWO coupled acoustic
 #: fields in one list -- the background (slots 0..11) and the scattered field
 #: (12..23), bound as ``bg.bind(slice(0, 12))`` / ``sc.bind(slice(12, 12))``.
-#: Its own adjoint kernels double-buffer psi only, so the adjoint list is the
-#: forward one (no ``adjoint_only`` slots): the scattered adjoint lambda_sc takes
-#: 0..11 and the background adjoint lambda_bg = mu 12..23.  The boundary-saving
+#: The adjoint list appends a zeta shadow triple per field: the scattered
+#: adjoint lambda_sc binds 0..11 + 24..26 and the background adjoint lambda_bg =
+#: mu 12..23 + 27..29.  The boundary-saving
 #: backward reconstructs both fields, 3+3 grids.  Aux grids are full-size (the
 #: drivers declare no per-axis slabs).  Two rotating blocks, so ``u_blocks`` is
 #: ``(0, 12)`` and ``recon_u_blocks`` is ``(0, 3)``.
 ACOUSTIC_LSRTM3D = SlotTable(
-    slots=tuple(_acoustic3d_field() + _acoustic3d_field("sc_")),
+    slots=tuple(_acoustic3d_field() + _acoustic3d_field("sc_") + [
+        # adjoint-only zeta shadows of the two adjoint fields, in bind()'s tail
+        # order (zetaxn, zetazn, zetayn): the exact CPML adjoint reads the
+        # neighbours' zeta* and rotates with swap_aux().
+        Slot("zetaxn", "dbuf", "x", dbuf_of="zetax", adjoint_only=True),
+        Slot("zetazn", "dbuf", "z", dbuf_of="zetaz", adjoint_only=True),
+        Slot("zetayn", "dbuf", "y", dbuf_of="zetay", adjoint_only=True),
+        Slot("sc_zetaxn", "dbuf", "x", dbuf_of="sc_zetax", adjoint_only=True),
+        Slot("sc_zetazn", "dbuf", "z", dbuf_of="sc_zetaz", adjoint_only=True),
+        Slot("sc_zetayn", "dbuf", "y", dbuf_of="sc_zetay", adjoint_only=True),
+    ]),
     recon=("u_prev", "u_now", "u_next", "sc_u_prev", "sc_u_now", "sc_u_next"),
 )
 

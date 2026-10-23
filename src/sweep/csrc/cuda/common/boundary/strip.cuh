@@ -16,6 +16,10 @@
 //   * the band-enumerating compact kernels (boundary_kernel2d/3d_compact*)
 //     take the band bounds from bs_strip_bands_2d/3d -- they visit exactly
 //     the in-grid cells of the non-cut bands, i.e. the same set;
+//     boundary_kernel3d_compact_owned also asks bs_strip_faces_3d which
+//     LATER bands (in the full-grid kernel's write order) hold the cell, so
+//     each multi-band cell is restored from the band the full-grid kernel
+//     writes last;
 //   * sub_source_in_restore_strip{,_3d} (common.cu) asks
 //     bs_in_restore_strip_2d/3d whether a source cell was just overwritten by
 //     the restore.  It must agree with the restore kernels cell for cell, so

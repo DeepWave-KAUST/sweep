@@ -97,6 +97,7 @@ nav:
   - User Guide:
       - Backends: user-guide/backends.md
       - Equations: user-guide/equations.md
+      - "Pure-qP VTI / TTI: forward, adjoint, Born": user-guide/qp_born.md
       - Operators: user-guide/operators.md
       - Propagators: user-guide/propagators.md
       - Domain decomposition: user-guide/parallel.md
@@ -136,6 +137,7 @@ nav:
           - Anisotropic:
               - examples/anisotropic/index.md
               - Acoustic VTI: notebooks/05_wavefield_vti.ipynb
+              - Pure-qP VTI / TTI · Born, LSRTM: notebooks/34_lsrtm_qp_vti_tti.ipynb
               - Elastic TTI · rotation (2-D RSG): notebooks/10_wavefield_elastic_tti.ipynb
               - Elastic TTI · 3-D: notebooks/27_wavefield_elastic_tti_3d.ipynb
               - Elastic TTI · displacement (Oh 2020): notebooks/28_wavefield_elastic_tti_2nd.ipynb

@@ -1,7 +1,8 @@
 # Anisotropic
 
-VTI and TTI media: pseudo-acoustic VTI, the rotated staggered grid in 2-D and
-3-D, and the displacement formulation.
+VTI and TTI media: pseudo-acoustic VTI, Born modelling and LSRTM with the
+pure-qP equations, the rotated staggered grid in 2-D and 3-D, and the
+displacement formulation.
 
 <div class="grid cards" markdown>
 
@@ -11,12 +12,25 @@ VTI and TTI media: pseudo-acoustic VTI, the rotated staggered grid in 2-D and
 
     ---
 
-    Run Duveneck (1st-order), Liang (2nd-order pseudo-acoustic), and
+    Run Duveneck (1st-order), Liang (2nd-order pure qP), and
     Alkhalifah (η-acoustic) through the unified `AcousticAniso` factory
     on the canonical Duveneck Fig 2 setup; the trailing cell demonstrates
     the δ→ε disk taper that kills the pseudo-acoustic shear artefact.
 
     [:material-notebook-outline: Open notebook](../../notebooks/05_wavefield_vti.ipynb)
+
+-   ![LSRTM pure-qP VTI / TTI](../../figures/gallery/34_lsrtm_qp_vti_tti.png){ loading=lazy }
+
+    **LSRTM · pure-qP VTI / TTI**
+
+    ---
+
+    `AcousticVTILSRTM` / `AcousticTTILSRTM`, the Born pair of the pure-qP
+    equations, on a tilted anisotropic bed: TTI Born data imaged by RTM and by
+    least-squares RTM with the isotropic, VTI and TTI operators. Only TTI puts
+    the tilted bed where it is; VTI does worse than ignoring the anisotropy.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/34_lsrtm_qp_vti_tti.ipynb)
 
 -   ![Wavefield Elastic TTI](../../figures/gallery/10_wavefield_elastic_tti.png){ loading=lazy }
 

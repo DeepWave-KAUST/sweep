@@ -25,6 +25,32 @@ from sweep.scalars import fd_coefficients, staggered_grid_coes
 from sweep.equations.base import FirstOrderEquation
 
 
+def _resolve_boundary_dtype(boundary_dtype=None):
+    """The boundary storage dtype a run allocates.
+
+    Precedence: explicit Python kwarg (from BoundaryOptions /
+    boundary_saving_config dict) wins over the SWEEP_BOUNDARY_DTYPE env
+    var (the documented global override), which wins over the legacy
+    SWEEP_FP16_BOUNDARY=1 gate, which wins over the ``fp32`` default.
+    This only decides what dtype to ALLOCATE the boundary buffers in; we
+    deliberately do NOT write the choice back into os.environ.  The C++
+    saver derives the storage dtype from the buffer tensors it is handed
+    (see csrc/.../boundary/saver.cuh), so a per-instance storage_dtype
+    cannot leak into later default-config propagators in the same process.
+    """
+    if boundary_dtype is None:
+        _env_dtype = os.environ.get('SWEEP_BOUNDARY_DTYPE', '').strip().lower()
+        if _env_dtype in ('fp32', 'fp16', 'bf16', 'int8'):
+            boundary_dtype = _env_dtype
+        elif os.environ.get('SWEEP_FP16_BOUNDARY', '') in ('1', 'true', 'yes', 'on'):
+            boundary_dtype = 'fp16'
+        else:
+            boundary_dtype = 'fp32'
+    if boundary_dtype not in ('fp32', 'fp16', 'bf16', 'int8'):
+        raise ValueError(f"boundary_dtype must be 'fp32'/'fp16'/'bf16'/'int8', got {boundary_dtype!r}")
+    return boundary_dtype
+
+
 def _get_C():
     import torch  # Ensure PyTorch is loaded before importing the compiled extension.
     import sweep._C as _C
@@ -982,8 +1008,12 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
     def _build_fd_coefficients(self, M):
         lap_coes = torch.zeros(M + 1, dtype=torch.float32, device=self.dev)
 
-        lap_coes[1:] = torch.from_numpy(fd_coefficients(2, 2 * M)).to(self.dev).float()
-        lap_coes[0] = torch.sum(lap_coes[1:]) * 2
+        coes = fd_coefficients(2, 2 * M)
+        lap_coes[1:] = torch.from_numpy(coes).to(self.dev).float()
+        # Summed in fp64 and rounded once, as eager's kernel centre
+        # (generate_convolution_kernel): the fp32 sum of the rounded
+        # coefficients is one ulp off at orders 8 and 10.
+        lap_coes[0] = float(2 * coes.sum())
 
         # First-order CUDA equations use staggered-grid forward/backward
         # derivatives (`sgradient`), so their first-derivative coefficients
@@ -1127,25 +1157,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         boundary_on_cpu = boundary_storage in {"cpu", "disk"}
         staging_pinned = use_pinned_memory or boundary_storage == "disk"
         staging_interval = transfer_interval * ring_buffers
-        # Precedence: explicit Python kwarg (from BoundaryOptions /
-        # boundary_saving_config dict) wins over the SWEEP_BOUNDARY_DTYPE env
-        # var (the documented global override), which wins over the legacy
-        # SWEEP_FP16_BOUNDARY=1 gate, which wins over the ``fp32`` default.
-        # This only decides what dtype to ALLOCATE the boundary buffers in; we
-        # deliberately do NOT write the choice back into os.environ.  The C++
-        # saver derives the storage dtype from the buffer tensors it is handed
-        # (see csrc/.../boundary/saver.cuh), so a per-instance storage_dtype
-        # cannot leak into later default-config propagators in the same process.
-        if boundary_dtype is None:
-            _env_dtype = os.environ.get('SWEEP_BOUNDARY_DTYPE', '').strip().lower()
-            if _env_dtype in ('fp32', 'fp16', 'bf16', 'int8'):
-                boundary_dtype = _env_dtype
-            elif os.environ.get('SWEEP_FP16_BOUNDARY', '') in ('1', 'true', 'yes', 'on'):
-                boundary_dtype = 'fp16'
-            else:
-                boundary_dtype = 'fp32'
-        if boundary_dtype not in ('fp32', 'fp16', 'bf16', 'int8'):
-            raise ValueError(f"boundary_dtype must be 'fp32'/'fp16'/'bf16'/'int8', got {boundary_dtype!r}")
+        boundary_dtype = _resolve_boundary_dtype(boundary_dtype)
         # All storage locations (gpu/cpu/disk) support every storage_dtype
         # (fp32/fp16/bf16/int8).  Staged int8 uses a uint8 main + FP32 per-block
         # scale ring (and, for disk, parallel uint8 + scale files); see the
@@ -1167,6 +1179,16 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             return
 
         cuda_layout = self._cuda_layout()
+        # A frame shell (cuda_layout.boundary_frame) also covers the whole
+        # absorbing pad: abcn more cells across and abcn more tangentially.
+        # The C side (save_width / bs_tangent_pad in the driver) assumes one
+        # pad on every face, so anything else is refused here.
+        frame = int(self.abcn) if getattr(cuda_layout, "boundary_frame", False) else 0
+        if frame and any(int(p) != frame for p in self.pml_pad):
+            raise NotImplementedError(
+                f"boundary saving for {type(self.equation).__name__} needs the same "
+                f"absorbing pad on every face (abcn={self.abcn}), got {tuple(self.pml_pad)}; "
+                "use a uniform abcn without a free surface, or memory=Full().")
         layout = Layout(
             self.shape_cuda,
             cuda_layout.resolved_boundary_save_nvar(),
@@ -1176,8 +1198,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             self.B,
             staging_interval if boundary_on_cpu else transfer_interval,
             self._image_method_active,
-            self.equation.so // 2 * cuda_layout.boundary_save_reach + 1,
-            tangent_pad=cuda_layout.boundary_tangent_pad,
+            self.equation.so // 2 * cuda_layout.boundary_save_reach + 1 + frame,
+            tangent_pad=cuda_layout.boundary_tangent_pad + frame,
             pad=self.pml_pad,   # ramp only: the C side's phys box includes the buffer
             cut_mask=getattr(self, "_dd_cut_mask", 0),
         )
@@ -1518,7 +1540,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         elif layout.slots is not None:
             forward_slots = [slot for slot in layout.slots.slots if not slot.adjoint_only]
             assert len(forward_slots) == len(shapes), "slot table / forward shapes mismatch"
-            shapes = [sh for slot, sh in zip(forward_slots, shapes) if slot.role != "dbuf"]
+            keep_dbuf = bool(getattr(layout, "checkpoint_replay_psi_dbuf", False))
+            shapes = [sh for slot, sh in zip(forward_slots, shapes) if slot.role != "dbuf" or keep_dbuf]
         sets = 1
         if mode == "recursive" and layout.recursive_state_depth:
             sets += _recursive_scratch_depth(int(max_segment))
@@ -1923,6 +1946,16 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         # declare cuda_layout_for_grads (see _cuda_layout); set before the buffers
         # below are sized from it.
         self._model_grad_mask = tuple(bool(m.requires_grad) for m in models)
+        # An equation whose compiled backward returns only some of the
+        # gradients refuses the rest here, before anything runs (a silently
+        # missing gradient is the failure mode this guards).
+        refuse = getattr(self.equation, "c_refuse_grads", None)
+        if callable(refuse) and requires_backward:
+            refuse(bool(requires_wavelet_grad), self._model_grad_mask,
+                   boundary_saving=bool(use_boundary_saving),
+                   boundary_dtype=(_resolve_boundary_dtype(boundary_cfg.get('storage_dtype'))
+                                   if use_boundary_saving else None),
+                   checkpoint=bool(self.use_ckpt))
         if requires_backward and self.compute_illumination:
             self.source_illumination = torch.zeros_like(unpadded_models[0])
             self.receiver_illumination = torch.zeros_like(unpadded_models[0])

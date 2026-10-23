@@ -82,7 +82,7 @@ __global__ void calculate_grad_lsrtm3d_mp_utt(
 SWEEP_BY_ORDER_TABLE(acoustic3d_single_fn, acoustic3d_single_by_order, acoustic3d_single);
 SWEEP_BY_ORDER_TABLE(acoustic3d_single_nopml_fn, acoustic3d_single_nopml_by_order, acoustic3d_single_nopml);
 SWEEP_BY_ORDER_TABLE(acoustic_lsrtm3d_coupled_fn, acoustic_lsrtm3d_coupled_by_order, acoustic_lsrtm3d_coupled);
-SWEEP_BY_ORDER_TABLE(acoustic_lsrtm3d_adjoint_fn, acoustic_lsrtm3d_adjoint_by_order, acoustic_lsrtm3d_adjoint);
+SWEEP_BY_ORDER_TABLE(acoustic_lsrtm3d_adjoint_exact_fn, acoustic_lsrtm3d_adjoint_exact_by_order, acoustic_lsrtm3d_adjoint_exact);
 
 // v2_lambda = vp^2 * lambda  (per-cell, race-free pre-pass for the L* adjoint).
 __global__ void compute_v2_lambda_lsrtm3d(
@@ -105,15 +105,13 @@ __global__ void compute_v2_lambda_lsrtm3d(
 // acoustic_lsrtm2d kernels -- see there for the derivation of each term. ----
 
 // Background adjoint lambda_bg = mu: its own propagation plus the transpose of the
-// scattered-source coupling, v2 = vp^2 * g with g = lambda_bg + mp * lambda_sc;
-// g is kept too, for the adjoint step's CPML band (its pml_field).
+// scattered-source coupling, v2 = vp^2 * (lambda_bg + mp * lambda_sc).
 __global__ void compute_v2_lambda_bg_lsrtm3d(
     const float* __restrict__ vp,
     const float* __restrict__ mp,
     const float* __restrict__ lambda_bg,
     const float* __restrict__ lambda_sc,
     float* __restrict__ v2_lambda,
-    float* __restrict__ g,
     int nx, int ny, int nz, int B
 ) {
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -124,7 +122,6 @@ __global__ void compute_v2_lambda_bg_lsrtm3d(
     int sp = nx * ny * nz; int idx = b * sp + iz * (nx * ny) + iy * nx + ix;
     float v2 = vp[idx] * vp[idx];
     float gi = lambda_bg[idx] + mp[idx] * lambda_sc[idx];
-    g[idx] = gi;
     v2_lambda[idx] = v2 * gi;
 }
 

@@ -6,6 +6,7 @@
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
 #include "../../common/boundary_runtime.cuh"
+#include "../../common/boundary/session.cuh"
 #include "../../common/cudautils.h"
 #include "../../common/checkpoint_runtime.cuh"
 #include "../../common/boundarysaver.cuh"
@@ -28,9 +29,10 @@ static BufList grad_slots(const BackwardInputCore& p)
 
 namespace {
 
-// Proper transpose adjoint step for the lsrtm 3D scattered field: v2_lambda =
-// vp^2 * lambda_now, then L* = lap(v2_lambda) (interior) / forward CPML (PML).
-// Replaces the old forward-operator adjoint (acoustic3d_single = vp^2*lap),
+// Adjoint step of one lsrtm 3D field: v2_lambda = vp^2 * lambda_now, then the
+// exact transpose of the forward step, CPML band included
+// (acoustic_lsrtm3d_adjoint_exact).  Replaces the old forward-operator adjoint
+// (acoustic3d_single = vp^2*lap),
 
 // Layout of p.adjoint_workspace, declared on the Python side by
 // AcousticLSRTM3D.cuda_layout.backward_workspace_shapes (one padded grid per
@@ -41,20 +43,20 @@ namespace {
 // checkpoint replay STATE is not here: it rides p.forward_wavefields as state
 // sets (bind_replay_state_set below).
 enum WorkspaceSlot : int { V2_LAMBDA = 0, U_THIS = 1, F_THIS = 1, N_SLOTS_PLAIN = 1, N_SLOTS_EXTRA = 2 };
-// RWI: the background adjoint's v2 = vp^2*g and g = lambda_bg + mp*lambda_sc itself
-// (which the adjoint step's CPML band differentiates) are the LAST two slots of the
-// full (V2_LAMBDA + them) and bs (V2_LAMBDA, F_THIS + them) pools;
-// _adjoint_workspace_shapes declares 3 and 4 slots for those modes.
-constexpr int N_SLOTS_RWI_FULL = 3;
-constexpr int N_SLOTS_RWI_BS = 4;
+// RWI: the background adjoint's v2 = vp^2*(lambda_bg + mp*lambda_sc) is the LAST
+// slot of the full (V2_LAMBDA, it) and bs (V2_LAMBDA, F_THIS, it) pools;
+// _adjoint_workspace_shapes declares 2 and 3 slots for those modes.
+constexpr int N_SLOTS_RWI_FULL = 2;
+constexpr int N_SLOTS_RWI_BS = 3;
 
 // One checkpoint replay state set: the 3-D AcousticWavefieldTensor in its bind
-// order (u_prev, u_now, u_next, psix, psiz, zetax, zetaz, psiy, zetay -- no
-// psi double-buffer shadow, so bind() keeps double_buffer_psi=false and the
-// replay keeps its u-only swap()), declared as
+// order (u_prev, u_now, u_next, psix, psiz, zetax, zetaz, psiy, zetay, psixn,
+// psizn, psiyn -- 12 model-shaped grids: the replay's forward reads the
+// neighbours' psi, so it runs double-buffered and rotates with swap_pml(), as
+// the forward does; in place it raced those reads), declared as
 // AcousticLSRTM3D.cuda_layout.checkpoint_state_nvar because the LSRTM forward
 // slot list is two acoustic layouts back to back.
-static constexpr int CKPT_STATE_NVAR = 9;
+static constexpr int CKPT_STATE_NVAR = 12;
 
 // Exactly the count this mode declares.  The propagator allocates the pool for
 // every gradient-bearing forward (_ensure_adjoint_workspace_buffers, driven by
@@ -122,8 +124,7 @@ static inline void run_lsrtm3d_adjoint_step(
     compute_v2_lambda_lsrtm3d<<<grid, block>>>(
         vp.data_ptr<float>(), adj_view.u_now, v2_lambda.data_ptr<float>(), ctx.nx, ctx.ny, ctx.nz, ctx.B);
     ACOUSTIC_LSRTM3D_ADJOINT(order, grid, block,
-        adj_view, v2_lambda.data_ptr<float>(), /*pml_field=*/nullptr, vp.data_ptr<float>(),
-        lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx);
+        adj_view, v2_lambda.data_ptr<float>(), lap_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx);
 }
 
 std::vector<Buf> slice_wavefields(
@@ -141,33 +142,41 @@ std::vector<Buf> slice_wavefields(
     );
 }
 
-// The adjoint state: the first 12 of the propagator's 24 adjoint wavefield
-// slots (cuda_layout base_nvar + pml_nvar; the background field's u triple +
-// CPML sextet + psi double-buffer triple).  _c.py binds cp.adjoint_wavefields
-// on every backward -- _ensure_wavefield_buffers allocates them whenever the
-// forward required a gradient -- so the list is never empty here.
+// The propagator's adjoint wavefield slots (cuda_layout base_nvar + pml_nvar +
+// adjoint_extra_nvar = 6 + 18 + 6): the two fields' 12-slot forward lists, then
+// the zeta double-buffer triple of each (slot_table.ACOUSTIC_LSRTM3D,
+// adjoint_only).  The exact adjoint reads the neighbours' zeta*, so each adjoint
+// binds 15 tensors -- u triple, CPML sextet, psi triple, zeta triple -- and
+// rotates with swap_aux().  _c.py binds cp.adjoint_wavefields on every backward
+// (zeroed) -- _ensure_wavefield_buffers allocates them whenever the forward
+// required a gradient -- so the list is never empty here.
+static constexpr int ADJ_SLOTS = 30;
+static std::vector<Buf> adjoint_field_slots(const BackwardInputCore& p, int field, const char* mode)
+{
+    SWEEP_CHECK(static_cast<int>(p.adjoint_wavefields.size()) == ADJ_SLOTS,
+                "acoustic_lsrtm3d/", mode, " requires the propagator-bound "
+                "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar + adjoint_extra_nvar = ",
+                ADJ_SLOTS, " tensors), got ", p.adjoint_wavefields.size());
+    auto slots = slice_wavefields(p.adjoint_wavefields, 12 * field, 12);
+    for (int k = 0; k < 3; ++k)   // zetaxn, zetazn, zetayn: bind()'s tail order
+        slots.push_back(p.adjoint_wavefields[24 + 3 * field + k]);
+    return slots;
+}
+
+// The scattered adjoint lambda_sc: field 0 of the adjoint slots.
 void bind_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInputCore& p,
                         const char* mode)
 {
-    SWEEP_CHECK(p.adjoint_wavefields.size() >= 12,
-                "acoustic_lsrtm3d/", mode, " requires the propagator-bound "
-                "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar = 24 tensors; "
-                "the background field takes the first 12), got ",
-                p.adjoint_wavefields.size());
-    wf.bind(slice_wavefields(p.adjoint_wavefields, 0, 12), 3, true);
+    wf.bind(adjoint_field_slots(p, 0, mode), 3, true);
 }
 
-// The background adjoint lambda_bg = mu (Wu & Alkhalifah 2015): the second 12 of
-// the 24 adjoint slots.  LSRTM declares two fields, so the propagator already sizes
-// the adjoint pool for both; the scattered adjoint takes 0..11, these were unused.
+// The background adjoint lambda_bg = mu (Wu & Alkhalifah 2015): field 1 of the
+// adjoint slots.  LSRTM declares two fields, so the propagator already sizes the
+// adjoint pool for both; the scattered adjoint takes field 0, these were unused.
 void bind_bg_adjoint_state(AcousticWavefieldTensor& wf, const BackwardInputCore& p,
                            const char* mode)
 {
-    SWEEP_CHECK(p.adjoint_wavefields.size() >= 24,
-                "acoustic_lsrtm3d/", mode, " needs all 24 adjoint_wavefields "
-                "(cuda_layout.base_nvar + pml_nvar) for the RWI background adjoint, got ",
-                p.adjoint_wavefields.size());
-    wf.bind(slice_wavefields(p.adjoint_wavefields, 12, 12), 3, true);
+    wf.bind(adjoint_field_slots(p, 1, mode), 3, true);
 }
 
 BackwardOutputCore backward_full_imaging_impl(const BackwardInputCore& p);
@@ -358,7 +367,7 @@ void advance_forward_interval_3d(
             ctx
         );
 
-        forward.swap();
+        forward.swap_pml();
     }
 }
 
@@ -442,7 +451,7 @@ void process_recursive_interval_3d(
             ctx
         );
 
-        start_state.swap();
+        start_state.swap_pml();
 
         auto adj_view = adjoint.view();
 
@@ -459,7 +468,7 @@ void process_recursive_interval_3d(
             ctx
         );
 
-        adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
+        adjoint.swap_aux();   // rotate u, psi<->psin AND zeta<->zetan (exact adjoint)
 
         accumulate_source_gradient_3d(
             forward_source_grid,
@@ -623,11 +632,10 @@ void run_full_imaging(
     bind_adjoint_state(adjoint, p, "backward");
     // rwi (vp needs its gradient): the background adjoint and its scratch.
     AcousticWavefieldTensor bg_adjoint;
-    Buf v2lbg, gbg;
+    Buf v2lbg;
     if (rwi) {
         bind_bg_adjoint_state(bg_adjoint, p, "backward");
-        v2lbg = pool_required(p.adjoint_workspace, N_SLOTS_RWI_FULL - 2, vp, "adjoint_workspace");
-        gbg = pool_required(p.adjoint_workspace, N_SLOTS_RWI_FULL - 1, vp, "adjoint_workspace");
+        v2lbg = pool_required(p.adjoint_workspace, N_SLOTS_RWI_FULL - 1, vp, "adjoint_workspace");
     }
     // RWI beta split (grad_split_iii_out bound): III goes there, grad_vp keeps II+IV.
     SWEEP_CHECK(rwi || !p.grad_split_iii_out.defined(),
@@ -666,12 +674,12 @@ void run_full_imaging(
             compute_v2_lambda_bg_lsrtm3d<<<launch_config.grid, launch_config.block>>>(
                 vp.data_ptr<float>(), mp.data_ptr<float>(),
                 bg_adjoint.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
-                v2lbg.data_ptr<float>(), gbg.data_ptr<float>(), nx, ny, nz, B);
+                v2lbg.data_ptr<float>(), nx, ny, nz, B);
             ACOUSTIC_LSRTM3D_ADJOINT(
                 order, launch_config.grid, launch_config.block,
-                bg_adj_view, v2lbg.data_ptr<float>(), gbg.data_ptr<float>(), vp.data_ptr<float>(),
-                lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx);
-            bg_adjoint.swap_pml();   // bg_adjoint.u_now = lambda_bg(it)
+                bg_adj_view, v2lbg.data_ptr<float>(),
+                lap_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx);
+            bg_adjoint.swap_aux();   // bg_adjoint.u_now = lambda_bg(it)
         }
 
         auto adj_view = adjoint.view();
@@ -689,7 +697,7 @@ void run_full_imaging(
             ctx
         );
 
-        adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
+        adjoint.swap_aux();   // rotate u, psi<->psin AND zeta<->zetan (exact adjoint)
 
         accumulate_source_gradient_3d(
             forward_source_config.grid,
@@ -835,11 +843,10 @@ void run_bs_imaging(
         }
     }
     AcousticWavefieldTensor bg_adjoint;
-    Buf v2lbg, gbg;
+    Buf v2lbg;
     if (rwi) {
         bind_bg_adjoint_state(bg_adjoint, p, "backward_bs");
-        v2lbg = pool_required(p.adjoint_workspace, N_SLOTS_RWI_BS - 2, vp, "adjoint_workspace");
-        gbg = pool_required(p.adjoint_workspace, N_SLOTS_RWI_BS - 1, vp, "adjoint_workspace");
+        v2lbg = pool_required(p.adjoint_workspace, N_SLOTS_RWI_BS - 1, vp, "adjoint_workspace");
     }
     SWEEP_CHECK(rwi || !p.grad_split_iii_out.defined(),
                 "acoustic_lsrtm3d: grad_split_iii_out needs the RWI vp gradient (vp requires grad)");
@@ -886,9 +893,21 @@ void run_bs_imaging(
     GradParam grad_ctx_y{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
-    AsyncCopyContext async_copy(staged_boundary);
+    // A Python-owned BoundarySession, when bound (ModelParallel binds one for
+    // cpu/disk storage), keeps the copy stream and its ring events alive ACROSS
+    // calls, as in the template drivers (eq_driver.cuh).  DD drives this
+    // backward one step per call.  With a copy stream of its own per call, the
+    // next step's H2D that prefetch_next_backward_chunk_if_needed issues at the
+    // end of a call stayed queued on a stream nothing waited on again; landing
+    // late, it overwrote the ring slot a later call had just refilled and was
+    // restoring from (the cpu-staged DD gradient changed from run to run, by up
+    // to 12 % of its peak).  On the session's one stream every copy queues
+    // behind the earlier calls' and every restore waits on the event of the copy
+    // it reads.
     const std::vector<std::string> disk_files = p.boundary_disk_files.vec();   // the runtime keeps a pointer to it
-    BoundaryRuntime boundary_runtime(
+    BoundaryScope boundary_scope(
+        p.boundary_session ? p.boundary_session->impl() : nullptr,
+        BoundarySessionImpl::Phase::Backward,
         boundary_saver,
         3,
         true,
@@ -897,11 +916,16 @@ void run_bs_imaging(
         p.boundary_disk_async_read,
         p.transfer_interval,
         p.boundary_ring_buffers,
-        disk_files,
-        async_copy.compute_stream,
-        async_copy.copy_stream
+        disk_files
     );
-    boundary_runtime.prefetch_initial_backward_chunk(p.nt, it_hi);   // prime the ring for THIS segment
+    BoundaryRuntime& boundary_runtime = boundary_scope.runtime();
+    // Segments partition [0, nt) in descending order (SteppedBackwardRunner), so
+    // the session's runtime is primed by the first one and walks the chunks by
+    // global step from there (prefetch_next below), as the persistent runner
+    // does; re-priming every call re-copied the chunk prefix every step.  A
+    // per-call runtime starts empty and primes the ring for THIS segment.
+    if (first_segment || boundary_scope.owns())
+        boundary_runtime.prefetch_initial_backward_chunk(p.nt, it_hi);
 
     for (int it = it_hi - 1; it >= std::max(it_lo, 1); --it) {
         auto for_view = forward.view();
@@ -915,12 +939,12 @@ void run_bs_imaging(
             compute_v2_lambda_bg_lsrtm3d<<<launch_config.grid, launch_config.block>>>(
                 vp.data_ptr<float>(), mp.data_ptr<float>(),
                 bg_adjoint.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
-                v2lbg.data_ptr<float>(), gbg.data_ptr<float>(), nx, ny, nz, B);
+                v2lbg.data_ptr<float>(), nx, ny, nz, B);
             ACOUSTIC_LSRTM3D_ADJOINT(
                 order, launch_config.grid, launch_config.block,
-                bg_adj_view, v2lbg.data_ptr<float>(), gbg.data_ptr<float>(), vp.data_ptr<float>(),
-                lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx);
-            bg_adjoint.swap_pml();   // bg_adjoint.u_now = lambda_bg(it)
+                bg_adj_view, v2lbg.data_ptr<float>(),
+                lap_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx);
+            bg_adjoint.swap_aux();   // bg_adjoint.u_now = lambda_bg(it)
         }
 
         auto adj_view = adjoint.view();
@@ -938,7 +962,7 @@ void run_bs_imaging(
             ctx
         );
 
-        adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
+        adjoint.swap_aux();   // rotate u, psi<->psin AND zeta<->zetan (exact adjoint)
 
         accumulate_source_gradient_3d(
             fwd_source_config.grid,
@@ -1061,7 +1085,7 @@ void run_bs_imaging(
             ctx
         );
 
-        adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
+        adjoint.swap_aux();   // rotate u, psi<->psin AND zeta<->zetan (exact adjoint)
 
         accumulate_source_gradient_3d(
             fwd_source_config.grid,
@@ -1074,6 +1098,13 @@ void run_bs_imaging(
             forward_nsrc
         );
     }
+
+    // A per-call runtime dies with this call, so a stepped call drains its copy
+    // stream: the prefetch it issued for the next step would otherwise be the
+    // orphan described at the scope above.  The monolithic call has nothing left
+    // in flight -- its last prefetch is the one its last restore waited on.
+    if (boundary_scope.owns() && (it_hi < static_cast<int>(p.nt) || it_lo > 0))
+        boundary_runtime.synchronize();
 }
 
 BackwardOutputCore backward_bs_imaging_impl(const BackwardInputCore& p)
@@ -1126,8 +1157,9 @@ void run_ckpt_imaging(
     bind_adjoint_state(adjoint, p, "backward_ckpt");
 
     // The chunk replay state: replay state set 0 of p.forward_wavefields, the
-    // only set in chunk mode. Every chunk re-seeds all 9 tensors (load the 8
-    // checkpointed fields + zero u_next) before any read.
+    // only set in chunk mode. Every chunk re-seeds the 8 checkpointed fields and
+    // zeroes u_next before any read; the psi shadows are written before they are
+    // read (in the CPML cells; zero elsewhere, as the propagator allocated them).
     SWEEP_CHECK(static_cast<int>(p.forward_wavefields.size()) == CKPT_STATE_NVAR,
                 "acoustic_lsrtm3d/backward_ckpt requires the propagator-bound "
                 "forward_wavefields (cuda_layout.checkpoint_state_nvar): one replay "
@@ -1206,7 +1238,7 @@ void run_ckpt_imaging(
                 ctx
             );
 
-            forward.swap();
+            forward.swap_pml();
         }
 
         for (int it = end - 1; it >= start; --it) {
@@ -1225,7 +1257,7 @@ void run_ckpt_imaging(
                 ctx
             );
 
-            adjoint.swap_pml();   // rotate u AND psi<->psin: race-free adjoint psi
+            adjoint.swap_aux();   // rotate u, psi<->psin AND zeta<->zetan (exact adjoint)
 
             accumulate_source_gradient_3d(
                 fwd_source_config.grid,

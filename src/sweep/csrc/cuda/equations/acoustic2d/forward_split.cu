@@ -131,8 +131,11 @@ __global__ void __launch_bounds__(256) a2d_fwd_ring(
         f.u_prev[idx] +
         v2_dt2 * w_sum;
 
+    // The vp image is the update actually applied, v^2 * w_sum: on the halo
+    // cells next to a band (now on this branch) w_sum is not the bare
+    // Laplacian, and boundary saving's u_tt images exactly this.
     if (u_this_b != nullptr)
-        u_this_b[idx] = (v * v) * (lap_x + lap_z);
+        u_this_b[idx] = (v * v) * w_sum;
 }
 
 struct FwdArgs {
@@ -144,8 +147,10 @@ template<int Order>
 void launch_fwd(const FwdArgs& a, const SolverContext& ctx)
 {
     const Box all = fdtd::computed_box(ctx);
-    // the cells with no axis in its CPML band
-    const Box in = fdtd::intersect(fdtd::phys_box(ctx, 0), all);
+    // the cells no axis' CPML terms reach: the coefficient band plus halo (the
+    // d(a psi) taps and np.gradient's dbdx reach halo cells past the band; the
+    // adjoint's pure_interior uses the same bound).  Cut faces keep the halo.
+    const Box in = fdtd::intersect(fdtd::phys_box(ctx, ctx.M), all);
     if (!fdtd::empty(in)) {
         const auto L = fdtd::box_launch(in, ctx.B, fdtd::kBoxBlock);
         a2d_fwd_interior<Order><<<L.grid, L.block>>>(a.wf, a.u_this, a.vp, a.lap, ctx, in);

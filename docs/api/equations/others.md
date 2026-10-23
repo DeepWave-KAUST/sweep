@@ -2,8 +2,9 @@
 
 Exported equation classes without a page of their own; see the
 [equation index](index.md) for the families. Compiled `impl='c'` kernels exist
-for `ElasticVRR`, `AcousticVTI1st` and `AcousticVTI1st3D`; every other class
-on this page runs on the eager backend only.
+for `ElasticVRR`, `AcousticVTI1st`, `AcousticVTI1st3D`, `AcousticVTI`,
+`AcousticTTI` and the Born pair `AcousticVTILSRTM` / `AcousticTTILSRTM`; every
+other class on this page runs on the eager backend only.
 
 ## Curvilinear-grid topography
 
@@ -31,9 +32,17 @@ routing names are these same classes.
 
 ::: sweep.equations.AcousticAniso
 
+The pure-qP pair and its Born equations: the derivation, the three
+`s_gradient` modes and the compiled backend are in
+[Pure-qP VTI / TTI](../../user-guide/qp_born.md).
+
 ::: sweep.equations.AcousticVTI
 
 ::: sweep.equations.AcousticTTI
+
+::: sweep.equations.AcousticVTILSRTM
+
+::: sweep.equations.AcousticTTILSRTM
 
 ::: sweep.equations.AcousticTariq
 

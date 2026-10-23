@@ -18,9 +18,9 @@
 #define ACOUSTIC_LSRTM3D_COUPLED(order, grid, block, ...) \
     SWEEP_LAUNCH_BY_ORDER(acoustic_lsrtm3d_coupled_by_order, order, grid, block, __VA_ARGS__)
 
-// Proper-adjoint (transpose) of the scattered-field propagation: L* = lap(v^2.l).
+// Exact transpose of a field's step (acoustic_lsrtm3d_adjoint_exact below).
 #define ACOUSTIC_LSRTM3D_ADJOINT(order, grid, block, ...) \
-    SWEEP_LAUNCH_BY_ORDER(acoustic_lsrtm3d_adjoint_by_order, order, grid, block, __VA_ARGS__)
+    SWEEP_LAUNCH_BY_ORDER(acoustic_lsrtm3d_adjoint_exact_by_order, order, grid, block, __VA_ARGS__)
 
 template <int Order>
 __device__ inline float acoustic_cpml_update_3d(
@@ -48,7 +48,9 @@ __device__ inline float acoustic_cpml_update_3d(
 
     // Interior fast-path: ax/bx/dbxdx vanish, so w_sum reduces to the sum of
     // laplacians and the aux fields stay zero. Skip the 14+ extra loads/stores.
-    bool in_pml = solver.in_pml_3d(ix, iy, iz, halo);
+    // in_cpml: the band AND the cell past it, where db = np.gradient(b) is
+    // still nonzero (dropping it there reflected off the CPML).
+    bool in_pml = solver.in_cpml_3d(ix, iy, iz, halo);
     if (!in_pml) {
         return lap_x + lap_y + lap_z;
     }
@@ -218,19 +220,22 @@ __global__ void compute_v2_lambda_lsrtm3d(
     int nx, int ny, int nz, int B
 );
 
-// Proper adjoint (transpose) of the lsrtm 3D scattered-field propagation:
-//   lambda_next = 2 lambda_now - lambda_pre + dt^2 * lap(v^2 * lambda_now)
-// in the non-PML interior -- transpose of forward v^2*lap(lambda) (non-self-
-// adjoint when vp varies).  PML band keeps forward CPML (acoustic_cpml_update_3d).
-// Mirrors the acoustic2d fix (5188031).  Requires v2_lambda = vp^2*lambda_now.
+// Exact transpose of one step of a field advanced by acoustic_cpml_update_3d
+// (the product-rule CPML), the 3-D twin of acoustic_lsrtm2nd_adjoint_exact
+// (acoustic_lsrtm2d/kernels.cuh): per axis d, with g = dt^2 * v2l and
+// gtmp_d = (1+b_d) g + b_d zeta*_d,
+//   lambda_next = 2 lambda - lambda_prev + sum_d [ L_d((1+b_d) gtmp_d) - D_d(b_d psi*_d + db_d gtmp_d) ]
+//   psi*_d'     = a_d psi*_d + da_d gtmp_d - D_d(a_d gtmp_d)
+//   zeta*_d'    = a_d (zeta*_d + g)
+// v2l = vp^2 * lambda for a field's own adjoint, vp^2 * (lambda_bg + mp *
+// lambda_sc) for the RWI background adjoint.  An axis none of whose taps is
+// in_cpml reduces to L_d(g) and leaves its (zero) aux unwritten.  New psi* /
+// zeta* go to the double buffers; the caller rotates with swap_aux().
 template <int Order>
-__global__ void acoustic_lsrtm3d_adjoint(
+__global__ void acoustic_lsrtm3d_adjoint_exact(
     AcousticWavefieldPointer wf,
-    const float* __restrict__ v2_lambda,
-    const float* __restrict__ pml_field,   // nullptr = wf.u_now (see the PML band below)
-    const float* __restrict__ vp,
+    const float* __restrict__ v2l,
     LaplaceParam lap_ctx,
-    GradParam grad_ctx,
     GradParam grad_ctx_x,
     GradParam grad_ctx_y,
     GradParam grad_ctx_z,
@@ -250,41 +255,77 @@ __global__ void acoustic_lsrtm3d_adjoint(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    int stride_z = solver.nx * solver.ny;
-    int spatial_size = stride_z * solver.nz;
-    int idx = iz * stride_z + iy * solver.nx + ix;
-    auto f = wf.offset(b, spatial_size);
-    const float* vp_b = vp + b * spatial_size;
-    const float* v2l_b = v2_lambda + b * spatial_size;
-    float dt2 = solver.dt * solver.dt;
+    const int sy = solver.nx;
+    const int sz = solver.nx * solver.ny;
+    const int sp = sz * solver.nz;
+    const int idx = iz * sz + iy * sy + ix;
+    auto f = wf.offset(b, sp);
+    const float* g_b = v2l + b * sp;
+    const float dt2 = solver.dt * solver.dt;
+    const float* lc = lap_ctx.coeff;     // [c0 (centre, applied as -lc[0]), c1..cM]
+    const float* gc = grad_ctx_x.coeff;  // [_, c1..cM] (antisymmetric)
 
-    bool in_pml = solver.in_pml_3d(ix, iy, iz, halo);
+    // Does the tap range [i - M, i + M] meet a band face's in_cpml cells?
+    const bool xfull = solver.taps_in_cpml_x(ix, halo, halo);
+    const bool yfull = solver.taps_in_cpml_y(iy, halo, halo);
+    const bool zfull = solver.taps_in_cpml_z(iz, halo, halo);
 
-    if (!in_pml) {
-        // L* = lap(v^2 . lambda)  (transpose of forward v^2 . lap(lambda))
-        float lap_x = laplace<3, Order, X>(v2l_b, ix, iy, iz, lap_ctx);
-        float lap_y = laplace<3, Order, Y>(v2l_b, ix, iy, iz, lap_ctx);
-        float lap_z = laplace<3, Order, Z>(v2l_b, ix, iy, iz, lap_ctx);
+    if (!xfull && !yfull && !zfull) {
+        // No tap in the CPML: L* = lap(v^2 . lambda), the transpose of the
+        // forward v^2 . lap (compile-time stencils, one dt^2 at the end).
+        float lap_x = laplace<3, Order, X>(g_b, ix, iy, iz, lap_ctx);
+        float lap_y = laplace<3, Order, Y>(g_b, ix, iy, iz, lap_ctx);
+        float lap_z = laplace<3, Order, Z>(g_b, ix, iy, iz, lap_ctx);
         f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + dt2 * (lap_x + lap_y + lap_z);
         return;
     }
 
-    // PML band: keep the forward CPML formulation (shared lsrtm update), on
-    // pml_field when given -- the RWI background adjoint's lambda_bg +
-    // mp*lambda_sc, whose coupling part reaches it only through v2_lambda, which
-    // this branch does not read (see acoustic_lsrtm2nd_adjoint).
-    AcousticWavefieldPointer fp = f;
-    if (pml_field) fp.u_now = const_cast<float*>(pml_field) + b * spatial_size;   // only read
-    float w_sum = acoustic_cpml_update_3d<Order>(
-        fp, ix, iy, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, true, solver, halo);
-    float v = vp_b[idx];
-    f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + (v * v) * dt2 * w_sum;
+    #define LSRTM3_GW(n) ( dt2 * g_b[n] )
+    // One axis: the transpose (full) or the plain L_d(g) (off the band).
+    #define LSRTM3_AXIS(FULL, AXIS, I, STRIDE, A, B_, DB, PSI, ZETA, PSIN, ZETAN, GCTX, INV, INV2, L_OUT, DGG_OUT) \
+    {                                                                                                    \
+        float Lacc, Dgg = 0.0f;                                                                          \
+        if (FULL) {                                                                                      \
+            const float a_ = A[I];                                                                       \
+            const float da = gradient<2, Order, X>(A, I, 0, 0, GCTX);                                    \
+            const float gtmp0 = B_[I] * ZETA[idx] + (1.0f + B_[I]) * LSRTM3_GW(idx);                     \
+            Lacc = -lc[0] * ((1.0f + B_[I]) * gtmp0);                                                    \
+            float Dgq = 0.0f;                                                                            \
+            _Pragma("unroll")                                                                            \
+            for (int k = 1; k <= (Order > 0 ? M_static : 16); ++k) {                                     \
+                if (Order <= 0 && k > halo) break;                                                       \
+                const int np = idx + k * STRIDE, nm = idx - k * STRIDE, ip = I + k, im = I - k;          \
+                const float tp = B_[ip] * ZETA[np] + (1.0f + B_[ip]) * LSRTM3_GW(np);                    \
+                const float tm = B_[im] * ZETA[nm] + (1.0f + B_[im]) * LSRTM3_GW(nm);                    \
+                Lacc += lc[k] * ((1.0f + B_[ip]) * tp + (1.0f + B_[im]) * tm);                           \
+                Dgg += gc[k] * ((B_[ip] * PSI[np] + DB[ip] * tp) - (B_[im] * PSI[nm] + DB[im] * tm));    \
+                Dgq += gc[k] * (A[ip] * tp - A[im] * tm);                                                \
+            }                                                                                            \
+            Lacc *= INV2; Dgg *= INV; Dgq *= INV;                                                        \
+            PSIN[idx] = a_ * PSI[idx] + da * gtmp0 - Dgq;                                                \
+            ZETAN[idx] = a_ * (ZETA[idx] + LSRTM3_GW(idx));                                              \
+        } else {                                                                                         \
+            Lacc = dt2 * laplace<3, Order, AXIS>(g_b, ix, iy, iz, lap_ctx);                              \
+        }                                                                                                \
+        L_OUT = Lacc; DGG_OUT = Dgg;                                                                     \
+    }
+
+    float Lx, Dx, Ly, Dy, Lz, Dz;
+    LSRTM3_AXIS(xfull, X, ix, 1,  cpml.ax, cpml.bx, cpml.dbxdx, f.psix, f.zetax, f.psixn, f.zetaxn, grad_ctx_x,
+                1.0f / lap_ctx.dx, 1.0f / (lap_ctx.dx * lap_ctx.dx), Lx, Dx)
+    LSRTM3_AXIS(yfull, Y, iy, sy, cpml.ay, cpml.by, cpml.dbydy, f.psiy, f.zetay, f.psiyn, f.zetayn, grad_ctx_y,
+                1.0f / lap_ctx.dy, 1.0f / (lap_ctx.dy * lap_ctx.dy), Ly, Dy)
+    LSRTM3_AXIS(zfull, Z, iz, sz, cpml.az, cpml.bz, cpml.dbzdz, f.psiz, f.zetaz, f.psizn, f.zetazn, grad_ctx_z,
+                1.0f / lap_ctx.dz, 1.0f / (lap_ctx.dz * lap_ctx.dz), Lz, Dz)
+    #undef LSRTM3_AXIS
+    #undef LSRTM3_GW
+
+    f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + (Lx + Ly + Lz - Dx - Dy - Dz);
 }
 
-using acoustic_lsrtm3d_adjoint_fn = void (*)(AcousticWavefieldPointer, const float*,
-    const float*, const float*, LaplaceParam, GradParam, GradParam, GradParam, GradParam,
-    AcousticCPMLPointer, SolverContext);
-SWEEP_BY_ORDER_DECL(acoustic_lsrtm3d_adjoint_fn, acoustic_lsrtm3d_adjoint_by_order);
+using acoustic_lsrtm3d_adjoint_exact_fn = void (*)(AcousticWavefieldPointer, const float*,
+    LaplaceParam, GradParam, GradParam, GradParam, AcousticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(acoustic_lsrtm3d_adjoint_exact_fn, acoustic_lsrtm3d_adjoint_exact_by_order);
 
 template <int Order>
 __global__ void acoustic_lsrtm3d_coupled(
@@ -387,7 +428,7 @@ __global__ void calculate_grad_lsrtm3d_mp_utt(
 __global__ void compute_v2_lambda_bg_lsrtm3d(
     const float* __restrict__ vp, const float* __restrict__ mp,
     const float* __restrict__ lambda_bg, const float* __restrict__ lambda_sc,
-    float* __restrict__ v2_lambda, float* __restrict__ g, int nx, int ny, int nz, int B);
+    float* __restrict__ v2_lambda, int nx, int ny, int nz, int B);
 
 __global__ void calculate_grad_lsrtm3d_vp_utt(
     const float* __restrict__ bg_utt, const float* __restrict__ sc_utt,
