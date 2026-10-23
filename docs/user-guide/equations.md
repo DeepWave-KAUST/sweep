@@ -86,8 +86,8 @@ The `impl="c"` column says whether `PropSEM(impl='c')` can route the class to
 the CUDA kernels; every class runs on `impl="eager"`. The
 `BoundarySaving()` column is the CUDA-side coverage of
 [boundary saving](sem.md#boundary-saving) -- on `impl="eager"` it works for
-every class; ✅ = both backends, "eager" = eager only, and the C-PML is
-required wherever the ring IS the C-PML band.
+every class but the dissipative Biot one; ✅ = both backends, "eager" = eager
+only, and the C-PML is required wherever the ring IS the C-PML band.
 
 | Equation | Models | Mesh | Dim | Notes | `impl="c"` | `BoundarySaving()` |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -105,6 +105,7 @@ required wherever the ring IS the C-PML band.
 | `ElasticVSSEM3DDeformed` | `['vp', 'vs', 'rho']` | hex27 | 3D | 3-D elastic with **both** topography and absorbing boundaries (the velocity–stress family is where 3-D C-PML exists) | ❌ | eager |
 | `ElasticVTISEM2DDeformed` | `['vp', 'vs', 'rho', 'epsilon', 'delta']` | quad9 | 2D | VTI anisotropic velocity–stress: topography + C-PML | ❌ | eager |
 | `AcousticElasticSEM2D` | `['vp', 'vs', 'rho']` | quad9 | 2D | Coupled fluid–solid (ocean over seabed): split acoustic + elastic C-PML, records `chi, u_x, u_z` (+ derived `p, vx, vz`) | ✅ | ✅ (C-PML; fp32; +anchors) |
+| `BiotVSSEM2DDeformed` | `['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']` | quad9 | 2D | [Biot poroelastic](sem.md#poroelastic-waves-biot) velocity–stress with Darcy flux, the FD `Biot`'s equations and names (pore pressure continuous, flux element-local): topography + C-PML, open-pore surface, records `vx, vz, p, qx, qz, sxx, szz, sxz` | ❌ | ❌ (dissipative) |
 
 For the authoritative list of equations exported by your installation,
 with their models and compiled-binding support, use the CLI:

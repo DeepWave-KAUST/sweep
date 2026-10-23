@@ -85,7 +85,7 @@ from .equations.acoustic3d_deformed import AcousticSEM3DDeformed
 from .equations.acoustic_potential2d import AcousticPotentialSEM2D
 from .fields import (MESH_NDIM, format_field_specs, mesh_kind, model_names,
                      resolve_field_types)
-from .propagator import SEMPropagator, receiver_gather
+from .propagator import SEMPropagator, field_layouts, receiver_gather
 
 
 
@@ -317,6 +317,55 @@ def _resolve_vector_source(equation, source_type, ndim):
             f"two calls and add the records.")
     if any(moment):
         return out, None, tuple(moment)
+    return out, frozenset(axes), None
+
+
+def _resolve_named_source(equation, source_type):
+    """``source_type`` on an equation that declares its PropSEM source names
+    (``propsem_source_names``; Biot) -> ``(names, force_axes, moment)``, as
+    :func:`_resolve_vector_source` returns them.
+
+    A name is ``("velocity", k)`` -- entry ``k`` of the payload over the source
+    fields, injected into that field (the equation's ``source_mode
+    "velocity"``) -- or ``("moment", block)``, the ``(Mxx, Mzz, Mxz)`` it adds to
+    the moment tensor. Injected fields and moments do not mix in one call, for
+    the reason force and stress do not on the elastics. A name the equation
+    lists in ``propsem_source_refused`` raises with its reason.
+    """
+    vocab = equation.propsem_source_names
+    refused = getattr(equation, "propsem_source_refused", {})
+    name = equation.__name__
+    out, axes, moment = [], {}, None
+    for want in (source_type or equation.default_source_type):
+        if want in out:
+            raise ValueError(f"duplicate source_type entry '{want}'")
+        if want in refused:
+            raise NotImplementedError(
+                f"source_type '{want}' on {name}: {refused[want]}")
+        if want not in vocab:
+            raise ValueError(
+                f"Unknown source_type entry '{want}' for {name}. Available "
+                f"source_type values: {', '.join(vocab)}")
+        kind, val = vocab[want]
+        if kind == "velocity":
+            if val in axes:
+                raise ValueError(
+                    f"source_type entries '{axes[val]}' and '{want}' are the "
+                    f"same field on {name}")
+            axes[val] = want
+        else:
+            moment = val if moment is None else tuple(
+                a + b for a, b in zip(moment, val))
+        out.append(want)
+    if axes and moment is not None:
+        raise ValueError(
+            f"source_type {out} mixes an injected field "
+            f"({', '.join(axes.values())}) with a stress source: the injection "
+            f"takes the wavelet as itself, the stress source as its integral (a "
+            f"moment-tensor load), so they need two time functions. Run them as "
+            f"two calls and add the records.")
+    if moment is not None:
+        return out, None, moment
     return out, frozenset(axes), None
 
 
@@ -636,6 +685,9 @@ class PropSEM:
         m = as_memory_strategy(memory)
         self.memory = Full() if m is None else m
         self._memory = self._bs_store = self._ckpt_chunk = None
+        refusal = getattr(self.equation, "bs_refusal", None)
+        if isinstance(m, BoundarySaving) and refusal:
+            raise NotImplementedError(refusal)
 
         def unsupported(obj, keep):
             return [f.name for f in dataclasses.fields(obj)
@@ -741,7 +793,11 @@ class PropSEM:
         # the vector equations (a force with one component per axis) also
         # take the FD names; see _resolve_vector_source
         self._src_force_axes, self._src_moment = None, None
-        if not self.is_acoustic and _stamp is None and n_src == self.ndim:
+        self._n_src = n_src
+        if getattr(equation, "propsem_source_names", None):
+            (self.source_type, self._src_force_axes,
+             self._src_moment) = _resolve_named_source(equation, source_type)
+        elif not self.is_acoustic and _stamp is None and n_src == self.ndim:
             (self.source_type, self._src_force_axes,
              self._src_moment) = _resolve_vector_source(
                  equation, source_type, self.ndim)
@@ -1033,7 +1089,7 @@ class PropSEM:
             raise ValueError(
                 f"per-shot models disagree on the batch size: {sorted(sizes)}")
         B = sizes.pop()
-        c_max = float(torch.as_tensor(models[0]).max().detach())   # batch-max vp
+        c_max = self._pml_speed(models)                            # batch-max vp
         eqs = [self._build_eq([m[b] if ps(m) else m for m in models],
                               c_max=c_max) for b in range(B)]
         if self._use_c:
@@ -1047,7 +1103,20 @@ class PropSEM:
     def _build_eq(self, models, c_max=None):
         eq = self._build_eq_raw(models, c_max=c_max)
         eq.bs_band_mode = self.bs_band_mode
+        if getattr(self.equation, "propsem_source_names", None):
+            # a velocity or the pressure is injected into its field; a stress
+            # name is a moment-tensor load
+            eq.source_mode = "velocity" if self._src_moment is None else "load"
         return eq
+
+    def _pml_speed(self, models):
+        """The speed the C-PML is designed for: the largest ``vp`` (the first
+        model), or what the equation declares (``pml_speed``; Biot's fast P
+        wave of its eight coefficients)."""
+        speed = getattr(self.equation, "pml_speed", None)
+        if speed is None:
+            return float(torch.as_tensor(models[0]).max().detach())
+        return float(speed(models))
 
     def _cpml_cached(self, tag, make, *key):
         """Memoise one C-PML profile on an EXACT key.
@@ -1080,7 +1149,7 @@ class PropSEM:
         grids = [self._interp_to_gll(m.to(device=self.dev, dtype=self.dtype))
                  for m in models]
         if c_max is None:
-            c_max = float(grids[0].max().detach())   # vp drives the PML profile
+            c_max = self._pml_speed(grids)           # vp drives the PML profile
         sides = self._absorbing_sides()
         if self.is_acoustic:
             dirichlet = self.free_surface
@@ -1213,10 +1282,20 @@ class PropSEM:
                     f"tensor) source; give a force source_type to use it.")
             return None
         if override is not None:
-            return tuple(float(c) for c in override)
+            vec = tuple(float(c) for c in override)
+            if (getattr(self.equation, "propsem_source_names", None)
+                    and len(vec) != self._n_src):
+                own = [s.name for s in self.equation.field_specs
+                       if s.supports_source]
+                raise ValueError(
+                    f"source_vector on {self.equation.__name__} has one entry "
+                    f"per source field ({', '.join(own)}); got {len(vec)}")
+            return vec
         if self._src_force_axes is not None:
+            # one entry per source field: the axes on the elastics, Biot's
+            # (v_x, v_z, p)
             return tuple(1.0 if a in self._src_force_axes else 0.0
-                         for a in range(nd))
+                         for a in range(self._n_src))
         names = [s.name for s in self.equation.field_specs if s.supports_source]
         return tuple(1.0 if n in self.source_type else 0.0 for n in names[:nd])
 
@@ -1619,19 +1698,19 @@ class PropSEM:
     # same two things every time -- the global node ids behind a stamp's element
     # and the stamp's Lagrange weights).
     # ------------------------------------------------------------------ #
-    def _gather_rows(self, mesh, prop):
+    def _gather_rows(self, mesh, prop, layout="global"):
         """One shot's ``(rec_G, rec_W)`` -- see ``propagator.receiver_gather``,
         which this and the C consts builder share."""
-        return receiver_gather(mesh, prop.receivers)
+        return receiver_gather(mesh, prop.receivers, layout)
 
 
     def _on_dev(self, G, W):
         return G.to(self.dev), W.to(device=self.dev, dtype=self.dtype)
 
 
-    def _gather_batch(self, mesh, props):
+    def _gather_batch(self, mesh, props, layout="global"):
         """The same, stacked over shots: ``(B, nrec, ngll^d)``."""
-        G, W = zip(*(self._gather_rows(mesh, p) for p in props))
+        G, W = zip(*(self._gather_rows(mesh, p, layout) for p in props))
         return self._on_dev(torch.stack(G), torch.stack(W))
 
     # ------------------------------------------------------------------ #
@@ -1699,6 +1778,11 @@ class PropSEM:
         patterns = [torch.stack([pl[f] for pl in pat_list])
                     for f in range(len(pat_list[0]))]            # (B, n_global)
         rec_G, rec_W = self._gather_batch(mesh, props)           # (B, nrec, ngll^d)
+        # an element-local field (Biot's flux, stresses) is gathered from its
+        # own layout
+        rec_GI = {ri: rec_G if lay == "global" else
+                  self._gather_batch(mesh, props, lay)[0]
+                  for ri, lay in zip(recv_idxs, field_layouts(eq, recv_idxs))}
         wav_B = torch.stack(wav_per_shot)                        # (B, nt)
 
         st0 = eq.init_state(dt, dev, dtype)                      # tuple
@@ -1717,7 +1801,8 @@ class PropSEM:
                 sval = wav_B[:, n0 + j]
                 src = [pat * sval[:, None] for pat in patterns]
                 d = vstep(d, src)
-                comps = [(d[ri][ar, rec_G] * rec_W).sum(-1) for ri in recv_idxs]
+                comps = [(d[ri].reshape(B, -1)[ar, rec_GI[ri]] * rec_W).sum(-1)
+                         for ri in recv_idxs]
                 chunk.append(torch.stack(comps, -1))           # (B, nrec, ncomp)
             return d, torch.stack(chunk, dim=1)                # (B, k, nrec, ncomp)
 

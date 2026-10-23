@@ -38,6 +38,18 @@ def assemble(r_e: torch.Tensor, ibool: torch.Tensor, like: torch.Tensor):
     return out.index_add(0, idx, r_e.reshape(-1, k)).unbind(-1)
 
 
+def element_mean(mesh, f_e):
+    """An element-local field ``(E, ngll, ...)`` as a global one ``(n_global,)``:
+    at a node the elements share, the ``w |J|``-weighted mean of their values
+    (the lumped L2 projection onto the continuous space). For snapshots of the
+    element-local fields; a continuous field comes back unchanged."""
+    idx = mesh.ibool.reshape(-1)
+    w = mesh.w_jac
+    num = f_e.new_zeros(mesh.n_global).index_add(0, idx, (w * f_e).reshape(-1))
+    den = w.new_zeros(mesh.n_global).index_add(0, idx, w.reshape(-1))
+    return num / den
+
+
 def assemble_each(fields, ibool, like):
     """Assemble several element-local fields to global nodes, one single-field
     ``index_add`` each — the unstacked counterpart of ``assemble(stack(fields))``.
