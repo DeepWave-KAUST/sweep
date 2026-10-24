@@ -527,16 +527,20 @@ seis = solver(wavelet, sources, receivers, models=models)   # (nshots, nt, nrec,
 | `source_type` | source | the wavelet is |
 | --- | --- | --- |
 | `["sxx", "szz"]` (default), `["sxz"]` | total stress, as on the elastics | the moment rate |
+| `["fx"]`, `["fz"]` | a point force on the solid and the fluid alike (SPECFEM2D's poroelastic force) | the force |
 | `["p"]` | pore pressure; the total stress does not move | its rate |
 | `["vx"]`, `["vz"]` (`v_x`, `v_z`) | solid velocity; the flux does not move | the velocity source |
+| `["qx"]`, `["qz"]` (`q_x`, `q_z`) | Darcy flux; the solid does not move | the flux source |
 
 As on `PropTorch`, a stress source is a moment tensor that `PropSEM` drives
-with the wavelet's integral, while `p` and the velocities are injected into
-their fields; the two kinds do not mix in one call (run two and add the
-records). The flux names `qx` / `qz` are refused as sources: the Darcy flux is
-element-local here (below) and takes no point source. Receivers take `vx`,
-`vz`, `p`, `qx`, `qz`, `sxx`, `szz` and `sxz` (default `["vx", "vz"]`); the
-flux and the stresses are read from the receiver's element.
+with the wavelet's integral, while the others take the wavelet itself; the two
+kinds do not mix in one call (run two and add the records). The force loads
+the total momentum and the relative flow by the same amount, which moves the
+solid and the fluid in proportion; the velocity and flux sources are injected
+into their fields after the update, so they do not mix with a force either.
+Receivers take `vx`, `vz`, `p`, `qx`, `qz`, `sxx`, `szz` and `sxz` (default
+`["vx", "vz"]`); the flux and the stresses are read from the receiver's
+element.
 
 The solid is discretised as the velocity-stress elastic equation is:
 velocity on the continuous nodes, total stress in the elements, momentum in
@@ -569,16 +573,90 @@ cells. The undrained limit (`b` → ∞) agrees with `ElasticVSSEM2DDeformed`
 volumetric `alpha^2 M` part of the modulus there passes through the
 continuous `p`.
 
+### Anisotropic permeability and viscous attenuation
+
+`BiotAnisoPermSEM2DDeformed` takes the drag as a symmetric tensor
+`eta kappa^-1`: the models end in `b_xx, b_xz, b_zz` instead of `b`, which
+`sweep.equations.biot_params.biot_drag_tensor(eta, k_xx, k_xz, k_zz)` gives
+from a permeability tensor (x right, z down -- flip the sign of `k_xz` from a
+z-up convention such as SPECFEM2D's). The flux copies at a node then advance
+with both components coupled, still exactly.
+
+`equation_options={"viscous_q": (Q0, f0)}` turns on SPECFEM2D's viscous
+attenuation (`ATTENUATION_PORO_FLUID_PART`): the drag becomes a standard
+linear solid, `b (1 + i w tau_e) / (1 + i w tau_s)` with
+`tau_e, tau_s = (sqrt(Q0^2 + 1) ± 1) / (2 pi f0 Q0)` -- the plain drag at low
+frequency, `tau_e / tau_s` times it at high frequency, `1 / Q0` at `f0`. It
+costs a memory variable per flux component. `equation_options` passes any of
+an equation's own `build` keywords; a name the equation does not take is
+refused.
+
+### Fluid and dry elastic regions
+
+An element without a solid frame (`rho = 0`) is a fluid, one without a pore
+fluid (`M = 0`) a dry elastic solid, so a sea floor, a reservoir under a
+cap rock or a porous layer on a basement is one model.
+`sweep.equations.biot_params.biot_fluid(k_f, rho_f)` and
+`biot_elastic(vp, vs, rho)` give their coefficients; the ones a medium does
+not have are zero, which is checked, and get no gradient, so an inversion
+keeps the media as they are. Each element must be wholly one medium,
+so give these models on the GLL nodes (`(E, ngll, ngll)` arrays, e.g. from
+the centre depth of each element in `solver.mesh.z_e` -- the mesh includes
+the absorbing layer) with the interfaces on element edges. In a fluid, `q` is the fluid velocity (the `qx` / `qz`
+receivers) and `p` the pressure; `v` and the stresses are zero there, as `p`
+and `q` are in a dry solid.
+
+The interfaces are those of SPECFEM2D. Between a solid (porous or dry) and a
+fluid, the fluid's pressure acts on the solid and the solid's normal
+velocity enters the fluid's continuity equation, by two boundary integrals
+that are exact transposes of each other; with the continuous `p` this is
+the open-pore condition at a porous one (pressure, traction and the fluid's
+volume flux `(v + q)·n` continuous). Between a porous and a dry solid
+nothing is added: the velocity and the traction are continuous through the
+shared nodes and the weak form, and the pores are sealed, `q·n = 0`, which
+is the natural condition of the pressure equation. (SPECFEM2D sets the whole
+relative displacement to zero on those nodes.) A source loads only the fields
+of the element it is in, so one that would load nothing there -- a stress or
+solid-velocity source in a fluid, a pore pressure or flux in a dry solid --
+is refused, and a force in a fluid moves the fluid alone; on an interface
+each field takes its load from the side that has it. An
+interface may cross the side or bottom absorbing bands but not a corner
+region.
+
+`sweep.equations.biot_params` also maps the coefficients to the parameter
+families of Morency, Luo & Tromp (2009) that SPECFEM2D writes its kernels
+in -- `"primary"`, `"density"` (density-normalised) and `"wavespeed"` -- and
+turns a coefficient gradient into a family's kernels by the exact chain rule
+(`biot_family_kernels`).
+
+### Validation
+
 `test/sem/test_biot_sem.py` checks the analytic line source (solid velocity
-and pore pressure) from inviscid to the Darcy limit, the open-pore half-space
+and pore pressure) from inviscid to the Darcy limit, with the viscous
+attenuation against the frequency-dependent drag, the open-pore half-space
 against wavenumber integration, the pressure-release image of a pore fluid on
 its own, the pore pressure on the source's grid line, the FD records, the
-undrained limit and the gradient;
-`test/sem/specfem_compare/run_compare_poro.py` runs SPECFEM2D's
+undrained limit, the drag tensor's symmetries, the parameter families and
+the gradient (also through the drag tensor, the viscous memory and three
+media). A dry solid is `ElasticVSSEM2DDeformed` and water on a dry solid is
+`AcousticElasticSEM2D`, both to round-off; across water, porous rock and
+shale the Green's functions are reciprocal to round-off.
+`test/sem/specfem_compare/` runs SPECFEM2D (inputs from
+`make_specfem_poro_cases.py`): `run_compare_poro.py` its
 `poroelastic_semi_infinite_homogeneous` example against its reference
-seismograms (4e-4). 2-D and `impl='eager'` only. Boundary saving is refused
-because the viscous drag is dissipative everywhere, so the field cannot be
-stepped back; use `Full()` or `Ckpt(chunks=...)`.
+seismograms (4e-4); `run_compare_poro_features.py` the point force, the
+anisotropic permeability and the viscous drag with and without attenuation
+(relative L2 0.02-0.2%; the attenuation moves the records by 0.3-1%, and
+ours by the same to 3-15% of that); `run_compare_poro_coupling.py` its
+`poroelastic_acoustic` example and porous-elastic and water-porous-elastic
+layers (0.01-0.08% in the source band; the example 0.07-0.85% on its own
+mesh, where its inviscid slow wave has about one element per wavelength,
+and 0.003-0.013% with both on elements half as large). SPECFEM2D computes
+no pressure in poroelastic media, so these compare velocities.
+
+2-D and `impl='eager'` only. Boundary saving is refused because the viscous
+drag is dissipative everywhere, so the field cannot be stepped back; use
+`Full()` or `Ckpt(chunks=...)`.
 
 ## Wavefield snapshots
 

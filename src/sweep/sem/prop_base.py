@@ -322,20 +322,22 @@ def _resolve_vector_source(equation, source_type, ndim):
 
 def _resolve_named_source(equation, source_type):
     """``source_type`` on an equation that declares its PropSEM source names
-    (``propsem_source_names``; Biot) -> ``(names, force_axes, moment)``, as
-    :func:`_resolve_vector_source` returns them.
+    (``propsem_source_names``; Biot) -> ``(names, payload, moment, mode)``.
 
-    A name is ``("velocity", k)`` -- entry ``k`` of the payload over the source
-    fields, injected into that field (the equation's ``source_mode
-    "velocity"``) -- or ``("moment", block)``, the ``(Mxx, Mzz, Mxz)`` it adds to
-    the moment tensor. Injected fields and moments do not mix in one call, for
-    the reason force and stress do not on the elastics. A name the equation
-    lists in ``propsem_source_refused`` raises with its reason.
+    A name is ``(kind, values)``: ``"moment"`` adds ``(Mxx, Mzz, Mxz)`` to the
+    moment tensor; the other kinds add a payload over the source fields --
+    ``"velocity"`` injects into the field (the equation's ``source_mode
+    "velocity"``), ``"force"`` loads its equations (``source_mode "load"``),
+    ``"injection"`` goes with either. A moment takes the wavelet's integral and
+    the rest the wavelet itself, so they do not mix in one call, nor do an
+    injection and a load into the same fields. A name the equation lists in
+    ``propsem_source_refused`` raises with its reason.
     """
     vocab = equation.propsem_source_names
     refused = getattr(equation, "propsem_source_refused", {})
     name = equation.__name__
-    out, axes, moment = [], {}, None
+    fields = [s.name for s in equation.field_specs if s.supports_source]
+    out, payload, moment, kinds, owner = [], None, None, set(), {}
     for want in (source_type or equation.default_source_type):
         if want in out:
             raise ValueError(f"duplicate source_type entry '{want}'")
@@ -347,26 +349,34 @@ def _resolve_named_source(equation, source_type):
                 f"Unknown source_type entry '{want}' for {name}. Available "
                 f"source_type values: {', '.join(vocab)}")
         kind, val = vocab[want]
-        if kind == "velocity":
-            if val in axes:
-                raise ValueError(
-                    f"source_type entries '{axes[val]}' and '{want}' are the "
-                    f"same field on {name}")
-            axes[val] = want
-        else:
+        if kind == "moment":
             moment = val if moment is None else tuple(
                 a + b for a, b in zip(moment, val))
+        else:
+            for i, a in enumerate(val):
+                if a:
+                    if i in owner:
+                        raise ValueError(
+                            f"source_type entries '{owner[i]}' and '{want}' "
+                            f"both drive {fields[i]} on {name}")
+                    owner[i] = want
+            payload = val if payload is None else tuple(
+                a + b for a, b in zip(payload, val))
+        kinds.add(kind)
         out.append(want)
-    if axes and moment is not None:
+    if moment is not None and payload is not None:
         raise ValueError(
-            f"source_type {out} mixes an injected field "
-            f"({', '.join(axes.values())}) with a stress source: the injection "
-            f"takes the wavelet as itself, the stress source as its integral (a "
-            f"moment-tensor load), so they need two time functions. Run them as "
-            f"two calls and add the records.")
-    if moment is not None:
-        return out, None, moment
-    return out, frozenset(axes), None
+            f"source_type {out} mixes a stress source with an injected field or "
+            f"a force: the stress source takes the wavelet's integral (a "
+            f"moment-tensor load), the others the wavelet itself, so they need "
+            f"two time functions. Run them as two calls and add the records.")
+    if {"velocity", "force"} <= kinds:
+        raise ValueError(
+            f"source_type {out} mixes an injected velocity with a force: one "
+            f"moves its field after the update, the other loads the equations. "
+            f"Run them as two calls and add the records.")
+    mode = "load" if (moment is not None or "force" in kinds) else "velocity"
+    return out, payload, moment, mode
 
 
 def _resolve_snapshot_steps(nt, return_wavefield, snapshot_times,
@@ -589,7 +599,9 @@ class PropSEM:
     ``f_dominant`` (the C-PML's frequency), ``density`` (the fixed density of
     :class:`AcousticPotentialSEM2D`), ``bs_band_mode`` and
     ``bs_store_dtype_elem`` (what boundary saving keeps of the C-PML band,
-    and at what precision its element histories on ``impl='c'``).
+    and at what precision its element histories on ``impl='c'``), and
+    ``equation_options``, the equation's own ``build`` keywords (e.g. Biot's
+    ``viscous_q``).
     """
 
     def __init__(
@@ -615,6 +627,7 @@ class PropSEM:
         bs_store_dtype_elem=None,
         source_type=None,
         receiver_type=None,
+        equation_options=None,
         **kwargs,
     ):
         if kwargs:
@@ -638,7 +651,7 @@ class PropSEM:
         # the C-PML builders and the DD strips count the layer in elements
         self.abcn_elements = self.abcn // self.n_order
         self._resolve_equation(equation, shape, self.abcn_elements,
-                               source_type, receiver_type)
+                               source_type, receiver_type, equation_options)
 
         if any((n - 1) % self.n_order for n in shape):
             raise ValueError(
@@ -728,7 +741,8 @@ class PropSEM:
                     "impl='c' and memory=BoundarySaving().")
         self._bs_store_elem = bs_store_dtype_elem
 
-    def _resolve_equation(self, equation, shape, abcn_elements, source_type, receiver_type):
+    def _resolve_equation(self, equation, shape, abcn_elements, source_type, receiver_type,
+                          equation_options=None):
         """Derive and validate everything PropSEM needs from the equation:
         mesh family vs shape, the model list, what build()'s signature can
         carry, the calling convention, and the field-role selections.
@@ -761,12 +775,21 @@ class PropSEM:
         # the signature HERE, so it is a clear refusal at construction rather
         # than a TypeError from inside the first forward.
         import inspect as _inspect
-        _kw = {q.name for q in
-               _inspect.signature(equation.build).parameters.values()
-               if q.kind is q.KEYWORD_ONLY}
+        _params = _inspect.signature(equation.build).parameters
+        _kw = {q.name for q in _params.values() if q.kind is q.KEYWORD_ONLY}
         _split = set(getattr(equation, "cpml_builders", None) or ())
-        _unsupported = (_kw - {"cpml", "dirichlet", "domain", "free_top"}
-                        - _split)
+        # the rest of build()'s keywords are the equation's own options, which
+        # ``equation_options`` sets (Biot's viscous_q); a required one PropSEM
+        # cannot supply is refused
+        _own = _kw - {"cpml", "dirichlet", "domain", "free_top"} - _split
+        self._eq_options = dict(equation_options or {})
+        _bad = sorted(set(self._eq_options) - _own)
+        if _bad:
+            raise TypeError(
+                f"equation_options {_bad} are not options of "
+                f"{equation.__name__}.build; it takes {sorted(_own) or 'none'}")
+        _unsupported = {k for k in _own - set(self._eq_options)
+                        if _params[k].default is _params[k].empty}
         if _unsupported:
             raise NotImplementedError(
                 f"{equation.__name__}.build takes keyword argument(s) "
@@ -793,10 +816,11 @@ class PropSEM:
         # the vector equations (a force with one component per axis) also
         # take the FD names; see _resolve_vector_source
         self._src_force_axes, self._src_moment = None, None
+        self._src_payload, self._src_mode = None, None
         self._n_src = n_src
         if getattr(equation, "propsem_source_names", None):
-            (self.source_type, self._src_force_axes,
-             self._src_moment) = _resolve_named_source(equation, source_type)
+            (self.source_type, self._src_payload, self._src_moment,
+             self._src_mode) = _resolve_named_source(equation, source_type)
         elif not self.is_acoustic and _stamp is None and n_src == self.ndim:
             (self.source_type, self._src_force_axes,
              self._src_moment) = _resolve_vector_source(
@@ -1103,10 +1127,10 @@ class PropSEM:
     def _build_eq(self, models, c_max=None):
         eq = self._build_eq_raw(models, c_max=c_max)
         eq.bs_band_mode = self.bs_band_mode
-        if getattr(self.equation, "propsem_source_names", None):
-            # a velocity or the pressure is injected into its field; a stress
-            # name is a moment-tensor load
-            eq.source_mode = "velocity" if self._src_moment is None else "load"
+        if self._src_mode is not None:
+            # injected fields, or loads (a force, a moment tensor); see
+            # _resolve_named_source
+            eq.source_mode = self._src_mode
         return eq
 
     def _pml_speed(self, models):
@@ -1166,9 +1190,11 @@ class PropSEM:
             if self.equation is AcousticPotentialSEM2D:   # vp + constant density
                 rho = torch.full_like(grids[0], self._c_density)
                 return AcousticPotentialSEM2D.build(
-                    self.mesh, grids[0], rho, dirichlet=dirichlet, cpml=cpml)
+                    self.mesh, grids[0], rho, dirichlet=dirichlet, cpml=cpml,
+                    **self._eq_options)
             return self.equation.build(self.mesh, grids[0],
-                                       dirichlet=dirichlet, cpml=cpml)
+                                       dirichlet=dirichlet, cpml=cpml,
+                                       **self._eq_options)
         # elastic: vp/vs/rho and a NATURAL free surface -- traction-free is what
         # the weak form does on a side with no absorbing layer, so there is no
         # dirichlet set to build. ``free_surface`` therefore acts only by
@@ -1203,7 +1229,7 @@ class PropSEM:
                         pml_thickness_elements=self.abcn_elements,
                         c_max=c_max, f_dominant=self.f_dominant),
                     sides, self.abcn_elements, c_max, self.f_dominant)
-        return self.equation.build(self.mesh, *grids, **kw)
+        return self.equation.build(self.mesh, *grids, **kw, **self._eq_options)
 
     # receiver field indices (1 for acoustic, 3 components for elastic)
     def _recv_idxs(self, eq):
@@ -1256,7 +1282,7 @@ class PropSEM:
         """Is the source the equation's default -- the unit vertical force on
         the elastics, the one source field elsewhere? (What a bare node id
         means to the DD driver.)"""
-        if self._src_moment is not None:
+        if self._src_moment is not None or self._src_payload is not None:
             return False
         if self._src_force_axes is None:      # scalar / equation-declared
             return True
@@ -1283,19 +1309,18 @@ class PropSEM:
             return None
         if override is not None:
             vec = tuple(float(c) for c in override)
-            if (getattr(self.equation, "propsem_source_names", None)
-                    and len(vec) != self._n_src):
+            if self._src_payload is not None and len(vec) != self._n_src:
                 own = [s.name for s in self.equation.field_specs
                        if s.supports_source]
                 raise ValueError(
                     f"source_vector on {self.equation.__name__} has one entry "
                     f"per source field ({', '.join(own)}); got {len(vec)}")
             return vec
+        if self._src_payload is not None:      # an equation's named sources
+            return tuple(self._src_payload)
         if self._src_force_axes is not None:
-            # one entry per source field: the axes on the elastics, Biot's
-            # (v_x, v_z, p)
             return tuple(1.0 if a in self._src_force_axes else 0.0
-                         for a in range(self._n_src))
+                         for a in range(nd))
         names = [s.name for s in self.equation.field_specs if s.supports_source]
         return tuple(1.0 if n in self.source_type else 0.0 for n in names[:nd])
 

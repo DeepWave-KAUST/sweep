@@ -609,15 +609,42 @@ def _stamp_components(stamp, kind, payload):
 _DERIVATIVE_KINDS = ("moment_tensor", "explosion")
 
 
-def _stamp_loads(stamp, kind, payload):
+def _stamp_loads(stamp, kind, payload, alive=None, names=None):
     """``[(elem_id, components), ...]`` of one point source: its element for
     a :class:`PointStamp`, every element of an :class:`EdgeStamp`, each
-    weighted by its share."""
+    weighted by its share.
+
+    ``alive`` (an equation's ``source_field_elements``: per source field, the
+    ``(E,)`` bool of the elements it lives in) keeps each field's load to
+    those elements, the shares renormalised over them -- a source on an
+    interface between two media loads each field from its own side. A source
+    left loading nothing is refused (``names``: the source fields)."""
     parts = getattr(stamp, "parts", None)
-    if parts is None:
-        return [(stamp.elem_id, _stamp_components(stamp, kind, payload))]
-    return [(p.elem_id, [c * w for c in _stamp_components(p, kind, payload)])
-            for p, w in zip(parts, stamp.weights)]
+    weights = [1.0] if parts is None else list(stamp.weights)
+    parts = [stamp] if parts is None else parts
+    comps = [_stamp_components(p, kind, payload) for p in parts]
+    if alive is None:
+        if len(parts) == 1:
+            return [(parts[0].elem_id, comps[0])]
+        return [(p.elem_id, [c * w for c in cs])
+                for p, w, cs in zip(parts, weights, comps)]
+    out = [[] for _ in parts]
+    loaded = False
+    for f in range(len(comps[0])):
+        keep = [bool(alive[f][p.elem_id]) if f < len(alive) else True for p in parts]
+        total = sum(w for w, k in zip(weights, keep) if k)
+        for i, k in enumerate(keep):
+            c = comps[i][f] * (weights[i] / total) if k else comps[i][f] * 0.0
+            loaded = loaded or bool(k and c.abs().max() > 0)
+            out[i].append(c)
+    if not loaded and any(bool(c.abs().max() > 0) for cs in comps for c in cs):
+        fields = [n for f, n in enumerate(names or ())
+                  if any(bool(cs[f].abs().max() > 0) for cs in comps if f < len(cs))]
+        raise ValueError(
+            f"a {kind!r} source in element(s) {[p.elem_id for p in parts]} loads "
+            f"{fields or 'its fields'}, none of which lives there (a fluid element "
+            f"carries no solid velocity or stress, a dry one no pore pressure or flux)")
+    return [(p.elem_id, cs) for p, cs in zip(parts, out)]
 
 
 # --------------------------------------------------------------------------- #
@@ -758,8 +785,12 @@ class SEMPropagator:
                 default = (1.0,) + (0.0,) * (n_src_fields - 1)
                 source_payloads = [default] * len(source_xz)
         # a moment tensor differentiates the basis, so on an element edge it
-        # is stamped in every element there (EdgeStamp); the rest locate once
-        sources   = [(build_moment_stamp if kind in _DERIVATIVE_KINDS
+        # is stamped in every element there (EdgeStamp); the rest locate once --
+        # unless the fields live in different media (source_field_elements):
+        # then every source meets all the elements at its point, to take each
+        # field's load from the ones that carry it
+        edge_all = getattr(eq, "source_field_elements", None) is not None
+        sources   = [(build_moment_stamp if edge_all or kind in _DERIVATIVE_KINDS
                       else build_point_stamp)(eq.mesh, *xz)
                      for xz, kind in zip(source_xz, source_kinds)]
         receivers = [build_point_stamp(eq.mesh, *xz) for xz in receiver_xz]
@@ -767,6 +798,14 @@ class SEMPropagator:
                    source_kinds=source_kinds, source_payloads=source_payloads,
                    receiver_type=resolve_field_types(
                        type(eq), receiver_type, "receiver"))
+
+    def _source_media(self):
+        """``(alive, names)`` for :func:`_stamp_loads`: the equation's
+        ``source_field_elements`` (``None`` when every field lives everywhere)
+        and its source field names."""
+        alive = getattr(self.eq, "source_field_elements", None)
+        names = [s.name for s in self.eq.field_specs if s.supports_source]
+        return alive, names
 
     # ---- source spatial pattern (assembled ONCE, scaled per step) ------- #
     def _build_source_patterns(self, n_global, device, dtype):
@@ -788,9 +827,10 @@ class SEMPropagator:
         # the positional order is already the equation's own field order.
         patterns = [torch.zeros(n_global, dtype=dtype, device=device)
                     for _ in range(n_src)]
+        alive, names = self._source_media()
         for stamp, kind, payload in zip(self.sources, self.source_kinds,
                                         self.source_payloads):
-            for e, comps in _stamp_loads(stamp, kind, payload):
+            for e, comps in _stamp_loads(stamp, kind, payload, alive, names):
                 if len(comps) > n_src:
                     # zip would drop the extra components without a word
                     raise ValueError(
@@ -819,9 +859,10 @@ class SEMPropagator:
         mesh = self.eq.mesh
         n_src = sum(s.supports_source for s in self.eq.field_specs)
         G_rows, W_rows = [], [[] for _ in range(n_src)]
+        alive, names = self._source_media()
         for stamp, kind, payload in zip(self.sources, self.source_kinds,
                                         self.source_payloads):
-            loads = _stamp_loads(stamp, kind, payload)
+            loads = _stamp_loads(stamp, kind, payload, alive, names)
             G_rows.append(torch.cat([mesh.ibool[e].reshape(-1) for e, _ in loads]))
             for f, rows in enumerate(W_rows):
                 # a payload may cover the leading source fields only (a moment
