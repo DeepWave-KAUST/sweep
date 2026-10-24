@@ -47,6 +47,7 @@ from . import (
     acoustic_vrr,
     acoustic_vrz,
     acoustic_vti_1st,
+    biot,
     elastic,
     elastic3d,
     elastic_apm,

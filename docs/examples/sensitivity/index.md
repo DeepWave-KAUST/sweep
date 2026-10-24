@@ -1,7 +1,8 @@
 # Sensitivity & resolution
 
-Radiation patterns of the scattering virtual sources: the angular sensitivity
-behind multiparameter trade-off.
+Radiation patterns of the scattering virtual sources and finite-frequency
+sensitivity kernels: the angular and spatial sensitivity behind multiparameter
+trade-off.
 
 <div class="grid cards" markdown>
 
@@ -31,5 +32,31 @@ behind multiparameter trade-off.
     scattered-wavefield snapshots. Cf. Operto Fig. 8(c,d) / Forgues & Lambaré.
 
     [:material-notebook-outline: Open notebook](../../notebooks/21_radiation_elastic.ipynb)
+
+-   ![Poroelastic traveltime kernels](../../figures/gallery/38_kernels_poroelastic.png){ loading=lazy }
+
+    **Sensitivity · Poroelastic kernels**
+
+    ---
+
+    Traveltime kernels of the fast P, slow P and S waves in a Biot rock, in the
+    primary, density-normalised and wave-speed parameterizations — by
+    `torch.autograd` through `Biot`, no adjoint code. Reproduces Morency et al.
+    (2009).
+
+    [:material-notebook-outline: Open notebook](../../notebooks/38_kernels_poroelastic.ipynb)
+
+-   ![Poroelastic radiation pattern](../../figures/gallery/39_radiation_poroelastic.png){ loading=lazy }
+
+    **Sensitivity · Poroelastic radiation**
+
+    ---
+
+    Fast-P → fast-P / S radiation patterns of nine rock properties in four
+    parameterizations: the first-order Born amplitude of the Biot equations
+    against `sweep`'s numerics, and why low-frequency scattering is elastic.
+    After Yang et al. (2019).
+
+    [:material-notebook-outline: Open notebook](../../notebooks/39_radiation_poroelastic.ipynb)
 
 </div>

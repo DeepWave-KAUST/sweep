@@ -48,9 +48,9 @@ linked at the bottom of this page.
     ---
 
     Elastic sources, DAS, topography, per-edge free surfaces, attenuation,
-    and solver settings.
+    poroelastic waves and solver settings.
 
-    [:octicons-arrow-right-24: 8 notebooks](wavefields/index.md)
+    [:octicons-arrow-right-24: 9 notebooks](wavefields/index.md)
 
 -   [![Anisotropic](../figures/gallery/27_wavefield_elastic_tti_3d.png){ loading=lazy }](anisotropic/index.md)
 
@@ -101,9 +101,10 @@ linked at the bottom of this page.
 
     ---
 
-    Radiation patterns of the scattering sources behind multiparameter trade-off.
+    Radiation patterns and sensitivity kernels behind multiparameter trade-off,
+    acoustic to poroelastic.
 
-    [:octicons-arrow-right-24: 2 notebooks](sensitivity/index.md)
+    [:octicons-arrow-right-24: 4 notebooks](sensitivity/index.md)
 
 </div>
 

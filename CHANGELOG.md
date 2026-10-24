@@ -43,6 +43,13 @@ and this project adheres to
   the `mp` gradient and refuses the background models' and the wavelet's.
   Example: `docs/notebooks/34_lsrtm_qp_vti_tti.ipynb` (RTM and LSRTM of a
   tilted anisotropic bed with the isotropic, VTI and TTI operators).
+- **`Biot`: 2-D low-frequency Biot poroelastic waves** (eager).  Solid
+  velocity, Darcy flux, total stress and pore pressure on the Virieux
+  staggered grid; the stiff viscous drag is integrated exactly, so any
+  permeability runs at the fast-P time step and the Darcy limit is exact.
+  Open-pore top free surface.  `biot_from_rock` builds the eight coefficients
+  from rock properties (differentiable).  Boundary saving is refused (the
+  drag is dissipative); gradients use checkpointing.
 
 ### Changed
 - **`Acoustic3D` and `AcousticVRZ3D` on `impl='c'` run 1.2-1.8x faster per
@@ -191,6 +198,14 @@ and this project adheres to
 - Notebook 33 re-run on the new kernels: on the 3-D acoustic case `c` is now
   1.9x faster than eager for a full-storage gradient and 2.5x for a
   boundary-saving one (was 1.2x and 1.6x).
+- Notebook 38: poroelastic traveltime kernels by autograd through `Biot`,
+  three parameterizations (Morency et al. 2009).
+- Notebook 39: poroelastic radiation patterns, Born analytic against `Biot`,
+  four parameterizations (after Yang et al. 2019).
+- Notebook 40: `Biot` wavefields -- fast P, slow P and S, four viscous regimes
+  against the analytic solution, Dai et al.'s two layers under an open-pore
+  free surface.
+- API page and equations-table row for `Biot`.
 
 ## [0.3.5] - 2026-10-05
 

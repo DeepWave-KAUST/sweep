@@ -56,6 +56,12 @@ is supported for every class.
 | `ElasticTTISG3D` | `['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']` | 3D | Standard-staggered-grid elastic TTI | ✅ |
 | `ElasticTTI2nd` | `['vh', 'vs', 'rho', 'epsilon', 'eta', 'theta']` | 2D | Displacement-based elastic TTI (Oh et al. 2020) | ✅ |
 
+### Poroelastic
+
+| Equation | Models | Dim | Notes | `impl="c"` |
+| --- | --- | --- | --- | --- |
+| `Biot` | `['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']` | 2D | Low-frequency Biot poroelasticity: solid velocity, Darcy flux, total stress and pore pressure; exact viscous drag, open-pore free surface; build the coefficients with `biot_from_rock`; eager only | ❌ |
+
 ### Distributed Acoustic Sensing (DAS) family
 
 All DAS classes take elastic models — `['vp', 'vs', 'rho']` — and read out
