@@ -10,6 +10,14 @@ and this project adheres to
 ## [Unreleased]
 
 ### Added
+- **`sweep.datasets` gains `chevron-fwi-2014`**, the SEG 2014 Chevron FWI
+  synthetic: 1600 shot gathers (321 receivers, 8 s at 4 ms, isotropic elastic,
+  marine, with free-surface multiples), the starting vp, the source wavelet
+  and a well log, with their geometry.  Chevron never released the true
+  model, so the entry returns `vp_init` and no `vp`; `fields=` and `shots=`
+  limit what is read.  The files come from the project's Hugging Face copy,
+  else from the bucket's original archive as the Internet Archive captured
+  it, all pinned by sha256.
 - **`AcousticVTI` / `AcousticTTI` on `impl='c'` (`qp_vti2d` / `qp_tti2d`).**
   The pure-qP equations of Liang et al. (2023, doi:10.1190/geo2022-0292.1,
   eqs 19-20 and A-7) get CUDA kernels for the forward, the full-storage

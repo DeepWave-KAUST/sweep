@@ -29,7 +29,9 @@ Implementation: `src/sweep/datasets/`.
     `wget https://zenodo.org/records/23469292/files/Overthrust_3D_CD1.tar.gz`.
     `hess-vti` has no public copy: it loads only from an existing cache, or
     from the original files placed at the cache path that the error message
-    names.
+    names. `chevron-fwi-2014` is on Hugging Face only (folder
+    `chevron_fwi_2014/`); without it, its files are extracted from the bucket's
+    original archive as the Internet Archive captured it (3.8 GB).
 
 ## Quick start
 
@@ -54,7 +56,8 @@ full = datasets.load("overthrust", "3d-acoustic")   # downloads on first call
 - **Model-specific** — `units` (`hess-vti`, demos), `presets` (embedded demos),
   `geometry` (a sources/receivers dict on `marmousi:2d-acoustic`).
 
-The minimum you can rely on for any model is `vp` and `dh`.
+The minimum you can rely on for any model is `vp` and `dh`. The one data
+set, `chevron-fwi-2014`, has no `vp` (see below).
 
 !!! note "`variant` is optional"
     With a single variant it is inferred (`load("bp-2004")`). A multi-variant
@@ -76,15 +79,48 @@ The minimum you can rely on for any model is `vp` and `dh`.
 | `bp-2004` | download | 1911×5395 | free + attribution |
 | `bp-2007-tti` | download | 1801×12596 @ 6.25 m | courtesy of BP |
 | `hess-vti` | download | 1500×3617 @ ~7.62 m | Hess "AS IS" |
+| `chevron-fwi-2014` | download (data) | 1600 shots; `vp_init` 1200×3820, dz 5 / dx 12.5 m | Chevron DLA |
 
 Multi-parameter models return every field: `marmousi2` → `vp`/`vs`/`rho`,
 `bp-2007-tti` → `vp`/`epsilon`/`delta`/`theta`, `hess-vti` → `vp`/`epsilon`/`delta`.
 Every download entry was byte-verified against a real fetch (grid shape, value
 range, and slice image confirmed).
 
+## The Chevron 2014 FWI data set
+
+`chevron-fwi-2014` is the synthetic Chevron distributed for the SEG 2014 FWI
+workshop: pressure shot gathers computed in a 2-D isotropic elastic marine
+model, with free-surface multiples. Chevron never released that model, so the
+entry returns what was distributed instead of `vp`:
+
+| key | content |
+|---|---|
+| `data` | `(nshots, 2001, 321)` float32 gathers, 4 ms, 8 s |
+| `vp_init` | smooth starting vp, `(1200, 3820)`, `dh = (5.0, 12.5)`, x from 0 m |
+| `wavelet`, `wavelet_dt` | far-field source wavelet without ghost, sampled at 1/1500 s |
+| `well_log` | `{"x": 39375.0, "depth": ..., "vp": ...}`, 1000–2450 m every 5 m |
+| `geometry` | `source_x` `(nshots,)`, `receiver_x` `(nshots, 321)` in metres, `source_depth` = `receiver_depth` = 15 m, `dt`, `nt` |
+
+Shot `i` is at x = 1000 + 25 i m with its receivers at offsets 0–8000 m on the
++x side, so the receivers of the last shots reach x = 48975 m, beyond the
+starting model (47737.5 m): extend the model before modelling those shots.
+The water velocity is 1510 m/s.
+
+```python
+d = datasets.load("chevron-fwi-2014")                       # 3.8 GB download, 4.1 GB of gathers
+d = datasets.load("chevron-fwi-2014", shots=slice(0, 1600, 100))   # 16 shots
+d = datasets.load("chevron-fwi-2014", fields=("vp_init", "wavelet"))  # 19 MB, no gathers
+```
+
+`fields` picks any of `vp_init`, `data`, `wavelet`, `well_log` (default all);
+the 3.8 GB file is fetched only when `data` is asked for. `shots` (0-based
+indices: int, sequence or slice) selects the gathers and the geometry. Each
+gather's trace headers are checked against this geometry when it is read.
+The entry takes no `downsample`.
+
 ## Downsampling
 
-Every download loader takes `downsample` — a single int (all axes) or a
+Every model download loader takes `downsample` — a single int (all axes) or a
 per-axis list/tuple. Multi-field models decimate all fields by the same factor.
 
 `load(...)` returns a `dict`; read the array from `["vp"]` (and `["vs"]` /
@@ -167,7 +203,9 @@ re-host with attribution. The BP 2004 and BP 2007 terms ("AS IS", free download
 with attribution) allow passing the files on only together with their original
 documentation and terms, which the project's Zenodo records and the Hugging Face
 copy include; loading these models prints a note saying so. `hess-vti` is not
-re-hosted.
+re-hosted. The Chevron Data License Agreement of `chevron-fwi-2014` has the
+same conditions and asks that publications using the data acknowledge Chevron;
+its Hugging Face folder carries the agreement and the original README.
 
 !!! warning "Intentionally not bundled"
     - **Sigsbee2A/2B** — gated behind a signed Data Release Agreement; original

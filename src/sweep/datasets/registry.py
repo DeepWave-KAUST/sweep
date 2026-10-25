@@ -22,8 +22,10 @@ class Entry:
     name, variant
         The ``(name, variant)`` key used to look the model up.
     loader
-        Callable returning a dict with at least ``vp`` and ``dh``. It may
-        download and cache data on first call.
+        Callable returning a dict with at least ``vp`` and ``dh`` (a data set
+        without a released model, such as ``chevron-fwi-2014``, returns
+        ``vp_init`` instead of ``vp``). It may download and cache data on
+        first call.
     kind
         ``"embedded"`` for in-wheel demo blobs (no network), ``"download"``
         for benchmarks fetched on demand, ``"gated"`` for entries that
@@ -155,8 +157,9 @@ def _announce(entry: Entry) -> None:
 def load(name: str, variant: str | None = None, **kwargs: Any) -> dict[str, Any]:
     """Load (and download if needed) a benchmark dataset.
 
-    Returns a dict with at least ``vp`` and ``dh``. Most entries also
-    provide ``dt``, ``nt``, ``geometry``, and ``vp_init``. The license and
+    Returns a dict with at least ``vp`` and ``dh`` (``vp_init`` instead of
+    ``vp`` for ``chevron-fwi-2014``, whose true model was never released).
+    Most entries also provide ``dt`` and ``nt``; some add ``geometry``. The license and
     citation are printed once per process on first load.
     """
     entry = info(name, variant)

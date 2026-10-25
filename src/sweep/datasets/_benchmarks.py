@@ -1,4 +1,4 @@
-"""Downloadable full-size benchmark velocity models.
+"""Downloadable full-size benchmark velocity models, and one synthetic data set.
 
 Every entry here fetches its files on first use and caches them under
 ``sweep.datasets._cache.cache_root()``. Each file is pinned by the sha256 of
@@ -15,7 +15,10 @@ one per model, listed first, and in a Hugging Face dataset holding the same
 files, listed second; the bucket stays last in every list in case it comes
 back. ``overthrust`` falls back to the HDF5 copy of the model on Zenodo.
 ``hess-vti`` lists only the bucket, so it loads from an existing cache or from
-the original files placed in the cache by hand.
+the original files placed in the cache by hand. ``chevron-fwi-2014`` (shot
+gathers, starting model, wavelet and well log; no true model) is re-hosted on
+Hugging Face only, and is otherwise extracted from the bucket's original
+archive as the Internet Archive captured it.
 
 Licensing summary (see CATALOG.md for the full audit):
 
@@ -24,6 +27,9 @@ Licensing summary (see CATALOG.md for the full audit):
 * ``bp-2004`` / ``bp-2007-tti`` / ``hess-vti`` — free download + attribution,
   "AS IS" terms; passed on only with their original documentation and terms,
   as the project's BP records do (``hess-vti`` is not re-hosted).
+* ``chevron-fwi-2014`` — Chevron Data License Agreement: "AS IS", passed on
+  only with all of its documentation (the Hugging Face folder carries it),
+  acknowledge Chevron.
 
 Not included:
 
@@ -39,7 +45,15 @@ value range, and slice image confirmed).
 
 from __future__ import annotations
 
+import io
+import os
+import posixpath
+import re
+import struct
+import tarfile
+import time
 import warnings
+from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
@@ -308,6 +322,204 @@ def _load_hess_vti(*, fields=("vp", "epsilon", "delta"), downsample: "int | Sequ
 
 
 # ======================================================================
+# SEG 2014 Chevron FWI synthetic — Chevron Data License Agreement ("AS IS";
+# pass on only with all original documentation; acknowledge Chevron).
+# A data benchmark, not a model: the velocity model behind the data was never
+# released, so the entry returns the starting model (``vp_init``), the shot
+# gathers, the source wavelet and a well log instead of ``vp``.
+# The bucket served one gzipped tar split in two parts; the project re-hosts
+# its members unchanged on Hugging Face only (no Zenodo record). If Hugging
+# Face does not serve a member, both parts are fetched from the Internet
+# Archive's 2022 captures of the bucket (the bucket itself last) and every
+# member is extracted from them.
+#   SEG14.Pisoelastic.segy(.gz): pressure, IBM float, 1600 shots x 321
+#     hydrophones x 2001 samples @ 4 ms, traces sorted by shot; shot i at
+#     x = 1000 + 25 i m, its receivers at x_shot + 25 j m (j = 0..320, end-on),
+#     source and receiver depth 15 m; free-surface multiples included.
+#   SEG14.Vpsmoothstarting.segy: 3820 traces x 1200 samples, dx 12.5 m from
+#     x = 0 (cdpx headers), dz 5 m (sample-interval field 5000): 6 km deep,
+#     47.74 km wide -- the receivers of the last shots lie beyond its x range.
+#   Wavelet.txt: one header line, then the far-field wavelet at 2/3 ms.
+#   SEG14.Vplog: "Depth = z  Vp = v" lines, 1000-2450 m at x = 39375 m.
+# ======================================================================
+_CHEVRON = "chevron_fwi_2014"
+_CHEVRON_URL = _HF + "chevron_fwi_2014/"
+_CHEVRON_SHA256 = {
+    "SEG14.Pisoelastic.segy.gz": "2de46c3951d2ed1ebfa0f980378a7ca399bb3cd46f9ab04acb75202f9b493aba",
+    "SEG14.Vpsmoothstarting.segy": "a5b2264d4c69e4adbd87276bc6db7d89c6272e48564c1805a5bb78af926bb7c5",
+    "SEG14.Vplog": "94b304301056e64b6e22df95f6af67ed51fc1808e97d4876733697ed8c5f9177",
+    "Wavelet.txt": "1886ddf466b79baa383b9c461c5d72da19b3cad2747d71de126815433e43b9de",
+    "WellWavePic.JPG": "2f2cd1b4f7d0a842e362aeb3ee0aba71454797c39e3feb94c2cd883882d41a9d",
+    "README": "6dfb5daa4239eb279d3ab0e24f34ccd88e925f6d5aa1e4822223d856f0c5c443",
+    "DataLicenseAgreement": "1493aace3c2275c46ef7c001292cd1d0047dbe416ed7ac877238e189116148b7",
+}
+_CHEVRON_BUCKET = "http://s3.amazonaws.com/open.source.geoscience/open_data/seg_workshop_fwi_2014/"
+_CHEVRON_PARTS = (  # (name, Internet Archive capture, sha256)
+    ("seg_workshop_fwi_2014.tar.gz.partaa", "20220726215534",
+     "37b87f5a655051688f8c5f804dc5019efe0d107c0fe84927b1464cffc531e9c8"),
+    ("seg_workshop_fwi_2014.tar.gz.partab", "20220726220348",
+     "0510c6b74447536e21e56e0e4999fd311285da54fe70e71ea3187506ec68d81f"),
+)
+_CHEVRON_NSHOT, _CHEVRON_NREC, _CHEVRON_NT = 1600, 321, 2001
+_CHEVRON_DT = 0.004
+_CHEVRON_VP_SHAPE = (1200, 3820)  # (nz, nx)
+_CHEVRON_DH = (5.0, 12.5)
+_CHEVRON_FIELDS = ("vp_init", "data", "wavelet", "well_log")
+
+
+class _Concat(io.RawIOBase):
+    """Read several files as one stream (the parts of a split archive)."""
+
+    def __init__(self, paths):
+        self._files = [open(p, "rb") for p in paths]
+        self._i = 0
+
+    def readable(self):
+        return True
+
+    def readinto(self, b):
+        while self._i < len(self._files):
+            n = self._files[self._i].readinto(b)
+            if n:
+                return n
+            self._i += 1
+        return 0
+
+    def close(self):
+        for f in self._files:
+            f.close()
+        super().close()
+
+
+_CHEVRON_ATTEMPTS, _CHEVRON_RETRY_WAIT = 3, 30.0  # the Internet Archive often times out or answers 404 for a while
+
+
+def _chevron_part(name: str, ts: str, sha: str) -> Path:
+    urls = (f"https://web.archive.org/web/{ts}id_/{_CHEVRON_BUCKET}{name}",
+            _CHEVRON_BUCKET.replace("http://", "https://") + name)
+    for attempt in range(1, _CHEVRON_ATTEMPTS + 1):
+        try:
+            return _cache.download(urls, _cache.cache_path(_CHEVRON, name), sha256=sha)
+        except OSError:
+            if attempt == _CHEVRON_ATTEMPTS:
+                raise
+            time.sleep(_CHEVRON_RETRY_WAIT)
+
+
+def _chevron_unpack_archive() -> None:
+    """Fetch the two parts of the original archive and extract every member, checksum-verified."""
+    parts = [_chevron_part(*p) for p in _CHEVRON_PARTS]
+    done = set()
+    with io.BufferedReader(_Concat(parts), 1 << 22) as stream, tarfile.open(fileobj=stream, mode="r|gz") as tf:
+        for m in tf:
+            name = posixpath.basename(m.name)
+            if not m.isfile() or name not in _CHEVRON_SHA256:
+                continue
+            dest = _cache.cache_path(_CHEVRON, name)
+            tmp = dest.with_name(f"{name}.{os.getpid()}.part")
+            with tf.extractfile(m) as fin, open(tmp, "wb") as fout:
+                for chunk in iter(lambda: fin.read(1 << 22), b""):
+                    fout.write(chunk)
+            bad = _cache.checksum_error(tmp, sha256=_CHEVRON_SHA256[name])
+            if bad is not None:
+                tmp.unlink()
+                raise OSError(f"{name} in the archive does not match: {bad}")
+            os.replace(tmp, dest)
+            done.add(name)
+    missing = sorted(set(_CHEVRON_SHA256) - done)
+    if missing:
+        raise OSError(f"the archive lacks {missing}")
+    for p in parts:  # every member is cached and verified; the parts are not needed again
+        p.unlink()
+
+
+def _chevron_file(name: str) -> Path:
+    try:
+        return _cache.download((_CHEVRON_URL + name,), _cache.cache_path(_CHEVRON, name),
+                               sha256=_CHEVRON_SHA256[name])
+    except OSError as e:
+        warnings.warn(f"{e}\nExtracting it from the original archive instead (two parts, 3.8 GB, "
+                      "from the Internet Archive).")
+    _chevron_unpack_archive()
+    return _cache.cache_path(_CHEVRON, name)
+
+
+def _chevron_geometry(shots: np.ndarray) -> dict[str, Any]:
+    sx = 1000.0 + 25.0 * shots.astype(np.float64)
+    return {
+        "source_x": sx,
+        "receiver_x": sx[:, None] + 25.0 * np.arange(_CHEVRON_NREC, dtype=np.float64),
+        "source_depth": 15.0,
+        "receiver_depth": 15.0,
+        "dt": _CHEVRON_DT,
+        "nt": _CHEVRON_NT,
+    }
+
+
+def _scaled(v: np.ndarray, scalar: np.ndarray) -> np.ndarray:
+    """Apply a SEG-Y coordinate scalar (negative: divide by its magnitude)."""
+    s = scalar.astype(np.float64)
+    s[s == 0] = 1.0
+    v = v.astype(np.float64)
+    return np.where(s > 0, v * s, v / -s)
+
+
+def _read_chevron_shots(segy: Path, shots: np.ndarray) -> np.ndarray:
+    """``(len(shots), nt, nrec)`` float32 pressure; checks each shot's headers against the documented geometry."""
+    nshot, nrec, nt = _CHEVRON_NSHOT, _CHEVRON_NREC, _CHEVRON_NT
+    with open(segy, "rb") as f:
+        f.seek(3200)
+        binhdr = f.read(400)
+    dt_us, ns, fmt = (struct.unpack(">h", binhdr[o:o + 2])[0] for o in (16, 20, 24))
+    tb = 240 + 4 * nt
+    if (fmt, ns, dt_us) != (1, nt, round(_CHEVRON_DT * 1e6)) or os.path.getsize(segy) != 3600 + nshot * nrec * tb:
+        raise ValueError(f"{segy.name}: format {fmt}, {ns} samples at {dt_us} us, {os.path.getsize(segy)} bytes; "
+                         f"expected IBM float, {nt} samples at {round(_CHEVRON_DT * 1e6)} us, "
+                         f"{3600 + nshot * nrec * tb} bytes")
+    raw = np.memmap(segy, dtype=np.uint8, mode="r", offset=3600, shape=(nshot, nrec, tb))
+    geom = _chevron_geometry(shots)
+    out = np.empty((len(shots), nt, nrec), dtype=np.float32)
+    for k, i in enumerate(shots):
+        blk = np.ascontiguousarray(raw[i])
+        h = blk[:, :240]
+        word = lambda a, b, t: np.ascontiguousarray(h[:, a:b]).view(t).ravel()  # noqa: E731
+        scalco = word(70, 72, ">i2")
+        sx, gx = _scaled(word(72, 76, ">i4"), scalco), _scaled(word(80, 84, ">i4"), scalco)
+        if not ((word(8, 12, ">i4") == i + 1).all() and (sx == geom["source_x"][k]).all()
+                and (gx == geom["receiver_x"][k]).all()):
+            raise ValueError(f"{segy.name}: trace headers of shot {i} do not match the documented geometry")
+        out[k] = _formats._segy_decode(blk[:, 240:], 1, nt).T
+    del raw
+    return out
+
+
+def _load_chevron_fwi_2014(*, fields: Sequence[str] = _CHEVRON_FIELDS, shots=None) -> dict[str, Any]:
+    """``shots``: 0-based shot indices (int, sequence or slice) of the gathers and geometry; default all 1600."""
+    unknown = sorted(set(fields) - set(_CHEVRON_FIELDS))
+    if unknown:
+        raise ValueError(f"unknown fields {unknown}; choose from {list(_CHEVRON_FIELDS)}")
+    idx = np.arange(_CHEVRON_NSHOT)
+    if shots is not None:
+        idx = idx[shots] if isinstance(shots, slice) else idx[np.atleast_1d(np.asarray(shots, dtype=np.int64))]
+    out: dict[str, Any] = {"dh": _CHEVRON_DH, "dt": _CHEVRON_DT, "nt": _CHEVRON_NT,
+                           "geometry": _chevron_geometry(idx)}
+    if "vp_init" in fields:
+        out["vp_init"] = _formats.read_model(_chevron_file("SEG14.Vpsmoothstarting.segy"), shape=_CHEVRON_VP_SHAPE)
+    if "data" in fields:
+        gz = _chevron_file("SEG14.Pisoelastic.segy.gz")
+        out["data"] = _read_chevron_shots(_formats.gunzip(gz), idx)
+    if "wavelet" in fields:
+        lines = _chevron_file("Wavelet.txt").read_text().split("\n")[1:]
+        out["wavelet"] = np.array([float(v) for v in lines if v.strip()], dtype=np.float32)
+        out["wavelet_dt"] = 1.0 / 1500.0  # "Sample Rate = 0.666666... milliseconds"
+    if "well_log" in fields:
+        rows = re.findall(r"Depth\s*=\s*([-\d.]+)\s+Vp\s*=\s*([-\d.]+)", _chevron_file("SEG14.Vplog").read_text())
+        log = np.array(rows, dtype=np.float64)
+        out["well_log"] = {"x": 39375.0, "depth": log[:, 0], "vp": log[:, 1].astype(np.float32)}
+    return out
+
+
+# ======================================================================
 # Registration
 # ======================================================================
 def _register_all() -> None:
@@ -359,6 +571,15 @@ def _register_all() -> None:
         citation="Hess Corporation, SEG/Hess VTI benchmark (distributed via SEG)",
         license="Free download + attribution; Hess AS IS terms.",
         kind="download", redistributable=False, tags=["2d", "vti", "anisotropic"],
+    ))
+    register(Entry(
+        name="chevron-fwi-2014", variant="2d-elastic-data", loader=_load_chevron_fwi_2014,
+        description="SEG 2014 Chevron FWI synthetic: 1600 shots x 321 receivers x 8 s (isotropic elastic, "
+                    "marine, free-surface multiples), starting vp (1200x3820, dz 5 dx 12.5), wavelet, well log. "
+                    "The true model was never released.",
+        citation="Chevron (2014), SEG 2014 FWI workshop 2-D isotropic elastic marine synthetic; acknowledge Chevron",
+        license="Chevron Data License Agreement: AS IS; pass on only with all its documentation; acknowledge Chevron.",
+        kind="download", redistributable=False, tags=["2d", "elastic", "marine", "data"],
     ))
 
 

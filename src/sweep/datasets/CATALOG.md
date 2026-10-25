@@ -47,7 +47,12 @@ bucket stays last:
 `overthrust:3d-acoustic` falls back to the HDF5 copy of the model
 (doi:10.5281/zenodo.4252588) if no source serves the CD. `hess-vti` lists only
 the bucket: it loads from an existing cache, or from the original files placed
-at the path the error message names.
+at the path the error message names. `chevron-fwi-2014` has no Zenodo record:
+its files (the members of the bucket's two-part `seg_workshop_fwi_2014.tar.gz`,
+unchanged) come from the Hugging Face folder `chevron_fwi_2014/`, else from
+both parts as the Internet Archive captured them on 2022-07-26 (each reproduces
+the S3 ETag the bucket reported), the bucket last; every member is extracted
+and checked.
 
 ## CLI
 
@@ -73,6 +78,7 @@ sweep datasets where                    # print the cache directory
 | `bp-2004` | `2d-acoustic` | download | 1911×5395, dz6.25/dx12.5 | 1429–4790 | free+attr, AS-IS | ➖ | ✅ |
 | `bp-2007-tti` | `2d-tti` | download | 1801×12596 @ 6.25 m (vp/ε/δ/θ) | 1492–4554 | free+attr, courtesy BP | ➖ | ✅ |
 | `hess-vti` | `2d-vti` | download | 1500×3617 @ ~7.62 m (vp/ε/δ) | 1524–4511¹ | free+attr, Hess AS-IS | ➖ | ✅¹ |
+| `chevron-fwi-2014` | `2d-elastic-data` | download | data 1600×2001×321 @ 4 ms; vp_init 1200×3820, dz5/dx12.5² | — (no true model) | Chevron DLA, AS-IS | ➖ | ✅ |
 
 **re-host?** ✅ = CC-BY-4.0: anyone may re-host the files, with attribution;
 ➖ = the files may be passed on only with their original documentation and terms
@@ -84,6 +90,12 @@ shape, physical value range, and slice image confirmed for every entry.
 ¹ **hess-vti**: the SEG-Y ships vp in **ft/s** (5000–14800) and the grid in
 feet; the loader converts vp→m/s (×0.3048) and uses dh≈7.62 m (25 ft, the
 widely-used value — confirm against your reference if dh matters).
+
+² **chevron-fwi-2014** is a data set: `data`, `vp_init`, `wavelet`,
+`well_log`, `geometry`, no `vp` (Chevron never released the model). Verified
+2026-10: all 513 600 traces read (IBM float, 2001 samples at 4 ms, shot `i` at
+x = 1000 + 25 i m, receivers at offsets 0–8000 m on the +x side, depth 15 m,
+coordinate scalar −10000); starting model x = 0–47 737.5 m (cdpx), dz = 5 m.
 
 Verification notes (resolved 2026-07-06):
 - **overthrust 3d**: official SEG/EAGE 3-D Modeling Series CD (CD1 →
@@ -134,7 +146,7 @@ Loaders return a dict with at least `vp` and `dh`; most add `dt`, `nt`,
 
 ## Downsampling
 
-Every download loader takes `downsample`, either a single int (applied to all
+Every model download loader (not `chevron-fwi-2014`) takes `downsample`, either a single int (applied to all
 axes) or a per-axis list/tuple; `dh` is scaled per axis to match. Multi-field
 models (marmousi2, bp-2007-tti, hess-vti) decimate every field by the same
 factor. Factors must be `>= 1` and the sequence length must equal the model
