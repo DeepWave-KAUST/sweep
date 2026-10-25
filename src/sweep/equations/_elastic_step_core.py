@@ -1,31 +1,15 @@
-"""Shared FD core for 2-D first-order velocity-stress elastic equations.
+"""FD core for the 2-D first-order velocity-stress elastic step.
 
 The Virieux (1986) staggered-grid stencil + CPML accumulation + leapfrog
-state update is identical between
+state update of :mod:`sweep.equations.elastic`, factored out so the eager
+step and the boundary-saving sub-steps share it.  Callers are responsible for
+**all post-step boundary-condition enforcement** (image-method top-row
+zeroing).
 
-* :mod:`sweep.equations.elastic`     — bulk moduli, image-method FS,
-* :mod:`sweep.equations.elastic_apm` — APM-modified moduli, no image FS,
-
-so we factor it out here.  Callers are responsible for **all post-step
-boundary-condition enforcement** (image-method top-row zeroing, APM
-traction zeroing, AIR-cell wavefield zeroing).
-
-The function takes "effective" constitutive arrays so both call sites can
-share one signature:
-
-================== ==========================================
-For ``Elastic``    For ``ElasticAPM``
-================== ==========================================
-rho_x = rho        rho_x = rho_x_eff      (½ ρ at H/VL/VR…)
-rho_z = rho        rho_z = rho_z_eff
-lame_lambda        lame_lambda_eff        (0 at H, …)
-lame_mu            lame_mu_eff            (α/2 at H, …)
-mu_xz = lame_mu    mu_xz = mu_xz_node     (harmonic at σ_xz node)
-================== ==========================================
-
-For ``Elastic`` the caller simply aliases ``rho_x = rho_z = rho`` and
-``mu_xz = lame_mu`` — these are zero-copy tensor reference assignments,
-no extra memory.
+The function takes the staggered constitutive arrays separately --
+``rho_x``, ``rho_z`` and ``mu_xz`` next to ``lame_lambda`` / ``lame_mu`` --
+and ``Elastic`` aliases ``rho_x = rho_z = rho`` and ``mu_xz = lame_mu``:
+zero-copy tensor reference assignments, no extra memory.
 """
 
 from __future__ import annotations

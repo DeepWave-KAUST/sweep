@@ -14,7 +14,6 @@
 //     (2-D relies on Python-zeroed buffers);
 //   * the reconstruction bind requires the 12-tensor list (9 fields + 3
 //     carriers).
-// The APM entry points stay hand-written in forward.cu/backward.cu.
 // Hook timing: see the HOOK TIMING MAP at the top of ../../common/sg_driver.cuh.
 #pragma once
 

@@ -79,7 +79,13 @@ class CurvilinearGrid:
     Parameters
     ----------
     topography : array_like or None
-        Integer row index of the surface per column, length ``nx_phys``.
+        Surface position per column, in grid rows, length ``nx_phys``.
+        **May be fractional**: a boundary-fitted grid has no reason to snap
+        the surface to grid rows, and snapping it is actively harmful --
+        an integer surface is a staircase, and a staircase forces
+        grid-scale energy into the free surface at every step.  Integer
+        input is still accepted (and then smoothed, see below) for
+        backwards compatibility with the image-method topography API.
         ``None`` → flat surface at row 0 (identity transform).
     nz_phys, nx_phys : int
         Physical-grid size.
@@ -110,16 +116,27 @@ class CurvilinearGrid:
         import torch
 
         if topography is None:
-            topo = np.zeros(nx_phys, dtype=np.int64)
+            topo = np.zeros(nx_phys, dtype=np.float64)
         else:
-            topo = np.asarray(topography, dtype=np.int64).reshape(-1)
+            topo = np.asarray(topography, dtype=np.float64).reshape(-1)
             if topo.shape[0] != nx_phys:
                 raise ValueError(
                     f"topography length {topo.shape[0]} != nx_phys ({nx_phys})"
                 )
 
-        # Surface elevation in physical units (m)
-        h = topo.astype(np.float32) * float(dh)               # (nx,)
+        # Surface elevation in physical units (m).  An integer-row surface
+        # is a staircase; smooth it here so that the mapping *and* its
+        # metric describe the same surface.  (The old code smoothed only
+        # the slope, which left the grid stepped while the metric claimed
+        # it was smooth -- that mismatch is a per-step forcing of
+        # grid-scale energy right at the free surface.)  A fractional
+        # surface is taken as given: the caller already supplied a smooth
+        # one.
+        is_stepped = bool(np.allclose(topo, np.round(topo)))
+        h = topo * float(dh)                                   # (nx,)
+        if is_stepped and nx_phys > 1:
+            h = _gaussian_smooth_1d(h.astype(np.float32), sigma=4.0
+                                    ).astype(np.float64)
         z_bottom = float(nz_phys - 1) * float(dh)
         D = z_bottom - h                                       # (nx,)
         if (D <= 0).any():
@@ -129,14 +146,9 @@ class CurvilinearGrid:
                 f"[{int(topo.min())}, {int(topo.max())}] with nz_phys={nz_phys}"
             )
 
-        # First derivative of the surface in X. Integer-row topography
-        # produces a saw-tooth ``h(ξ)`` whose raw central difference is
-        # noisy; smooth ``h`` with a short Gaussian before differencing
-        # so the metric ``α`` is well-behaved. A 4-cell stddev keeps the
-        # large-scale shape (topo features span tens of cells) while
-        # killing the per-cell quantisation jitter.
-        h_smooth = _gaussian_smooth_1d(h, sigma=4.0)
-        h_prime = np.gradient(h_smooth, dh)                     # (nx,)
+        # First derivative of the surface in X, taken from the very same
+        # ``h`` the mapping uses, so grid and metric always agree.
+        h_prime = np.gradient(h, dh)                            # (nx,)
 
         # η grid on the computational domain
         eta_1d = np.linspace(0.0, 1.0, nz_phys, dtype=np.float32)
@@ -168,7 +180,11 @@ class CurvilinearGrid:
         # 1D surface-slope h'(ξ) for the elastic rotated free-surface BC
         # ``σ_xz = h' σ_xx, σ_zz = h'² σ_xx`` on a curved surface.
         self.h_prime = _t(h_prime)
-        self.topo_rows = torch.from_numpy(topo).to(device).long()
+        # Surface actually used by the mapping (rows / metres); ``topo_rows``
+        # keeps the legacy integer form for display and cropping.
+        self.h_surface = _t(h)
+        self.topo_rows = torch.from_numpy(
+            np.round(h / float(dh)).astype(np.int64)).to(device).long()
         self.d_eta = float(d_eta)
         self.dh = float(dh)
         self.nz_phys = int(nz_phys)
@@ -212,24 +228,77 @@ class CurvilinearGrid:
             "h_prime": h_prime_runtime,
         }
 
-    def physical_to_computational(self, x_phys, z_phys):
-        """Map a physical (x_phys, z_phys) point — both in grid-index units
-        — to its computational (ξ, η) cell-index location.
+    def row_spacing(self, x_phys=None):
+        """Physical vertical spacing (metres) of the boundary-fitted grid.
 
-        Returns ``(i_xi, i_eta)`` as Python floats (the caller can round
-        for use as source/receiver placement). The ξ index is identical
-        to ``x_phys``; the η index is ``(z_phys − topo[ix]) /
-        (nz_phys − 1 − topo[ix]) · (nz_phys − 1)``.
+        **This is not** ``dh``.  The mapping spreads ``eta`` over the whole
+        ``nz_phys - 1`` computational rows while the physical column below
+        the surface is only ``nz_phys - 1 - topo[ix]`` rows deep, so one
+        computational row spans ``D(x) / (nz_phys - 1)`` metres, and with
+        topography that varies **column by column**.  Assuming ``dh`` here
+        is the single easiest way to place a source at the wrong depth:
+        with ``nz_phys=192``, ``topo=24``, ``dh=5`` the spacing is 4.372 m,
+        12.6 % short, and the crest of a 50 m hill gives 4.634 m.
         """
-        import torch
+        import numpy as np
 
-        ix = int(round(float(x_phys)))
-        ix = max(0, min(ix, self.nx_phys - 1))
-        s = int(self.topo_rows[ix].item())
-        denom = self.nz_phys - 1 - s
-        if denom <= 0:
-            raise ValueError(f"column {ix} has no physical depth below the surface")
-        eta_norm = (float(z_phys) - s) / denom
-        eta_norm = max(0.0, min(1.0, eta_norm))
+        # the surface the MAPPING uses, in ROWS.  ``h_surface`` is stored in
+        # metres and ``topo_rows`` is its rounded integer shadow -- neither
+        # is directly usable here.
+        topo = np.asarray(self.h_surface.detach().cpu(),
+                          dtype=np.float64) / float(self.dh)
+        d = ((self.nz_phys - 1) - topo) * float(self.dh) / (self.nz_phys - 1)
+        if x_phys is None:
+            return d
+        ix = np.clip(np.round(np.asarray(x_phys)).astype(int), 0, self.nx_phys - 1)
+        return d[ix]
+
+    def physical_to_computational(self, x_phys, z_phys):
+        """Map physical ``(x_phys, z_phys)`` grid-index coordinates to the
+        computational ``(xi, eta)`` cell-index location.
+
+        Accepts scalars or arrays and broadcasts them together.  The xi
+        index is identical to ``x_phys``; the eta index is
+        ``(z_phys - topo[ix]) / (nz_phys - 1 - topo[ix]) * (nz_phys - 1)``
+        and comes back **fractional**; :meth:`row_spacing` gives what a
+        computational row is in metres.
+
+        The propagator applies it to sources and receivers itself (they are
+        physical indices; ``PropBase._place_on_curvilinear``), so this is for
+        looking at where a position lands: ``k`` computational rows below
+        the surface are ``k * D(x)/(nz_phys - 1)`` metres, not ``k * dh``.
+        """
+        import numpy as np
+
+        ix = np.clip(np.round(np.asarray(x_phys, dtype=np.float64)).astype(int),
+                     0, self.nx_phys - 1)
+        # the surface the MAPPING uses, in ROWS.  ``h_surface`` is stored in
+        # metres and ``topo_rows`` is its rounded integer shadow -- neither
+        # is directly usable here.
+        topo = np.asarray(self.h_surface.detach().cpu(),
+                          dtype=np.float64) / float(self.dh)
+        s = topo[ix]
+        denom = (self.nz_phys - 1) - s
+        if np.any(denom <= 0):
+            raise ValueError("some column has no physical depth below the surface")
+        eta_norm = np.clip((np.asarray(z_phys, dtype=np.float64) - s)/denom, 0.0, 1.0)
         i_eta = eta_norm * (self.nz_phys - 1)
-        return float(ix), float(i_eta)
+        if np.isscalar(x_phys) and np.isscalar(z_phys):
+            return float(ix), float(i_eta)
+        return ix.astype(np.float64), i_eta
+
+    def computational_to_physical(self, x_phys, i_eta):
+        """Inverse of :meth:`physical_to_computational` — the physical row
+        a computational eta index actually lands on."""
+        import numpy as np
+
+        ix = np.clip(np.round(np.asarray(x_phys, dtype=np.float64)).astype(int),
+                     0, self.nx_phys - 1)
+        # the surface the MAPPING uses, in ROWS.  ``h_surface`` is stored in
+        # metres and ``topo_rows`` is its rounded integer shadow -- neither
+        # is directly usable here.
+        topo = np.asarray(self.h_surface.detach().cpu(),
+                          dtype=np.float64) / float(self.dh)
+        s = topo[ix]
+        return s + np.asarray(i_eta, dtype=np.float64)/(self.nz_phys - 1) * \
+            ((self.nz_phys - 1) - s)

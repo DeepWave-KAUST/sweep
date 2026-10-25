@@ -1,7 +1,7 @@
 """3-D topography Python eager consistency suite.
 
 Covers ``acoustic3d`` and ``elastic3d`` with irregular free-surface
-topography (image method only — APM 3-D pending Dong 2023 implementation).
+topography (image method).
 Since the CUDA 3-D topo backend is not yet implemented, this suite
 validates the Python eager path by three orthogonal checks per case:
 
@@ -92,7 +92,6 @@ def _ridge(ny: int, nx: int) -> np.ndarray:
 SOLVERS = {
     "acoustic3d_topo":      TopoSolver("acoustic3d_topo",     Acoustic3D, False, "image"),
     "elastic3d_topo":       TopoSolver("elastic3d_topo",      Elastic,    True,  "image"),
-    "elastic3d_topo_apm":   TopoSolver("elastic3d_topo_apm",  Elastic,    True,  "apm"),
 }
 
 SCENARIOS = {
@@ -101,7 +100,7 @@ SCENARIOS = {
     "ridge":        TopoScenario("ridge",        _ridge),
 }
 
-DEFAULT_SOLVERS = "acoustic3d_topo,elastic3d_topo,elastic3d_topo_apm"
+DEFAULT_SOLVERS = "acoustic3d_topo,elastic3d_topo"
 DEFAULT_SCENARIOS = "flat,gentle_hill,ridge"
 
 
@@ -276,10 +275,6 @@ def build_parser():
     p.add_argument("--src-depth", type=int, default=2)
     p.add_argument("--rel-flat-threshold", type=float, default=1e-5,
                    help="flat-topo IMAGE record must match flat FS within this rel-L2")
-    p.add_argument("--rel-flat-apm-threshold", type=float, default=5e-2,
-                   help="flat-topo APM record must match flat-FS image record "
-                        "within this rel-L2 (APM is a different discretisation "
-                        "from image; ~few percent on coarse grids is expected)")
     p.add_argument("--no-fail", action="store_true")
     return p
 
@@ -358,34 +353,23 @@ def main():
                 continue
 
             # ---- Check 1: flat-topo equivalence ----
-            # IMAGE: with topo_rows == 0 the surface row is the physical
-            # top, identical to flat ``free_surface=True`` (no topo) — must
-            # match bit-exact.
-            # APM:   topo_rows == 0 means there are NO air cells (mask
-            # all-False) so the simulation reduces to a no-FS, full-PML
-            # bulk medium, which is fundamentally different from the image
-            # flat-FS reference.  Skip this check for APM and verify the
-            # APM free-surface path with the non-flat scenarios below
-            # (which DO have air cells and exercise H/V*/OC/IC).
+            # With topo_rows == 0 the surface row is the physical top,
+            # identical to flat ``free_surface=True`` (no topo) — must match
+            # bit-exact.
             if ck == "flat":
-                if solver.topo_method == "apm":
+                try:
+                    rec = run_forward(solver, prop, wavelet_t, sources, receivers,
+                                      true_models, device)
+                    rel = rel_l2(flat_record, rec)
+                    ok = rel < args.rel_flat_threshold
+                    msg = f"rel_l2={rel:.3e} (vs flat FS)"
                     print(f"{sk:24s} {ck:14s} {'flat_equivalence':22s} "
-                          f"SKIP (APM with all-zero topo has no air cells; "
-                          f"non-flat scenarios exercise the APM free surface)")
-                else:
-                    try:
-                        rec = run_forward(solver, prop, wavelet_t, sources, receivers,
-                                          true_models, device)
-                        rel = rel_l2(flat_record, rec)
-                        ok = rel < args.rel_flat_threshold
-                        msg = f"rel_l2={rel:.3e} (vs flat FS)"
-                        print(f"{sk:24s} {ck:14s} {'flat_equivalence':22s} "
-                              f"{'OK' if ok else 'FAIL'}  {msg}")
-                        if not ok:
-                            n_fail += 1
-                    except Exception as exc:
-                        print(f"{sk:24s} {ck:14s} {'flat_equivalence':22s} ERROR: {exc}")
+                          f"{'OK' if ok else 'FAIL'}  {msg}")
+                    if not ok:
                         n_fail += 1
+                except Exception as exc:
+                    print(f"{sk:24s} {ck:14s} {'flat_equivalence':22s} ERROR: {exc}")
+                    n_fail += 1
 
             # ---- Check 2: air cells zeroed in forward record (sanity that
             # the receiver placement above surface returns 0).

@@ -18,10 +18,10 @@ def cosine(a, b):
     return (a @ b / (a.norm() * b.norm() + 1e-30)).item()
 
 
-def build(device, nz=48, nx=56, abcn=30, M=2, dt=0.0015, dh=10.0, nt=120):
+def build(device, nz=48, nx=56, abcn=30, M=2, dt=0.0015, dh=10.0, nt=120, **kw):
     eq = Acoustic(spatial_order=2 * M, device=device, backend="torch")
     prop = PropTorch(eq, shape=(nz, nx), abcn=abcn, dh=dh, dt=dt, nt=nt,
-                     dev=device, impl="eager", use_compile=False, use_ckpt=False)
+                     dev=device, impl="eager", use_compile=False, use_ckpt=False, **kw)
     return eq, prop
 
 
@@ -85,6 +85,28 @@ def main():
     print(f"    image['vp'] shape={tuple(images['vp'].shape)} "
           f"norm={images['vp'].norm().item():.4e}")
     print(f"    vp.grad is None (untouched): {vp.grad is None}")
+
+
+def test_gradient_mode_under_a_free_surface_is_cropped_like_autograd():
+    """A free surface has no pad on top, so the runtime pads are not centred:
+    the registered gradient is cropped per face, as EdgePadding crops the
+    autograd one (a centred crop put it half the bottom pad too deep)."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    nt = 120
+    vp_np = np.full((48, 56), 2000.0, dtype=np.float32)
+    vp_np[16:, :] += 200.0
+    wavelet = torch.as_tensor(ricker(nt, 0.0015, 10.0, 0.06), device=device)
+    sources = torch.as_tensor([[[28, 2]]], device=device)
+    receivers = torch.as_tensor([[[rx, 2] for rx in range(0, 56, 4)]], device=device)
+    grads = []
+    for custom in (False, True):
+        eq, prop = build(device, free_surface=True)
+        if custom:
+            prop.register_gradient("vp", standard_imaging(eq), mode="gradient")
+        vp = torch.as_tensor(vp_np, device=device).requires_grad_(True)
+        (0.5 * prop(wavelet, sources, receivers, models=[vp]).pow(2).sum()).backward()
+        grads.append(vp.grad.detach())
+    assert cosine(*grads) > 0.99, cosine(*grads)
 
 
 if __name__ == "__main__":

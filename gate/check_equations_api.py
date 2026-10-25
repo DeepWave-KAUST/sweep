@@ -8,7 +8,8 @@ surface exactly:
 * ``dir(sweep.equations)`` -- every public name, including the author-named and
   ``*Default*`` aliases and the submodule names that ``from . import x`` binds;
 * ``_equation_classes()`` -- name -> class, same class object per name (so
-  ``ElasticAPM is Elastic`` and ``Elastic3D is not Elastic`` stay true);
+  ``AcousticVTILiang is AcousticVTI`` and ``Elastic3D is not Elastic`` stay
+  true);
 * ``torch_binding_supported_equations()`` -- exactly the same 24 names. This one
   is subtle: it is ``callable(cls._C)``, so moving ``_C`` onto the base class
   unconditionally would silently promote every equation into the set.
@@ -65,7 +66,6 @@ def main() -> int:
 
     # Identity relations that a name->class map alone does not pin down.
     ident = [
-        ("ElasticAPM", "Elastic", True),
         ("Elastic3D", "Elastic", False),
         ("AcousticVTILiang", "AcousticVTI", True),
         ("AcousticTTIAlkhalifah", "AcousticTariq", True),

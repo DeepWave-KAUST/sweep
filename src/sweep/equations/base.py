@@ -42,7 +42,6 @@ class WaveEquation:
     # whose guard on it is a plain attribute access: on an instance without
     # the attribute it raises, once another instance has compiled the step.
     _topo_rows_runtime = None
-    _apm_air_mask_runtime = None
 
     # Default PML formulation when the propagator is not given one explicitly.
     # Subclasses with stricter requirements (e.g. ElasticTTISG → 'cpmls') override this.
@@ -73,14 +72,6 @@ class WaveEquation:
     # the PML, so the boundary shell -- and the storage noise it carries -- is
     # never read by the gradient of a physical cell.
     BOUNDARY_BUFFER_REACH = 0
-
-    # Whether this equation has a parameter-modified (APM, Cao & Chen 2018)
-    # path for irregular free-surface topography.  When True, the propagator's
-    # ``topography=`` accepts a 2-D air_mask + ``free_surface=False`` and
-    # routes through the equation's APM dispatch.  Defaults to False;
-    # subclasses with an APM implementation (currently :class:`Elastic`)
-    # override.
-    supports_apm = False
 
     # Whether this equation supports a free surface AT ALL.  The isotropic
     # image method (odd mirror of the normal stresses about the surface) does

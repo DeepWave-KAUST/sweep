@@ -7,8 +7,6 @@ free-surface topography paths added to the CUDA backend:
 * **Acoustic** image / vacuum-staircase (Mittet 2002) — forward + backward
 * **Elastic** image method (Robertsson 1996, ``topo_method='image'``) —
   forward + backward
-* **Elastic APM** (Cao & Chen 2018, ``topo_method='apm'``) — forward only
-  (CUDA backward is a stub; gradients flow through eager autograd).
 
 For each (solver × topo scenario × memory mode) the suite runs both eager
 and CUDA propagators, computes gradients via autograd, and reports cosine
@@ -69,8 +67,7 @@ class TopoSolver:
     key: str
     equation_cls: type
     elastic: bool
-    topo_method: str        # 'image' or 'apm'
-    forward_only: bool      # True for APM (CUDA backward is a stub)
+    topo_method: str        # 'image'
 
 
 @dataclass(frozen=True)
@@ -104,13 +101,10 @@ def _stairs(nx: int) -> np.ndarray:
 
 SOLVERS = {
     "acoustic2d_topo": TopoSolver(
-        "acoustic2d_topo", Acoustic, False, "image", False,
+        "acoustic2d_topo", Acoustic, False, "image",
     ),
     "elastic2d_topo_image": TopoSolver(
-        "elastic2d_topo_image", Elastic, True, "image", False,
-    ),
-    "elastic2d_topo_apm": TopoSolver(
-        "elastic2d_topo_apm", Elastic, True, "apm", False,  # gradient enabled
+        "elastic2d_topo_image", Elastic, True, "image",
     ),
 }
 
@@ -120,7 +114,7 @@ SCENARIOS = {
     "stairs":      TopoScenario("stairs", "discrete-step topography (worst case for staircase)", _stairs),
 }
 
-DEFAULT_SOLVERS = "acoustic2d_topo,elastic2d_topo_image,elastic2d_topo_apm"
+DEFAULT_SOLVERS = "acoustic2d_topo,elastic2d_topo_image"
 DEFAULT_SCENARIOS = "gentle_hill,mountain,stairs"
 DEFAULT_MODES = "full,bs_gpu,bs_cpu"
 
@@ -195,7 +189,7 @@ def build_propagator(solver: TopoSolver, backend_impl: str, mode: str, topo, sha
         allow_growth=True,
     )
     # Image method: free_surface auto-set to True by propagator's
-    # _resolve_topo_method; APM auto-sets False.  Don't override.
+    # _resolve_topo_method.  Don't override.
     if backend_impl == "eager":
         from sweep.propagator.options import EagerOptions
         return PropTorch(
@@ -335,8 +329,6 @@ def build_parser():
     p.add_argument("--src-depth", type=int, default=2, help="cells below local surface for source")
     p.add_argument("--rel-l2-threshold", type=float, default=1.5)
     p.add_argument("--cosine-threshold", type=float, default=0.8)
-    p.add_argument("--fwd-rel-threshold", type=float, default=1e-3,
-                   help="forward-only solvers (APM): max relative record diff")
     p.add_argument("--no-fail", action="store_true",
                    help="always exit 0 (collect all results)")
     return p
@@ -349,13 +341,6 @@ def status_for_grad(grad_metrics, args):
             fails.append(f"{name}.cosine={m['cosine']:.4g}<{args.cosine_threshold}")
         if not math.isfinite(m["rel_l2"]) or m["rel_l2"] > args.rel_l2_threshold:
             fails.append(f"{name}.rel_l2={m['rel_l2']:.4g}>{args.rel_l2_threshold}")
-    return ("FAIL" if fails else "OK"), fails
-
-
-def status_for_fwd(rec_metric, args):
-    fails = []
-    if rec_metric["rel_l2"] > args.fwd_rel_threshold:
-        fails.append(f"record.rel_l2={rec_metric['rel_l2']:.4g}>{args.fwd_rel_threshold}")
     return ("FAIL" if fails else "OK"), fails
 
 
@@ -376,7 +361,7 @@ def main():
     rows = []
     print(f"\nTopography gradient consistency suite — grid {shape}, "
           f"NT={args.nt}, dt={args.dt}, abcn={args.abcn}\n")
-    print(f"{'solver':24s} {'topo':14s} {'mode':10s}  cosine_grad / rel_l2 / fwd_rel        status")
+    print(f"{'solver':24s} {'topo':14s} {'mode':10s}  cosine_grad / rel_l2                  status")
     print("-" * 110)
     n_fail = 0
 
@@ -394,13 +379,10 @@ def main():
                 eager_prop = build_propagator(solver, "eager", "full", topo, shape, args, device)
                 observed_np = run_forward(solver, eager_prop, wavelet_t, sources, receivers,
                                           true_models, device)
-                if solver.forward_only:
-                    eager_rec = observed_np
-                else:
-                    eager_out = run_forward_backward(
-                        solver, eager_prop, wavelet_t, sources, receivers, observed_np,
-                        init_models, grad_flags, model_names, device,
-                    )
+                eager_out = run_forward_backward(
+                    solver, eager_prop, wavelet_t, sources, receivers, observed_np,
+                    init_models, grad_flags, model_names, device,
+                )
             except Exception as exc:
                 rows.append((sk, ck, "eager", str(exc)))
                 n_fail += 1
@@ -410,29 +392,18 @@ def main():
             for mk in mode_keys:
                 try:
                     cuda_prop = build_propagator(solver, "c", mk, topo, shape, args, device)
-                    if solver.forward_only:
-                        cuda_rec_np = run_forward(solver, cuda_prop, wavelet_t, sources,
-                                                  receivers, true_models, device)
-                        rec_metric = metric_pair(
-                            torch.tensor(eager_rec, dtype=torch.float32),
-                            torch.tensor(cuda_rec_np, dtype=torch.float32),
-                        )
-                        st, fails = status_for_fwd(rec_metric, args)
-                        line = (f"{sk:24s} {ck:14s} {mk:10s}  fwd rel={rec_metric['rel_l2']:.3e}  "
-                                f"cos={rec_metric['cosine']:.4f}  {st}")
-                    else:
-                        cuda_out = run_forward_backward(
-                            solver, cuda_prop, wavelet_t, sources, receivers, observed_np,
-                            init_models, grad_flags, model_names, device,
-                        )
-                        grad_metrics = {
-                            name: metric_pair(eager_out["grads"][name], cuda_out["grads"][name])
-                            for name in eager_out["grads"]
-                        }
-                        st, fails = status_for_grad(grad_metrics, args)
-                        cos = " ".join(f"{n}={m['cosine']:.4f}" for n, m in grad_metrics.items())
-                        rel = " ".join(f"{n}={m['rel_l2']:.3e}" for n, m in grad_metrics.items())
-                        line = f"{sk:24s} {ck:14s} {mk:10s}  cos: {cos:30s} rel: {rel:20s}  {st}"
+                    cuda_out = run_forward_backward(
+                        solver, cuda_prop, wavelet_t, sources, receivers, observed_np,
+                        init_models, grad_flags, model_names, device,
+                    )
+                    grad_metrics = {
+                        name: metric_pair(eager_out["grads"][name], cuda_out["grads"][name])
+                        for name in eager_out["grads"]
+                    }
+                    st, fails = status_for_grad(grad_metrics, args)
+                    cos = " ".join(f"{n}={m['cosine']:.4f}" for n, m in grad_metrics.items())
+                    rel = " ".join(f"{n}={m['rel_l2']:.3e}" for n, m in grad_metrics.items())
+                    line = f"{sk:24s} {ck:14s} {mk:10s}  cos: {cos:30s} rel: {rel:20s}  {st}"
 
                     if st == "FAIL":
                         n_fail += 1

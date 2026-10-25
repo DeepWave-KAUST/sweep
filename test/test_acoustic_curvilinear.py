@@ -168,9 +168,10 @@ def test_surface_pressure_release_under_hill():
     syn, snaps = prop(
         _wavelet(), sources, receivers, models=[vp],
         return_wavefield=True, snapshot_times=snap_idx,
+        snapshot_grid="computational",      # the grid's own rows
     )
-    # snaps shape: (n_snap, n_field, B, C, nz_pad, nx_pad). After PML
-    # strip, the first z row in the snapshot is η=0 — the surface.
+    # snaps shape: (n_snap, n_field, B, C, nz_pad, nx_pad). On the grid's
+    # own rows the first z row of the snapshot is η=0 — the surface.
     p_snaps = snaps[:, 0, 0, 0]
     surface_row = p_snaps[:, 0, :]  # (n_snap, nx_pad)
     bulk_peak = p_snaps.abs().max().item()
@@ -194,3 +195,49 @@ def test_impl_c_rejects_curvilinear():
     eq = AcousticCurvilinear(spatial_order=SO, device=DEVICE, backend="torch")
     with pytest.raises(NotImplementedError):
         eq._C()
+
+
+# ---------------------------------------------------------------------------
+# 6. A registered gradient comes back on the model grid
+# ---------------------------------------------------------------------------
+
+
+def _curvilinear_imaging(eq):
+    """``2 dt^2 vp Lap(u) u_adj`` with the step's own curvilinear Laplacian:
+    the vp-gradient of the update, away from the PML."""
+    def fn(fwd, adj, models, dt, h):
+        u = fwd["h1"]
+        hx = h if isinstance(h, (int, float)) else h[-1]
+        hz = eq._curv_d_eta
+        lap_ee, lap_xx = eq.separable_d2_2d(u, eq.laplace_kernels, hz, hx)
+        u_e = eq.gradient(u, hz, -2, kernels=eq.grad_kernels)
+        u_xe = eq.gradient(u_e, hx, -1, kernels=eq.grad_kernels)
+        lap = (lap_xx + 2.0 * eq._curv_alpha * u_xe
+               + eq._curv_metric_pηη * lap_ee + eq._curv_metric_pη * u_e)
+        return 2.0 * dt * dt * models[0] * lap * adj["h1"]
+    return fn
+
+
+def test_registered_gradient_is_on_the_model_grid():
+    """The imaging condition accumulates on the grid's rows; the gradient it
+    hands back is cropped per face (the free surface has no pad on top) and
+    taken through the transpose of the model sampling, as autograd's is."""
+    x = np.arange(NX) * DH
+    topo = 6.0 * (1.0 - np.exp(-((x - NX * DH / 2) ** 2) / (2.0 * 150.0 ** 2)))
+    sources = torch.tensor([[NX // 2, 4.0]], dtype=torch.float64).to(DEVICE)
+    rec_x = np.arange(4, NX - 4, 6)
+    receivers = torch.from_numpy(np.stack([rec_x, topo[rec_x] + 1.0], -1)[None]).to(DEVICE)
+    vp0 = np.where(np.arange(NZ)[:, None] >= 24, 2300.0, 2000.0) * np.ones((1, NX))
+    grads = []
+    for custom in (False, True):
+        prop = _make_prop(topography=topo)
+        if custom:
+            prop.register_gradient("vp", _curvilinear_imaging(prop.equation), mode="gradient")
+        vp = torch.tensor(vp0, dtype=torch.float32, device=DEVICE, requires_grad=True)
+        (0.5 * prop(_wavelet(), sources, receivers, models=[vp]).square().sum()).backward()
+        grads.append(vp.grad.detach().double().flatten())
+    auto, reg = grads
+    cos = float(auto @ reg / (auto.norm() * reg.norm()))
+    assert cos > 0.999, cos
+    air = torch.as_tensor(np.arange(NZ)[:, None] < np.ceil(topo - 1e-4)[None, :]).flatten().to(DEVICE)
+    assert (reg[air] == 0).all() and (auto[air] == 0).all()

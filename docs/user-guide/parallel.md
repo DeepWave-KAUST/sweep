@@ -181,7 +181,7 @@ but not every value is wired for the DD backward — which Python drives one
 step per kernel call, unlike the monolithic loop the staged paths were built
 for. What is refused, is refused loudly at the first backward:
 
-| `BoundarySaving.storage` | Acoustic 2-D / 3-D, VRZ 3-D | Elastic 2-D / 3-D, Elastic APM | LSRTM 2-D / 3-D |
+| `BoundarySaving.storage` | Acoustic 2-D / 3-D, VRZ 3-D | Elastic 2-D / 3-D | LSRTM 2-D / 3-D |
 | --- | --- | --- | --- |
 | `"gpu"` (default, gpu-direct) | yes | yes | yes |
 | `"cpu"` (pinned-host staging) | **yes** | **yes** — it used to raise | **yes** — the 3-D one used to race |

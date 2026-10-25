@@ -63,10 +63,9 @@ def build_topography(nx: int) -> np.ndarray:
 
 
 def build_velocity(nz: int, nx: int, topo: np.ndarray) -> np.ndarray:
-    """Layered vp model defined on the PHYSICAL grid (same as staircase
-    demo). The propagator passes it through to the curvilinear path; in
-    this MVP the velocity is treated as constant per cell in the
-    computational grid (no resampling onto stretched cells)."""
+    """Layered vp model on the PHYSICAL grid (same as the staircase demo),
+    as for any equation: the propagator samples it at the boundary-fitted
+    rows."""
     vp = np.full((nz, nx), 2800.0, dtype=np.float32)
     near_surface_thickness = 6
     middle_thickness = 35
@@ -83,15 +82,13 @@ def build_wavelet() -> torch.Tensor:
 
 
 def build_geometry(topo: np.ndarray):
-    """Sources / receivers live on the COMPUTATIONAL (ξ, η) grid for the
-    curvilinear path. Conveniently, the surface in computational coords
-    is the flat row η-index = 0 for EVERY column — so a "source on the
-    surface" is just (x, 0)."""
+    """Sources / receivers are physical grid indices, as on any grid: the
+    propagator maps them onto the boundary-fitted rows itself."""
     src_x = NX // 3
-    src_z = 2   # 2 cells below the (flat) computational surface
+    src_z = int(topo[src_x]) + 2   # 2 cells below the local surface
     sources = torch.from_numpy(np.array([[src_x, src_z]], dtype=np.int64))
     rec_x = np.arange(6, NX - 6, 3, dtype=np.int64)
-    rec_z = np.full_like(rec_x, 1)   # one cell below the flat surface
+    rec_z = topo[rec_x] + 1        # one cell below the local surface
     receivers = torch.from_numpy(np.stack([rec_x, rec_z], axis=-1)[None, ...])
     return sources, receivers, src_x, src_z, rec_x
 
@@ -110,10 +107,8 @@ def plot_model(vp, topo, src_xz, rec_x, path):
     im = ax.imshow(vp_plot, cmap="viridis", extent=extent, aspect="auto")
     fig.colorbar(im, ax=ax, label="vp (m/s)", shrink=0.85)
     ax.plot(np.arange(NX) * DH * 1e-3, topo * DH * 1e-3, "k-", lw=1.2, label="topography")
-    sx, sz_comp = src_xz
-    # Map computational source (sx, sz_comp) back to physical for display.
-    z_phys = topo[sx] + sz_comp
-    ax.plot([sx * DH * 1e-3], [z_phys * DH * 1e-3], "r*", ms=14, label="source")
+    sx, sz = src_xz                                  # physical indices
+    ax.plot([sx * DH * 1e-3], [sz * DH * 1e-3], "r*", ms=14, label="source")
     rz_phys = topo[rec_x] + 1
     ax.plot(rec_x * DH * 1e-3, rz_phys * DH * 1e-3, "yv", ms=3, label="receivers")
     ax.legend(loc="lower right", fontsize=8)
@@ -138,37 +133,18 @@ def plot_record(record, rec_x, path):
     plt.close(fig)
 
 
-def save_wavefield_gif(snaps_p_comp, topo, snap_times, src_xz, path):
-    """``snaps_p_comp`` lives in computational (ξ, η) coords with the
-    surface at row 0. For display we resample each frame to physical
-    (X, Z) so the topography appears in its true shape.
+def save_wavefield_gif(snaps_p, topo, snap_times, src_xz, path):
+    """``snaps_p`` comes back on the physical (X, Z) grid -- the propagator
+    maps the boundary-fitted rows back itself -- so the topography is in its
+    true shape already; only the PML pads are cropped here.
     """
-    if snaps_p_comp.ndim != 3:
-        raise ValueError(f"expected (n_snap, nz, nx), got {snaps_p_comp.shape}")
-    n_snap, nz_pad, nx_pad = snaps_p_comp.shape
-    snaps_phys_comp = snaps_p_comp[:, 0 : nz_pad - ABCN, ABCN : nx_pad - ABCN]
-    assert snaps_phys_comp.shape[-2:] == (NZ, NX), (
-        f"crop mismatch: {snaps_phys_comp.shape}"
+    if snaps_p.ndim != 3:
+        raise ValueError(f"expected (n_snap, nz, nx), got {snaps_p.shape}")
+    n_snap, nz_pad, nx_pad = snaps_p.shape
+    snaps_physgrid = snaps_p[:, 0 : nz_pad - ABCN, ABCN : nx_pad - ABCN]
+    assert snaps_physgrid.shape[-2:] == (NZ, NX), (
+        f"crop mismatch: {snaps_physgrid.shape}"
     )
-
-    # Resample computational η ∈ [0,1] back to physical Z per column:
-    #   Z_phys_row = topo[ix] + (η_index / (NZ-1)) * (NZ - 1 - topo[ix])
-    # Equivalently the row 0 of the comp grid → physical row topo[ix],
-    # row NZ-1 → physical row NZ-1.
-    snaps_physgrid = np.zeros_like(snaps_phys_comp)
-    for ix in range(NX):
-        s = int(topo[ix])
-        depth = NZ - 1 - s
-        if depth <= 0:
-            continue
-        # Interpolate snaps_phys_comp[:, :, ix] (length NZ) onto physical
-        # depth rows [s, s+1, ..., NZ-1] (length depth+1).
-        eta_phys = np.linspace(0.0, 1.0, depth + 1, dtype=np.float32)
-        eta_comp = np.linspace(0.0, 1.0, NZ, dtype=np.float32)
-        for t in range(n_snap):
-            snaps_physgrid[t, s : NZ, ix] = np.interp(
-                eta_phys, eta_comp, snaps_phys_comp[t, :, ix]
-            )
 
     pct = float(np.percentile(np.abs(snaps_physgrid), 99.5))
     pct = max(pct, 1e-12)
@@ -181,9 +157,8 @@ def save_wavefield_gif(snaps_p_comp, topo, snap_times, src_xz, path):
     x_km = np.arange(NX) * DH * 1e-3
     (topo_line,) = ax.plot(x_km, topo_km, "k-", lw=1.2)
     ax.fill_between(x_km, 0, topo_km, color="white", alpha=0.95)
-    sx, sz_comp = src_xz
-    z_phys = topo[sx] + sz_comp
-    ax.plot([sx * DH * 1e-3], [z_phys * DH * 1e-3], "r*", ms=12)
+    sx, sz = src_xz
+    ax.plot([sx * DH * 1e-3], [sz * DH * 1e-3], "r*", ms=12)
     ax.set_xlabel("x (km)")
     ax.set_ylabel("z (km)")
     ax.set_title(f"Curvilinear  |p|  at t = {snap_times[0] * DT:.3f} s")

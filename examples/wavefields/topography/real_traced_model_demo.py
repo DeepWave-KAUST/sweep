@@ -12,7 +12,9 @@ Two simulations are run side-by-side and share the SAME quantised topography
 (``air_mask`` derived from ``vp < 400``):
 
 1. **Acoustic 2-D**   ``Acoustic`` + ``free_surface=True`` + ``topography=row``
-2. **Elastic 2-D**    ``ElasticAPM`` with vs/rho derived from vp
+2. **Elastic 2-D**    ``Elastic`` + ``topography=row`` (Robertsson image
+   method), vs/rho derived from vp.  For a boundary-fitted surface see
+   ``elastic2d_curvilinear_demo.py`` (``ElasticCurvilinear``).
 
 Outputs written to ``outputs/``:
 
@@ -39,7 +41,7 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
 from matplotlib.colors import TwoSlopeNorm
 
-from sweep.equations import Acoustic, ElasticAPM
+from sweep.equations import Acoustic, Elastic
 from sweep.propagator.torch import PropTorch
 from sweep.signal import ricker
 
@@ -113,9 +115,10 @@ def derive_models(vp):
       vs  = vp / VPVS_RATIO
       rho = GARDNER_A * vp^GARDNER_N  (Gardner relation; ~2300 kg/m³ @ 3 km/s)
 
-    Air cells: keep the SAME Gardner-derived rho and vp/1.73 vs.  ElasticAPM
-    zeros wavefields at air via ``zero_at_air``; using realistic ρ everywhere
-    avoids the ``dt/ρ`` blow-up that follows from setting ρ_air = 1.2 kg/m³.
+    Air cells: keep the SAME Gardner-derived rho and vp/1.73 vs.  The image
+    method zeroes the wavefield above the surface rows; using realistic ρ
+    everywhere avoids the ``dt/ρ`` blow-up that follows from setting
+    ρ_air = 1.2 kg/m³.
     """
     air = vp < AIR_THRESHOLD
     # First, replace air-cell vp with a sensible "background" value so the
@@ -253,7 +256,7 @@ def plot_record_elastic(record_vz, rec_x, nt, path):
     axes[1].set_ylabel("time (s)")
     axes[1].set_title("Elastic vz — AGC (200 ms)")
 
-    fig.suptitle("ElasticAPM shot gather — vz")
+    fig.suptitle("Elastic shot gather — vz")
     fig.savefig(path, dpi=130)
     plt.close(fig)
 
@@ -420,14 +423,15 @@ def main():
         print("[real-demo] acoustic figures written.")
 
     # -----------------------------------------------------------------------
-    # Elastic APM
+    # Elastic (image method)
     # -----------------------------------------------------------------------
     if not args.skip_elastic:
-        print("[real-demo] === Elastic 2-D APM (Cao & Chen 2018) ===")
-        eq_e = ElasticAPM(spatial_order=SO, device=device, backend="torch")
+        print("[real-demo] === Elastic 2-D, image method (Robertsson 1996) ===")
+        eq_e = Elastic(spatial_order=SO, device=device, backend="torch")
         prop_e = PropTorch(
             eq_e, shape=(nz, nx),
-            topography=topo_row,    # 1-D row per col; topo_method auto → 'apm'
+            topography=topo_row,    # 1-D row per col; the staircase image method
+            topo_method="image",
             abcn=ABCN, dh=DH, dt=DT,
             use_ckpt=False, impl="eager",
             eager_options={"use_compile": False},
@@ -440,7 +444,7 @@ def main():
         with torch.no_grad():
             record_e, snaps_e = prop_e(
                 wavelet_e, sources, receivers,
-                models=[vp_t, vs_t, rho_t],   # air_mask already on prop_e via topography=
+                models=[vp_t, vs_t, rho_t],   # surface rows already on prop_e via topography=
                 return_wavefield=True, snapshot_times=snap_times,
             )
         torch.cuda.synchronize() if device == "cuda" else None

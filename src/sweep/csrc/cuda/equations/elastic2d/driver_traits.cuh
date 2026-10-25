@@ -1,9 +1,6 @@
 // Driver traits for the 2-D elastic equation: the per-equation half of the
 // staggered-family skeleton in ``common/sg_driver.cuh``.  Line-faithful
 // transcription of the hand-written drivers; physics kernels untouched.
-// The APM (Cao & Chen 2018) entry points stay hand-written in
-// forward.cu/backward.cu — they refuse stepping/phasing and carry their own
-// kernel variants, so there is nothing for the skeleton to share yet.
 //
 // REFERENCE EQUATION of the staggered family.  The other staggered-family
 // members (elastic3d, das_mu2d, das_mu3d, elastic_tti_sg2d, elastic_tti_sg3d,

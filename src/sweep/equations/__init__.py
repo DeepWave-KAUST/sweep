@@ -17,8 +17,6 @@ visible where the physics is:
 * ``AcousticVTIDuveneck``/``3D`` -- Duveneck et al. (2008), 1st-order
   velocity-stress, 10.1190/1.3059320
 * ``DASElastic``/``3D`` -- alias of ``DASZhao``/``3D``
-* ``ElasticAPM`` -- alias of ``Elastic`` (Cao & Chen 2018 APM free surface;
-  the same class, dispatched by the propagator's ``topo_method='apm'``)
 
 The ``*Default*`` names point at the class a user gets when they just want "the
 standard" solver for that symmetry: 2-D VTI routes to Liang's 2nd-order scalar
@@ -50,7 +48,6 @@ from . import (
     biot,
     elastic,
     elastic3d,
-    elastic_apm,
     elastic_curvilinear,
     elastic_tti,
     elastic_tti_2nd,

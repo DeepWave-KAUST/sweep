@@ -377,7 +377,7 @@ void check_visco_backward(const BackwardInputCore& p)
                 "visco_acoustic2d does not support stepped backward segments");
     SWEEP_CHECK(p.cut_face_mask == 0,
                 "visco_acoustic2d does not support domain decomposition");
-    SWEEP_CHECK(!p.has_topo && !p.use_apm,
+    SWEEP_CHECK(!p.has_topo,
                 "visco_acoustic2d does not support topography on impl='c' yet; "
                 "use impl='eager'");
     SWEEP_CHECK(!p.compute_adcig,

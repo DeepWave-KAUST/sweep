@@ -71,10 +71,8 @@ struct ForwardInput {
     torch::Tensor topo_rows;
     bool has_topo = false;
 
-    // APM (Cao & Chen 2018) per-cell category, runtime-padded int32 tensor
-    // shape ``(nz_runtime, nx_runtime)``.  Empty unless ``use_apm`` is set.
-    // Codes: INTERIOR=0, AIR=1, H=2, VL=3, VR=4, OC=5, IC=6 (see Python
-    // ``sweep.equations._topography``).
+    // Retired with the APM free surface: the core input structs keep the
+    // matching fields (a C ABI field is never removed), so these stay too.
     torch::Tensor topo_category;
     bool use_apm = false;
 

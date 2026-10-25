@@ -67,13 +67,13 @@ class Cfg:
     mode: str          # eager: full|bs|ckpt ; c: full|bs_*|ckpt_*
     scenario: str      # key into solver_gradient_mode_suite.SCENARIOS
     grid: str          # "canon" | "phys"
-    #: which surface discretisation: "auto" | "image" | "apm".
+    #: which surface discretisation: "auto" | "image".
     topo_method: str = "auto"
     #: irregular free-surface topography: "" (flat) | "hill" | "stairs".
     #:
     #: Every other scenario in this file runs a FLAT model, so until these
     #: existed no topography code path had a bit-exact gate at all -- not the
-    #: image-method rows, not the APM air mask, not the DD air-clear pre-pass.
+    #: image-method rows, not the DD air-clear pre-pass.
     topo: str = ""
 
     @property
@@ -175,9 +175,9 @@ def _topography(kind: str, nx: int, ny: int | None = None):
 
     2-D wants ``(nx_phys,)``, 3-D wants ``(ny_phys, nx_phys)``. The 3-D profile
     deliberately varies along BOTH axes: a y-invariant surface would not catch a
-    y/x transposition in the runtime pad, and the pad tuples in the image and
-    APM builders are in reversed axis order with equal widths, so a
-    transposition is invisible unless something breaks the symmetry.
+    y/x transposition in the runtime pad, and the image builder's pad tuple is
+    in reversed axis order with equal widths, so a transposition is invisible
+    unless something breaks the symmetry.
     """
     import numpy as np
     x = np.arange(nx)
@@ -197,15 +197,10 @@ def _topography(kind: str, nx: int, ny: int | None = None):
 
 
 # Topography configs, and the trap in choosing them: `impl='c'` REFUSES
-# boundary saving with topography and refuses the APM backward outright. A
-# refused config still "passes" the comparison -- an error compares equal to an
-# error -- so it would be a green that checks nothing. Topo configs on the
-# compiled path therefore use `full` or `ckpt_chunk`, never `bs_*`.
-#
-# The second trap: APM is the DEFAULT surface method for elastic equations, and
-# the compiled APM BACKWARD is a stub that refuses. So an elastic topo config on
-# impl='c' must ask for 'image' explicitly; APM is covered on eager, where its
-# gradient does work.
+# boundary saving with topography. A refused config still "passes" the
+# comparison -- an error compares equal to an error -- so it would be a green
+# that checks nothing. Topo configs on the compiled path therefore use `full`
+# or `ckpt_chunk`, never `bs_*`.
 _TOPO = [
     # Both grids: the shape given to PropTorch is the physical extent (the PML
     # is added on top), so canon is a perfectly good surface, just a small one.
@@ -221,13 +216,11 @@ _TOPO = [
     Cfg("acoustic2d", "c", "full", "interior", "phys", topo="stairs"),
     Cfg("acoustic3d", "eager", "full", "interior", "phys", topo="hill"),
     Cfg("acoustic3d", "c", "full", "interior", "phys", topo="hill"),
-    # elastic: image on both impls, APM on eager only
+    # elastic: image on both impls
     Cfg("elastic2d", "eager", "full", "interior", "phys", topo="hill",
         topo_method="image"),
     Cfg("elastic2d", "c", "full", "interior", "phys", topo="hill",
         topo_method="image"),
-    Cfg("elastic2d", "eager", "full", "interior", "phys", topo="hill",
-        topo_method="apm"),
 ]
 
 

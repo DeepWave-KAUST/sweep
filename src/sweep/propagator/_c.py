@@ -16,7 +16,6 @@ except ImportError:      # torch < 2.0: no Dynamo, nothing to keep out of a trac
 from sweep.memory.torch import Allocator
 from sweep.memory.shape import Layout
 from sweep.core.arguments import validate_memory_strategy
-from sweep.core.topography import build_apm_model_tensors
 from sweep.propagator._call_params import CompiledCallParams
 from sweep.propagator.base import PropBase
 from sweep.equations._edges import is_top_only_or_none
@@ -205,7 +204,7 @@ def _history_buffer(shape, device):
     return torch.zeros(shape, device=device)
 
 
-def _gradient_buffers(has_wavelet, forward_source, models, n_grad_models=None):
+def _gradient_buffers(has_wavelet, forward_source, models):
     """One zero tensor per gradient the compiled backward accumulates into, in
     ``BackwardInput.grads_out`` order: ``grad_wavelet`` first when the equation
     declares it (``cuda_layout.grads_out_has_wavelet``), then one per model.
@@ -214,19 +213,9 @@ def _gradient_buffers(has_wavelet, forward_source, models, n_grad_models=None):
     driver allocate its own. Allocating them here costs the same bytes and the
     same zero-fill per backward as the ``zeros_like`` they replace -- what moves
     is only who allocates, so the C++ side stops owning tensors.
-
-    ``n_grad_models`` caps the models that get a gradient of their own. The APM
-    list appends derived tensors (effective moduli, masked densities) whose
-    gradient the driver never produces: it returns one shared zero under every
-    such slot, and so does this -- one tensor, referenced by all of them --
-    which keeps the memory of an APM backward where it was.
     """
     grads = [torch.zeros_like(forward_source)] if has_wavelet else []
-    n = len(models) if n_grad_models is None else int(n_grad_models)
-    grads += [torch.zeros_like(m) for m in models[:n]]
-    if n < len(models):
-        shared_zero = torch.zeros_like(models[0])
-        grads += [shared_zero] * (len(models) - n)
+    grads += [torch.zeros_like(m) for m in models]
     return grads
 
 
@@ -341,16 +330,6 @@ class Wrapper(torch.autograd.Function):
             params.topo_rows = torch.empty(0, dtype=torch.int32,
                                             device=wavelet.device)
             params.has_topo = False
-        # APM (Cao & Chen 2018) plumbing.  ``params.models`` is already
-        # extended with the precomputed effective moduli by the caller
-        # (positions 6..10); we just attach the category and flag here.
-        if cp.use_apm_param:
-            params.topo_category = cp.topo_category_param.to(torch.int32).contiguous()
-            params.use_apm = True
-        else:
-            params.topo_category = torch.empty(0, dtype=torch.int32,
-                                                device=wavelet.device)
-            params.use_apm = False
         params.nt = nt
         params.dt = dt
         params.spacing = spacing
@@ -520,7 +499,7 @@ class Wrapper(torch.autograd.Function):
         params.models = [m.contiguous() for m in ctx.models]
         params.derived_models = _derived_model_buffers(cp.derived_model_nvar_backward, params.models[0])
         params.grads_out = _gradient_buffers(cp.grads_out_has_wavelet, ctx.forward_source,
-                                             params.models, cp.n_grad_models)
+                                             params.models)
         params.eq_aux = [t.contiguous() for t in cp.eq_aux]
         # ``adjoint_source`` arrives in the canonical (B, nt, nrec, nfield)
         # layout that ``forward`` returned; permute it back to the raw CUDA
@@ -559,16 +538,6 @@ class Wrapper(torch.autograd.Function):
                 0, dtype=torch.int32, device=adjoint_source.device,
             )
             params.has_topo = False
-        # APM CUDA backward: forward saved the category + flag in ctx.
-        topo_cat_rt = cp.topo_category_param
-        use_apm     = bool(cp.use_apm_param)
-        if use_apm and topo_cat_rt is not None:
-            params.topo_category = topo_cat_rt.to(torch.int32).contiguous()
-            params.use_apm = True
-        else:
-            params.topo_category = torch.empty(0, dtype=torch.int32,
-                                                device=adjoint_source.device)
-            params.use_apm = False
         params.boundary_on_cpu = cp.boundary_on_cpu
         params.boundary_on_disk = cp.boundary_on_disk
         params.boundary_disk_async_read = cp.boundary_disk_async_read
@@ -772,12 +741,9 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             # reverse reconstruction re-runs the (now per-edge-correct) forward
             # kernels, so no separate handling is needed.
 
-        # Topography is supported on CUDA via two paths:
-        #   * topo_method='image' — per-column staircase (vacuum for Acoustic,
-        #     Robertsson 1996 image method for Elastic).  Always available.
-        #   * topo_method='apm'   — Cao & Chen 2018 parameter-modified path.
-        #     CUDA forward only; backward currently falls back to eager.
-        # Plumb the appropriate equation._C() function set below.
+        # Topography on CUDA is the image method: a per-column staircase
+        # (vacuum for Acoustic, Robertsson 1996 image method for Elastic),
+        # bound through the same equation._C() function set.
 
         self.register_buffer('dt', torch.tensor(self._dt, device=self.dev, dtype=torch.float32))
         self.register_buffer('dh', torch.tensor(self._grid_spacing, device=self.dev, dtype=torch.float32))
@@ -796,25 +762,6 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             raise NotImplementedError(
                 f"Ckpt(mode='recursive'): {type(self.equation).__name__} has no "
                 "recursive-checkpoint C binding; use Ckpt(mode='chunk', ...).")
-
-        # APM CUDA path — only attached when the equation supports it AND the
-        # user selected ``topo_method='apm'``.  Forward only: there is no
-        # compiled APM backward (the one there was returned a wrong rho
-        # gradient at body-force source cells and is gone), so
-        # ``_guard_apm_backward`` refuses any backward through this path and
-        # sends gradients to eager autograd (see that method for the numbers).
-        # The two backward slots raise the same refusal if ever reached.
-        if (getattr(self, "_topo_method", None) == "apm"
-                and hasattr(self.equation, "_C_apm")):
-            self.forward_func = self.equation._C_apm()[0]
-            self.backward_func = self._apm_backward_removed
-            self.backward_bs_func = self._apm_backward_removed
-            # APM has no checkpoint backward implementation; drop out of
-            # checkpointing so backward routes to boundary saving if it is on,
-            # otherwise to full.
-            self.backward_ckpt_func = None
-            self.backward_recursive_ckpt_func = None
-            self._disable_ckpt(reason="APM has no compiled ckpt backward")
 
         # Initialize reusable runtime buffers lazily so they always match the
         # current batch size used by the CUDA kernels.
@@ -892,59 +839,6 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self.adcig_max_lag = 0
         self.adcig = None
 
-    @staticmethod
-    def _apm_backward_removed(*_args, **_kwargs):
-        raise NotImplementedError(
-            "topo_method='apm' has no gradient on impl='c': there is no compiled "
-            "APM backward (_guard_apm_backward refuses before this is reached)")
-
-    def _guard_apm_backward(self, requires_backward):
-        """The CUDA APM backward returns a WRONG rho gradient.
-
-        ``topo_method='apm'`` (Cao & Chen 2018 parameter-modified surface) is a
-        CUDA **forward** path; its backward was always meant to be taken through
-        eager autograd — see the note on the ``_C_apm()`` dispatch above — but
-        nothing enforced that, so it quietly handed back a gradient instead.
-
-        What it hands back, finite-difference arbitrated (elastic 2-D, source
-        ``['vz']``, d(loss)/d(rho) at the source cell z=8 x=28):
-
-            FD (truth)  +2.606052e-05
-            eager       +2.606044e-05   rel 3.2e-06   correct
-            impl='c'    +2.243012e-06   rel 9.1e-01   off by 11.6x
-
-        The error is confined to that one cell — masking it drops the whole-field
-        rel_l2 from 8.9e-01 to 2.4e-04, and single-cell FD at the four
-        neighbours confirms impl='c' is right there — and it needs a body-force
-        source: rho cos against eager is 0.54 for ``['vz']``, 0.29 for
-        ``['vx']``, but 1.0000000 for the pure-stress loadings.  It does not
-        need a hill (flat-zero APM topography reproduces it), it fires in all
-        four backward modes (full, boundary saving, both checkpoint flavours),
-        and it reproduces bit-identically on dev, so it is not a regression.
-        The signature is a missing body-force rho injection correction in the
-        APM rho backward — the non-APM path got exactly that fix in 46172fd.
-
-        vp and vs happen to agree with eager to ~1e-3 here, but that path has
-        never been validated against the truth either, so the whole APM backward
-        is gated rather than just the rho slot.
-        """
-        if not requires_backward or getattr(self, "_topo_method", None) != "apm":
-            return
-        raise NotImplementedError(
-            "topo_method='apm' has no gradient on impl='c': the CUDA APM path is "
-            "forward-only, and its backward returns a wrong rho gradient at "
-            "body-force source cells (off by ~11x, finite-difference arbitrated; "
-            "all backward modes, with or without a hill). Compute gradients "
-            "through impl='eager', which matches finite differences to 3e-6 under "
-            "APM:\n"
-            "  * impl='eager' for the whole run, or\n"
-            "  * keep impl='c' for forward-only modelling (that IS supported and "
-            "is unaffected) and run the gradient pass on impl='eager', or\n"
-            "  * topo_method='image' if you want the gradient on impl='c' — the "
-            "image-method topography backward is gradient-consistent with eager "
-            "(cos 1.0000000, rel 1e-6) in the full and checkpoint modes."
-        )
-
     def _guard_boundary_saving_topography(self, active):
         """Boundary saving + ``topography=`` produces a WRONG gradient on impl='c'.
 
@@ -975,12 +869,10 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         if not active:
             return
         # ``topography=`` was actually given: the image path stores the runtime
-        # surface rows, the APM path stores per-cell categories instead.  A flat
-        # ``free_surface=True`` also resolves ``_topo_method='image'`` but leaves
-        # ``_topo_rows_runtime`` None — that configuration is fine and must NOT
-        # trip this guard.
-        has_topography = (getattr(self, "_topo_rows_runtime", None) is not None
-                          or getattr(self, "_topo_method", None) == "apm")
+        # surface rows.  A flat ``free_surface=True`` also resolves
+        # ``_topo_method='image'`` but leaves ``_topo_rows_runtime`` None — that
+        # configuration is fine and must NOT trip this guard.
+        has_topography = getattr(self, "_topo_rows_runtime", None) is not None
         if not has_topography:
             return
         raise NotImplementedError(
@@ -1976,9 +1868,6 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                                  boundary_tail_steps)
         if not requires_backward:
             use_boundary_saving = False
-        # APM first: it is the more fundamental limitation of the two, so its
-        # message is the useful one when both would fire.
-        self._guard_apm_backward(requires_backward)
         self._guard_boundary_saving_topography(use_boundary_saving and requires_backward)
         use_recursive_checkpoint = bool(
             use_checkpoint and self.ckpt_mode == "recursive" and self.backward_recursive_ckpt_func is not None
@@ -2055,20 +1944,10 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
 
         spacing = self._cuda_spacing()
 
-        # Topography / APM plumbing.  Image method uses _topo_rows_runtime
-        # only; APM additionally precomputes effective moduli + category
-        # from the runtime-padded air mask and prepends them to ``models``.
+        # Topography: the image method's runtime surface rows.
         topo_rows_runtime = getattr(self.equation, "_topo_rows_runtime", None)
         topo_rows_arg = topo_rows_runtime
         has_topo_arg = topo_rows_runtime is not None
-        topo_cat_arg = None
-        use_apm_arg = False
-        models_arg = models
-        if getattr(self, "_topo_method", None) == "apm":
-            models_arg, cat_t = build_apm_model_tensors(
-                models, self.equation._apm_air_mask_runtime, self.ndim)
-            topo_cat_arg = cat_t
-            use_apm_arg = True
 
         # CPML profiles are built on ``equation.device`` (default 'cpu'); pin
         # them to the propagator's compute device so an equation created
@@ -2122,7 +2001,6 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     grads_out_has_wavelet=bool(self._cuda_layout().grads_out_has_wavelet),
                     rwi_split_iii=bool(self._cuda_layout().rwi_split_iii),
                     grads_out_wavelet_written=bool(self._cuda_layout().grads_out_wavelet_written),
-                    n_grad_models=len(models) if use_apm_arg else None,
                     illum_nvar=int(self._cuda_layout().illum_nvar),
                     adjoint_wavefields=adjoint_wavefields,
                     adjoint_workspace=adjoint_workspace,
@@ -2140,14 +2018,12 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     adcig_max_lag=int(self.adcig_max_lag),
                     topo_rows_param=topo_rows_arg,
                     has_topo_param=has_topo_arg,
-                    topo_category_param=topo_cat_arg,
-                    use_apm_param=use_apm_arg,
                     fs_faces=self._fs_faces_c,
                     cut_face_mask=getattr(self, "_dd_cut_mask", 0),
                     eq_aux=tuple(self._c_eq_aux()),
                 ),
                 wavelet,
-                *models_arg,
+                *models,
             )
         
         return syn

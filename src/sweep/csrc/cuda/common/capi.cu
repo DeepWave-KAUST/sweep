@@ -105,13 +105,13 @@ const char* const ENTRY_NAMES[SWEEP_ENTRY_COUNT] = {
     "elastic2d_backward_bs",
     "elastic2d_backward_ckpt",
     "elastic2d_backward_recursive_ckpt",
-    "elastic2d_apm_forward",
+    "retired_65_forward",
     "elastic3d_forward",
     "elastic3d_backward_bs",
     "elastic3d_backward_ckpt",
     "elastic3d_backward_recursive_ckpt",
     "elastic3d_backward",
-    "elastic3d_apm_forward",
+    "retired_71_forward",
     "elastic_tti_2nd2d_forward",
     "elastic_tti_2nd2d_backward",
     "elastic_tti_2nd2d_backward_bs",
@@ -241,13 +241,13 @@ void dispatch(int entry, const void* in, void* out)
         case 62: *static_cast<BackwardOutputCore*>(out) = elastic2d::backward_bs_core(*static_cast<const BackwardInputCore*>(in)); return;
         case 63: *static_cast<BackwardOutputCore*>(out) = elastic2d::backward_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
         case 64: *static_cast<BackwardOutputCore*>(out) = elastic2d::backward_recursive_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
-        case 65: *static_cast<ForwardOutputCore*>(out) = elastic2d::apm_forward_core(*static_cast<const ForwardInputCore*>(in)); return;
+        case 65: SWEEP_CHECK(false, "sweep_call: entry 65 is retired (the APM free surface was removed)"); return;
         case 66: *static_cast<ForwardOutputCore*>(out) = elastic3d::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
         case 67: *static_cast<BackwardOutputCore*>(out) = elastic3d::backward_bs_core(*static_cast<const BackwardInputCore*>(in)); return;
         case 68: *static_cast<BackwardOutputCore*>(out) = elastic3d::backward_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
         case 69: *static_cast<BackwardOutputCore*>(out) = elastic3d::backward_recursive_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
         case 70: *static_cast<BackwardOutputCore*>(out) = elastic3d::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
-        case 71: *static_cast<ForwardOutputCore*>(out) = elastic3d::apm_forward_core(*static_cast<const ForwardInputCore*>(in)); return;
+        case 71: SWEEP_CHECK(false, "sweep_call: entry 71 is retired (the APM free surface was removed)"); return;
         case 72: *static_cast<ForwardOutputCore*>(out) = elastic_tti_2nd2d::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
         case 73: *static_cast<BackwardOutputCore*>(out) = elastic_tti_2nd2d::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
         case 74: *static_cast<BackwardOutputCore*>(out) = elastic_tti_2nd2d::backward_bs_core(*static_cast<const BackwardInputCore*>(in)); return;

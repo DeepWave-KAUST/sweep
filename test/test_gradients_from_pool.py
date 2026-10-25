@@ -71,8 +71,8 @@ def test_backward_accumulates_into_the_handed_over_gradients(key, mode, monkeypa
     handed = []
     orig = c_prop._gradient_buffers
 
-    def keep(has_wavelet_, forward_source, models, n_grad_models=None):
-        grads = orig(has_wavelet_, forward_source, models, n_grad_models)
+    def keep(has_wavelet_, forward_source, models):
+        grads = orig(has_wavelet_, forward_source, models)
         handed.append((has_wavelet_, len(models), grads))
         return grads
     monkeypatch.setattr(c_prop, "_gradient_buffers", keep)
@@ -98,21 +98,10 @@ def test_backward_accumulates_into_the_handed_over_gradients(key, mode, monkeypa
     assert max(float(x.abs().max()) for x in g) > 0
 
 
-def test_gradient_buffers_share_one_placeholder_for_derived_models():
-    """Pure-Python contract: with ``n_grad_models`` capped, every model past the
-    cap gets the SAME zero tensor (as the APM drivers always returned one ``z``
-    under every derived slot), so an APM backward costs what it used to.
-
-    No GPU counterpart: the propagator refuses ``topo_method='apm'`` gradients on
-    ``impl='c'`` (its rho gradient is known-wrong), so the compiled APM backward
-    is unreachable from Python and only its contract can be pinned here."""
+def test_gradient_buffers_one_per_model():
+    """Pure-Python contract: one distinct zero buffer per model, after the
+    wavelet slot when the layout declares one."""
     src = torch.zeros(1, 1, 8)
-    models = [torch.zeros(1, 1, 4, 5) for _ in range(11)]
-    grads = c_prop._gradient_buffers(False, src, models, n_grad_models=3)
-    assert len(grads) == 11
-    assert len({id(g) for g in grads[:3]}) == 3
-    assert all(g is grads[3] for g in grads[3:])
-    assert grads[3] is not grads[0]
-    # and the default is one buffer per model, all distinct
-    grads = c_prop._gradient_buffers(True, src, models[:2])
+    models = [torch.zeros(1, 1, 4, 5) for _ in range(2)]
+    grads = c_prop._gradient_buffers(True, src, models)
     assert len(grads) == 3 and len({id(g) for g in grads}) == 3

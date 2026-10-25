@@ -67,24 +67,17 @@ class PropBase:
                 giving the per-column surface row index in the physical
                 grid (``0`` = top of physical domain).  When given, a
                 free surface is **implicit** — you do NOT need to set
-                ``free_surface=True``.  ``topo_method`` selects the
-                discretisation (image method vs APM); the propagator's
-                PML layout is auto-set to match.  Defaults to ``None``.
-            topo_method (str, optional): Which surface scheme to use
-                when ``topography`` is given.  One of:
-
-                * ``'auto'`` (default) — pick ``'apm'`` if the equation
-                  declares ``supports_apm=True`` (currently
-                  :class:`Elastic`/:class:`ElasticAPM`), else ``'image'``
-                  (vacuum / Robertsson staircase).
-                * ``'image'`` — staircase image method.  Acoustic uses
-                  Mittet 2002 vacuum cells; Elastic uses Robertsson 1996
-                  odd-parity stress mirror.  Sets ``free_surface=True``
-                  internally (top PML suppressed).
-                * ``'apm'`` — Cao & Chen 2018 parameter-modified method
-                  (elastic only).  Sets ``free_surface=False`` internally
-                  (full PML, including top).  Best long-time stability
-                  on rough staircase topography.
+                ``free_surface=True``.  The surface is the staircase
+                image method; the propagator's PML layout is auto-set
+                to match.  For a boundary-fitted elastic surface use
+                :class:`ElasticCurvilinear`.  Defaults to ``None``.
+            topo_method (str, optional): The surface scheme used when
+                ``topography`` is given: ``'auto'`` (default) and
+                ``'image'`` both select the staircase image method --
+                Acoustic uses Mittet 2002 vacuum cells, Elastic the
+                Robertsson 1996 odd-parity stress mirror -- and set
+                ``free_surface=True`` internally (top PML suppressed).
+                ``'apm'`` was removed and raises.
 
                 Ignored when ``topography is None``.  Legacy:
                 ``free_surface=True + topography`` (without
@@ -197,10 +190,6 @@ class PropBase:
         #     kernels should use the image-method PML layout (top PML
         #     suppressed) AND the odd-parity z-derivative mirror at the
         #     surface row.  ``True`` only when method == 'image'.
-        # APM implements the free surface via per-cell modulus
-        # modifications and keeps full PML on all four sides, so it has
-        # ``free_surface=True`` (physical) but ``_image_method_active=False``
-        # (no image-method mirror / no top-PML suppression).
         self._topo_method, self.free_surface, self._image_method_active = (
             self._resolve_topo_method(
                 topography=topography,
@@ -209,7 +198,7 @@ class PropBase:
             )
         )
         # ``topography=`` implies a free surface even with free_surface=False --
-        # image method or APM alike, both of them isotropic constructions.
+        # the image method, an isotropic construction.
         refuse_free_surface_if_anisotropic(
             equation, self.free_surface, "implied by topography=")
         # A topography STAIRCASE (not a flat free surface) needs the equation
@@ -227,9 +216,8 @@ class PropBase:
         # ``_resolve_topo_method`` can turn the TOP free surface on implicitly
         # (topography= implies an image-method free surface even with
         # free_surface=False).  Fold that back into the canonical fs_faces/pad so
-        # the per-edge padding layout suppresses the top PML accordingly.  (APM
-        # topography returns _image_method_active=False and keeps full PML, so
-        # this correctly does not fire.)  Gate on ``topography is not None``:
+        # the per-edge padding layout suppresses the top PML accordingly.  Gate
+        # on ``topography is not None``:
         # topography is the ONLY reason to add a top free surface the user didn't
         # ask for — a plain per-edge request like ``free_surface=['left']`` must
         # NOT get a spurious top free surface (which would drop the top PML).
@@ -290,9 +278,7 @@ class PropBase:
         # Keep the equation object aware of geometry-dependent boundary
         # behavior.  ``equation.free_surface`` is the image-method-layout
         # flag (used by the Python eager step to decide whether to apply
-        # the top-row image mirror).  APM equations set free_surface=False
-        # internally because their kernels don't engage the image mirror;
-        # the per-cell category handles the FS BC.
+        # the top-row image mirror).
         self.equation.free_surface = self._image_method_active
         # Per-edge free-surface faces (canonical axis-major bool tuple).  Migrated
         # equations (Acoustic / Elastic 2-D) read this; legacy equations ignore it
@@ -368,17 +354,16 @@ class PropBase:
         * ``free_surface=True`` (no topo)  → flat free surface (image method).
         * ``free_surface=False`` (no topo) → no free surface, full PML.
         * ``topography=`` given             → free surface is ON regardless
-          of the ``free_surface`` flag; method auto-selects (APM if
-          supported, otherwise image) unless the user explicitly passes
-          ``topo_method='image'`` or ``'apm'``.
-        * ``topo_method='apm'`` without ``topography``                 → error.
+          of the ``free_surface`` flag; the method is the image method.
+        * ``topo_method='apm'``                                       → error
+          (removed).
 
         Returns
         -------
         (method, free_surface_physical, image_method_active) :
             (str | None, bool, bool)
 
-        ``method``                — ``'image'``, ``'apm'``, or ``None``.
+        ``method``                — ``'image'`` or ``None``.
         ``free_surface_physical`` — user-facing flag: does the model have a
                                     free surface at all?
         ``image_method_active``   — implementation flag: should kernels use
@@ -390,10 +375,9 @@ class PropBase:
         return topography_.resolve_topo_method(
             topography=topography, topo_method=topo_method,
             free_surface=free_surface,
-            supports_apm=bool(getattr(self.equation, 'supports_apm', False)),
             # is_curvilinear is an INSTANCE attribute with no class-level
-            # default (unlike supports_apm), so the getattr default is what
-            # every non-curvilinear equation relies on.
+            # default, so the getattr default is what every non-curvilinear
+            # equation relies on.
             is_curvilinear=bool(getattr(self.equation, 'is_curvilinear', False)),
             equation_name=type(self.equation).__name__,
         )
@@ -402,20 +386,9 @@ class PropBase:
         """Validate and store irregular free-surface topography.
 
         ``topography=`` takes a 1-D ``(nx_phys,)`` integer array of
-        per-column surface row indices.  The matching 2-D air mask is
-        derived internally for the APM path; the image-method path uses
-        only the 1-D form.  Method dispatch follows ``self._topo_method``
-        (set in :meth:`_resolve_topo_method`):
-
-        ============== =================================================
-        ``_topo_method``  Backend
-        ============== =================================================
-        ``'image'``      Image-method / vacuum staircase
-                         (Mittet 2002 / Robertsson 1996).
-                         Uses ``_topo_rows_runtime``.
-        ``'apm'``        APM (Cao & Chen 2018) — elastic only.
-                         Uses ``_apm_air_mask_runtime``.
-        ============== =================================================
+        per-column surface row indices, which the image-method / vacuum
+        staircase (Mittet 2002 / Robertsson 1996) installs as
+        ``_topo_rows_runtime``.
 
         Curvilinear equations (``equation.is_curvilinear``) consume the
         per-column elevation independently of the dispatch above.
@@ -425,7 +398,6 @@ class PropBase:
         self._topo_rows_runtime = None
         self.equation.topography = None
         self.equation._topo_rows_runtime = None
-        self.equation._apm_air_mask_runtime = None
 
         if topography is None:
             # Curvilinear equations need an identity-metric grid even
@@ -447,8 +419,8 @@ class PropBase:
         topo_input = torch.as_tensor(topography)
 
         # Resolve physical extents from the runtime shape + image-method-
-        # layout flag (image suppresses top PML; APM has PML on both top
-        # and bottom).  ``self.shape`` is laid out as (nz, nx) for 2-D and
+        # layout flag (image suppresses the top PML).  ``self.shape`` is laid
+        # out as (nz, nx) for 2-D and
         # (nz, ny, nx) for 3-D — z is always axis 0.
         if self._image_method_active:
             nz_phys = self.shape[0] - self.abcn
@@ -463,30 +435,31 @@ class PropBase:
             nx_phys = self.shape[2] - 2 * self.abcn
             phys_extent = (nz_phys, ny_phys, nx_phys)
 
-        # Normalise input → (topo_row_phys, air_mask_phys) tuple.  Each
-        # method below picks the form it needs.  Shapes:
-        #   2-D : topo_row_phys (nx_phys,)              air_mask (nz, nx)
-        #   3-D : topo_row_phys (ny_phys, nx_phys)      air_mask (nz, ny, nx)
-        topo_row_phys, air_mask_phys = self._canonicalise_topography(
-            topo_input, *phys_extent
-        )
-
-        # Curvilinear path: always uses 1-D row.  Boundary-fitted grid
-        # ignores the air_mask form entirely.
+        # Curvilinear path: the boundary-fitted grid does not need the
+        # surface to land on grid rows, and forcing it to would turn a
+        # smooth hill into a staircase that radiates grid-scale energy.
+        # Keep the caller's (possibly fractional) row positions and skip
+        # the integer canonicalisation the image method needs.
         if getattr(self.equation, "is_curvilinear", False):
-            self.topography = topo_row_phys
-            self.equation.topography = topo_row_phys
+            topo_curv = topo_input.reshape(-1).to(torch.float64)
+            if topo_curv.numel() != nx_phys:
+                raise ValueError(
+                    f"2-D curvilinear topography must have one entry per "
+                    f"physical column: got {topo_curv.numel()}, expected "
+                    f"{nx_phys}")
+            self.topography = topo_curv
+            self.equation.topography = topo_curv
             self._attach_curvilinear_metrics(
-                topography=topo_row_phys.cpu().numpy(),
+                topography=topo_curv.cpu().numpy(),
                 halo=self.equation.so // 2,
             )
             return
 
-        # Dispatch on the topo method resolved at construction.
+        # Validated surface rows: 2-D (nx_phys,), 3-D (ny_phys, nx_phys).
+        topo_row_phys = self._canonicalise_topography(topo_input, *phys_extent)
+
         if self._topo_method == 'image':
             self._populate_image_method_topography(topo_row_phys)
-        elif self._topo_method == 'apm':
-            self._populate_apm_topography(air_mask_phys)
         else:
             # _resolve_topo_method should never let us get here with
             # topography != None and method == None, but guard anyway.
@@ -518,24 +491,198 @@ class PropBase:
         self.equation.topography = topo_row_phys
         self.equation._topo_rows_runtime = topo_runtime
 
-    def _populate_apm_topography(self, air_mask_phys):
-        """Set the APM air mask on the equation.
+    # -- curvilinear geometry helpers --------------------------------------
 
-        The build is in :func:`sweep.core.topography.build_apm_air_mask`; the
-        three assignments stay here. Note ``self.topography`` keeps the
-        PHYSICAL mask while the equation gets the padded one, and that the
-        physical mask lives on the INPUT's device -- CPU for a numpy
-        topography, even on a CUDA run.
+    @property
+    def curvilinear_grid(self):
+        """The :class:`~sweep.utils.curvilinear.CurvilinearGrid` in use, or
+        ``None`` for a Cartesian propagator."""
+        return getattr(self, "_curvilinear_grid", None)
+
+    def to_computational(self, x_phys, z_phys):
+        """Physical ``(ix, iz)`` grid indices -> computational ``(xi, eta)``.
+
+        Where a physical position lands on the boundary-fitted grid, whose
+        rows count from the surface down and are ``D(x)/(nz - 1)`` metres
+        each, not ``dh``. Sources and receivers do NOT need it: they are
+        physical indices and the propagator maps them itself (to the nearest
+        computational row; see :meth:`_place_on_curvilinear`). Returns
+        fractional indices.
         """
-        air_mask_padded = topography_.build_apm_air_mask(
-            air_mask_phys,
-            abcn=self.abcn,
-            halo=self.equation.so // 2,
-            device=getattr(self.equation, "device", None) or self.dev,
-        )
-        self.topography = air_mask_phys
-        self.equation.topography = air_mask_phys
-        self.equation._apm_air_mask_runtime = air_mask_padded
+        grid = self.curvilinear_grid
+        if grid is None:
+            return float(x_phys), float(z_phys)
+        return grid.physical_to_computational(x_phys, z_phys)
+
+    def _place_on_curvilinear(self, coords, role):
+        """``coords`` -- physical grid indices -- as a curvilinear equation
+        consumes them; untouched on a Cartesian grid.
+
+        Sources and receivers are physical grid indices for every equation:
+        ``[ix, iz]``, ``iz`` in rows of ``dh`` below the top of the model and
+        fractional if need be (a surface rarely sits on a row). The
+        boundary-fitted grid counts its rows from the surface down, one of
+        them ``D(x)/(nz - 1)`` metres, so the index is mapped here, to the
+        nearest computational row: the grid's point source. A point up to one
+        row above the surface the grid uses -- it smooths an integer
+        staircase, so a receiver put on an integer surface row can sit a
+        fraction of a row above it -- goes on the surface row; higher up is
+        the air, and that is refused, as is anything outside the model.
+        """
+        grid = self.curvilinear_grid
+        if grid is None:
+            return coords
+        import torch
+
+        t = coords if torch.is_tensor(coords) else torch.as_tensor(np.asarray(coords))
+        c = t.detach().cpu().double().numpy()
+        x, z = c[..., 0], c[..., -1]
+        ix = np.rint(x)
+        bad = np.abs(x - ix) > 1e-6
+        if bad.any():
+            raise ValueError(
+                f"{role} columns must be whole grid indices on a curvilinear "
+                f"grid (its columns do not move); got x = {x[bad][0]}")
+        bad = (ix < 0) | (ix > grid.nx_phys - 1) | (z > grid.nz_phys - 1 + 1e-6)
+        if bad.any():
+            raise ValueError(
+                f"{int(bad.sum())} {role}(s) outside the {grid.nz_phys} x "
+                f"{grid.nx_phys} model, e.g. [{x[bad][0]:g}, {z[bad][0]:g}]")
+        surf = np.asarray(grid.h_surface.detach().cpu(), dtype=np.float64) / float(grid.dh)
+        s = surf[ix.astype(np.int64)]
+        bad = z < s - 1.0
+        if bad.any():
+            raise ValueError(
+                f"{int(bad.sum())} {role}(s) above the surface, e.g. "
+                f"[{x[bad][0]:g}, {z[bad][0]:g}] where the surface is row "
+                f"{s[bad][0]:.2f}. Sources and receivers are physical grid "
+                f"indices (rows of dh from the top of the model): put them at "
+                f"or below the surface row of their column.")
+        _, eta = grid.physical_to_computational(ix, z)
+        out = c.copy()
+        out[..., 0] = ix
+        out[..., -1] = np.rint(np.asarray(eta, dtype=np.float64))
+        return torch.as_tensor(out.astype(np.int64), device=t.device)
+
+    def _curvilinear_snapshots(self, snapshots):
+        """Snapshots of a curvilinear run on the Cartesian grid, in place.
+
+        The boundary-fitted grid stores row ``k`` of column ``x`` at depth
+        ``k * D(x)/(nz - 1)`` below the surface, so its raw snapshots have the
+        surface on row 0 everywhere and a stretched column under it. Each
+        Cartesian row is mapped to its (fractional) computational row and
+        interpolated linearly between the two around it; the cells above the
+        surface are the air and hold 0, as the image method's vacuum does.
+        The layout is the one a Cartesian propagator returns -- the model
+        plus its PML pads, whose columns take the edge column's surface, as
+        the padded metrics do. A flat curvilinear grid is the identity and is
+        returned as it is.
+        """
+        grid = self.curvilinear_grid
+        if grid is None or self.topography is None:
+            return snapshots
+        import torch
+
+        i0, i1, w, keep = self._curvilinear_snapshot_tables(grid)
+        cols = torch.arange(i0.shape[1]).expand_as(i0)
+        for k in range(snapshots.shape[0]):
+            s = snapshots[k]
+            a, b = s[..., i0, cols], s[..., i1, cols]
+            snapshots[k] = torch.where(keep, a + w * (b - a), torch.zeros_like(a))
+        return snapshots
+
+    def _curvilinear_snapshot_tables(self, grid):
+        """``(i0, i1, w, keep)`` over the snapshot grid ``self.shape``: the two
+        computational rows around each Cartesian cell, the weight of the
+        lower one, and which cells are below the surface and inside the
+        computed rows. Cached per grid."""
+        import torch
+
+        cached = getattr(self, "_curv_snap_tables", None)
+        if cached is not None and cached[0] is grid:
+            return cached[1]
+        nz_rt, nx_rt = self.shape
+        top = 0 if self._image_method_active else self.abcn
+        left = self.abcn
+        surf = np.asarray(grid.h_surface.detach().cpu(), dtype=np.float64) / float(grid.dh)
+        s = surf[np.clip(np.arange(nx_rt) - left, 0, grid.nx_phys - 1)][None, :]
+        p = (np.arange(nz_rt, dtype=np.float64) - top)[:, None]   # Cartesian row in the model
+        depth = (grid.nz_phys - 1) - s
+        eta = (p - s) * (grid.nz_phys - 1) / depth + top          # computational row, runtime
+        keep = (p >= s) & (eta <= nz_rt - 1)
+        eta = np.clip(eta, 0.0, nz_rt - 1)
+        i0 = np.floor(eta).astype(np.int64)
+        tables = (torch.as_tensor(i0),
+                  torch.as_tensor(np.minimum(i0 + 1, nz_rt - 1)),
+                  torch.as_tensor(eta - i0, dtype=torch.float32),
+                  torch.as_tensor(keep))
+        self._curv_snap_tables = (grid, tables)
+        return tables
+
+    def _curvilinear_models(self, models):
+        """Physical-grid models on the boundary-fitted grid's rows.
+
+        Models are given on the Cartesian grid, as for every other equation:
+        row ``z`` is ``z * dh`` below the top of the model. Computational row
+        ``k`` of column ``x`` sits ``k * D(x)/(nz - 1)`` below the surface,
+        so each column is sampled there, linearly between the two physical
+        rows around it -- differentiably: the gradient comes back on the
+        physical grid, through the transpose of this interpolation, and the
+        rows above the surface, which no computational row samples, get none.
+        Between the surface and the first row at or below the surface the
+        caller gave, the model is that row's: the rows above it are the air,
+        whatever they hold, and the grid's surface is smoothed from an integer
+        one, so it can sit a little higher. A flat grid is the identity and
+        the models are returned as they are.
+        """
+        grid = self.curvilinear_grid
+        if grid is None or self.topography is None:
+            return models
+        import torch
+
+        i0, i1, w, cols = self._curvilinear_model_tables(grid)
+        out = []
+        for m in models:
+            d = m.device
+            a, b = m[..., i0.to(d), cols.to(d)], m[..., i1.to(d), cols.to(d)]
+            out.append(a + w.to(device=d, dtype=m.dtype) * (b - a))
+        return out
+
+    def _curvilinear_model_grad(self, grad):
+        """The transpose of :meth:`_curvilinear_models`: a gradient on the
+        grid's rows as the gradient of the physical-grid model."""
+        if self.curvilinear_grid is None or self.topography is None:
+            return grad
+        import torch
+
+        with torch.enable_grad():
+            x = torch.zeros_like(grad, requires_grad=True)
+            (y,) = self._curvilinear_models([x])
+            (g,) = torch.autograd.grad(y, x, grad)
+        return g
+
+    def _curvilinear_model_tables(self, grid):
+        """``(i0, i1, w, cols)`` over the model grid: the two physical rows
+        around each computational row and the weight of the lower one.
+        Cached per grid."""
+        import torch
+
+        cached = getattr(self, "_curv_model_tables", None)
+        if cached is not None and cached[0] is grid:
+            return cached[1]
+        nz, nx = grid.nz_phys, grid.nx_phys
+        s = np.asarray(grid.h_surface.detach().cpu(), dtype=np.float64)[None, :] / float(grid.dh)
+        k = np.arange(nz, dtype=np.float64)[:, None]
+        z = s + k * ((nz - 1) - s) / (nz - 1)                     # physical row of row k
+        wet = np.ceil(np.asarray(self.topography.cpu(), dtype=np.float64) - 1e-4)
+        z = np.clip(np.maximum(z, wet[None, :]), 0.0, nz - 1)
+        i0 = np.floor(z).astype(np.int64)
+        tables = (torch.as_tensor(i0),
+                  torch.as_tensor(np.minimum(i0 + 1, nz - 1)),
+                  torch.as_tensor(z - i0, dtype=torch.float32),
+                  torch.arange(nx).expand(nz, nx))
+        self._curv_model_tables = (grid, tables)
+        return tables
 
     def _attach_curvilinear_metrics(self, topography, halo):
         """Build a :class:`CurvilinearGrid` from ``topography`` (physical
@@ -661,26 +808,15 @@ class PropBase:
     def _set_memory_strategy(self, strategy, *, reason=None):
         """Move to another gradient-memory strategy, deliberately.
 
-        ``reason`` is for the caller's benefit at the call site, not stored: it
-        makes ``_set_memory_strategy('boundary', reason='APM has no ckpt
-        backward')`` read as what it is, where ``use_ckpt = False`` left the
+        ``reason`` is for the caller's benefit at the call site, not stored: a
+        call such as ``_set_memory_strategy('boundary', reason='no ckpt
+        backward')`` reads as what it is, where ``use_ckpt = False`` left the
         reader to work out what it fell back TO.
         """
         if strategy not in ("full", "boundary", "ckpt"):
             raise ValueError(
                 f"memory strategy must be 'full', 'boundary' or 'ckpt', got {strategy!r}")
         self._memory_strategy = strategy
-
-    def _disable_ckpt(self, reason):
-        """Drop out of checkpointing, keeping boundary saving if it is enabled.
-
-        ``use_ckpt = False`` did not say where it landed. It landed here.
-        """
-        if self._memory_strategy != "ckpt":
-            return
-        self._set_memory_strategy(
-            "boundary" if self.boundary_saving_config.get("enabled") else "full",
-            reason=reason)
 
     def _set_call_signature(self):
         forward = getattr(type(self), "forward", None)

@@ -149,7 +149,7 @@ inline fdtd::LaunchConfig wave_config(const Dims& d)
 }
 
 // SolverContext construction is shared; the per-family extras (topography
-// rows, per-edge free-surface faces, APM flags) go through Eq::setup_ctx.
+// rows, per-edge free-surface faces) go through Eq::setup_ctx.
 template <class Eq, class P>
 inline SolverContext make_ctx(const P& p, const Dims& d)
 {
