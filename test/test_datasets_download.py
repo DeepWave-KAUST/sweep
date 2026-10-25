@@ -6,10 +6,12 @@ Everything runs offline against a fake ``requests`` except the ``network``
 tests, which download from Zenodo and run only with ``SWEEP_TEST_NETWORK=1``.
 """
 
+import gzip
 import hashlib
 import io
 import itertools
 import os
+import struct
 import sys
 import tarfile
 import types
@@ -206,11 +208,11 @@ def test_every_download_entry_pins_a_sha256(tmp_path, monkeypatch):
     monkeypatch.setattr(_cache, "download", record)
     entries = [datasets.info(n, v) for n, v in datasets.available()]
     entries = [e for e in entries if e.loader.__module__ == _benchmarks.__name__]
-    assert len(entries) == 7
+    assert len(entries) == 8
     for e in entries:
         with pytest.raises(_Stop):
             e.loader()
-    assert len(calls) == 6  # the two marmousi entries share one tarball
+    assert len(calls) == 7  # the two marmousi entries share one tarball
     for name, (urls, kw) in calls.items():
         assert urls and not isinstance(urls, str), name
         assert len(kw.get("sha256") or "") == 64, name
@@ -223,6 +225,10 @@ def test_every_download_entry_pins_a_sha256(tmp_path, monkeypatch):
         assert urls[-1].startswith(_benchmarks._S3), urls
     assert _benchmarks._OVERTHRUST_H5_MD5 == "ae4082cdcebbc7714eedd382d7925804"  # as Zenodo publishes it
     assert set(_benchmarks._HESS_SHA256) == set(_benchmarks._HESS_MEMBERS.values())
+    # chevron: the Hugging Face copy only (its fallback is the original archive, see below)
+    assert calls["SEG14.Vpsmoothstarting.segy"][0] == (_benchmarks._CHEVRON_URL + "SEG14.Vpsmoothstarting.segy",)
+    assert all(len(s) == 64 for s in _benchmarks._CHEVRON_SHA256.values())
+    assert all(len(s) == 64 for _, _, s in _benchmarks._CHEVRON_PARTS)
 
 
 # ---------------------------------------------------------- overthrust 3d
@@ -343,6 +349,179 @@ def test_overthrust_h5_without_h5py_says_how_to_install(monkeypatch, tmp_path):
         _benchmarks._read_overthrust_h5(tmp_path / "x.h5")
 
 
+# ------------------------------------------------------- chevron fwi 2014
+def _to_ibm(a) -> np.ndarray:
+    """IEEE values (exactly representable in 24 bits) -> IBM float32 bit patterns."""
+    a = np.asarray(a, dtype=np.float64).ravel()
+    out = np.zeros(a.size, dtype=np.uint32)
+    for k, v in enumerate(a):
+        if v == 0:
+            continue
+        e4 = int(np.ceil(np.log2(abs(v)) / 4 + 1e-12))
+        m = abs(v) / 16.0 ** e4
+        if m >= 1:
+            e4, m = e4 + 1, m / 16
+        out[k] = (int(v < 0) << 31) | ((e4 + 64) << 24) | int(round(m * 2 ** 24))
+    return out
+
+
+def _segy(traces, headers, dt_us):
+    """A SEG-Y rev-1 file: IBM float, ``traces`` (ntr, ns), ``headers`` a list of {byte offset: (fmt, value)}."""
+    ntr, ns = traces.shape
+    binhdr = bytearray(400)
+    binhdr[16:18] = struct.pack(">h", dt_us)
+    binhdr[20:22] = struct.pack(">h", ns)
+    binhdr[24:26] = struct.pack(">h", 1)
+    body = bytearray()
+    for tr, hd in zip(traces, headers):
+        h = bytearray(240)
+        h[114:116] = struct.pack(">h", ns)
+        h[116:118] = struct.pack(">h", dt_us)
+        for off, (fmt, v) in hd.items():
+            h[off:off + struct.calcsize(fmt)] = struct.pack(fmt, v)
+        body += h + _to_ibm(tr).astype(">u4").tobytes()
+    return b" " * 3200 + bytes(binhdr) + bytes(body)
+
+
+@pytest.fixture
+def small_chevron(monkeypatch, tmp_path):
+    """A 3-shot, 4-receiver, 5-sample Chevron set with a 6x7 starting model; returns (members, truth)."""
+    nshot, nrec, nt, (nz, nx) = 3, 4, 5, (6, 7)
+    monkeypatch.setattr(_benchmarks, "_CHEVRON_NSHOT", nshot)
+    monkeypatch.setattr(_benchmarks, "_CHEVRON_NREC", nrec)
+    monkeypatch.setattr(_benchmarks, "_CHEVRON_NT", nt)
+    monkeypatch.setattr(_benchmarks, "_CHEVRON_VP_SHAPE", (nz, nx))
+    monkeypatch.setenv("SWEEP_DATASETS_CACHE", str(tmp_path / "cache"))
+    s, r, k = np.meshgrid(np.arange(nshot), np.arange(nrec), np.arange(nt), indexing="ij")
+    data = ((s * 64 + r * 8 + k) / 8.0 - 3.0).astype(np.float32)          # (shot, rec, t)
+    hdrs = [{8: (">i", i + 1), 12: (">i", j + 1), 70: (">h", -10000),
+             72: (">i", (1000 + 25 * i) * 10000), 80: (">i", (1000 + 25 * (i + j)) * 10000)}
+            for i in range(nshot) for j in range(nrec)]
+    seis = _segy(data.reshape(-1, nt), hdrs, 4000)
+    z, x = np.meshgrid(np.arange(nz), np.arange(nx), indexing="ij")
+    vp = (1500.0 + 100.0 * z + 4.0 * x).astype(np.float32)                 # (nz, nx)
+    vp_segy = _segy(vp.T, [{}] * nx, 5000)
+    members = {
+        "SEG14.Pisoelastic.segy.gz": gzip.compress(seis),
+        "SEG14.Vpsmoothstarting.segy": vp_segy,
+        "SEG14.Vplog": b"Well Log: Depth in meters;  Vp in m/s;  X location = 39375 m\n"
+                       b"Depth = 1000.0  Vp = 2414.7  \nDepth = 1005.0  Vp = 2242.4  \n",
+        "Wavelet.txt": b"Source Wavelet. Sample Rate = 0.666666... milliseconds\n0.000000000\n0.900000000\n-1.5\n",
+        "WellWavePic.JPG": b"\xff\xd8 picture",
+        "README": b"readme",
+        "DataLicenseAgreement": b"DATA LICENSE AGREEMENT",
+    }
+    monkeypatch.setattr(_benchmarks, "_CHEVRON_SHA256", {n: _sha(b) for n, b in members.items()})
+    truth = {"data": data.transpose(0, 2, 1), "vp_init": vp, "wavelet": np.array([0, 0.9, -1.5], np.float32),
+             "depth": np.array([1000.0, 1005.0]), "log_vp": np.array([2414.7, 2242.4], np.float32)}
+    return members, truth
+
+
+def _serve_chevron_hf(fake_net, members):
+    routes, fetched = fake_net
+    for n, b in members.items():
+        routes[_benchmarks._CHEVRON_URL + n] = (200, b)
+    return fetched
+
+
+def _check_chevron(out, truth, shots):
+    np.testing.assert_array_equal(out["data"], truth["data"][shots])
+    assert out["data"].dtype == np.float32
+    np.testing.assert_array_equal(out["vp_init"], truth["vp_init"])
+    np.testing.assert_array_equal(out["wavelet"], truth["wavelet"])
+    np.testing.assert_array_equal(out["well_log"]["depth"], truth["depth"])
+    np.testing.assert_array_equal(out["well_log"]["vp"], truth["log_vp"])
+    g = out["geometry"]
+    np.testing.assert_array_equal(g["source_x"], 1000.0 + 25.0 * np.asarray(shots))
+    np.testing.assert_array_equal(g["receiver_x"], g["source_x"][:, None] + 25.0 * np.arange(4))
+    assert out["dh"] == (5.0, 12.5) and out["dt"] == 0.004 and out["nt"] == 5
+    assert "vp" not in out
+
+
+def test_chevron_loads_every_field_from_hugging_face(small_chevron, fake_net):
+    members, truth = small_chevron
+    fetched = _serve_chevron_hf(fake_net, members)
+    out = datasets.load("chevron-fwi-2014")
+    _check_chevron(out, truth, [0, 1, 2])
+    assert all(u.startswith(_benchmarks._CHEVRON_URL) for u in fetched) and len(fetched) == 4
+    out = datasets.load("chevron-fwi-2014", shots=[2, 0])
+    _check_chevron(out, truth, [2, 0])
+    assert len(fetched) == 4  # second load: from the verified cache
+
+
+def test_chevron_fetches_the_gathers_only_when_asked(small_chevron, fake_net):
+    members, truth = small_chevron
+    fetched = _serve_chevron_hf(fake_net, members)
+    out = datasets.load("chevron-fwi-2014", fields=("vp_init",), shots=slice(1, 3))
+    np.testing.assert_array_equal(out["vp_init"], truth["vp_init"])
+    assert "data" not in out and out["geometry"]["source_x"].tolist() == [1025.0, 1050.0]
+    assert fetched == [_benchmarks._CHEVRON_URL + "SEG14.Vpsmoothstarting.segy"]
+    with pytest.raises(ValueError, match="unknown fields"):
+        datasets.load("chevron-fwi-2014", fields=("vp",))
+
+
+def test_chevron_falls_back_to_the_original_archive(small_chevron, fake_net, monkeypatch, tmp_path):
+    members, truth = small_chevron
+    routes, fetched = fake_net
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for n, b in members.items():
+            info = tarfile.TarInfo(n)
+            info.size = len(b)
+            tf.addfile(info, io.BytesIO(b))
+    archive = buf.getvalue()
+    cut = len(archive) // 3  # the bucket split the archive at an arbitrary byte
+    parts = (("x.tar.gz.partaa", "20220726000001", archive[:cut]), ("x.tar.gz.partab", "20220726000002", archive[cut:]))
+    monkeypatch.setattr(_benchmarks, "_CHEVRON_PARTS", tuple((n, ts, _sha(b)) for n, ts, b in parts))
+    ia = [f"https://web.archive.org/web/{ts}id_/{_benchmarks._CHEVRON_BUCKET}{n}" for n, ts, _ in parts]
+    routes[ia[0]] = (503, b"Service Unavailable")  # the Internet Archive is flaky: the bucket is next
+    routes[_benchmarks._CHEVRON_BUCKET.replace("http://", "https://") + parts[0][0]] = (200, parts[0][2])
+    routes[ia[1]] = (200, parts[1][2])
+    with pytest.warns(UserWarning, match="original archive"):
+        out = datasets.load("chevron-fwi-2014")
+    _check_chevron(out, truth, [0, 1, 2])
+    assert fetched[0] == _benchmarks._CHEVRON_URL + "SEG14.Vpsmoothstarting.segy" and ia[1] in fetched
+    cache = tmp_path / "cache" / "chevron_fwi_2014"
+    assert sorted(p.name for p in cache.iterdir()) == sorted(list(members) + ["SEG14.Pisoelastic.segy"])
+    assert sum(u.startswith(_benchmarks._CHEVRON_URL) for u in fetched) == 1  # every member came out of the archive
+
+
+def test_chevron_retries_a_part_the_internet_archive_did_not_serve(monkeypatch, tmp_path, fake_net):
+    routes, fetched = fake_net
+    monkeypatch.setenv("SWEEP_DATASETS_CACHE", str(tmp_path))
+    monkeypatch.setattr(_benchmarks, "_CHEVRON_RETRY_WAIT", 0.0)
+    body = b"part bytes" * 100
+    url = f"https://web.archive.org/web/1id_/{_benchmarks._CHEVRON_BUCKET}p"
+    get = sys.modules["requests"].get
+    def flaky(u, stream=False, timeout=None):  # a read timeout on the first try only
+        if u == url and fetched.count(u) == 0:
+            fetched.append(u)
+            raise OSError("Read timed out")
+        return get(u, stream=stream, timeout=timeout)
+    monkeypatch.setattr(sys.modules["requests"], "get", flaky)
+    routes[url] = (200, body)
+    assert _benchmarks._chevron_part("p", "1", _sha(body)).read_bytes() == body
+    assert fetched.count(url) == 2
+    monkeypatch.setattr(_benchmarks, "_CHEVRON_ATTEMPTS", 2)
+    with pytest.raises(OSError, match="could not download q"):
+        _benchmarks._chevron_part("q", "1", _sha(body))  # never served: gives up after two rounds
+
+
+def test_chevron_refuses_gathers_whose_headers_disagree(small_chevron, fake_net, monkeypatch):
+    members, _ = small_chevron
+    seis = bytearray(gzip.decompress(members["SEG14.Pisoelastic.segy.gz"]))
+    tb = 240 + 4 * 5
+    off = 3600 + (1 * 4 + 2) * tb + 80  # gx of shot 1, receiver 2
+    seis[off:off + 4] = struct.pack(">i", 999 * 10000)
+    members["SEG14.Pisoelastic.segy.gz"] = gzip.compress(bytes(seis))
+    monkeypatch.setitem(_benchmarks._CHEVRON_SHA256, "SEG14.Pisoelastic.segy.gz",
+                        _sha(members["SEG14.Pisoelastic.segy.gz"]))
+    _serve_chevron_hf(fake_net, members)
+    datasets.load("chevron-fwi-2014", fields=("data",), shots=[0, 2])
+    with pytest.raises(ValueError, match="shot 1"):
+        datasets.load("chevron-fwi-2014", fields=("data",), shots=1)
+
+
 # ---------------------------------------------------------------- network
 # md5 of the original files, as the Zenodo records publish them
 ZENODO_FILES = {
@@ -431,3 +610,27 @@ def test_overthrust_fresh_download_and_the_hdf5_fallback_agree(tmp_path, monkeyp
     with pytest.warns(UserWarning, match="HDF5 copy"):
         h5 = datasets.load("overthrust", "3d-acoustic")["vp"]
     np.testing.assert_array_equal(h5, cd)
+
+
+@network
+@pytest.mark.parametrize("name", sorted(_benchmarks._CHEVRON_SHA256))
+def test_hugging_face_serves_the_pinned_chevron_files(name):
+    requests = pytest.importorskip("requests")
+    url = _benchmarks._CHEVRON_URL + name
+    h = requests.head(url, allow_redirects=False, timeout=60)
+    linked = h.headers.get("X-Linked-ETag", "").strip('"')
+    if len(linked) == 64:  # LFS file: Hugging Face reports its sha256
+        assert linked == _benchmarks._CHEVRON_SHA256[name]
+    else:  # small file stored in git (its ETag is the git blob id): fetch it
+        assert _sha(requests.get(url, timeout=60).content) == _benchmarks._CHEVRON_SHA256[name]
+
+
+@network
+def test_chevron_fresh_download_without_the_gathers(tmp_path, monkeypatch):
+    pytest.importorskip("requests")
+    monkeypatch.setenv("SWEEP_DATASETS_CACHE", str(tmp_path))
+    out = datasets.load("chevron-fwi-2014", fields=("vp_init", "wavelet", "well_log"))
+    assert out["vp_init"].shape == (1200, 3820) and out["dh"] == (5.0, 12.5)
+    assert 1400 < float(out["vp_init"].min()) < 1600 < float(out["vp_init"].max())
+    assert out["wavelet"].shape == (1025,)
+    assert out["well_log"]["depth"][[0, -1]].tolist() == [1000.0, 2450.0]
