@@ -55,7 +55,10 @@ Two SEM-specific constraints to know up front:
 
 Equations are discovered automatically — `sweep.sem.equations.describe()`
 prints the full table (mesh family, C-PML support, fields, receiver
-components) for every equation class.
+components) for every equation class. `sweep list equations` lists them
+next to the finite-difference ones, `sweep show <Equation>` prints one's
+fields, source and receiver types and the `models=` it takes (see
+[CLI](cli.md)), and the API is in the [SEM reference](../api/sem/index.md).
 
 ## Shot batching on `impl='c'`
 

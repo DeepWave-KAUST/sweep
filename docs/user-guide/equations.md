@@ -91,7 +91,7 @@ only, and the C-PML is required wherever the ring IS the C-PML band.
 
 | Equation | Models | Mesh | Dim | Notes | `impl="c"` | `BoundarySaving()` |
 | --- | --- | --- | --- | --- | --- | --- |
-| `AcousticPotentialSEM2D` | `['vp', 'rho']` | quad9 | 2D | Potential form (SPECFEM), variable density; the FWI workhorse — [shot batching](sem.md#shot-batching-on-implc), per-shot models and batched boundary saving live here | ✅ | ✅ (C-PML; fp32/bf16/int8; batched) |
+| `AcousticPotentialSEM2D` | `['vp']` | quad9 | 2D | Potential form (SPECFEM), the density from `density=`; the FWI workhorse — [shot batching](sem.md#shot-batching-on-implc), per-shot models and batched boundary saving live here | ✅ | ✅ (C-PML; fp32/bf16/int8; batched) |
 | `AcousticSEM2D` | `['vp']` | quad4 | 2D | Constant-density displacement form, flat mesh | ❌ | eager |
 | `AcousticSEM2DDeformed` | `['vp']` | quad9 | 2D | Topography-capable variant of `AcousticSEM2D` | ❌ | eager |
 | `AcousticSEM3D` | `['vp']` | hex8 | 3D | 3-D acoustic, flat mesh | ✅ | ✅ (fp32/bf16/int8) |
@@ -115,6 +115,11 @@ with their models and compiled-binding support, use the CLI:
 sweep list equations
 ```
 
+It lists the SEM classes after the finite-difference ones, and
+`sweep show <Class>` prints one class's fields, source and receiver types
+and models (see [CLI](cli.md)). The SEM API is in the
+[SEM reference](../api/sem/index.md).
+
 Or from Python:
 
 ```python
@@ -124,13 +129,13 @@ print(sorted(equation_classes().keys()))
 print(torch_binding_supported_equations())
 ```
 
-Four SEM classes additionally run **multi-GPU model decomposition** on
+Five SEM classes additionally run **multi-GPU model decomposition** on
 `impl='c'` (x strips; the 3-D cut is a YZ plane) — `AcousticPotentialSEM2D`,
-`ElasticSEM2DDeformed`, `AcousticElasticSEM2D` and `AcousticSEM3D`; the
-first two also compose it with boundary saving. See
-[Domain decomposition](sem.md#domain-decomposition-multi-gpu-phase-1). The
-whitelist is exact, so a near-miss (e.g. `AcousticSEM3DDeformed`) raises
-rather than falling through to a sibling's path.
+`ElasticSEM2DDeformed`, `AcousticElasticSEM2D`, `AcousticSEM3D` and
+`AcousticSEM3DDeformed`; the first two also compose it with boundary saving.
+See [Domain decomposition](sem.md#domain-decomposition-multi-gpu-phase-1).
+The whitelist is exact, so any other class, a subclass of one of these
+included, raises rather than falling through to a sibling's path.
 
 The SEM registry has its own one-liner — mesh family, topography and C-PML
 support, field counts and receiver components for every class:

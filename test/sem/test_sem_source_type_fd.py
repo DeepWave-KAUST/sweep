@@ -16,6 +16,8 @@ the same ``source_type`` and wavelet give the same waveform.
 """
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 import pytest
 import torch
@@ -228,25 +230,34 @@ def _fd_geometry():
     return src, rec
 
 
-def _fd_vz(source_type, wav):
+@functools.lru_cache(maxsize=None)
+def _fd_vz(source_type):
+    """PropTorch's v_z for ``source_type`` (a tuple) under ``_fd_wavelet()``:
+    the reference of both tests below, so the explosion's is run once.
+
+    A 20-cell absorbing layer (40 took three times as long): the two
+    records correlate to 1.00000 for all three source types."""
     from sweep.equations import Elastic
     from sweep.propagator.torch import PropTorch
     eq = Elastic(spatial_order=4, device="cpu", backend="torch")
-    prop = PropTorch(eq, shape=(FZ, FX), abcn=40, dh=FDH, dt=FDT,
+    prop = PropTorch(eq, shape=(FZ, FX), abcn=20, dh=FDH, dt=FDT,
                      free_surface=False, impl="eager", use_ckpt=False,
                      eager_options={"use_compile": False},
-                     source_type=source_type, receiver_type=["vz"])
+                     source_type=list(source_type), receiver_type=["vz"])
     src, rec = _fd_geometry()
     models = [torch.full((FZ, FX), v) for v in (FVP, FVS, FRHO)]
     with torch.no_grad():
-        out = prop(wav, torch.tensor(src), torch.tensor(rec), models=models)
+        out = prop(_fd_wavelet(), torch.tensor(src), torch.tensor(rec),
+                   models=models)
     return out[0, :, :, 0].double()
 
 
 def _sem_vz(source_type, wav):
+    # four absorbing elements (was six): the FD correlations below drop by
+    # at most 0.002 (sxz, the lowest: 0.985 -> 0.984), the mesh by 23%
     p = PropSEM(ElasticVSSEM2DDeformed, shape=(FZ, FX), dh=FDH, dt=FDT,
                 nt=FNT, n_order=NO, free_surface=False,
-                abcn=6 * NO, f_dominant=FF0, dev="cpu", impl="eager",
+                abcn=4 * NO, f_dominant=FF0, dev="cpu", impl="eager",
                 dtype=torch.float32, source_type=source_type,
                 receiver_type=["v_z"])
     src, rec = _fd_geometry()
@@ -263,8 +274,7 @@ def _corr(a, b):
 
 @pytest.mark.parametrize("source_type", [["sxx", "szz"], ["vz"], ["sxz"]])
 def test_same_source_type_same_waveform_as_proptorch(source_type):
-    w = _fd_wavelet()
-    c = _corr(_fd_vz(source_type, w), _sem_vz(source_type, w))
+    c = _corr(_fd_vz(tuple(source_type)), _sem_vz(source_type, _fd_wavelet()))
     assert c > 0.9, f"{source_type}: FD vs SEM v_z correlate {c:.3f}"
 
 
@@ -274,7 +284,7 @@ def test_the_waveform_check_can_tell_a_derivative():
     check above must fail on it."""
     w = _fd_wavelet()
     dw = torch.diff(w, prepend=w[:1] * 0) / FDT
-    c = _corr(_fd_vz(["sxx", "szz"], w), _sem_vz(["sxx", "szz"], dw))
+    c = _corr(_fd_vz(("sxx", "szz")), _sem_vz(["sxx", "szz"], dw))
     assert abs(c) < 0.6, f"a derivative-off record still correlates {c:.3f}"
 
 

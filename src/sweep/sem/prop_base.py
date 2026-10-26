@@ -120,6 +120,18 @@ def _outside_model(raw, n):
     return (raw < -tol) | (raw > (n - 1) + tol)
 
 
+def propsem_models(equation) -> list:
+    """The ``models=`` list PropSEM takes for ``equation``, in order.
+
+    The positional models of ``build()``, minus the ones PropSEM supplies
+    itself: the acoustic potential form takes ``(vp, rho)``, but ``density=``
+    exists so that callers pass ``models=[vp]`` and rho is a constant the
+    adapter fills in. ``sweep show`` reads the same list.
+    """
+    supplied = {"rho"} if equation is AcousticPotentialSEM2D else set()
+    return [n for n in model_names(equation) if n not in supplied]
+
+
 def _resolve_free_surface(free_surface, ndim, topography):
     """``free_surface`` as PropTorch takes it -> the tuple of side names that
     carry one.
@@ -761,13 +773,9 @@ class PropSEM:
                 f"{equation.__name__} builds on a {kind} mesh "
                 f"({MESH_NDIM[kind]}-D); shape {shape} is {self.ndim}-D.")
         # Positional models of build(), MINUS the ones PropSEM supplies
-        # itself: the acoustic potential form takes (vp, rho) but ``density=``
-        # exists precisely so callers pass models=[vp] and rho is a constant
-        # the adapter fills in. Deriving the raw signature here would be more
-        # faithful to build() and would break that contract.
-        self._supplied = {"rho"} if equation is AcousticPotentialSEM2D else set()
-        self.model_names = [n for n in model_names(equation)
-                            if n not in self._supplied]
+        # itself (see propsem_models). Deriving the raw signature here would
+        # be more faithful to build() and would break the density= contract.
+        self.model_names = propsem_models(equation)
         # PropSEM drives build() one generic way: positional models, plus
         # `dirichlet` for the acoustic forms and a single `cpml`. An equation
         # whose signature needs something else (the fluid-solid form wants

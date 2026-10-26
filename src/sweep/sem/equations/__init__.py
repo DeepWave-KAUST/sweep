@@ -41,6 +41,41 @@ def equation_classes() -> dict[str, type]:
     return dict(_EQUATIONS)
 
 
+def summary(cls) -> dict:
+    """What picks an equation, as data -- the columns of :func:`describe`.
+
+    ``mesh`` (``"quad4"``, ``"quad9"``, ``"hex8"`` or ``"hex27"``), ``ndim``,
+    ``topography`` (the mesh family admits one), ``cpml`` (``"yes"``,
+    ``"split"`` or ``"NO"``, see :func:`describe`), ``fields`` (the state, in
+    order), ``sources`` and ``receivers`` (the fields a source drives and the
+    receivers sample) and ``derived`` (the receiver components computed from
+    those, such as ``p``). ``sweep show`` prints it.
+    """
+    import inspect
+
+    from ..fields import MESH_NDIM, mesh_kind
+    from ..mesh import MESH_BUILDERS
+
+    kind = mesh_kind(cls)
+    params = inspect.signature(cls.build).parameters
+    # "split" = the fluid-solid form, which takes cpml_ac AND cpml_el
+    # rather than one cpml. PropSEM supplies both via the equation's
+    # cpml_builders declaration, so "split" is informational, not a gap.
+    cpml = ("yes" if "cpml" in params
+            else "split" if any(k.startswith("cpml_") for k in params)
+            else "NO")
+    return {
+        "mesh": kind,
+        "ndim": MESH_NDIM[kind],
+        "topography": MESH_BUILDERS[kind][1] is not None,
+        "cpml": cpml,
+        "fields": [s.name for s in cls.field_specs],
+        "sources": [s.name for s in cls.field_specs if s.supports_source],
+        "receivers": [s.name for s in cls.field_specs if s.supports_receiver],
+        "derived": list(getattr(cls, "derived_receiver_types", {})),
+    }
+
+
 def describe() -> str:
     """One line per equation: everything needed to pick one.
 
@@ -55,27 +90,13 @@ def describe() -> str:
     ``build()`` accepts an absorbing profile at all. An equation with
     ``cpml no`` is a reflecting box: PropSEM refuses an ``abcn`` for it.
     """
-    import inspect
-
-    from ..fields import MESH_NDIM, mesh_kind
-    from ..mesh import MESH_BUILDERS
-
     head = (f"  {'equation':26s} {'mesh':6s} {'D':>1s} {'topo':>5s} "
             f"{'cpml':>5s} {'flds':>5s}  records")
     rows = [head, "  " + "-" * (len(head) - 2)]
     for name in __all__:
-        cls = _EQUATIONS[name]
-        kind = mesh_kind(cls)
-        topo = "yes" if MESH_BUILDERS[kind][1] is not None else "no"
-        params = inspect.signature(cls.build).parameters
-        # "split" = the fluid-solid form, which takes cpml_ac AND cpml_el
-        # rather than one cpml. PropSEM supplies both via the equation's
-        # cpml_builders declaration, so "split" is informational, not a gap.
-        cpml = ("yes" if "cpml" in params
-                else "split" if any(k.startswith("cpml_") for k in params)
-                else "NO")
-        recv = [s.name for s in cls.field_specs if s.supports_receiver]
-        rows.append(f"  {name:26s} {kind:6s} {MESH_NDIM[kind]:>1d} {topo:>5s} "
-                    f"{cpml:>5s} {len(cls.field_specs):>5d}  "
-                    f"{', '.join(recv)}")
+        s = summary(_EQUATIONS[name])
+        topo = "yes" if s["topography"] else "no"
+        rows.append(f"  {name:26s} {s['mesh']:6s} {s['ndim']:>1d} {topo:>5s} "
+                    f"{s['cpml']:>5s} {len(s['fields']):>5d}  "
+                    f"{', '.join(s['receivers'])}")
     return "\n".join(rows)

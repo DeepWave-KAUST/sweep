@@ -209,3 +209,10 @@ nav:
           - PropTorch: api/propagators/prop_torch.md
           - PropJax: api/propagators/prop_jax.md
       - Parallel (DD): api/parallel.md
+      - Spectral element (SEM):
+          - api/sem/index.md
+          - PropSEM: api/sem/prop_sem.md
+          - SEM equations: api/sem/equations.md
+          - Meshes, basis and C-PML: api/sem/mesh.md
+          - SEMPropagator: api/sem/low_level.md
+          - Parallel (DD): api/sem/parallel.md

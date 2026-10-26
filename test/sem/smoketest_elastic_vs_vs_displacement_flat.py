@@ -7,7 +7,7 @@ and compare against the 1st-order direct velocity output.
 
 Run::
 
-    PYTHONPATH=src python test/sem/test_elastic_vs_vs_displacement_flat.py
+    PYTHONPATH=src python test/sem/smoketest_elastic_vs_vs_displacement_flat.py
 
 Saves the comparison plot to ``_smoketest/vs_vs_disp_flat.png``.
 """
