@@ -9,6 +9,8 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-10-29
+
 ### Added
 - **`ElasticBorn`: Born modelling for the 2-D first-order elastic equation**
   (Li, Guo, Li & Alkhalifah 2019, doi:10.1190/geo2017-0722.1, eq. 5 in
@@ -74,11 +76,26 @@ and this project adheres to
   Open-pore top free surface.  `biot_from_rock` builds the eight coefficients
   from rock properties (differentiable).  Boundary saving is refused (the
   drag is dissipative); gradients use checkpointing.
+- **Eager boundary saving for `Elastic3D`, `DASMu`, `DASMu3D` and
+  `ElasticVRR`**, free surface included: their step now splits into two
+  reversible halves.  Against full storage the gradients agree to 3e-5 to
+  3e-4.
+- **Eager `storage='disk'` for the boundary ring**: pinned staging slots and
+  background threads that write and read temp files; I/O errors raise.
+  `storage='cpu'` now copies through pinned memory on a side stream and
+  prefetches for the reverse pass (`Elastic3D` at 192^3 on a V100: 11.8 s to
+  7.8 s, against 7.7 s with the ring on the GPU).  `pinned_memory`,
+  `disk_dir`, `transfer_interval` and `ring_buffers` now reach the eager
+  backend; they used to be dropped silently.
+- **`EagerOptions(cpml_strips=True)`** keeps the CPML memory fields on the
+  absorbing strips only, for 17 equations.  Off by default; uncompiled it is
+  bit-identical to the full-grid layout.
 - **`sweep.sem`: a spectral-element solver for irregular topography.**  Quad9 /
   Hex27 curvilinear meshes fitted to the free surface and GLL points with a
   diagonal mass matrix: the acoustic potential, elastic and coupled
-  fluid-solid equations in 2-D, acoustic and elastic in 3-D, all but 3-D
-  elastic with C-PML.  `PropSEM` takes `PropTorch`'s constructor and call:
+  fluid-solid equations in 2-D, acoustic and elastic in 3-D, all with C-PML
+  but the displacement-form elastic `ElasticSEM2D`, `ElasticSEM3D` and
+  `ElasticSEM3DDeformed`.  `PropSEM` takes `PropTorch`'s constructor and call:
   `abcn` grid cells of C-PML (whole elements) outside the model, whose
   gradient stops at the model edge as FD's does; the `free_surface` edge
   spec; per-column `topography` rows; `memory=Full()` / `BoundarySaving()` /
@@ -116,6 +133,10 @@ and this project adheres to
   structs generated from `cuda/equations/sem{2,3}d/*_types.h` like the FD ones.
   The core's C ABI is now 3: a core built from an older tree is refused at
   load -- rebuild it.
+- **`sweep list equations` and `sweep show` cover the SEM equations**, and
+  the API reference has SEM pages (`PropSEM`, the equations, meshes and C-PML,
+  `SEMPropagator`, SEM domain decomposition).  `sweep --help` points to
+  `sweepx` for task runs.
 
 ### Changed
 - **The Born equations are named Born, not LSRTM** (no aliases kept):
@@ -207,6 +228,29 @@ and this project adheres to
   of twice (the pressure strips the gradient reads across a cut ride with
   lambda and p), 1.04-1.10x per DD step on 4x V100; a tile cut on both sides
   of an axis needs at least `spatial_order` cells along it.
+- **The compiled eager step is faster and compiles once.**  Under
+  `torch.compile` (the eager default) every derivative is now a zero-padded
+  shifted slice that fuses into the step kernel, instead of a cuDNN
+  convolution: on an A100 and a V100, 1.2-4.5x on 2-D forwards, 1.1-7.3x on
+  2-D gradients, 2.5-10x at 128^3, and 1.3-3.9x less peak memory for a
+  full-tape gradient.  Uncompiled eager keeps the convolution.  Sources are
+  scattered from indices built once instead of through a full-grid mask, and
+  records are stacked once instead of written step by step (V100: forward
+  1.05-1.37x, gradient 1.08-1.22x).  A rollout compiles one graph instead of
+  3-6: steps run uncompiled until their inputs' `requires_grad` flags settle,
+  so the first gradient call with a cold compile cache takes 35-85 % of the
+  time it did.  Uncompiled records and gradients are unchanged bit for bit;
+  compiled ones move at fp32 rounding (<= 1.4e-6).
+- **The eager step compiles as one graph from torch 2.2 on.**  torch 2.3
+  compiles the GPU step with `allow_buffer_reuse=False` and runs the CPU step
+  uncompiled, around two Inductor bugs fixed in 2.4 (one turned the
+  `ViscoAcoustic` forward to NaN); torch 1.x runs uncompiled and warns once.
+- **An eager source off the grid raises `ValueError`**; its flat index used
+  to wrap around silently.
+- **Eager boundary saving is refused for `ViscoAcoustic`, `AcousticVTI` and
+  `AcousticTTI`**: reconstructing their wavefields backwards amplifies the
+  round-off into a gradient 2-10 % off.  Use full storage or checkpointing
+  (or, for the qP pair, `impl='c'`).
 
 ### Removed
 - **The APM free surface (`topo_method='apm'`, `ElasticAPM`).**  Elastic
@@ -219,6 +263,8 @@ and this project adheres to
   it with the image method.  The core's two APM entries (65, 71) are retired
   and their numbers not reused; the input-struct fields `topo_category` and
   `use_apm` stay, unused.
+- **`SWEEP_VRZ_GRAD_SPLIT`.**  It put one card on the two-pass VRZ gradient so
+  it matched `ModelParallel`; that now holds without it.  Setting it raises.
 
 ### Fixed
 - **`PropSEM` no longer spends seconds per call locating its sources and
@@ -352,15 +398,23 @@ and this project adheres to
   read from the Marmousi2 archive, and the embedded demo derived from it) now
   carries Marmousi2's CC-BY-4.0 license and cites Martin et al. (2006).  The
   example download scripts under `examples/models/` use the same sources.
-
-### Removed
-- **`SWEEP_VRZ_GRAD_SPLIT`.**  It put one card on the two-pass VRZ gradient so
-  it matched `ModelParallel`; that now holds without it.  Setting it raises.
+- **Eager boundary saving under `torch.compile` no longer keeps a dropped
+  propagator's GPU memory** (its workspace and its last rollout's ring and
+  frames: a reference cycle through the autograd graph, which gc cannot
+  see).  A second backward of the same rollout now raises; it used to return
+  a wrong gradient silently.
+- **`ViscoAcoustic` with per-shot models `(B, nz, nx)`.**  The fractional
+  exponent was averaged over the whole batch, so each shot's result depended
+  on the other shots' Q (1.7e-3 in the data, 8e-4 in the gradient against
+  one shot at a time).  Each shot now takes its own, on eager and
+  `impl='c'`; a shared model is unchanged bit for bit.
+- `backend_concat` and `zero_edge_halo` accept numpy 2 and JAX arrays.
 
 ### Documentation
-- Notebook 33 re-run on the new kernels: on the 3-D acoustic case `c` is now
-  1.9x faster than eager for a full-storage gradient and 2.5x for a
-  boundary-saving one (was 1.2x and 1.6x).
+- Notebook 33 (new): eager, eager with CPML strips and `c` on forward,
+  full-storage and boundary-saving runs -- time, compile time, peak memory
+  and gradient agreement.  On the 3-D acoustic case `c` is 1.9x faster than
+  eager for a full-storage gradient and 2.5x for a boundary-saving one.
 - Notebook 38: poroelastic traveltime kernels by autograd through `Biot`,
   three parameterizations (Morency et al. 2009).
 - Notebook 39: poroelastic radiation patterns, Born analytic against `Biot`,
@@ -1280,7 +1334,8 @@ see the
 [GitHub commit history](https://github.com/DeepWave-KAUST/sweep/commits/dev)
 for changes prior to this entry.
 
-[Unreleased]: https://github.com/DeepWave-KAUST/sweep/compare/v0.3.5...dev
+[Unreleased]: https://github.com/DeepWave-KAUST/sweep/compare/v0.3.6...dev
+[0.3.6]: https://github.com/DeepWave-KAUST/sweep/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/DeepWave-KAUST/sweep/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/DeepWave-KAUST/sweep/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/DeepWave-KAUST/sweep/compare/v0.3.2...v0.3.3
