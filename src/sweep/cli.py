@@ -225,7 +225,12 @@ def _show_sem_equation(class_name, cls):
           f"topography: {_format_yes_no(info['topography'])}")
     print(f"  C-PML: {_SEM_CPML[info['cpml']]}")
     print(f"  Wavefields: {info['fields']}")
-    print(f"  Source fields: {info['sources']}")
+    # an equation that names its PropSEM sources (Biot) takes exactly those
+    names = list(getattr(cls, "propsem_source_names", None) or ())
+    if names:
+        print(f"  Source types: {names}")
+    else:
+        print(f"  Source fields: {info['sources']}")
     print(f"  Receiver types: {info['receivers'] + info['derived']}")
     print(f"  Needed models: {propsem_models(cls)}")
     print(f"  Torch binding support: {_format_yes_no(binding_supported)}")
