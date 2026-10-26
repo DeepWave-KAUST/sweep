@@ -176,6 +176,16 @@ and this project adheres to
   `use_apm` stay, unused.
 
 ### Fixed
+- **CPU math no longer depends on oneMKL's VML first-call race.** PyTorch's
+  x86 wheels run `torch.sqrt` / `exp` / `log` ... on CPU float tensors through
+  oneMKL VML, whose CPU detection is not thread-safe: on AVX-512 Intel CPUs the
+  first multi-threaded VML op of a process could run a low-precision kernel in
+  a worker's OpenMP chunk (`sqrt` up to 3e-4 off, `exp` 1.5e-4) -- one fresh
+  process in five at 4 threads on a Xeon Gold 6148 with torch 2.14.1, never on
+  AMD EPYC.  A model derived on CPU (`vp = sqrt(H / rho)`) came out wrong in
+  that chunk, and `test_biot`'s undrained limit failed in one process out of
+  four.  Importing `sweep` (with torch loaded) or `sweep.equations` now settles
+  the detection with one serial 1-element call (`sweep/_mkl_vml.py`).
 - **The second-order acoustic family's compiled backward is the exact
   transpose of its compiled forward, CPML band included** (`Acoustic`,
   `Acoustic3D`, `AcousticVRZ`, `AcousticVRZ3D`, `AcousticLSRTM`,

@@ -88,6 +88,15 @@ def _extend_package_path_with_build_outputs() -> None:
 _extend_package_path_with_build_outputs()
 
 
+# `import sweep` stays torch-free; when torch is already loaded, settle MKL's VML
+# CPU dispatch now (sweep.equations does it on first import otherwise) -- see
+# sweep/_mkl_vml.py
+if "torch" in sys.modules:
+    from ._mkl_vml import settle_mkl_vml_dispatch as _settle_mkl_vml
+
+    _settle_mkl_vml()
+
+
 def _is_extension_origin(origin: str | None) -> bool:
     """True when a module spec's origin is a compiled extension rather than a
     ``.py`` file — i.e. ``sweep._C`` is a real binary, not the JIT shim."""

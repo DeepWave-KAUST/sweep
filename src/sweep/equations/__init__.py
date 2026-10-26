@@ -23,7 +23,14 @@ standard" solver for that symmetry: 2-D VTI routes to Liang's 2nd-order scalar
 (memory-light, the original SWEEP entry), 3-D VTI to Duveneck's first-order
 because it is the only one with a 3-D class.
 """
-from ._registry import (
+from .._mkl_vml import settle_mkl_vml_dispatch as _settle_mkl_vml
+
+# before any CPU model preparation (log impedance, moduli sqrt, ...): the first
+# multi-threaded MKL VML op of a process can otherwise run a wrong kernel in one
+# OpenMP chunk -- see sweep/_mkl_vml.py
+_settle_mkl_vml()
+
+from ._registry import (  # noqa: E402
     equation_classes,
     equation_method,
     get_equation,
