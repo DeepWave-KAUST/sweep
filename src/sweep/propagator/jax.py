@@ -237,6 +237,7 @@ class PropJax(PropBase):
             source_indices=source_indices,
             receiver_indices=receiver_indices,
             batch_size=batch_size,
+            models=models,
             free_surface=getattr(self, "free_surface", False),
             forced_mode=self._bs_options.get("mode"),
             storage_dtype=self._bs_options.get("storage_dtype", "fp32"),

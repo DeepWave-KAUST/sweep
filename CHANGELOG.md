@@ -700,6 +700,19 @@ and this project adheres to
   the full tape. They are now made once per rollout through the time-invariant
   dict, and in every uncompiled step that has none; compiled steps compute them
   in place, as before.
+- **Boundary saving of the staggered equations (eager and JAX) is exact in
+  the interior again.**  The last physical cell on the high side of every axis
+  holds half-grid values that sit in the PML (nonzero `azh`/`axh`), which the
+  CPML-free reconstruction cannot rebuild, and the ring was restored only after
+  both sub-steps, so the inverted velocity half read wrong ring stresses.  Once
+  the wavefield reached the PML the error crept inward: interior gradients off
+  the full tape by 1.6e-5 (`Acoustic1st`) to 3.7e-4 (`Elastic`), fp64, on a
+  300-step record.  The 'substep' ring now takes in the outermost physical cell
+  on each side (as the CUDA `M + 1`-wide strips do, ~1/M more ring storage) and
+  each sub-step's fields are restored as soon as it is inverted; the interior
+  matches to round-off, the outermost one or two physical cells keep the
+  near-PML error of the design (`Acoustic1st`, `Elastic`, `Elastic3D`, `DASMu`,
+  `DASMu3D`, `ElasticVRR`).
 - **The compiled eager step of the 3-D deformed SEM classes with a C-PML is faster:
   forward 4.3-6.4x on `AcousticSEM3DDeformed`, 1.9-3x on `ElasticVSSEM3DDeformed`,
   `ElasticVTISEM3DDeformed`, `ElasticTTISEM3DDeformed` and
