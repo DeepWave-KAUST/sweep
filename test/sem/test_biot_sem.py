@@ -7,6 +7,7 @@ source's integrated wavelet leads its rate by ``dt / 2`` -- so the records sit `
 and ``3 dt / 2`` (pressure) after the step's time ``n dt``.
 """
 
+import functools
 import math
 
 import numpy as np
@@ -19,6 +20,10 @@ from sweep.sem import (BiotAnisoPermSEM2DDeformed, BiotVSSEM2DDeformed,
 from test_biot import DAI1, _dwn_halfspace, _layered_rock
 
 NO = 4
+# Two elements of C-PML instead of PropSEM's ten, for tests whose C-PML is not under test: a
+# gradient against finite differences (the discrete adjoint, whatever the layer), records that
+# end before the first echo; on these small models the layer is most of the elements.
+THIN_ABCN = 2 * NO
 
 
 def _prop(shape, dh, dt, src, rec, *, eq=BiotVSSEM2DDeformed, dtype=torch.float32, f0=30.0,
@@ -133,11 +138,14 @@ def _split_source(shape, dh, dt, nt, models, src, rec, rec_types, *, qpart, phi,
     return t, num
 
 
+@functools.lru_cache(maxsize=None)
 def line_source_case(b_dai, dev="cpu", viscous_q=None):
     """``(t, sem (nt, 2), analytic (nt, 2))``: solid vz and pore pressure of the split source
     in Dai's medium, 60 m off in x and z. The model keeps the C-PML's echoes out of the record
-    (they reach a few percent of the direct waves). ``viscous_q`` turns on the viscous
-    attenuation, the analytic drag then ``b (1 + i w tau_e) / (1 + i w tau_s)``."""
+    (they reach a few percent of the direct waves; six elements of it instead of ten add at
+    most 6e-4 to the errors). ``viscous_q`` turns on the viscous attenuation, the analytic drag
+    then ``b (1 + i w tau_e) / (1 + i w tau_s)``. Cached: the plain b = 7e4 case serves three
+    tests."""
     from sweep.sem.equations.biot_vs_deformed import viscous_relaxation_times
 
     dh, dt, nt, f0, t0, qpart, phi = 4.0, 2e-4, 800, 30.0, 0.04, 0.1, 0.3
@@ -145,7 +153,7 @@ def line_source_case(b_dai, dev="cpu", viscous_q=None):
     kw = {} if viscous_q is None else {"equation_options": {"viscous_q": viscous_q}}
     t, num = _split_source((121, 121), dh, dt, nt, models, np.array([[45, 45]]),
                            np.array([[[60, 60]]]), ["vz", "p"], qpart=qpart, phi=phi, f0=f0,
-                           t0=t0, dev=dev, **kw)
+                           t0=t0, dev=dev, abcn=6 * NO, **kw)
     b_of_w = None
     if viscous_q is not None:
         tau_e, tau_s = viscous_relaxation_times(*viscous_q)
@@ -161,11 +169,12 @@ def line_source_case(b_dai, dev="cpu", viscous_q=None):
 
 def open_pore_case(b_dai, dev="cpu"):
     """``(t, sem (nt, 2), wavenumber integration (nt, 2))``: solid vx, vz on the open-pore
-    surface 100 m from the split source 20 m below it, with no C-PML echo in the record."""
-    dh, dt, nt, f0, t0, qpart, phi = 2.0, 1e-4, 1600, 30.0, 0.04, 0.1, 0.3
+    surface 60 m from the split source 20 m below it, the model just large enough that the
+    C-PML's echoes reach no more than the end of the record."""
+    dh, dt, nt, f0, t0, qpart, phi = 2.0, 1e-4, 1200, 30.0, 0.04, 0.1, 0.3
     models = biot_from_biot_constants(**DAI1, b=b_dai, phi=phi)
-    xs, zs, xr = 80, 10, 130
-    t, num = _split_source((125, 221), dh, dt, nt, models, np.array([[xs, zs]]),
+    xs, zs, xr = 65, 10, 95
+    t, num = _split_source((85, 161), dh, dt, nt, models, np.array([[xs, zs]]),
                            np.array([[[xr, 0]]]), ["vx", "vz"], qpart=qpart, phi=phi, f0=f0,
                            t0=t0, dev=dev, free_surface=True)
     s_time = _gauss(f0, t0)
@@ -187,8 +196,9 @@ def test_viscous_line_source_matches_analytic(b_dai, tol):
 
 
 # In the Darcy limit the surface's drainage layer sqrt(2 D / w) is ~7 cm, far below the GLL
-# spacing, and the nodes there are fully drained: 1.1% on 8 m elements (FD Biot: 1.3% on 2 m
-# cells). With the layer resolved (b = 7e5) the error falls to 1e-4 under refinement.
+# spacing, and the nodes there are fully drained: 0.9% on 8 m elements 60 m from the source,
+# 1.2% at 100 m (FD Biot there: 1.3% on 2 m cells). With the layer resolved (b = 7e5) the error
+# falls to 1e-4 under refinement.
 @pytest.mark.parametrize("b_dai, tol", [(0.0, 0.005), (7e5, 0.005), (9e8, 0.02)])
 def test_open_pore_surface_matches_wavenumber_integration(b_dai, tol):
     # sigma . n = 0, p = 0 on the surface: slow wave propagating, diffusive, Darcy limit
@@ -210,7 +220,8 @@ def pressure_source_case(shape, src, rec, free_surface, dh=2.0, dt=2e-4, nt=900,
     f0, t0 = 30.0, 0.04
     t = np.arange(nt) * dt
     s_time = _gauss(f0, t0)
-    prop = _prop(shape, dh, dt, ["p"], ["p"], free_surface=free_surface, dev=dev)
+    prop = _prop(shape, dh, dt, ["p"], ["p"], free_surface=free_surface, dev=dev,
+                 abcn=THIN_ABCN)
     with torch.no_grad():
         num = prop(_rate(s_time, t), np.array([src]), np.array([rec]),
                    models=_fields(FLUID, shape))[0, :, :, 0].double().cpu().numpy()
@@ -238,20 +249,21 @@ def test_decoupled_pore_fluid_sees_a_pressure_release_surface():
         assert _rel(num[:, i], ana[:, i]) < 0.005, (i, _rel(num[:, i], ana[:, i]))
 
 
-@pytest.mark.parametrize("dz", [0, 15])
-def test_pressure_has_no_grid_line_modes(dz):
+def test_pressure_has_no_grid_line_modes():
     # a point source excites nothing that runs along the grid lines through it: a receiver
     # on the source's row records the free-space pressure like one off it (with a continuous
     # flux and an element-local p, the row's record was 14x the analytic at dh = 2 and grew
     # like 1 / dh)
-    _, num, ana = pressure_source_case((161, 161), [65, 80], [[95, 80 + dz]], False)
-    assert _rel(num[:, 0], ana[:, 0]) < 0.005, _rel(num[:, 0], ana[:, 0])
+    _, num, ana = pressure_source_case((161, 161), [65, 80], [[95, 80], [95, 95]], False)
+    for i in range(2):
+        assert _rel(num[:, i], ana[:, i]) < 0.005, (i, _rel(num[:, i], ana[:, i]))
 
 
 def test_matches_the_fd_biot():
     # PropTorch's Biot and PropSEM on the same call: the FD stress injection is a moment of
     # dh^2 per unit wavelet sum, the SEM one of dt, and FD's vz sits half a cell down
     from sweep.equations import Biot
+    from sweep.propagator.options import EagerOptions
     from sweep.propagator.torch import PropTorch
 
     dh, dt, nt, f0 = 2.0, 2e-4, 900, 25.0
@@ -259,8 +271,10 @@ def test_matches_the_fd_biot():
     models = biot_from_biot_constants(**DAI1, b=7e4, phi=0.3)
     w = _ricker(nt, dt, f0)
     src, rec = np.array([[30, 30]]), np.array([[[70, 50]]])
+    # uncompiled: no other test steps this grid, which a cold compile makes 8 - 20 s, not 1.3 s
     fd = PropTorch(Biot(device="cpu"), shape=shape, dev="cpu", dh=dh, dt=dt, source_type=["sxx", "szz"],
-                   receiver_type=["vz"], abcn=40, backend="torch", impl="eager")
+                   receiver_type=["vz"], abcn=40, backend="torch", impl="eager",
+                   eager_options=EagerOptions(use_compile=False))
     sem = _prop(shape, dh, dt, ["sxx", "szz"], ["vz"])
     with torch.no_grad():
         a = fd(w, src, rec, models=_fields(models, shape))[0, :, 0, 0].double().numpy()
@@ -274,72 +288,78 @@ def test_matches_the_fd_biot():
 # ------------------------------------------------------------------------------------------ #
 # gradient
 # ------------------------------------------------------------------------------------------ #
-@pytest.mark.parametrize("free_surface", [False, True])
-@pytest.mark.parametrize("which", [1, 3, 7])   # mu, M, b
-def test_gradient_matches_finite_difference(free_surface, which):
+# The finite-difference checks: a central difference of a 1e-5 relative step against the
+# adjoint, to 1e-6 and no absolute floor (|J' dm| is 1e-21 - 1e-16 here: pytest.approx's default
+# abs = 1e-12 would pass any gradient). Measured 1e-10 - 1e-7, the largest the step's own
+# truncation (M in the water); a 1e-3 step was 1e-3 off, edge cells 2e-4, a moving C-PML 2e-3.
+FD_STEP = 1e-5
+
+
+def _fd_matches(J, coef, which, grad, dm):
+    pred = float((grad * dm).sum())
+    with torch.no_grad():
+        fd = (float(J([c + dm if k == which else c for k, c in enumerate(coef)]))
+              - float(J([c - dm if k == which else c for k, c in enumerate(coef)]))) / 2.0
+    assert fd == pytest.approx(pred, rel=1e-6, abs=0), (which, fd, pred)
+
+
+def _interior_bump(shape):
+    """A Gaussian bump on the model grid, zero on its outermost cells: the C-PML copies those
+    outward and the gradient is the physical box's, so theirs leaves the copies out."""
+    zz, xx = torch.meshgrid(*(torch.arange(n, dtype=torch.float64) for n in shape), indexing="ij")
+    bump = torch.exp(-((zz - 18.0) ** 2 + (xx - 16.0) ** 2) / 30.0)
+    bump[[0, -1]] = 0.0
+    bump[:, [0, -1]] = 0.0
+    return bump
+
+
+@functools.lru_cache(maxsize=None)
+def _gradient_case(free_surface=False, variant=None):
+    """``(coef, J, grads)``: the misfit of a layered rock and its gradient to every
+    coefficient, one backward for every coefficient checked. The C-PML is laid out for the
+    model's fast P speed, a float the gradient does not follow: held, or a step in M would
+    move the layer too."""
     shape, dh, dt, nt = (33, 41), 10.0, 5e-4, 360
     f64 = torch.float64
     rock = _layered_rock(shape)
     rock["kappa"] = 1e-10                          # gamma dt ~ 1: the drag's exponential matters
     coef = _fields(biot_from_rock(**rock), shape, f64)
+    eq, kw = BiotVSSEM2DDeformed, {}
+    if variant == "tensor":
+        eq = BiotAnisoPermSEM2DDeformed
+        coef = coef[:7] + [coef[7], 0.3 * coef[7], 2.0 * coef[7]]
+    elif variant == "viscous":
+        kw["equation_options"] = {"viscous_q": (5.0, 12.0)}
     src = np.array([[20, 10]])
     rec = np.stack([np.arange(6, 36, 4), np.full(8, 24)], 1)[None]
     w = _ricker(nt, dt, 12.0, f64)
-    prop = _prop(shape, dh, dt, ["sxx", "szz"], ["vx", "vz", "p"], dtype=f64, f0=12.0,
-                 free_surface=free_surface)
+    prop = _prop(shape, dh, dt, ["sxx", "szz"], ["vx", "vz", "p"], eq=eq, dtype=f64, f0=12.0,
+                 free_surface=free_surface, abcn=THIN_ABCN, **kw)
+    c_max = prop._pml_speed([prop._interp_to_gll(c) for c in coef])
+    prop._pml_speed = lambda models: c_max
     obs = prop(w, src, rec, models=coef).detach()
 
-    def J(m):
-        models = list(coef)
-        models[which] = m
+    def J(models):
         return 0.5 * (prop(w, src, rec, models=models) - 1.05 * obs).square().sum()
 
-    m0 = coef[which].clone().requires_grad_()
-    (g,) = torch.autograd.grad(J(m0), m0)
-    zz, xx = torch.meshgrid(torch.arange(shape[0], dtype=f64), torch.arange(shape[1], dtype=f64),
-                            indexing="ij")
-    dm = 1e-3 * coef[which] * torch.exp(-((zz - 18.0) ** 2 + (xx - 16.0) ** 2) / 30.0)
-    pred = float((g * dm).sum())
-    with torch.no_grad():
-        fd = (float(J(coef[which] + dm)) - float(J(coef[which] - dm))) / 2.0
-    assert fd == pytest.approx(pred, rel=1e-5), (fd, pred)
+    m0 = [c.clone().requires_grad_() for c in coef]
+    return coef, J, torch.autograd.grad(J(m0), m0)
+
+
+@pytest.mark.parametrize("free_surface", [False, True])
+@pytest.mark.parametrize("which", [1, 3, 7])   # mu, M, b
+def test_gradient_matches_finite_difference(free_surface, which):
+    coef, J, grads = _gradient_case(free_surface)
+    dm = FD_STEP * coef[which] * _interior_bump(coef[which].shape)
+    _fd_matches(J, coef, which, grads[which], dm)
 
 
 @pytest.mark.parametrize("variant", ["tensor", "viscous"])
 def test_gradient_through_the_drag_tensor_and_the_viscous_memory(variant):
     # the per-node matrix exponential and the memory variable carry the gradient too
-    shape, dh, dt, nt = (33, 41), 10.0, 5e-4, 360
-    f64 = torch.float64
-    rock = _layered_rock(shape)
-    rock["kappa"] = 1e-10
-    coef = _fields(biot_from_rock(**rock), shape, f64)
-    kw = {}
-    if variant == "tensor":
-        eq, which = BiotAnisoPermSEM2DDeformed, 8                 # b_xz
-        coef = coef[:7] + [coef[7], 0.3 * coef[7], 2.0 * coef[7]]
-    else:
-        eq, which = BiotVSSEM2DDeformed, 7                         # b
-        kw["equation_options"] = {"viscous_q": (5.0, 12.0)}
-    src = np.array([[20, 10]])
-    rec = np.stack([np.arange(6, 36, 4), np.full(8, 24)], 1)[None]
-    w = _ricker(nt, dt, 12.0, f64)
-    prop = _prop(shape, dh, dt, ["sxx", "szz"], ["vx", "vz", "p"], eq=eq, dtype=f64, f0=12.0, **kw)
-    obs = prop(w, src, rec, models=coef).detach()
-
-    def J(m):
-        models = list(coef)
-        models[which] = m
-        return 0.5 * (prop(w, src, rec, models=models) - 1.05 * obs).square().sum()
-
-    m0 = coef[which].clone().requires_grad_()
-    (g,) = torch.autograd.grad(J(m0), m0)
-    zz, xx = torch.meshgrid(torch.arange(shape[0], dtype=f64), torch.arange(shape[1], dtype=f64),
-                            indexing="ij")
-    dm = 1e-3 * coef[7] * torch.exp(-((zz - 18.0) ** 2 + (xx - 16.0) ** 2) / 30.0)
-    pred = float((g * dm).sum())
-    with torch.no_grad():
-        fd = (float(J(coef[which] + dm)) - float(J(coef[which] - dm))) / 2.0
-    assert fd == pytest.approx(pred, rel=1e-5), (fd, pred)
+    coef, J, grads = _gradient_case(variant=variant)
+    which = 8 if variant == "tensor" else 7                         # b_xz, b
+    _fd_matches(J, coef, which, grads[which], FD_STEP * coef[7] * _interior_bump(coef[7].shape))
 
 
 # ------------------------------------------------------------------------------------------ #
@@ -443,8 +463,9 @@ def test_default_receivers_are_the_solid_velocity():
 
 def test_pressure_flux_and_stress_receivers_on_shots_and_snapshots():
     # the flux and the stress are element-local: they are gathered from their own layout,
-    # in the vmapped multi-shot batch exactly as in the one-shot loop, and snapshotted on
-    # the grid with the continuous p and v
+    # in the vmapped multi-shot batch as in the one-shot loop, and snapshotted on the grid
+    # with the continuous p and v. The batch runs batched kernels, so it agrees to rounding
+    # (torch 2.14 on CPU: 2e-6 of each field's peak), not bitwise.
     p, coef = _small(["sxx", "szz"], ["p", "sxx", "qz", "vz"])
     w = _ricker(120, 5e-4, 12.0)
     src = np.array([[12, 10], [8, 6]])
@@ -452,8 +473,9 @@ def test_pressure_flux_and_stress_receivers_on_shots_and_snapshots():
     with torch.no_grad():
         both = p(w, src, rec, models=coef)
         one = torch.cat([p(w, src[i:i + 1], rec, models=coef) for i in range(2)])
-    assert both.shape == (2, 120, 3, 4) and bool((both.abs().amax((0, 1, 2)) > 0).all())
-    torch.testing.assert_close(both, one, rtol=0, atol=0)
+    peak = one.abs().amax((0, 1, 2))
+    assert both.shape == (2, 120, 3, 4) and bool((peak > 0).all())
+    torch.testing.assert_close(both / peak, one / peak, rtol=0, atol=1e-5)
     with torch.no_grad():
         seis, snaps = p(w, src[:1], rec, models=coef, return_wavefield=True,
                         snapshot_times=[40, 100])
@@ -492,7 +514,8 @@ def test_the_pml_is_designed_for_the_fast_p_wave():
 # ------------------------------------------------------------------------------------------ #
 def _explosion(eq, models, rec, shape=(33, 33), src=(16, 16), nt=300, **kw):
     f64 = torch.float64
-    prop = _prop(shape, 4.0, 2e-4, ["sxx", "szz"], ["vx", "vz", "p"], eq=eq, dtype=f64, **kw)
+    prop = _prop(shape, 4.0, 2e-4, ["sxx", "szz"], ["vx", "vz", "p"], eq=eq, dtype=f64,
+                 abcn=THIN_ABCN, **kw)
     with torch.no_grad():
         return prop(_ricker(nt, 2e-4, 30.0, f64), np.array([src]), np.array([rec]),
                     models=_fields(models, shape, f64))[0].numpy()
@@ -830,11 +853,13 @@ def test_a_stress_source_on_the_seafloor_loads_the_rock_alone():
 def test_interfaces_through_the_pml_stay_stable(b):
     # the seafloor and the rock-shale interface cross the side bands with the plain
     # coupling: the records keep decaying (4 s runs: to 3% of the peak with the inviscid
-    # slow wave, 0.1% with b = 7e5, never growing); here 1.2 s, the window maxima of the
-    # last 0.2 s against 0.4 - 0.6 s: 0.48 / 0.53 (b = 0), 0.28 / 0.04
+    # slow wave, 0.1% with b = 7e5, never growing); here 1.2 s through five elements of
+    # C-PML, the window maxima of the last 0.2 s against 0.4 - 0.6 s: 0.50 / 0.53 (b = 0),
+    # 0.19 / 0.05 (ten elements: 0.48 / 0.53, 0.28 / 0.04)
     f64 = torch.float64
     shape, dh, dt, nt = (41, 49), 5.0, 2e-4, 6000
-    prop = _prop(shape, dh, dt, ["p"], ["p", "vz"], f0=40.0, free_surface=True, dtype=f64)
+    prop = _prop(shape, dh, dt, ["p"], ["p", "vz"], f0=40.0, free_surface=True, dtype=f64,
+                 abcn=5 * NO)
     w = _ricker(nt, dt, 40.0, f64)
     with torch.no_grad():
         out = prop(w, np.array([[24, 6]]), np.array([[[10, 6], [30, 20]]]),
@@ -851,7 +876,8 @@ def test_gradient_through_the_three_media():
     # an update leaves the media as they are
     f64 = torch.float64
     shape, dh, dt, nt = (41, 49), 5.0, 2e-4, 500
-    prop = _prop(shape, dh, dt, ["p"], ["p", "vx", "vz"], f0=40.0, free_surface=True, dtype=f64)
+    prop = _prop(shape, dh, dt, ["p"], ["p", "vx", "vz"], f0=40.0, free_surface=True, dtype=f64,
+                 abcn=THIN_ABCN)
     coef = _three_media(prop.mesh, 7e5)
     src, rec = np.array([[24, 6]]), np.stack([np.arange(6, 44, 4), np.full(10, 20)], 1)[None]
     w = _ricker(nt, dt, 40.0, f64)
@@ -863,24 +889,17 @@ def test_gradient_through_the_three_media():
     def J(models):
         return 0.5 * (prop(w, src, rec, models=models) - 1.05 * obs).square().sum()
 
+    m0 = [c.clone().requires_grad_() for c in coef]
+    J(m0).backward()
+    water, dry = zc < 60, zc > 140
+    for k in (0, 1, 2, 4, 5, 7):                          # H, mu, C, rho, rho_f, b
+        assert not m0[k].grad[water].any(), k
+    for k in (2, 3, 5, 6, 7):                             # C, M, rho_f, m, b
+        assert not m0[k].grad[dry].any(), k
     for which, (z0, z1) in ((3, (0, 60)), (1, (60, 140)), (0, (140, 1e9))):   # M, mu, H
-        m0 = [c.clone().requires_grad_() for c in coef]
-        J(m0).backward()
-        if which == 3:
-            water, dry = zc < 60, zc > 140
-            for k in (0, 1, 2, 4, 5, 7):                  # H, mu, C, rho, rho_f, b
-                assert not m0[k].grad[water].any(), k
-            for k in (2, 3, 5, 6, 7):                     # C, M, rho_f, m, b
-                assert not m0[k].grad[dry].any(), k
         sel = ((zc > z0) & (zc < z1)).to(f64).view(E, 1, 1).expand(E, n, n)
         bump = torch.exp(-((prop.mesh.x_e - xc) ** 2) / 800.0) * sel
-        dm = 1e-3 * coef[which] * bump
-        pred = float((m0[which].grad * dm).sum())
-        with torch.no_grad():
-            plus = [c + dm if k == which else c for k, c in enumerate(coef)]
-            minus = [c - dm if k == which else c for k, c in enumerate(coef)]
-            fd = (float(J(plus)) - float(J(minus))) / 2.0
-        assert fd == pytest.approx(pred, rel=1e-5), (which, fd, pred)
+        _fd_matches(J, coef, which, m0[which].grad, FD_STEP * coef[which] * bump)
 
 
 def test_the_pml_speed_takes_every_medium():
