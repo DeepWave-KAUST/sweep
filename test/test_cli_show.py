@@ -99,3 +99,14 @@ def test_a_typo_is_offered_the_sem_name(capsys):
     out = capsys.readouterr().out
     assert "Did you mean" in out and "AcousticPotentialSEM2D" in out
     assert "spectral-element" in out
+
+
+def test_biot_shows_propsem_source_names(capsys):
+    """Biot names its PropSEM sources (a force, a moment, a pore-pressure or
+    flux injection), which are not its source fields."""
+    assert list_wavefields("BiotVSSEM2DDeformed") == 0
+    out = capsys.readouterr().out
+    line = next(l for l in out.splitlines() if "Source types" in l)
+    assert all(f"'{n}'" in line for n in ("fz", "p", "sxx", "qz"))
+    assert ("Needed models: ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']"
+            in out)

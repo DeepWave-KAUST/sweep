@@ -159,3 +159,25 @@ each; records `chi`, `u_x`, `u_z` and the derived `p`, `vx`, `vz`.
       members: [build]
       inherited_members: true
       show_if_no_docstring: true
+
+## Poroelastic (Biot)
+
+The FD `sweep.equations.Biot` on the spectral-element mesh: solid velocity
+and pore pressure on the continuous nodes, Darcy flux and total stress in the
+elements, with the same eight coefficients `[H, mu, C, M, rho, rho_f, m, b]`
+and the same source and receiver names. See
+[Poroelastic waves (Biot)](../../user-guide/sem.md#poroelastic-waves-biot).
+
+::: sweep.sem.BiotVSSEM2DDeformed
+    options:
+      heading_level: 3
+      members: [build]
+      inherited_members: true
+      show_if_no_docstring: true
+
+::: sweep.sem.BiotAnisoPermSEM2DDeformed
+    options:
+      heading_level: 3
+      members: [build]
+      inherited_members: true
+      show_if_no_docstring: true

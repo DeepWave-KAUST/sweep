@@ -65,6 +65,28 @@ and this project adheres to
   local-window FWI and an x-strip domain decomposition (`SEMModelParallel`).
   User guide: `docs/user-guide/sem.md`; examples: the SEM section (notebooks
   41-44).
+- **`BiotVSSEM2DDeformed`: Biot poroelastic waves on the SEM.**  The FD `Biot`'s
+  velocity-stress-pressure form with the Darcy flux on the Quad9 mesh, its eight
+  coefficients and its `source_type` / `receiver_type` names through `PropSEM`.  The
+  pore pressure is continuous and the flux element-local, so the pore fluid is the
+  acoustic pressure SEM (with the flux continuous, as in SPECFEM2D, a point source
+  excites grid-scale modes along its grid lines); the viscous drag integrated
+  exactly per node, C-PML, an open-pore free surface (`p = 0`) that a `topography`
+  carries too.  Checked against analytic and wavenumber-integration solutions, the
+  FD records and SPECFEM2D's `poroelastic_semi_infinite_homogeneous` example.  2-D,
+  eager, no boundary saving.  The receiver gather now also reads element-local
+  fields (the flux and the stresses).  With SPECFEM2D's other poroelastic
+  features: a point force `fx` / `fz` and flux sources `qx` / `qz`; an anisotropic
+  permeability (`BiotAnisoPermSEM2DDeformed`, the drag a tensor); the viscous
+  attenuation (`equation_options={"viscous_q": (Q0, f0)}`, a standard linear
+  solid); fluid (`rho = 0`) and dry elastic (`M = 0`) regions in one model, coupled
+  as in SPECFEM2D (open pores to a fluid, sealed to a dry solid), sources loading
+  only the fields of their medium.  `sweep.equations.biot_params`: the drag tensor,
+  the fluid and dry-solid coefficients, and the parameter families of Morency, Luo &
+  Tromp (2009) with their kernels by the exact chain rule.  Checked against
+  SPECFEM2D runs of each and its `poroelastic_acoustic` example.
+- **`PropSEM(equation_options=...)`**: an equation's own `build` keywords; a name the
+  equation does not take is refused.
 - **`impl='c'` for `sweep.sem`.**  The SEM CUDA kernels are 43 entries of the
   core (kind 3 of the C API, called through `sweep_sem_call`), their input
   structs generated from `cuda/equations/sem{2,3}d/*_types.h` like the FD ones.

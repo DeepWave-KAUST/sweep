@@ -228,7 +228,7 @@
     </a>
     <a class="sweep-api__card" href="sem/equations/">
       <div class="sweep-api__card-hd"><code>SEM equations</code><div class="sweep-api__card-tags"><span>2D + 3D</span></div></div>
-      <p>Acoustic, elastic (displacement and velocity-stress, VTI) and coupled fluid-solid, on flat and curved meshes.</p>
+      <p>Acoustic, elastic (displacement and velocity-stress, VTI), coupled fluid-solid and poroelastic (Biot), on flat and curved meshes.</p>
       <div class="sweep-api__card-models">registry: <span class="sweep-api__chip teal">equation_classes</span> <span class="sweep-api__chip teal">describe</span></div>
     </a>
     <a class="sweep-api__card" href="sem/mesh/">

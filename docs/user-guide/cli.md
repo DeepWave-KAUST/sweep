@@ -75,22 +75,24 @@ Finite difference (sweep.equations, run with PropTorch):
 
 Spectral element (sweep.sem, run with PropSEM):
 
-  Equation                 Mesh                   Models                                   Torch Binding  Binding Ready
-  -----------------------  ---------------------  ---------------------------------------  -------------  -------------
-  AcousticElasticSEM2D     quad9 2-D, topography  ['vp', 'vs', 'rho']                      yes            yes
-  AcousticPotentialSEM2D   quad9 2-D, topography  ['vp']                                   yes            yes
-  AcousticSEM2D            quad4 2-D              ['vp']                                   no             no
-  AcousticSEM2DDeformed    quad9 2-D, topography  ['vp']                                   no             no
-  AcousticSEM3D            hex8 3-D               ['vp']                                   yes            yes
-  AcousticSEM3DDeformed    hex27 3-D, topography  ['vp']                                   yes            yes
-  ElasticSEM2D             quad4 2-D              ['vp', 'vs', 'rho']                      no             no
-  ElasticSEM2DDeformed     quad9 2-D, topography  ['vp', 'vs', 'rho']                      yes            yes
-  ElasticSEM3D             hex8 3-D               ['vp', 'vs', 'rho']                      yes            yes
-  ElasticSEM3DDeformed     hex27 3-D, topography  ['vp', 'vs', 'rho']                      yes            yes
-  ElasticVSSEM2DDeformed   quad9 2-D, topography  ['vp', 'vs', 'rho']                      no             no
-  ElasticVSSEM3D           hex8 3-D               ['vp', 'vs', 'rho']                      yes            yes
-  ElasticVSSEM3DDeformed   hex27 3-D, topography  ['vp', 'vs', 'rho']                      no             no
-  ElasticVTISEM2DDeformed  quad9 2-D, topography  ['vp', 'vs', 'rho', 'epsilon', 'delta']  no             no
+  Equation                    Mesh                   Models                                                              Torch Binding  Binding Ready
+  --------------------------  ---------------------  ------------------------------------------------------------------  -------------  -------------
+  AcousticElasticSEM2D        quad9 2-D, topography  ['vp', 'vs', 'rho']                                                 yes            yes
+  AcousticPotentialSEM2D      quad9 2-D, topography  ['vp']                                                              yes            yes
+  AcousticSEM2D               quad4 2-D              ['vp']                                                              no             no
+  AcousticSEM2DDeformed       quad9 2-D, topography  ['vp']                                                              no             no
+  AcousticSEM3D               hex8 3-D               ['vp']                                                              yes            yes
+  AcousticSEM3DDeformed       hex27 3-D, topography  ['vp']                                                              yes            yes
+  BiotAnisoPermSEM2DDeformed  quad9 2-D, topography  ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b_xx', 'b_xz', 'b_zz']  no             no
+  BiotVSSEM2DDeformed         quad9 2-D, topography  ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']                     no             no
+  ElasticSEM2D                quad4 2-D              ['vp', 'vs', 'rho']                                                 no             no
+  ElasticSEM2DDeformed        quad9 2-D, topography  ['vp', 'vs', 'rho']                                                 yes            yes
+  ElasticSEM3D                hex8 3-D               ['vp', 'vs', 'rho']                                                 yes            yes
+  ElasticSEM3DDeformed        hex27 3-D, topography  ['vp', 'vs', 'rho']                                                 yes            yes
+  ElasticVSSEM2DDeformed      quad9 2-D, topography  ['vp', 'vs', 'rho']                                                 no             no
+  ElasticVSSEM3D              hex8 3-D               ['vp', 'vs', 'rho']                                                 yes            yes
+  ElasticVSSEM3DDeformed      hex27 3-D, topography  ['vp', 'vs', 'rho']                                                 no             no
+  ElasticVTISEM2DDeformed     quad9 2-D, topography  ['vp', 'vs', 'rho', 'epsilon', 'delta']                             no             no
 ```
 
 The unified facades `DAS` (formerly `DASModeler`) and `AcousticAniso` are
@@ -172,8 +174,16 @@ sweep show AcousticPotentialSEM2D
 
 On the elastic SEM classes `source_type` also takes `PropTorch`'s names: `vx`,
 `vz` (and `vy`) for a force and, in 2-D, `sxx`, `szz`, `sxz` for a moment
-tensor (see [SEM · Source types](sem.md#source-types)). A class without an
-absorbing layer says so, as `ElasticSEM2D` does:
+tensor (see [SEM · Source types](sem.md#source-types)). The Biot classes
+name the `source_type` values `PropSEM` takes for them (a force, a moment, a
+pore-pressure or flux injection), so `show` prints those instead of their
+source fields:
+
+```text
+  Source types: ['vx', 'vz', 'qx', 'qz', 'v_x', 'v_z', 'q_x', 'q_z', 'fx', 'fz', 'p', 'sxx', 'szz', 'sxz']
+```
+
+A class without an absorbing layer says so, as `ElasticSEM2D` does:
 
 ```text
   C-PML: no -- a reflecting box, abcn=0 only
@@ -193,7 +203,7 @@ sweep show Acoustic3d ; echo "exit=$?"
 ```text
 No such wave equation: Acoustic3d
   Did you mean: Acoustic3D, Acoustic, AcousticVRZ3D?
-  `sweep list equations` names all 43 finite-difference and 14 spectral-element equations.
+  `sweep list equations` names all 43 finite-difference and 16 spectral-element equations.
 exit=1
 ```
 

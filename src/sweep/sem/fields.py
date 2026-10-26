@@ -172,15 +172,16 @@ def resolve_field_types(equation, kinds, role):
     ==========================================  ==================  ==========
 
     Neither exposes a stress receiver. In the velocity-stress family the
-    stresses DO exist as fields, but they are element-local (``E, ngll, ngll``,
-    DG-style, so material jumps can live on element faces) while the point
-    receiver gather works on the global CG nodes -- hence
-    ``supports_receiver=False`` on ``sigma_*``, a storage-layout limit rather
-    than a naming one. In the displacement family there is no stress state at
-    all; it is formed inside the stiffness apply and never stored.
+    stresses DO exist as fields, element-local (``E, ngll, ngll``, DG-style,
+    so material jumps can live on element faces), and the receiver gather
+    reads an element-local field from the receiver's own element (Biot's flux
+    and stresses are recorded that way); the elastics just do not flag theirs
+    ``supports_receiver``. In the displacement family there is no
+    stress state at all; it is formed inside the stiffness apply and never
+    stored.
 
-    So FD's ``vx``/``sxx`` names transfer only partially: ``v_x`` exists in the
-    velocity-stress family, ``sxx`` in neither.
+    So FD's ``vx``/``sxx`` names transfer only partially on the elastics:
+    ``v_x`` exists in the velocity-stress family, ``sxx`` in neither.
     """
     attr = "supports_source" if role == "source" else "supports_receiver"
     specs = list(equation.field_specs)
@@ -200,7 +201,10 @@ def resolve_field_types(equation, kinds, role):
         # equation may override (the fluid-solid form defaults to chi: a
         # scalar source in the water column).
         if role == "receiver":
-            return [s.name for s in avail]
+            # Biot records its solid velocity by default, as the FD Biot does,
+            # not all eight of its receiver fields
+            declared = getattr(equation, "default_receiver_type", None)
+            return list(declared) if declared else [s.name for s in avail]
         declared = getattr(equation, "default_source_type", None)
         return list(declared) if declared else [avail[-1].name]
     name = getattr(equation, "__name__", type(equation).__name__)

@@ -41,17 +41,19 @@ from .mesh.quad9 import Quad9Mesh
 from .mesh.hex8 import Hex8Mesh
 from .mesh.hex27 import Hex27Mesh
 from .basis.quad9 import q2_basis_at, q2_basis_deriv_at
-from ._assembly import scatter_point_sources
+from ._assembly import element_mean, scatter_point_sources
 from .fields import resolve_field_types
 
 
 # --------------------------------------------------------------------------- #
 # Lagrange basis helpers (scalar evaluation at a point in [-1, 1]).
 # --------------------------------------------------------------------------- #
-def receiver_gather(mesh, receivers):
+def receiver_gather(mesh, receivers, layout="global"):
     """``(rec_G, rec_W)`` of one shot: the global node ids behind every
     receiver's element and that receiver's Lagrange weights, both
-    ``(nrec, ngll**dim)``.
+    ``(nrec, ngll**dim)``. With ``layout="element"`` the ids index an
+    element-local field flattened to ``(E * ngll**dim,)`` instead -- the
+    receiver's own element's nodes (Biot's flux and stresses).
 
     Every receiver samples ``sum_ab w_eta[a] w_xi[b] . field[ibool[e, a, b]]``,
     so ONE gather plus a weighted sum answers all of them at once -- the
@@ -64,8 +66,21 @@ def receiver_gather(mesh, receivers):
     callers wrote these two lines out (the eager forward, PropSEM's batch
     gather, SEMCudaPropagator's consts).
     """
-    return (torch.stack([mesh.ibool[r.elem_id].reshape(-1) for r in receivers]),
-            torch.stack([r.gather_weights() for r in receivers]))
+    if layout == "element":
+        m = mesh.ibool[0].numel()
+        nodes = torch.arange(m, device=mesh.ibool.device)
+        G = torch.stack([r.elem_id * m + nodes for r in receivers])
+    elif layout == "global":
+        G = torch.stack([mesh.ibool[r.elem_id].reshape(-1) for r in receivers])
+    else:
+        raise ValueError(f"receivers sample a 'global' or an 'element' field, "
+                         f"not {layout!r}")
+    return G, torch.stack([r.gather_weights() for r in receivers])
+
+
+def field_layouts(eq, idxs):
+    """The storage layout of each state field in ``idxs`` (``field_specs``)."""
+    return [eq.field_specs[i].layout for i in idxs]
 
 
 def lagrange_basis_at(nodes: torch.Tensor, x: float) -> torch.Tensor:
@@ -566,13 +581,24 @@ def _stamp_components(stamp, kind, payload):
     Returns a list aligned with the equation's source fields: ``[scalar]`` for an
     acoustic body source, ``[F_x, F_z(, F_y)]`` for an elastic body force, the
     two/three moment-tensor components for ``moment_tensor`` / ``explosion``.
+
+    A ``force`` payload has one entry per source field (Biot's three: ``v_x,
+    v_z, p``), a 2-D ``moment_tensor`` one ``(Mxx, Mzz, Mxz)`` block per pair
+    of them; fields past the payload take no load.
     """
     if kind == "scalar":
         return [stamp.scalar_stamp(payload[0])]
     if kind == "force":
-        return list(stamp.force_stamp(*payload))
+        # one Lagrange stamp per entry: force_stamp's ``F * outer`` product, for
+        # any number of source fields
+        return [stamp.scalar_stamp(f) for f in payload]
     if kind == "moment_tensor":
-        return list(stamp.moment_tensor_stamp(payload[0], payload[1], payload[2]))
+        if len(payload) % 3:
+            raise ValueError(
+                f"a moment_tensor payload is (Mxx, Mzz, Mxz) blocks; got "
+                f"{len(payload)} entries")
+        return [c for k in range(0, len(payload), 3)
+                for c in stamp.moment_tensor_stamp(*payload[k:k + 3])]
     if kind == "explosion":                       # isotropic Mxx = Mzz = M0, Mxz = 0
         m0 = payload[0]
         return list(stamp.moment_tensor_stamp(m0, m0, 0.0))
@@ -583,15 +609,42 @@ def _stamp_components(stamp, kind, payload):
 _DERIVATIVE_KINDS = ("moment_tensor", "explosion")
 
 
-def _stamp_loads(stamp, kind, payload):
+def _stamp_loads(stamp, kind, payload, alive=None, names=None):
     """``[(elem_id, components), ...]`` of one point source: its element for
     a :class:`PointStamp`, every element of an :class:`EdgeStamp`, each
-    weighted by its share."""
+    weighted by its share.
+
+    ``alive`` (an equation's ``source_field_elements``: per source field, the
+    ``(E,)`` bool of the elements it lives in) keeps each field's load to
+    those elements, the shares renormalised over them -- a source on an
+    interface between two media loads each field from its own side. A source
+    left loading nothing is refused (``names``: the source fields)."""
     parts = getattr(stamp, "parts", None)
-    if parts is None:
-        return [(stamp.elem_id, _stamp_components(stamp, kind, payload))]
-    return [(p.elem_id, [c * w for c in _stamp_components(p, kind, payload)])
-            for p, w in zip(parts, stamp.weights)]
+    weights = [1.0] if parts is None else list(stamp.weights)
+    parts = [stamp] if parts is None else parts
+    comps = [_stamp_components(p, kind, payload) for p in parts]
+    if alive is None:
+        if len(parts) == 1:
+            return [(parts[0].elem_id, comps[0])]
+        return [(p.elem_id, [c * w for c in cs])
+                for p, w, cs in zip(parts, weights, comps)]
+    out = [[] for _ in parts]
+    loaded = False
+    for f in range(len(comps[0])):
+        keep = [bool(alive[f][p.elem_id]) if f < len(alive) else True for p in parts]
+        total = sum(w for w, k in zip(weights, keep) if k)
+        for i, k in enumerate(keep):
+            c = comps[i][f] * (weights[i] / total) if k else comps[i][f] * 0.0
+            loaded = loaded or bool(k and c.abs().max() > 0)
+            out[i].append(c)
+    if not loaded and any(bool(c.abs().max() > 0) for cs in comps for c in cs):
+        fields = [n for f, n in enumerate(names or ())
+                  if any(bool(cs[f].abs().max() > 0) for cs in comps if f < len(cs))]
+        raise ValueError(
+            f"a {kind!r} source in element(s) {[p.elem_id for p in parts]} loads "
+            f"{fields or 'its fields'}, none of which lives there (a fluid element "
+            f"carries no solid velocity or stress, a dry one no pore pressure or flux)")
+    return [(p.elem_id, cs) for p, cs in zip(parts, out)]
 
 
 # --------------------------------------------------------------------------- #
@@ -732,8 +785,12 @@ class SEMPropagator:
                 default = (1.0,) + (0.0,) * (n_src_fields - 1)
                 source_payloads = [default] * len(source_xz)
         # a moment tensor differentiates the basis, so on an element edge it
-        # is stamped in every element there (EdgeStamp); the rest locate once
-        sources   = [(build_moment_stamp if kind in _DERIVATIVE_KINDS
+        # is stamped in every element there (EdgeStamp); the rest locate once --
+        # unless the fields live in different media (source_field_elements):
+        # then every source meets all the elements at its point, to take each
+        # field's load from the ones that carry it
+        edge_all = getattr(eq, "source_field_elements", None) is not None
+        sources   = [(build_moment_stamp if edge_all or kind in _DERIVATIVE_KINDS
                       else build_point_stamp)(eq.mesh, *xz)
                      for xz, kind in zip(source_xz, source_kinds)]
         receivers = [build_point_stamp(eq.mesh, *xz) for xz in receiver_xz]
@@ -741,6 +798,14 @@ class SEMPropagator:
                    source_kinds=source_kinds, source_payloads=source_payloads,
                    receiver_type=resolve_field_types(
                        type(eq), receiver_type, "receiver"))
+
+    def _source_media(self):
+        """``(alive, names)`` for :func:`_stamp_loads`: the equation's
+        ``source_field_elements`` (``None`` when every field lives everywhere)
+        and its source field names."""
+        alive = getattr(self.eq, "source_field_elements", None)
+        names = [s.name for s in self.eq.field_specs if s.supports_source]
+        return alive, names
 
     # ---- source spatial pattern (assembled ONCE, scaled per step) ------- #
     def _build_source_patterns(self, n_global, device, dtype):
@@ -762,9 +827,16 @@ class SEMPropagator:
         # the positional order is already the equation's own field order.
         patterns = [torch.zeros(n_global, dtype=dtype, device=device)
                     for _ in range(n_src)]
+        alive, names = self._source_media()
         for stamp, kind, payload in zip(self.sources, self.source_kinds,
                                         self.source_payloads):
-            for e, comps in _stamp_loads(stamp, kind, payload):
+            for e, comps in _stamp_loads(stamp, kind, payload, alive, names):
+                if len(comps) > n_src:
+                    # zip would drop the extra components without a word
+                    raise ValueError(
+                        f"a {kind!r} source with payload {tuple(payload)} has "
+                        f"{len(comps)} components; {type(eq).__name__} has "
+                        f"{n_src} source fields")
                 g = mesh.ibool[e].reshape(-1)
                 for pat, comp in zip(patterns, comps):
                     pat.index_add_(0, g, comp.reshape(-1))
@@ -787,12 +859,17 @@ class SEMPropagator:
         mesh = self.eq.mesh
         n_src = sum(s.supports_source for s in self.eq.field_specs)
         G_rows, W_rows = [], [[] for _ in range(n_src)]
+        alive, names = self._source_media()
         for stamp, kind, payload in zip(self.sources, self.source_kinds,
                                         self.source_payloads):
-            loads = _stamp_loads(stamp, kind, payload)
+            loads = _stamp_loads(stamp, kind, payload, alive, names)
             G_rows.append(torch.cat([mesh.ibool[e].reshape(-1) for e, _ in loads]))
             for f, rows in enumerate(W_rows):
-                rows.append(torch.cat([c[f].reshape(-1) for _, c in loads]))
+                # a payload may cover the leading source fields only (a moment
+                # tensor on Biot's v rows, none on p): the rest take no load
+                rows.append(torch.cat([
+                    (c[f] if f < len(c) else torch.zeros_like(c[0])).reshape(-1)
+                    for _, c in loads]))
         width = max(g.numel() for g in G_rows)
         if any(g.numel() != width for g in G_rows):
             # an edge source spans several elements: pad the others with zero
@@ -856,6 +933,7 @@ class SEMPropagator:
         device, dtype = self._dev_dtype()
         recv = self._recv_components()
         rec_G, rec_W = self._receiver_gather(device, dtype)
+        layouts = field_layouts(self.eq, recv)
         source_spec, like = self._source_term(per_source, device, dtype)
         step_fn = self._step_fn(compile_step)
 
@@ -865,6 +943,11 @@ class SEMPropagator:
                 snap_at is not None, compile_step, bs_store_dtype)
 
         n_rec = len(self.receivers)
+        # an element-local field (Biot's flux, stresses) is gathered from its
+        # own layout
+        rec_GI = {i: rec_G if lay == "global" else
+                  receiver_gather(self.eq.mesh, self.receivers, lay)[0].to(device)
+                  for i, lay in zip(recv, layouts)} if n_rec else {}
         state = self.eq.init_state(self.dt, device, dtype)     # positional tuple
         seis = {i: torch.zeros(n_rec, self.nt, dtype=dtype, device=device)
                 for i in recv}
@@ -879,20 +962,22 @@ class SEMPropagator:
 
             if n_rec > 0:
                 for i in recv:
-                    seis[i][:, n] = (state[i][rec_G] * rec_W).sum(dim=1)
+                    seis[i][:, n] = (state[i].reshape(-1)[rec_GI[i]]
+                                     * rec_W).sum(dim=1)
 
             if snap_at is not None and n in snap_at:
-                for i in recv:
-                    snaps[i].append(state[i].clone())
+                for i, lay in zip(recv, layouts):
+                    snaps[i].append(state[i].clone() if lay == "global" else
+                                    element_mean(self.eq.mesh, state[i]))
 
         # (nrec, nt) per component -> (nt, nrec, ncomp), the FD layout.
         out = torch.stack([seis[i] for i in recv], -1).transpose(0, 1)
         if snap_at is None:
             return out
         if not snap_at:                       # snapshot_times=[]: none asked for
-            return out, state[recv[0]].new_zeros(
-                (0, len(recv)) + tuple(state[recv[0]].shape))
-        # (nsnap, ncomp, n_global), at the steps of snap_at in ascending order
+            return out, state[recv[0]].new_zeros((0, len(recv), self.eq.mesh.n_global))
+        # (nsnap, ncomp, n_global), at the steps of snap_at in ascending order;
+        # an element-local field as the |J|-weighted mean at each shared node
         return out, torch.stack([torch.stack(snaps[i], 0) for i in recv], 1)
 
     def _snapshot_steps(self, every, times):
