@@ -44,9 +44,10 @@ def _is_tensor(x) -> bool:
     return hasattr(x, "data_ptr") and hasattr(x, "shape")
 
 
-def _fill_buf(b, t) -> None:
+def _fill_buf(b, t, any_width: bool = False) -> None:
     """Describe ``t`` into ``b``, a ZEROED Buf (fresh struct memory): None stays
-    the undefined Buf (defined_ False, everything zero), exactly buf_of()."""
+    the undefined Buf (defined_ False, everything zero), exactly buf_of().
+    ``any_width`` lifts the tag/width check for the SEM twins (see _check_sem_dtype)."""
     if t is None:
         return
     shape = t.shape
@@ -57,7 +58,7 @@ def _fill_buf(b, t) -> None:
             "raise BUF_MAX_DIMS in csrc/core/buf.h.")
     tag = _tags().get(t.dtype, _abi.FP32)
     es = t.element_size()
-    if es != _TAG_WIDTH[tag]:
+    if not any_width and es != _TAG_WIDTH[tag]:
         raise RuntimeError(
             f"buf_of: a {t.dtype} tensor is {es} bytes wide but the boundary storage tag "
             f"implies {_TAG_WIDTH[tag]}; the boundary layer stores float32, float16, "
@@ -142,6 +143,27 @@ def _session_handle(what: str, name: str, val):
         return int(h)
     h = val.value if isinstance(val, c_void_p) else val
     return int(h) if h else None
+
+
+# The SEM twins (core/sem_input_core.h) hold no boundary storage, so the tag
+# means nothing to them: their tensors go through at their own width and the
+# SEM drivers read each with its element type -- int64 / int32 index tables,
+# float32 fields, the bf16 / int8 band rings (whose kind travels as band_kind).
+# The dtype set is what makes the drivers' width checks exact: an 8-byte
+# buffer here is int64, never float64.
+_sem_dtypes = None
+
+
+def _check_sem_dtype(struct_name: str, name: str, t) -> None:
+    global _sem_dtypes
+    if _sem_dtypes is None:
+        import torch
+        _sem_dtypes = {torch.float32, torch.bfloat16, torch.float16, torch.int8,
+                       torch.uint8, torch.int32, torch.int64}
+    if t.dtype not in _sem_dtypes:
+        raise RuntimeError(
+            f"{struct_name}.{name}: a {t.dtype} tensor; the SEM drivers read float32, "
+            "bfloat16, float16, int8, uint8, int32 or int64 only")
 
 
 def adapt(struct_name: str, obj):

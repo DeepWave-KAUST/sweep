@@ -1,8 +1,9 @@
 """The C boundary (core/capi.h) of the prebuilt ``libsweep_core.so``: its
 symbols load through ctypes (``sweep.backend.c.loader.core_lib()``, no compiled module
 file exists on the default path any more), the entry table names exactly the
-functions ``sweep._C``'s namespace binds (same names, every kind right), the
-session and the stream round trip, and the visco FFT query answers.  The
+functions ``sweep._C``'s namespace binds (same names, every kind right; the
+SEM entries, kind 3, each name the struct they take), the session and the
+stream round trip, and the visco FFT query answers.  The
 dispatcher itself is exercised by the ctypes layer (test_backend_c.py)."""
 import ctypes
 import pytest
@@ -45,11 +46,27 @@ def test_abi_version_and_entry_table_match_the_module():
     lib.sweep_entry_name.restype = ctypes.c_char_p
     names = [lib.sweep_entry_name(i).decode() for i in range(n)]
     assert lib.sweep_entry_name(n) is None and lib.sweep_entry_kind(n) == -1
-    bound = _bound(mod)
-    assert sorted(names) == bound, set(names) ^ set(bound)
+    sem = {nm for i, nm in enumerate(names) if lib.sweep_entry_kind(i) == 3}
+    bound = [b for b in _bound(mod) if b not in sem]
+    fd = sorted(nm for nm in names if nm not in sem)
+    assert fd == bound, set(fd) ^ set(bound)
     for i, nm in enumerate(names):
+        if nm in sem:
+            continue
         op = next(op for op in OPS if nm.endswith("_" + op))
         assert lib.sweep_entry_kind(i) == {"forward": 0, "rtm": 2}.get(op, 1), nm
+    # The SEM entries (kind 3): the sem2d_/sem3d_ names the SEM drivers call,
+    # each bound on sweep._C and each naming a struct the mirror knows.
+    assert len(sem) == 43, len(sem)
+    lib.sweep_entry_struct.restype = ctypes.c_char_p
+    lib.sweep_entry_struct.argtypes = [ctypes.c_int]
+    for i, nm in enumerate(names):
+        struct = lib.sweep_entry_struct(i)
+        if nm in sem:
+            assert nm.startswith(("sem2d_", "sem3d_")) and callable(getattr(mod, nm)), nm
+            assert struct is not None and struct.decode() in abi.STRUCTS, (nm, struct)
+        else:
+            assert struct is None, (nm, struct)
 
 
 def test_session_stream_and_fft_query_round_trip():

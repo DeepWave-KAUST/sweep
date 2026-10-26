@@ -334,12 +334,12 @@ parameter-gradient kernel — the rest is reuse.
 
 ```cpp
 // src/sweep/csrc/core/capi.h  (enum SweepEntry) -- append after the last equation
-SWEEP_ENTRY_MY_SCALAR_FORWARD = 94,
-SWEEP_ENTRY_MY_SCALAR_BACKWARD = 95,
-SWEEP_ENTRY_MY_SCALAR_BACKWARD_BS = 96,
-SWEEP_ENTRY_MY_SCALAR_BACKWARD_CKPT = 97,
-SWEEP_ENTRY_MY_SCALAR_BACKWARD_RECURSIVE_CKPT = 98,
-SWEEP_ENTRY_COUNT = 99
+SWEEP_ENTRY_MY_SCALAR_FORWARD = 142,
+SWEEP_ENTRY_MY_SCALAR_BACKWARD = 143,
+SWEEP_ENTRY_MY_SCALAR_BACKWARD_BS = 144,
+SWEEP_ENTRY_MY_SCALAR_BACKWARD_CKPT = 145,
+SWEEP_ENTRY_MY_SCALAR_BACKWARD_RECURSIVE_CKPT = 146,
+SWEEP_ENTRY_COUNT = 147
 
 // src/sweep/csrc/cuda/common/capi.cu
 #include "../equations/my_scalar/my_scalar.h"
@@ -347,8 +347,8 @@ SWEEP_ENTRY_COUNT = 99
 //              "my_scalar_backward_ckpt", "my_scalar_backward_recursive_ckpt"
 // ENTRY_KINDS: 0, 1, 1, 1, 1
 // dispatch(): one case per entry, e.g.
-case 94: *static_cast<ForwardOutputCore*>(out) = my_scalar::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
-case 95: *static_cast<BackwardOutputCore*>(out) = my_scalar::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
+case 142: *static_cast<ForwardOutputCore*>(out) = my_scalar::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
+case 143: *static_cast<BackwardOutputCore*>(out) = my_scalar::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
 // ... _backward_bs, _backward_ckpt, _backward_recursive_ckpt likewise
 ```
 

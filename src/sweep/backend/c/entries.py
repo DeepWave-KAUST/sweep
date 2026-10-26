@@ -20,7 +20,7 @@ from . import abi as _abi
 from .adapt import _is_tensor, adapt
 from .loader import _ERR_CAP, _raise_core, core_lib
 
-_KIND_FORWARD, _KIND_BACKWARD, _KIND_RTM = 0, 1, 2
+_KIND_FORWARD, _KIND_BACKWARD, _KIND_RTM, _KIND_SEM = 0, 1, 2, 3
 
 # Per entry kind: the input struct ``adapt`` packs and the output struct the
 # core fills (dropped: see the module docstring).
@@ -99,6 +99,9 @@ def _entry_table(lib):
 
 
 def _make_entry(lib, entry: int, name: str, kind: int):
+    if kind == _KIND_SEM:
+        from .sem import make_sem_entry
+        return make_sem_entry(lib, entry, name, _StreamScope)
     if kind not in _KINDS:
         raise RuntimeError(f"sweep core entry {name} has unknown kind {kind}")
     in_name, out_type = _KINDS[kind]

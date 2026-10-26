@@ -74,12 +74,51 @@ the receiver-side discretisation.
 | `DASMu` / `DASMu3D` | `['vp', 'vs', 'rho']` | 2D / 3D | Mu & Hung (2022) velocity-stress formulation with integrated strain | ✅ |
 | `DASElastic` / `DASElastic3D` | `['vp', 'vs', 'rho']` | 2D / 3D | Elastic DAS variant (alias of `DASZhao` / `DASZhao3D`) | ✅ |
 
+### SEM family (spectral elements)
+
+The spectral-element classes live in `sweep.sem.equations` and are driven by
+[`PropSEM`](sem.md) rather than `PropTorch`; models are the same grid tensors
+(`vp` in m/s, etc.) — `PropSEM` interpolates them onto the GLL nodes.
+**Deformed** means the Quad9 / Hex27 curved-mesh variant: it carries surface
+topography and is the one to pick whenever the mesh is not a flat box (the
+flat Quad4 / Hex8 forms trade that for a cheaper constant-Jacobian stencil).
+The `impl="c"` column says whether `PropSEM(impl='c')` can route the class to
+the CUDA kernels; every class runs on `impl="eager"`. The
+`BoundarySaving()` column is the CUDA-side coverage of
+[boundary saving](sem.md#boundary-saving) -- on `impl="eager"` it works for
+every class but the dissipative Biot one; ✅ = both backends, "eager" = eager
+only, and the C-PML is required wherever the ring IS the C-PML band.
+
+| Equation | Models | Mesh | Dim | Notes | `impl="c"` | `BoundarySaving()` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `AcousticPotentialSEM2D` | `['vp']` | quad9 | 2D | Potential form (SPECFEM), the density from `density=`; the FWI workhorse — [shot batching](sem.md#shot-batching-on-implc), per-shot models and batched boundary saving live here | ✅ | ✅ (C-PML; fp32/bf16/int8; batched) |
+| `AcousticSEM2D` | `['vp']` | quad4 | 2D | Constant-density displacement form, flat mesh | ❌ | eager |
+| `AcousticSEM2DDeformed` | `['vp']` | quad9 | 2D | Topography-capable variant of `AcousticSEM2D` | ❌ | eager |
+| `AcousticSEM3D` | `['vp']` | hex8 | 3D | 3-D acoustic, flat mesh | ✅ | ✅ (fp32/bf16/int8) |
+| `AcousticSEM3DDeformed` | `['vp']` | hex27 | 3D | 3-D acoustic with topography | ✅ | ✅ (fp32/bf16/int8) |
+| `ElasticSEM2D` | `['vp', 'vs', 'rho']` | quad4 | 2D | 2nd-order displacement (Newmark), flat; **no C-PML** — superseded by the Deformed form | ❌ | eager |
+| `ElasticSEM2DDeformed` | `['vp', 'vs', 'rho']` | quad9 | 2D | SPECFEM2D-style displacement elastic: topography + C-PML | ✅ | ✅ (C-PML; fp32) |
+| `ElasticSEM3D` | `['vp', 'vs', 'rho']` | hex8 | 3D | 3-D displacement elastic; **no C-PML** (3-D displacement C-PML is not modelled) | ✅ | eager |
+| `ElasticSEM3DDeformed` | `['vp', 'vs', 'rho']` | hex27 | 3D | 3-D displacement elastic with topography; **no C-PML** | ✅ | eager |
+| `ElasticVSSEM2DDeformed` | `['vp', 'vs', 'rho']` | quad9 | 2D | 1st-order velocity–stress elastic: topography + C-PML | ❌ | eager |
+| `ElasticVSSEM3D` | `['vp', 'vs', 'rho']` | hex8 | 3D | 3-D velocity–stress elastic with C-PML, flat mesh | ✅ | eager |
+| `ElasticVSSEM3DDeformed` | `['vp', 'vs', 'rho']` | hex27 | 3D | 3-D elastic with **both** topography and absorbing boundaries (the velocity–stress family is where 3-D C-PML exists) | ❌ | eager |
+| `ElasticVTISEM2DDeformed` | `['vp', 'vs', 'rho', 'epsilon', 'delta']` | quad9 | 2D | VTI anisotropic velocity–stress: topography + C-PML | ❌ | eager |
+| `AcousticElasticSEM2D` | `['vp', 'vs', 'rho']` | quad9 | 2D | Coupled fluid–solid (ocean over seabed): split acoustic + elastic C-PML, records `chi, u_x, u_z` (+ derived `p, vx, vz`) | ✅ | ✅ (C-PML; fp32; +anchors) |
+| `BiotVSSEM2DDeformed` | `['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']` | quad9 | 2D | [Biot poroelastic](sem.md#poroelastic-waves-biot) velocity–stress with Darcy flux, the FD `Biot`'s equations and names (pore pressure continuous, flux element-local): topography + C-PML, open-pore surface, fluid (`rho = 0`) and dry elastic (`M = 0`) regions, viscous attenuation (`viscous_q`), records `vx, vz, p, qx, qz, sxx, szz, sxz` | ❌ | ❌ (dissipative) |
+| `BiotAnisoPermSEM2DDeformed` | `['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b_xx', 'b_xz', 'b_zz']` | quad9 | 2D | `BiotVSSEM2DDeformed` with an [anisotropic permeability](sem.md#anisotropic-permeability-and-viscous-attenuation) (drag tensor) | ❌ | ❌ (dissipative) |
+
 For the authoritative list of equations exported by your installation,
 with their models and compiled-binding support, use the CLI:
 
 ```bash
 sweep list equations
 ```
+
+It lists the SEM classes after the finite-difference ones, and
+`sweep show <Class>` prints one class's fields, source and receiver types
+and models (see [CLI](cli.md)). The SEM API is in the
+[SEM reference](../api/sem/index.md).
 
 Or from Python:
 
@@ -88,6 +127,22 @@ from sweep.equations import equation_classes, torch_binding_supported_equations
 
 print(sorted(equation_classes().keys()))
 print(torch_binding_supported_equations())
+```
+
+Five SEM classes additionally run **multi-GPU model decomposition** on
+`impl='c'` (x strips; the 3-D cut is a YZ plane) — `AcousticPotentialSEM2D`,
+`ElasticSEM2DDeformed`, `AcousticElasticSEM2D`, `AcousticSEM3D` and
+`AcousticSEM3DDeformed`; the first two also compose it with boundary saving.
+See [Domain decomposition](sem.md#domain-decomposition-multi-gpu-phase-1).
+The whitelist is exact, so any other class, a subclass of one of these
+included, raises rather than falling through to a sibling's path.
+
+The SEM registry has its own one-liner — mesh family, topography and C-PML
+support, field counts and receiver components for every class:
+
+```python
+import sweep.sem.equations
+print(sweep.sem.equations.describe())
 ```
 
 ## Acoustic

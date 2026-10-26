@@ -57,3 +57,56 @@ def test_main_propagates_the_failure(monkeypatch):
     from sweep.cli import main
     monkeypatch.setattr(sys, "argv", ["sweep", "show", "NoSuchEquation"])
     assert main() == 1
+
+
+# --- the spectral-element equations (sweep.sem) -----------------------------
+# They are not WaveEquation subclasses and run with PropSEM, so the FD registry
+# does not hold them; `sweep list` / `sweep show` read sweep.sem's own.
+
+def test_list_names_both_families(capsys):
+    import sweep.sem.equations as sem
+    from sweep.cli import list_equations
+
+    list_equations()
+    out = capsys.readouterr().out
+    assert "Available equations:" in out
+    assert "Spectral element (sweep.sem, run with PropSEM)" in out
+    rows = {line.split()[0] for line in out.splitlines() if line.startswith("  ")}
+    missing = (set(eq.equation_classes()) | set(sem.equation_classes())) - rows
+    assert not missing, missing
+
+
+def test_a_sem_equation_shows_what_propsem_takes(capsys):
+    assert list_wavefields("AcousticPotentialSEM2D") == 0
+    out = capsys.readouterr().out
+    assert "=== AcousticPotentialSEM2D ===" in out
+    assert "run with PropSEM" in out
+    assert "Mesh: quad9, 2-D, topography: yes" in out
+    # rho is PropSEM's density=, not a model
+    assert "Needed models: ['vp']" in out
+    # p is derived from chi; both are receiver types
+    line = next(l for l in out.splitlines() if "Receiver types" in l)
+    assert "'chi'" in line and "'p'" in line
+
+
+def test_a_sem_equation_without_cpml_says_so(capsys):
+    assert list_wavefields("ElasticSEM2D") == 0
+    assert "C-PML: no" in capsys.readouterr().out
+
+
+def test_a_typo_is_offered_the_sem_name(capsys):
+    assert list_wavefields("AcousticPotentialSEM") == 1
+    out = capsys.readouterr().out
+    assert "Did you mean" in out and "AcousticPotentialSEM2D" in out
+    assert "spectral-element" in out
+
+
+def test_biot_shows_propsem_source_names(capsys):
+    """Biot names its PropSEM sources (a force, a moment, a pore-pressure or
+    flux injection), which are not its source fields."""
+    assert list_wavefields("BiotVSSEM2DDeformed") == 0
+    out = capsys.readouterr().out
+    line = next(l for l in out.splitlines() if "Source types" in l)
+    assert all(f"'{n}'" in line for n in ("fz", "p", "sxx", "qz"))
+    assert ("Needed models: ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']"
+            in out)

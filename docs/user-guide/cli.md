@@ -10,9 +10,11 @@ Implementation: `src/sweep/cli.py`.
 
 ## `sweep list equations`
 
-Lists every equation class exported by `sweep.equations` together with its
-required model parameters, whether it declares a compiled CUDA binding, and
-whether the CUDA core can run here right now.
+Lists every equation class in two tables: the finite-difference ones exported
+by `sweep.equations`, run with `PropTorch`, and the spectral-element ones of
+`sweep.sem`, run with `PropSEM`. Each row gives the required model
+parameters, whether the class has a compiled CUDA kernel, and whether the
+CUDA core can run here right now; an SEM row also gives the mesh family.
 
 ```bash
 sweep list equations
@@ -23,6 +25,8 @@ Example output on a machine with a CUDA GPU where the shipped core fits:
 ```text
 Available equations:
 
+Finite difference (sweep.equations, run with PropTorch):
+
   Equation               Models                                                              Torch Binding  Binding Ready
   ---------------------  ------------------------------------------------------------------  -------------  -------------
   Acoustic               ['vp']                                                              yes            yes
@@ -31,22 +35,27 @@ Available equations:
   AcousticCurvilinear    ['vp']                                                              no             no
   AcousticLSRTM          ['vp', 'mp']                                                        yes            yes
   AcousticLSRTM3D        ['vp', 'mp']                                                        yes            yes
-  AcousticTTI            ['vp', 'epsilon', 'delta', 'theta']                                 no             no
+  AcousticTTI            ['vp', 'epsilon', 'delta', 'theta']                                 yes            yes
   AcousticTTIAlkhalifah  ['vv', 'v', 'eta']                                                  no             no
-  AcousticTTILiang       ['vp', 'epsilon', 'delta', 'theta']                                 no             no
+  AcousticTTIBorn        ['vp', 'epsilon', 'delta', 'theta', 'mp']                           yes            yes
+  AcousticTTILSRTM       ['vp', 'epsilon', 'delta', 'theta', 'mp']                           yes            yes
+  AcousticTTILiang       ['vp', 'epsilon', 'delta', 'theta']                                 yes            yes
   AcousticTariq          ['vv', 'v', 'eta']                                                  no             no
   AcousticVRR            ['vp', 'rx', 'rz']                                                  no             no
   AcousticVRZ            ['vp', 'z']                                                         yes            yes
   AcousticVRZ3D          ['vp', 'z']                                                         yes            yes
-  AcousticVTI            ['vp', 'epsilon', 'delta']                                          no             no
+  AcousticVTI            ['vp', 'epsilon', 'delta']                                          yes            yes
   AcousticVTI1st         ['vp', 'epsilon', 'delta', 'rho']                                   yes            yes
   AcousticVTI1st3D       ['vp', 'epsilon', 'delta', 'rho']                                   yes            yes
   AcousticVTIAlkhalifah  ['vv', 'v', 'eta']                                                  no             no
-  AcousticVTIDefault     ['vp', 'epsilon', 'delta']                                          no             no
+  AcousticVTIBorn        ['vp', 'epsilon', 'delta', 'mp']                                    yes            yes
+  AcousticVTIDefault     ['vp', 'epsilon', 'delta']                                          yes            yes
   AcousticVTIDefault3D   ['vp', 'epsilon', 'delta', 'rho']                                   yes            yes
   AcousticVTIDuveneck    ['vp', 'epsilon', 'delta', 'rho']                                   yes            yes
   AcousticVTIDuveneck3D  ['vp', 'epsilon', 'delta', 'rho']                                   yes            yes
-  AcousticVTILiang       ['vp', 'epsilon', 'delta']                                          no             no
+  AcousticVTILSRTM       ['vp', 'epsilon', 'delta', 'mp']                                    yes            yes
+  AcousticVTILiang       ['vp', 'epsilon', 'delta']                                          yes            yes
+  Biot                   ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']                     no             no
   DASElastic             ['vp', 'vs', 'rho']                                                 yes            yes
   DASElastic3D           ['vp', 'vs', 'rho']                                                 yes            yes
   DASMu                  ['vp', 'vs', 'rho']                                                 yes            yes
@@ -62,6 +71,28 @@ Available equations:
   ElasticTTISG3D         ['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']  yes            yes
   ElasticVRR             ['vp', 'vs', 'Rp_x', 'Rp_z', 'Rs_x', 'Rs_z']                        yes            yes
   ViscoAcoustic          ['vp', 'Q', 'omega']                                                yes            yes
+  ViscoElastic           ['vp', 'vs', 'rho', 'Qp', 'Qs']                                     yes            yes
+
+Spectral element (sweep.sem, run with PropSEM):
+
+  Equation                    Mesh                   Models                                                              Torch Binding  Binding Ready
+  --------------------------  ---------------------  ------------------------------------------------------------------  -------------  -------------
+  AcousticElasticSEM2D        quad9 2-D, topography  ['vp', 'vs', 'rho']                                                 yes            yes
+  AcousticPotentialSEM2D      quad9 2-D, topography  ['vp']                                                              yes            yes
+  AcousticSEM2D               quad4 2-D              ['vp']                                                              no             no
+  AcousticSEM2DDeformed       quad9 2-D, topography  ['vp']                                                              no             no
+  AcousticSEM3D               hex8 3-D               ['vp']                                                              yes            yes
+  AcousticSEM3DDeformed       hex27 3-D, topography  ['vp']                                                              yes            yes
+  BiotAnisoPermSEM2DDeformed  quad9 2-D, topography  ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b_xx', 'b_xz', 'b_zz']  no             no
+  BiotVSSEM2DDeformed         quad9 2-D, topography  ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']                     no             no
+  ElasticSEM2D                quad4 2-D              ['vp', 'vs', 'rho']                                                 no             no
+  ElasticSEM2DDeformed        quad9 2-D, topography  ['vp', 'vs', 'rho']                                                 yes            yes
+  ElasticSEM3D                hex8 3-D               ['vp', 'vs', 'rho']                                                 yes            yes
+  ElasticSEM3DDeformed        hex27 3-D, topography  ['vp', 'vs', 'rho']                                                 yes            yes
+  ElasticVSSEM2DDeformed      quad9 2-D, topography  ['vp', 'vs', 'rho']                                                 no             no
+  ElasticVSSEM3D              hex8 3-D               ['vp', 'vs', 'rho']                                                 yes            yes
+  ElasticVSSEM3DDeformed      hex27 3-D, topography  ['vp', 'vs', 'rho']                                                 no             no
+  ElasticVTISEM2DDeformed     quad9 2-D, topography  ['vp', 'vs', 'rho', 'epsilon', 'delta']                             no             no
 ```
 
 The unified facades `DAS` (formerly `DASModeler`) and `AcousticAniso` are
@@ -83,6 +114,13 @@ The two right-most columns distinguish:
   `sweep.backend.torch.binding.diagnostics()["reason"]` says why, and
   `["shipped_core"]` which core, if any, fits
   (see [Building the CUDA core](../dev/building.md)).
+
+On an SEM row, **Mesh** is the mesh family the class builds on (`quad4` and
+`hex8` are flat, `quad9` and `hex27` curved) with `topography` when the class
+takes one, and **Models** is the `models=` list `PropSEM` takes: on
+`AcousticPotentialSEM2D` the density is the constant `density=`, not a model.
+**Torch Binding** says that `PropSEM(impl='c')` has CUDA kernels for the
+class, and **Binding Ready** is the same check as on the FD rows.
 
 ## `sweep show <Equation>`
 
@@ -113,10 +151,49 @@ sweep show ElasticTTISG
   Torch binding available: yes
 ```
 
+An SEM class prints its mesh and C-PML, its fields, the fields a source drives,
+the receiver types (the receiver fields and the components derived from them,
+such as `p` and `vx`) and the `models=` that `PropSEM` takes:
+
+```bash
+sweep show AcousticPotentialSEM2D
+```
+
+```text
+=== AcousticPotentialSEM2D ===
+  Spectral element: sweep.sem, run with PropSEM
+  Mesh: quad9, 2-D, topography: yes
+  C-PML: yes
+  Wavefields: ['chi', 'chi_prev', 'psi_x', 'psi_z', 'zeta_x', 'zeta_z']
+  Source fields: ['chi']
+  Receiver types: ['chi', 'p']
+  Needed models: ['vp']
+  Torch binding support: yes
+  Torch binding available: yes
+```
+
+On the elastic SEM classes `source_type` also takes `PropTorch`'s names: `vx`,
+`vz` (and `vy`) for a force and, in 2-D, `sxx`, `szz`, `sxz` for a moment
+tensor (see [SEM · Source types](sem.md#source-types)). The Biot classes
+name the `source_type` values `PropSEM` takes for them (a force, a moment, a
+pore-pressure or flux injection), so `show` prints those instead of their
+source fields:
+
+```text
+  Source types: ['vx', 'vz', 'qx', 'qz', 'v_x', 'v_z', 'q_x', 'q_z', 'fx', 'fz', 'p', 'sxx', 'szz', 'sxz']
+```
+
+A class without an absorbing layer says so, as `ElasticSEM2D` does:
+
+```text
+  C-PML: no -- a reflecting box, abcn=0 only
+```
+
 ### Unknown names, and the exit code
 
-`show` resolves the name through the **equation registry**, not the
-`sweep.equations` namespace, so only real equations answer. An unknown name
+`show` resolves the name through the **equation registries**, the
+finite-difference one and then the SEM one, not the `sweep.equations`
+namespace, so only real equations answer. An unknown name
 exits **1** and offers the closest registered spellings:
 
 ```bash
@@ -126,7 +203,7 @@ sweep show Acoustic3d ; echo "exit=$?"
 ```text
 No such wave equation: Acoustic3d
   Did you mean: Acoustic3D, Acoustic, AcousticVRZ3D?
-  `sweep list equations` names all 38 registered equations.
+  `sweep list equations` names all 43 finite-difference and 16 spectral-element equations.
 exit=1
 ```
 
@@ -140,7 +217,8 @@ A successful `show` exits 0, so `sweep show <Eq> >/dev/null` is a usable
 The `Wavefields` list is the **full** internal state — it includes CPML memory
 variables and other auxiliary fields. The user-facing source / receiver field
 choices are a subset; use the equation's `available_fields(role="source")` or
-`available_fields(role="receiver")` Python helper for that.
+`available_fields(role="receiver")` Python helper for that. For an SEM class
+`show` prints those two subsets itself.
 
 ## Python-side equivalents
 
@@ -165,6 +243,20 @@ print([f.name for f in eq.available_fields(role="source")])
 print(eq.describe_field("h1"))
 print([m.name for m in eq.available_models()])
 print(eq.describe_model("vp"))
+```
+
+The SEM registry has its own helpers in `sweep.sem.equations`, and
+`propsem_models` gives the `models=` list `PropSEM` takes:
+
+```python
+import sweep.sem.equations as sem
+from sweep.sem.prop_base import propsem_models
+
+print(sorted(sem.equation_classes()))
+cls = sem.equation_classes()["AcousticPotentialSEM2D"]
+print(sem.summary(cls))       # mesh, ndim, topography, cpml, fields, sources, receivers, derived
+print(propsem_models(cls))    # ['vp']
+print(sem.describe())         # one line per class
 ```
 
 ## `sweep datasets`

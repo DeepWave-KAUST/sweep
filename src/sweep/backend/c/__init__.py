@@ -42,6 +42,15 @@ BACKWARD_RUNNER_EQUATIONS = ("acoustic_vrz3d",)
 _ns = None
 
 
+def sem_namespace() -> dict:
+    """The SEM part of :func:`namespace` -- the kind-3 entries and their input
+    classes -- for the compiled developer path, whose shim does not bind them
+    (it links the same core, so this reaches the same kernels)."""
+    from .sem import INPUTS
+    return {k: v for k, v in namespace().items()
+            if k.startswith(("sem2d_", "sem3d_")) or k in INPUTS}
+
+
 def namespace() -> dict:
     """Everything ``sweep._C`` exposes, keyed by its old pybind name (cached;
     built once under the loader's ``_load_lock``)."""
@@ -66,6 +75,8 @@ def namespace() -> dict:
                     raise RuntimeError(f"sweep core has no entry {entry}, needed by its stepped runner")
                 fname = f"{entry}_runner"
                 ns[fname] = _make_runner_factory(cls, ids[entry], fname)
+        from .sem import INPUTS as _sem_inputs
+        ns.update(_sem_inputs)
         ns.update(
             ForwardInput=_abi.ForwardInput,
             BackwardInput=_abi.BackwardInput,

@@ -7,7 +7,8 @@ use of ``impl='c'``) loads the prebuilt core through ctypes
 eager/JAX-only users never touch the core at all.  ``SWEEP_JIT_FULL=1``
 selects the compiled developer path instead: the pybind shim, compiled against
 your torch on first use and cached (see ``sweep/backend/c/jit.py``); it
-reaches the same CUDA core.  ``sweep.precompile()`` does the one-time part up
+reaches the same CUDA core.  The SEM entries go through the ctypes layer on
+both paths -- the shim binds the FD structs only.  ``sweep.precompile()`` does the one-time part up
 front.
 """
 
@@ -32,6 +33,9 @@ def _load(compile_only: bool = False):
         for _k in dir(mod):
             if not _k.startswith("__"):
                 _ns[_k] = getattr(mod, _k)
+        if not compile_only:
+            from .backend import c as _backend_c
+            _ns.update(_backend_c.sem_namespace())
     else:
         from .backend import c as _backend_c
         _ns.update(_backend_c.namespace())

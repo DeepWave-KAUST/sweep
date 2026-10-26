@@ -1,7 +1,10 @@
 """sweep CLI — engine introspection only (`list equations`, `show <Eq>`).
 
-Task-running / FWI / LSRTM YAML driver lives in the `sweep-tasks` companion
-package: `pip install sweep-tasks` and use `sweep-tasks run task.yaml`.
+Both solver families answer: the finite-difference equations of
+`sweep.equations` and the spectral-element ones of `sweep.sem`.
+
+The task-running / FWI / LSRTM YAML driver is in `sweepx`:
+`pip install sweepx` and use `sweep-tasks run task.yaml`.
 """
 
 import argparse
@@ -56,20 +59,50 @@ def _iter_equation_rows():
     return rows
 
 
-def list_equations():
-    rows = _iter_equation_rows()
-    headers = [
-        ("Equation", "name"),
-        ("Models", "models"),
-        ("Torch Binding", "torch_binding_support"),
-        ("Binding Ready", "torch_binding_available"),
-    ]
+def _sem_registry():
+    """``{name: class}`` of the spectral-element equations (``sweep.sem``).
+
+    They are not in the FD registry: they do not subclass ``WaveEquation``
+    and run with ``PropSEM``, not ``PropTorch``.
+    """
+    from sweep.sem.equations import equation_classes
+
+    return equation_classes()
+
+
+def _iter_sem_rows():
+    import sweep
+    from sweep.sem.equations import summary
+    from sweep.sem.prop_base import propsem_models
+    from sweep.sem.prop_c import C_SUPPORTED
+
+    torch_binding_available = sweep.is_torch_binding_available()
+    rows = []
+
+    for name, cls in sorted(_sem_registry().items()):
+        info = summary(cls)
+        binding_supported = cls in C_SUPPORTED
+        rows.append(
+            {
+                "name": name,
+                "mesh": f"{info['mesh']} {info['ndim']}-D"
+                        + (", topography" if info["topography"] else ""),
+                "models": _format_models(propsem_models(cls)),
+                "torch_binding_support": _format_yes_no(binding_supported),
+                "torch_binding_available": _format_yes_no(
+                    binding_supported and torch_binding_available
+                ),
+            }
+        )
+
+    return rows
+
+
+def _print_table(rows, headers):
     widths = {
-        key: max(len(header), *(len(row[key]) for row in rows))
+        key: max([len(header)] + [len(row[key]) for row in rows])
         for header, key in headers
     }
-
-    print("Available equations:\n")
     print(
         "  "
         + "  ".join(header.ljust(widths[key]) for header, key in headers)
@@ -84,6 +117,25 @@ def list_equations():
             "  "
             + "  ".join(row[key].ljust(widths[key]) for _, key in headers)
         )
+
+
+def list_equations():
+    print("Available equations:\n")
+    print("Finite difference (sweep.equations, run with PropTorch):\n")
+    _print_table(_iter_equation_rows(), [
+        ("Equation", "name"),
+        ("Models", "models"),
+        ("Torch Binding", "torch_binding_support"),
+        ("Binding Ready", "torch_binding_available"),
+    ])
+    print("\nSpectral element (sweep.sem, run with PropSEM):\n")
+    _print_table(_iter_sem_rows(), [
+        ("Equation", "name"),
+        ("Mesh", "mesh"),
+        ("Models", "models"),
+        ("Torch Binding", "torch_binding_support"),
+        ("Binding Ready", "torch_binding_available"),
+    ])
 
 
 #: Not equations, but the names users most plausibly type at ``sweep show``:
@@ -106,6 +158,9 @@ def list_wavefields(class_name):
     cls = registry.get(class_name)
 
     if cls is None:
+        sem = _sem_registry()
+        if class_name in sem:
+            return _show_sem_equation(class_name, sem[class_name])
         if class_name in _FACADES:
             print(f"\n=== {class_name} ===")
             print(f"  {class_name} is a facade/dispatcher, not a wave equation:")
@@ -114,11 +169,13 @@ def list_wavefields(class_name):
             print(f"  Use `sweep show <RawClass>` on the one it dispatches to.")
             return 1
         print(f"No such wave equation: {class_name}")
-        near = difflib.get_close_matches(class_name, sorted(registry), n=3)
+        near = difflib.get_close_matches(class_name, sorted(registry) + sorted(sem),
+                                         n=3)
         if near:
             print(f"  Did you mean: {', '.join(near)}?")
         print("  `sweep list equations` names all "
-              f"{len(registry)} registered equations.")
+              f"{len(registry)} finite-difference and {len(sem)} spectral-element "
+              f"equations.")
         return 1
 
     wavefields = _read_class_metadata(cls, "wavefields")
@@ -143,11 +200,49 @@ def list_wavefields(class_name):
     return 0
 
 
+#: What ``summary()["cpml"]`` means for a caller of PropSEM.
+_SEM_CPML = {
+    "yes": "yes",
+    "split": "yes (an acoustic and an elastic profile)",
+    "NO": "no -- a reflecting box, abcn=0 only",
+}
+
+
+def _show_sem_equation(class_name, cls):
+    """``sweep show`` for a spectral-element equation (``sweep.sem``)."""
+    import sweep
+    from sweep.sem.equations import summary
+    from sweep.sem.prop_base import propsem_models
+    from sweep.sem.prop_c import C_SUPPORTED
+
+    info = summary(cls)
+    binding_supported = cls in C_SUPPORTED
+    binding_available = binding_supported and sweep.is_torch_binding_available()
+
+    print(f"\n=== {class_name} ===")
+    print("  Spectral element: sweep.sem, run with PropSEM")
+    print(f"  Mesh: {info['mesh']}, {info['ndim']}-D, "
+          f"topography: {_format_yes_no(info['topography'])}")
+    print(f"  C-PML: {_SEM_CPML[info['cpml']]}")
+    print(f"  Wavefields: {info['fields']}")
+    # an equation that names its PropSEM sources (Biot) takes exactly those
+    names = list(getattr(cls, "propsem_source_names", None) or ())
+    if names:
+        print(f"  Source types: {names}")
+    else:
+        print(f"  Source fields: {info['sources']}")
+    print(f"  Receiver types: {info['receivers'] + info['derived']}")
+    print(f"  Needed models: {propsem_models(cls)}")
+    print(f"  Torch binding support: {_format_yes_no(binding_supported)}")
+    print(f"  Torch binding available: {_format_yes_no(binding_available)}")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog='sweep',
         description='SWEEP (Seismic Wave Equation Exploration Platform) — engine introspection. '
-                    'For YAML-driven FWI / LSRTM runs, install `sweep-tasks` and use `sweep-tasks run`.',
+                    'For YAML-driven FWI / LSRTM runs, install `sweepx` and use `sweep-tasks run`.',
     )
     subparsers = parser.add_subparsers(dest='command')
 
