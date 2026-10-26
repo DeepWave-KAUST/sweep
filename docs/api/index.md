@@ -213,4 +213,40 @@
   </div>
 </section>
 
+<section class="sweep-api__sec">
+  <div class="sweep-api__sec-hd">
+    <span class="sweep-api__sec-dot teal"></span>
+    <h2>Spectral element (SEM)</h2>
+    <span class="sweep-api__count">sweep.sem</span>
+  </div>
+  <p class="sweep-api__sec-lede">The spectral-element solver: quad and hex meshes that follow a topography, GLL quadrature, the same constructor and call as <code>PropTorch</code>. Its equations are listed by <code>sweep list equations</code> next to the finite-difference ones.</p>
+  <div class="sweep-api__grid">
+    <a class="sweep-api__card" href="sem/prop_sem/">
+      <div class="sweep-api__card-hd"><code>PropSEM</code><div class="sweep-api__card-tags"><span>torch</span><span>eager + c</span></div></div>
+      <p>The SEM solver, with <code>PropTorch</code>'s options; <code>suggest_discretization</code> for the mesh and time step.</p>
+      <div class="sweep-api__card-models">options: <span class="sweep-api__chip teal">n_order</span> <span class="sweep-api__chip teal">topography</span> <span class="sweep-api__chip teal">memory=</span></div>
+    </a>
+    <a class="sweep-api__card" href="sem/equations/">
+      <div class="sweep-api__card-hd"><code>SEM equations</code><div class="sweep-api__card-tags"><span>2D + 3D</span></div></div>
+      <p>Acoustic, elastic (displacement and velocity-stress, VTI) and coupled fluid-solid, on flat and curved meshes.</p>
+      <div class="sweep-api__card-models">registry: <span class="sweep-api__chip teal">equation_classes</span> <span class="sweep-api__chip teal">describe</span></div>
+    </a>
+    <a class="sweep-api__card" href="sem/mesh/">
+      <div class="sweep-api__card-hd"><code>Quad4 · Quad9 · Hex8 · Hex27</code><div class="sweep-api__card-tags"><span>meshes</span><span>C-PML</span></div></div>
+      <p>The GLL basis, the mesh builders with and without topography, the C-PML profiles.</p>
+      <div class="sweep-api__card-models">builders: <span class="sweep-api__chip teal">build_topography_quad9</span> <span class="sweep-api__chip teal">build_cpml</span></div>
+    </a>
+    <a class="sweep-api__card" href="sem/low_level/">
+      <div class="sweep-api__card-hd"><code>SEMPropagator</code><div class="sweep-api__card-tags"><span>low level</span></div></div>
+      <p>The time loop under <code>PropSEM</code>, the point and moment stamps, boundary saving.</p>
+      <div class="sweep-api__card-models">stamps: <span class="sweep-api__chip teal">PointStamp</span> <span class="sweep-api__chip teal">EdgeStamp</span></div>
+    </a>
+    <a class="sweep-api__card" href="sem/parallel/">
+      <div class="sweep-api__card-hd"><code>SEMModelParallel</code><div class="sweep-api__card-tags"><span>impl='c'</span><span>nccl</span></div></div>
+      <p>One model split into x strips across GPUs.</p>
+      <div class="sweep-api__card-models">topology: <span class="sweep-api__chip teal">StripTopology</span></div>
+    </a>
+  </div>
+</section>
+
 </div>
