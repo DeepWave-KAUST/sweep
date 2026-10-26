@@ -7,6 +7,7 @@ through torch.compile, and Inductor's CPU backend shells out to g++. With g++ 9
 uncompiled, warns once, and returns exactly what ``use_compile=False`` does.
 """
 import warnings
+from functools import lru_cache
 
 import numpy as np
 import pytest
@@ -46,6 +47,14 @@ def _run(use_compile, memory=None):
     return solver, out.detach(), vp.grad
 
 
+@lru_cache(maxsize=None)
+def _reference(boundary_saving):
+    """``(record, gradient)`` of the plain uncompiled run every fallback must
+    reproduce, per memory mode: deterministic, so one run serves every test."""
+    _, out, grad = _run(False, BoundarySaving() if boundary_saving else None)
+    return out, grad
+
+
 @pytest.fixture
 def compiles_on_cpu(monkeypatch):
     """These tests stand in their own torch.compile; on torch 2.3 the CPU step
@@ -57,7 +66,7 @@ def compiles_on_cpu(monkeypatch):
 @pytest.mark.usefixtures("compiles_on_cpu")
 @pytest.mark.parametrize("memory", [None, BoundarySaving()], ids=["full", "boundary_saving"])
 def test_falls_back_to_the_uncompiled_step(monkeypatch, memory):
-    _, ref_out, ref_grad = _run(False, memory)
+    ref_out, ref_grad = _reference(memory is not None)
 
     calls = []
     monkeypatch.setattr(torch, "compile", _compile_that_cannot_build(calls))
@@ -90,7 +99,7 @@ def test_a_torch_without_compile_runs_uncompiled_and_says_so_once(monkeypatch, m
     """torch < 2.0 has no torch.compile at all.  The propagator used to skip
     compiling there in silence, leaving users on the slow path unawares."""
     import sweep.propagator._torch_eager as TE
-    _, ref_out, ref_grad = _run(False, memory)
+    ref_out, ref_grad = _reference(memory is not None)
 
     monkeypatch.delattr(torch, "compile")
     monkeypatch.setattr(TE, "_NO_COMPILE_WARNED", False)
@@ -119,7 +128,7 @@ def test_torch_23_runs_uncompiled_on_cpu_and_says_so_once(monkeypatch, memory):
     while compiling the backward, where no fallback catches it), and nothing
     turns the faulty fusion off."""
     import sweep.propagator._torch_eager as TE
-    _, ref_out, ref_grad = _run(False, memory)
+    ref_out, ref_grad = _reference(memory is not None)
 
     calls = []
     monkeypatch.setattr(TE, "INDUCTOR_23", True)

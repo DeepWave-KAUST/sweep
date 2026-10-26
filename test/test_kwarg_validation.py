@@ -16,6 +16,7 @@ import pytest
 import torch
 
 from sweep.equations.acoustic import Acoustic
+from sweep.propagator.options import EagerOptions
 from sweep.propagator.torch import PropTorch
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
@@ -60,7 +61,9 @@ def test_call_time_typo_raises_and_names_the_key():
 
 
 def test_call_time_recognised_extras_still_work():
-    p = _build()
+    # uncompiled: the extras reach init_abc, not the step, and a cold torch.compile
+    # of the step would cost ~30x this 50-step run
+    p = _build(eager_options=EagerOptions(use_compile=False))
     wavelet = torch.zeros(50, device=DEV)
     src = np.array([[[24, 28]]], dtype=np.int64)
     rec = np.array([[[10, 28]]], dtype=np.int64)

@@ -30,11 +30,13 @@ from conftest import requires_compile
 DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def _release_compiled_state():
     """Dynamo's cache keeps the compiled steps' propagators -- and their GPU
     buffers -- alive; release them so a later test that reads the absolute
-    peak memory (test_eager_boundary_saving) does not count them."""
+    peak memory (test_eager_boundary_saving) does not count them.  Taken by
+    the tests that compile only: the reset and a full gc.collect() cost
+    0.1-0.25 s a test, and the kernel-level tests build no compiled state."""
     yield
     if hasattr(torch, "_dynamo"):
         torch._dynamo.reset()
@@ -177,6 +179,7 @@ def _assert_matches(run, ref):
 
 
 @requires_compile
+@pytest.mark.usefixtures("_release_compiled_state")
 def test_the_conv_counter_sees_a_conv(monkeypatch):
     """With the slice form off the counter must find the convs, or the zero
     the tests below assert proves nothing."""
@@ -188,6 +191,7 @@ def test_the_conv_counter_sees_a_conv(monkeypatch):
 
 
 @requires_compile
+@pytest.mark.usefixtures("_release_compiled_state")
 @pytest.mark.parametrize("cls,shape,surface", EQUATIONS)
 def test_compiled_rollout_is_one_conv_free_graph_matching_uncompiled(cls, shape, surface):
     """A rollout compiles one graph (fullgraph=True raises on any break) with
@@ -206,6 +210,7 @@ def test_compiled_rollout_is_one_conv_free_graph_matching_uncompiled(cls, shape,
 
 
 @requires_compile
+@pytest.mark.usefixtures("_release_compiled_state")
 def test_plain_warmup_prefix_changes_nothing(monkeypatch):
     """Before torch 2.5 a checkpointed rollout runs its first, compiling steps
     on the plain tape, because compiling inside the checkpoint breaks its

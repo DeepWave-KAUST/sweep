@@ -9,6 +9,7 @@ import torch
 
 from sweep.equations import Biot, Elastic
 from sweep.equations.biot import biot_from_biot_constants, biot_from_rock, biot_wave_velocities
+from sweep.propagator.options import EagerOptions
 from sweep.propagator.torch import PropTorch
 from sweep.signal import ricker
 
@@ -23,9 +24,13 @@ def _wavelet(nt, dt, f0):
     return torch.from_numpy(ricker(t, f=f0))
 
 
-def _prop(eq, shape, dh, dt, src, rec, abcn=20, free_surface=False):
+def _prop(eq, shape, dh, dt, src, rec, abcn=20, free_surface=False, compiled=True):
+    # A cold torch.compile of the step costs seconds per grid, source field and gradient mode,
+    # as much as a few thousand uncompiled steps of these grids: only the runs with many steps
+    # per compiled graph (wave speeds, wavenumber integration) compile.
     return PropTorch(eq, shape=shape, dev=DEV, dh=dh, dt=dt, source_type=src, receiver_type=rec,
-                     abcn=abcn, free_surface=free_surface, backend="torch", impl="eager")
+                     abcn=abcn, free_surface=free_surface, backend="torch", impl="eager",
+                     eager_options=EagerOptions(use_compile=compiled))
 
 
 def _fields(coef, shape):
@@ -63,8 +68,10 @@ def test_no_relative_flow_limit_is_undrained_elastic():
     src = np.array([[35, 20]])
     rec = np.stack([np.arange(5, 65, 3), np.full(20, 40)], 1)[None]
     w = _wavelet(nt, dt, 12.0)
-    db = _prop(Biot(device=DEV), shape, dh, dt, ["sxx", "szz"], ["vx", "vz"])(w, src, rec, models=coef)
-    de = _prop(Elastic(device=DEV), shape, dh, dt, ["sxx", "szz"], ["vx", "vz"])(w, src, rec, models=[vp, vs, rho])
+    db = _prop(Biot(device=DEV), shape, dh, dt, ["sxx", "szz"], ["vx", "vz"], compiled=False)(
+        w, src, rec, models=coef)
+    de = _prop(Elastic(device=DEV), shape, dh, dt, ["sxx", "szz"], ["vx", "vz"], compiled=False)(
+        w, src, rec, models=[vp, vs, rho])
     err = float((db - de).abs().max() / de.abs().max())
     assert err < 1e-4, err
 
@@ -103,11 +110,16 @@ def test_gradient_matches_finite_difference_inside(free_surface):
     src = np.array([[24, 10]])
     rec = np.stack([np.arange(8, 40, 4), np.full(8, 30)], 1)[None]
     w = _wavelet(nt, dt, 10.0)
-    prop = _prop(Biot(device=DEV), shape, dh, dt, ["sxx", "szz"], ["vx", "vz", "p"], free_surface=free_surface)
+    prop = _prop(Biot(device=DEV), shape, dh, dt, ["sxx", "szz"], ["vx", "vz", "p"], free_surface=free_surface,
+                 compiled=False)
     obs = prop(w, src, rec, models=coef).detach()
+    # each receiver type in its own unit: as recorded, p (~1e-2 Pa) outweighs vx and vz
+    # (~1e-8 m/s) by 1e13 in the misfit, which left the solid-velocity adjoint unchecked
+    weight = 1.0 / obs.abs().amax(dim=(0, 1, 2))
 
     def J(mu):
-        return 0.5 * (prop(w, src, rec, models=[coef[0], mu, *coef[2:]]) - 1.05 * obs).double().square().sum()
+        r = (prop(w, src, rec, models=[coef[0], mu, *coef[2:]]) - 1.05 * obs) * weight
+        return 0.5 * r.double().square().sum()
 
     mu0 = coef[1].clone().requires_grad_()
     (g,) = torch.autograd.grad(J(mu0), mu0)
@@ -135,10 +147,10 @@ def test_free_surface_no_relative_flow_limit_is_elastic():
     rec = np.concatenate([np.stack([np.arange(5, 65, 3), np.zeros(20, int)], 1),
                           np.stack([np.arange(5, 65, 3), np.full(20, 12)], 1)])[None]
     w = _wavelet(nt, dt, 12.0)
-    db = _prop(Biot(device=DEV), shape, dh, dt, ["sxx", "szz"], ["vx", "vz"], free_surface=True)(
+    db = _prop(Biot(device=DEV), shape, dh, dt, ["sxx", "szz"], ["vx", "vz"], free_surface=True, compiled=False)(
         w, src, rec, models=coef)
-    de = _prop(Elastic(device=DEV), shape, dh, dt, ["sxx", "szz"], ["vx", "vz"], free_surface=True)(
-        w, src, rec, models=[vp, vs, rho])
+    de = _prop(Elastic(device=DEV), shape, dh, dt, ["sxx", "szz"], ["vx", "vz"], free_surface=True,
+               compiled=False)(w, src, rec, models=[vp, vs, rho])
     err = float((db - de).abs().max() / de.abs().max())
     assert err < 1e-4, err
 
@@ -160,7 +172,7 @@ def test_decoupled_pore_fluid_sees_a_pressure_release_surface():
         return np.exp(-(math.pi * f0 * (tt - t0)) ** 2)
 
     w = torch.from_numpy(dt * np.gradient(s_time(t), t) / dx**2).float()
-    prop = _prop(Biot(device=DEV), shape, dx, dt, ["p"], ["p"], abcn=30, free_surface=True)
+    prop = _prop(Biot(device=DEV), shape, dx, dt, ["p"], ["p"], abcn=30, free_surface=True, compiled=False)
     with torch.no_grad():
         num = prop(-w, np.array([[xs, zs]]), rec_xz[None], models=coef)[0, :, :, 0].double().numpy()
 
@@ -245,7 +257,7 @@ def test_viscous_line_source_matches_analytic(b_dai):
     src, rec = np.array([[pad, pad]]), np.array([[[pad + off, pad + off]]])
     num = 0.0
     for fields, scale in ((["sxx", "szz"], 1.0), (["p"], -qpart / phi)):
-        prop = _prop(Biot(device=DEV), shape, dx, dt, fields, ["vz"], abcn=30)
+        prop = _prop(Biot(device=DEV), shape, dx, dt, fields, ["vz"], abcn=30, compiled=False)
         with torch.no_grad():
             num = num + prop(w * scale, src, rec, models=coef)[0, :, 0, 0].double().numpy()
     ana = _analytic_line_source_vz(models, t, off * dx, off * dx + 0.5 * dx, s_time, qpart, phi)
@@ -331,10 +343,13 @@ def test_free_surface_matches_wavenumber_integration(b_dai, tol):
         prop = _prop(Biot(device=DEV), shape, dx, dt, fields, ["vx", "vz"], abcn=30, free_surface=True)
         with torch.no_grad():
             num = num + prop(w * scale, np.array([[xs, zs]]), np.array([[[xr, 0]]]), models=coef)[0, :, 0].double().numpy()
-    # vx sits at (x + dx/2, 0), vz at (x, dx/2) on the staggered grid
+    # vx sits at (x + dx/2, 0), vz at (x, dx/2) on the staggered grid.  One integration for both
+    # receivers, which share its per-frequency solves (most of its time), and only up to
+    # kx = 1 rad/m: past it the band's propagating modes are evanescent over the 20 m source
+    # depth (exp(-17) at 100 Hz), and the reference moves by < 1e-5 relative from kx_max = 2
     off = (xr - xs) * dx
-    ref_vx, _ = _dwn_halfspace(models, (1.0, qpart / phi), zs * dx, [(off + 0.5 * dx, 0.0)], t, s_time)
-    _, ref_vz = _dwn_halfspace(models, (1.0, qpart / phi), zs * dx, [(off, 0.5 * dx)], t, s_time)
-    for k, ref in enumerate((ref_vx[:, 0], ref_vz[:, 0])):
+    ref_vx, ref_vz = _dwn_halfspace(models, (1.0, qpart / phi), zs * dx, [(off + 0.5 * dx, 0.0), (off, 0.5 * dx)],
+                                    t, s_time, kx_max=1.0)
+    for k, ref in enumerate((ref_vx[:, 0], ref_vz[:, 1])):
         err = np.linalg.norm(num[:, k] - ref) / np.linalg.norm(ref)
         assert err < tol, (("vx", "vz")[k], err)

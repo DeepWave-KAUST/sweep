@@ -10,6 +10,8 @@ measure the principal-axis tilt of the wavefront; it must track the input
 radian angle, not the ~1° the bug produced.
 """
 
+from functools import lru_cache
+
 import numpy as np
 import pytest
 import torch
@@ -43,9 +45,11 @@ def _src(nz, nx):
     return torch.tensor(np.array([[nx // 2, nz // 2]], dtype=np.int64)[None])
 
 
+@lru_cache(maxsize=None)
 def _wavefront_tilt_deg(theta_rad, nz=NZ, nx=NX):
     """Propagate AcousticTTI with a constant ``theta`` (radians) and return the
-    principal-axis tilt of the final |h1| snapshot in degrees."""
+    principal-axis tilt of the final |h1| snapshot in degrees.  Cached: both
+    tests start from theta = 0, and the run is deterministic."""
     shape = (nz, nx)
     models = [
         torch.full(shape, VP_BG, dtype=torch.float32),
