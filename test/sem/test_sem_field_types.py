@@ -37,8 +37,11 @@ NT = 120
 
 
 def _prop(equation=ElasticSEM2DDeformed, dev="cpu", **kw):
+    # Two absorbing elements a side (four made the layer 152 of the mesh's
+    # 252 elements): in NT steps the P wave only just reaches the model's
+    # edge, so no reflection from the layer is in any record compared here.
     return PropSEM(equation, shape=(NZ, NX), dh=DH, dt=DT, nt=NT, n_order=NO,
-                   free_surface=("top",), abcn=4 * NO,
+                   free_surface=("top",), abcn=2 * NO,
                    f_dominant=F0, dev=dev, dtype=torch.float32, impl="eager",
                    **kw)
 

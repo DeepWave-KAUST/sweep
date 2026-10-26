@@ -40,6 +40,10 @@ def _prop(**kw):
     # the defaults these tests were written against: a free top, eager
     kw.setdefault("free_surface", True)
     kw.setdefault("impl", "eager")
+    # Two absorbing elements a side, not the default ten: superposition holds
+    # whatever the boundary does, and ten a side made the mesh 748 elements
+    # for a model of 168 (two: 252). The boundary-saving tests set their own.
+    kw.setdefault("abcn", 2 * 4)
     return PropSEM(AcousticSEM2D, shape=(NZ, NX), dh=DH, dt=DT, nt=NT,
                    dev=DEV, dtype=DTYPE, **kw)
 

@@ -33,6 +33,11 @@ def _prop(**kw):
     # the defaults these tests were written against: a free top, eager
     kw.setdefault("free_surface", True)
     kw.setdefault("impl", "eager")
+    # Two absorbing elements a side, not the default ten: nothing here is
+    # about absorption (adapter vs hand-built propagator, batched vs looped,
+    # checkpointed vs full tape), and ten a side made the mesh 748 elements
+    # for a model of 168 (two: 252).
+    kw.setdefault("abcn", 2 * 4)
     return PropSEM(AcousticSEM2D, shape=(NZ, NX), dh=DH, dt=DT, nt=NT,
                    dtype=DTYPE, **kw)
 
@@ -147,7 +152,12 @@ def test_checkpoint_matches_full_gradient():
 
     g_full = grad(None)
     g_ckpt = grad(40)                                   # 3 checkpointed chunks
-    assert torch.allclose(g_full, g_ckpt, atol=1e-10, rtol=1e-6)
+    # The gradient is ~1e-16 here (a unit wavelet, a 1e-7 record), so an
+    # absolute atol=1e-10 admitted anything, a zero or sign-flipped gradient
+    # included: the floor is relative to the gradient's own size.
+    scale = float(g_full.abs().max())
+    assert scale > 0
+    assert torch.allclose(g_full, g_ckpt, atol=1e-10 * scale, rtol=1e-6)
 
 
 def test_gll_native_model_passthrough():

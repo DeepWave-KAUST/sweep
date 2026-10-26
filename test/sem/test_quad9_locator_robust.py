@@ -15,6 +15,8 @@ Run::
 """
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 import torch
 
@@ -26,7 +28,10 @@ X_MAX, Z_BOTTOM = 1270.0, 890.0
 HILL_BASE, HILL_X0, HILL_SIG = 50.0, X_MAX / 2, 160.0
 
 
+@functools.lru_cache(maxsize=None)
 def _hill_mesh():
+    """Built once: the locator only reads the mesh, so the three tests that
+    use it share one 64x44 topography build."""
     def z_top_fn(x):
         return HILL_BASE * (1.0 - torch.exp(-((x - HILL_X0) ** 2)
                                             / (2.0 * HILL_SIG ** 2)))

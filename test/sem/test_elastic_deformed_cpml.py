@@ -47,7 +47,7 @@ def _energy_decay(eq, mesh, dt, nt, dtype):
     wav = _ricker(nt, dt, dtype=dtype)
     st = eq.init_state(dt, DEV, dtype)
     peak, late = 0.0, 0.0
-    with torch.no_grad():
+    with torch.inference_mode():         # cheaper per step than no_grad
         for n in range(nt):
             st = eq.step(st, [spx * wav[n], spz * wav[n]], dt)
             late = float((st[0] ** 2 + st[1] ** 2).sum())

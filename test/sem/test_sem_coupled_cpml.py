@@ -12,6 +12,8 @@ G3: interface-leakage budget — late-window field on Γ vs its peak. The plain
 Also: the corner rule fires for this geometry only when the interface is
     pushed into the bottom band (guards the build-time check end-to-end).
 """
+import functools
+
 import numpy as np
 import pytest
 import torch
@@ -46,41 +48,80 @@ def _build(z_if=Z_IF, pml_elems=4, dt=6e-4):
     return m, eq
 
 
-def _run(m, eq, nt, dt=6e-4, src_z=350.0, monitor_every=200):
-    """Near-interface water source (Scholte excitation); returns peak and the
-    monitored |field| series after the source is off."""
-    xg = torch.zeros(m.n_global, dtype=DT); xg[m.ibool] = m.x_e
-    zg = torch.zeros(m.n_global, dtype=DT); zg[m.ibool] = m.z_e
-    s = int(((xg - 500.0) ** 2 + (zg - src_z) ** 2).argmin())
-    pat = torch.zeros(m.n_global, dtype=DT); pat[s] = 1.0
-    zero = torch.zeros(m.n_global, dtype=DT)
-    t = np.arange(nt) * dt
-    a = (np.pi * 12.0 * (t - 0.12)) ** 2
-    wav = torch.tensor((1 - 2 * a) * np.exp(-a), dtype=DT)
-    wav[t > 0.3] = 0.0
-    on_if = (zg - Z_IF).abs() < 1e-6
+class _Rollout:
+    """Near-interface water source (Scholte excitation) on ``_build()``,
+    stepped on demand and monitored every ``monitor_every`` steps.
 
-    f = eq.init_state(dt, "cpu", DT)
-    peak = peak_if = 0.0
-    series, series_if = [], []
-    for n in range(nt):
-        f = eq.step(f, [pat * wav[n], zero, zero], dt)
-        if n % monitor_every == 0:
-            mx = max(float(f[0].abs().max()),
-                     float(f[2].abs().max()), float(f[3].abs().max()))
-            assert np.isfinite(mx), f"blow-up at step {n} (t={n*dt:.2f}s)"
-            uz_if = float(f[3][on_if].abs().max())
+    G2 (3000 steps), G3 (6000) and the long gate (20000) used to run this
+    same mesh, model, source and wavelet three times over. Their records are
+    prefixes of ONE trajectory -- the wavelet is cut at 0.3 s, so sample n
+    does not depend on the run length -- so each gate reads the first ``nt``
+    steps of a single rollout: the numbers its own run produced, at the cost
+    of the longest gate alone."""
+
+    def __init__(self, dt=6e-4, src_z=350.0, monitor_every=200):
+        self.m, self.eq = _build(dt=dt)
+        m = self.m
+        xg = torch.zeros(m.n_global, dtype=DT); xg[m.ibool] = m.x_e
+        zg = torch.zeros(m.n_global, dtype=DT); zg[m.ibool] = m.z_e
+        s = int(((xg - 500.0) ** 2 + (zg - src_z) ** 2).argmin())
+        self.pat = torch.zeros(m.n_global, dtype=DT); self.pat[s] = 1.0
+        self.zero = torch.zeros(m.n_global, dtype=DT)
+        self.on_if = (zg - Z_IF).abs() < 1e-6
+        self.dt, self.every = dt, monitor_every
+        self.wav = self._wavelet(0)
+        self.f = self.eq.init_state(dt, "cpu", DT)
+        self.n, self.blowup = 0, None
+        self.rec = []                     # (step, max |field|, max |u_z on Γ|)
+
+    def _wavelet(self, nt):
+        t = np.arange(nt) * self.dt
+        a = (np.pi * 12.0 * (t - 0.12)) ** 2
+        wav = torch.tensor((1 - 2 * a) * np.exp(-a), dtype=DT)
+        wav[t > 0.3] = 0.0
+        return wav
+
+    def window(self, nt):
+        """``(peak, series, peak_if, series_if)`` of the first ``nt`` steps:
+        the peaks, and the monitored series after the source is off."""
+        assert self.blowup is None or nt <= self.blowup, \
+            f"blow-up at step {self.blowup} (t={self.blowup*self.dt:.2f}s)"
+        if nt > len(self.wav):
+            self.wav = self._wavelet(nt)
+        dt = self.dt
+        with torch.inference_mode():          # nothing here is differentiated
+            for n in range(self.n, nt):
+                self.f = f = self.eq.step(
+                    self.f, [self.pat * self.wav[n], self.zero, self.zero], dt)
+                self.n = n + 1
+                if n % self.every == 0:
+                    mx = max(float(f[0].abs().max()),
+                             float(f[2].abs().max()), float(f[3].abs().max()))
+                    if not np.isfinite(mx):
+                        self.blowup = n
+                        raise AssertionError(
+                            f"blow-up at step {n} (t={n*dt:.2f}s)")
+                    self.rec.append((n, mx, float(f[3][self.on_if].abs().max())))
+        peak = peak_if = 0.0
+        series, series_if = [], []
+        for n, mx, uz_if in self.rec:
+            if n >= nt:
+                break
             peak, peak_if = max(peak, mx), max(peak_if, uz_if)
             if n * dt > 0.5:
                 series.append(mx)
                 series_if.append(uz_if)
-    return peak, series, peak_if, series_if
+        return peak, series, peak_if, series_if
+
+
+@functools.lru_cache(maxsize=None)
+def _rollout():
+    return _Rollout()
 
 
 def test_g2_stability_interface_through_xonly_bands():
     """3000 steps (~5 crossings): decays, no growth."""
-    m, eq = _build()
-    peak, series, *_ = _run(m, eq, nt=3000)
+    peak, series, *_ = _rollout().window(3000)
     assert peak > 0
     assert series[-1] < 3e-2 * peak, f"weak decay: {series[-1]/peak:.2e}"
 
@@ -89,8 +130,7 @@ def test_g2_stability_interface_through_xonly_bands():
 def test_g2_long_nt_hard_gate():
     """20000 steps (~35 crossing times) — the CPML corner-instability canary
     for the coupled system with plain coupling inside the X-only bands."""
-    m, eq = _build()
-    peak, series, *_ = _run(m, eq, nt=20000)
+    peak, series, *_ = _rollout().window(20000)
     assert peak > 0
     tail = series[len(series) * 3 // 4:]
     assert max(tail) < 1e-3 * peak, f"late field {max(tail)/peak:.2e} of peak"
@@ -105,8 +145,7 @@ def test_g3_interface_leakage_budget():
     absorption around −38 dB (measured). The gate guards against gross leakage
     or a slow interface-guided instability, not against that floor: the late Γ
     field must sit ≥34 dB below its own peak (amplitude ratio < 2e-2)."""
-    m, eq = _build()
-    _, _, peak_if, series_if = _run(m, eq, nt=6000)
+    _, _, peak_if, series_if = _rollout().window(6000)
     assert peak_if > 0
     late = max(series_if[len(series_if) * 3 // 4:])
     ratio = late / peak_if

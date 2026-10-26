@@ -13,6 +13,8 @@ Gradients flow vp/vs/rho -> (kappa, 1/rho, lam, mu, mass) -> step internals via
 the leaves returned by bs_model_tensors, so this also gates that the leaf set
 is COMPLETE — a missing leaf shows up as a wrong (not just noisy) gradient.
 """
+import functools
+
 import numpy as np
 import pytest
 import torch
@@ -90,6 +92,14 @@ def _run(memory, nt=300, dt=8e-4):
             vp.grad.clone(), vs.grad.clone(), rho.grad.clone())
 
 
+@functools.lru_cache(maxsize=None)
+def _bs_run():
+    """The boundary-saved run both CPU gates read: the first compares it to
+    the full tape, the second reads where its gradients live -- one rollout
+    for the two. (Not ``_run`` itself: the memory gate must really run.)"""
+    return _run("boundary")
+
+
 def _cos(a, b):
     a, b = a.reshape(-1), b.reshape(-1)
     return float(a @ b / (a.norm() * b.norm() + 1e-300))
@@ -97,7 +107,7 @@ def _cos(a, b):
 
 def test_bs_matches_full_tape_seis_and_gradients():
     s_full, gvp_f, gvs_f, grho_f = _run(None)
-    s_bs, gvp_b, gvs_b, grho_b = _run("boundary")
+    s_bs, gvp_b, gvs_b, grho_b = _bs_run()
 
     # (1) seismograms: same arithmetic path -> near-bitwise
     for j in RECV:
@@ -128,7 +138,7 @@ def test_bs_matches_full_tape_seis_and_gradients():
 def test_bs_gradient_covers_both_domains():
     """The vp gradient must be nonzero in BOTH the water (kappa path) and the
     solid (lam/mu path) — a missing model leaf would silently kill one side."""
-    _, gvp, gvs, _ = _run("boundary", nt=250)
+    _, gvp, gvs, _ = _bs_run()
     m, *_ = _model_leaves()
     zc = m.z_e.flatten(1).mean(1)
     fl = zc < Z_IF

@@ -13,6 +13,8 @@ Two gates, neither needs SPECFEM:
      source) so there is NO geometrical spreading and R is exact — no far-field
      correction, no SPECFEM.
 """
+import functools
+
 import numpy as np
 import pytest
 import torch
@@ -69,8 +71,10 @@ def test_constant_kappa_rho_reproduces_constant_density_class():
 # --------------------------------------------------------------------------- #
 # (1b) pure density contrast in a 1-D waveguide -> exact R
 # --------------------------------------------------------------------------- #
+@functools.lru_cache(maxsize=None)
 def _waveguide_reflection(rho_top, rho_bot):
-    """1-D waveguide, plane source, pure density contrast. Returns (R, x_var)."""
+    """1-D waveguide, plane source, pure density contrast. Returns (R, x_var).
+    Cached: the denser-below run is read by both (1b) tests."""
     DE, NEZ, C = 50.0, 60, 2000.0
     Z_I, Z_S, Z_R = 2000.0, 1000.0, 1500.0          # interface / source / receiver
     m = build_axis_aligned_quad9(nex=2, nez=NEZ, x_max=2 * DE, z_max=NEZ * DE,

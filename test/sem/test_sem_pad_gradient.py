@@ -122,8 +122,13 @@ def test_no_pad_keeps_the_exact_transpose():
                     generator=torch.Generator().manual_seed(2))
     vp = _grid().requires_grad_(True)
     (g,) = torch.autograd.grad((c * prop._interp_to_gll(vp)).sum(), vp)
-    d = torch.randn_like(vp)
-    h = 1e-2
+    # Seeded like c, and h=1: the map is linear, so the difference is exact
+    # up to rounding, ~eps*|sum|/h. With an unseeded direction and h=1e-2
+    # that rounding broke the 1e-9 bar for 2.2% of directions (9 of 400);
+    # at h=1 the worst of 400 is 1.4e-10.
+    d = torch.randn(vp.shape, dtype=torch.float64,
+                    generator=torch.Generator().manual_seed(3))
+    h = 1.0
     fd = ((c * prop._interp_to_gll(vp.detach() + h * d)).sum()
           - (c * prop._interp_to_gll(vp.detach() - h * d)).sum()) / (2 * h)
     assert abs(float((g * d).sum()) - float(fd)) <= 1e-9 * abs(float(fd))
@@ -152,8 +157,14 @@ def test_the_ring_no_longer_carries_the_band():
     shape, nt = (49, 65), 600
     vp_true = torch.full(shape, 1500.0, dtype=torch.float64)
     vp_true[shape[0] // 2:] = 2500.0
+    t = np.arange(nt) * 1e-3
+    a = (np.pi * 10.0 * (t - 0.12)) ** 2
+    w = torch.tensor((1 - 2 * a) * np.exp(-a))
+    src = np.array([[shape[1] // 2, 2]])
+    rx = np.linspace(0, shape[1] - 1, 32).astype(np.int64)
+    rec = np.stack([rx, np.full_like(rx, 4)], -1)[None]
 
-    def run(cut):
+    def prop(cut):
         p = PropSEM(AcousticPotentialSEM2D, shape=shape, dh=DH, dt=1e-3, nt=nt,
                     n_order=NO, free_surface=False, abcn=8 * NO,
                     f_dominant=10.0, dev="cpu", dtype=torch.float64,
@@ -161,14 +172,15 @@ def test_the_ring_no_longer_carries_the_band():
         p._build_grid_to_gll()
         if not cut:
             p._g_pad = None
-        t = np.arange(nt) * 1e-3
-        a = (np.pi * 10.0 * (t - 0.12)) ** 2
-        w = torch.tensor((1 - 2 * a) * np.exp(-a))
-        src = np.array([[shape[1] // 2, 2]])
-        rx = np.linspace(0, shape[1] - 1, 32).astype(np.int64)
-        rec = np.stack([rx, np.full_like(rx, 4)], -1)[None]
-        with torch.no_grad():
-            obs = p(w, src, rec, models=[vp_true])
+        return p
+
+    # the cut acts in the backward only (test_forward_values_do_not_move), so
+    # one observed record serves both runs
+    with torch.no_grad():
+        obs = prop(True)(w, src, rec, models=[vp_true])
+
+    def run(cut):
+        p = prop(cut)
         vp = torch.full(shape, 1500.0, dtype=torch.float64, requires_grad=True)
         (0.5 * (p(w, src, rec, models=[vp]) - obs).pow(2).sum()).backward()
         g = vp.grad
