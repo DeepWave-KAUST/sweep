@@ -1,6 +1,6 @@
 #include <algorithm>
 
-#include "acoustic_lsrtm3d.h"
+#include "acoustic_born3d.h"
 #include "kernels.cuh"
 #include "../../common/common.cuh"
 #include "../../common/context.h"
@@ -12,7 +12,7 @@
 #include "../../common/boundarysaver.cuh"
 #include "../../launch/config.h"
 
-namespace acoustic_lsrtm3d {
+namespace acoustic_born3d {
 
 // p.grads_out as the propagator binds it: {grad_wavelet, grad_vp, grad_mp}, in
 // BackwardOutputCore.grads order (zeroed per backward on the Python side and
@@ -21,7 +21,7 @@ namespace acoustic_lsrtm3d {
 static BufList grad_slots(const BackwardInputCore& p)
 {
     SWEEP_CHECK(p.grads_out.size() == 3,
-                "acoustic_lsrtm3d/backward requires the propagator-bound grads_out "
+                "acoustic_born3d/backward requires the propagator-bound grads_out "
                 "(cuda_layout.grads_out_has_wavelet + one slot per model = 3 tensors: "
                 "{grad_wavelet, grad_vp, grad_mp}), got ", p.grads_out.size());
     return p.grads_out;
@@ -31,11 +31,11 @@ namespace {
 
 // Adjoint step of one lsrtm 3D field: v2_lambda = vp^2 * lambda_now, then the
 // exact transpose of the forward step, CPML band included
-// (acoustic_lsrtm3d_adjoint_exact).  Replaces the old forward-operator adjoint
+// (acoustic_born3d_adjoint_exact).  Replaces the old forward-operator adjoint
 // (acoustic3d_single = vp^2*lap),
 
 // Layout of p.adjoint_workspace, declared on the Python side by
-// AcousticLSRTM3D.cuda_layout.backward_workspace_shapes (one padded grid per
+// AcousticBorn3D.cuda_layout.backward_workspace_shapes (one padded grid per
 // shot each, zeroed by the propagator before every gradient-bearing forward):
 // the vp^2*lambda scratch of every adjoint step, plus one grid the modes use
 // differently -- the replayed step's field in the recursive mode, the forward
@@ -54,19 +54,19 @@ constexpr int N_SLOTS_RWI_BS = 3;
 // psizn, psiyn -- 12 model-shaped grids: the replay's forward reads the
 // neighbours' psi, so it runs double-buffered and rotates with swap_pml(), as
 // the forward does; in place it raced those reads), declared as
-// AcousticLSRTM3D.cuda_layout.checkpoint_state_nvar because the LSRTM forward
+// AcousticBorn3D.cuda_layout.checkpoint_state_nvar because the LSRTM forward
 // slot list is two acoustic layouts back to back.
 static constexpr int CKPT_STATE_NVAR = 12;
 
 // Exactly the count this mode declares.  The propagator allocates the pool for
 // every gradient-bearing forward (_ensure_adjoint_workspace_buffers, driven by
-// AcousticLSRTM3D.cuda_layout.backward_workspace_shapes, which returns a
+// AcousticBorn3D.cuda_layout.backward_workspace_shapes, which returns a
 // non-empty list in all four memory modes), so an empty or differently sized
 // pool means the Python declaration drifted.
 static BufList workspace_slots(const BackwardInputCore& p, int n_slots)
 {
     SWEEP_CHECK(static_cast<int>(p.adjoint_workspace.size()) == n_slots,
-                "acoustic_lsrtm3d/backward requires the propagator-bound adjoint_workspace "
+                "acoustic_born3d/backward requires the propagator-bound adjoint_workspace "
                 "(cuda_layout.backward_workspace_shapes): ", n_slots,
                 " tensors for this mode, got ", p.adjoint_workspace.size());
     return p.adjoint_workspace;
@@ -112,7 +112,7 @@ static int recursive_scratch_depth(int interval_length)
 }
 
 // non-self-adjoint when vp varies (~15% grad[mp] error in variable velocity).
-static inline void run_lsrtm3d_adjoint_step(
+static inline void run_born3d_adjoint_step(
     int order, dim3 grid, dim3 block,
     AcousticWavefieldPointer adj_view,
     const Buf& vp,
@@ -121,9 +121,9 @@ static inline void run_lsrtm3d_adjoint_step(
     const std::vector<Buf>& workspace)
 {
     auto v2_lambda = pool_required(workspace, V2_LAMBDA, vp, "adjoint_workspace");   // vp^2 * lambda_now (fully overwritten each step)
-    compute_v2_lambda_lsrtm3d<<<grid, block>>>(
+    compute_v2_lambda_born3d<<<grid, block>>>(
         vp.data_ptr<float>(), adj_view.u_now, v2_lambda.data_ptr<float>(), ctx.nx, ctx.ny, ctx.nz, ctx.B);
-    ACOUSTIC_LSRTM3D_ADJOINT(order, grid, block,
+    ACOUSTIC_BORN3D_ADJOINT(order, grid, block,
         adj_view, v2_lambda.data_ptr<float>(), lap_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx);
 }
 
@@ -144,7 +144,7 @@ std::vector<Buf> slice_wavefields(
 
 // The propagator's adjoint wavefield slots (cuda_layout base_nvar + pml_nvar +
 // adjoint_extra_nvar = 6 + 18 + 6): the two fields' 12-slot forward lists, then
-// the zeta double-buffer triple of each (slot_table.ACOUSTIC_LSRTM3D,
+// the zeta double-buffer triple of each (slot_table.ACOUSTIC_BORN3D,
 // adjoint_only).  The exact adjoint reads the neighbours' zeta*, so each adjoint
 // binds 15 tensors -- u triple, CPML sextet, psi triple, zeta triple -- and
 // rotates with swap_aux().  _c.py binds cp.adjoint_wavefields on every backward
@@ -154,7 +154,7 @@ static constexpr int ADJ_SLOTS = 30;
 static std::vector<Buf> adjoint_field_slots(const BackwardInputCore& p, int field, const char* mode)
 {
     SWEEP_CHECK(static_cast<int>(p.adjoint_wavefields.size()) == ADJ_SLOTS,
-                "acoustic_lsrtm3d/", mode, " requires the propagator-bound "
+                "acoustic_born3d/", mode, " requires the propagator-bound "
                 "adjoint_wavefields (cuda_layout.base_nvar + pml_nvar + adjoint_extra_nvar = ",
                 ADJ_SLOTS, " tensors), got ", p.adjoint_wavefields.size());
     auto slots = slice_wavefields(p.adjoint_wavefields, 12 * field, 12);
@@ -244,7 +244,7 @@ void accumulate_imaging_3d(
 )
 {
     if (grad != nullptr) {
-        calculate_grad_lsrtm3d_mp<<<wave_grid, wave_block>>>(
+        calculate_grad_born3d_mp<<<wave_grid, wave_block>>>(
             forward_ptr,
             adjoint_ptr,
             vp.data_ptr<float>(),
@@ -276,7 +276,7 @@ void accumulate_imaging_utt_3d(
 )
 {
     if (grad != nullptr) {
-        calculate_grad_lsrtm3d_mp_utt<<<wave_grid, wave_block>>>(
+        calculate_grad_born3d_mp_utt<<<wave_grid, wave_block>>>(
             u_next_ptr,
             u_now_ptr,
             u_prev_ptr,
@@ -341,7 +341,7 @@ void advance_forward_interval_3d(
     for (int it = start; it < end; ++it) {
         auto view = forward.view();
 
-        ACOUSTIC_LSRTM3D_SINGLE(
+        ACOUSTIC_BORN3D_SINGLE(
             order,
             wave_grid,
             wave_block,
@@ -425,7 +425,7 @@ void process_recursive_interval_3d(
         auto u_this = pool_required(p.adjoint_workspace, U_THIS, vp, "adjoint_workspace");
         auto fwd_view = start_state.view();
 
-        ACOUSTIC_LSRTM3D_SINGLE(
+        ACOUSTIC_BORN3D_SINGLE(
             order,
             wave_grid,
             wave_block,
@@ -455,7 +455,7 @@ void process_recursive_interval_3d(
 
         auto adj_view = adjoint.view();
 
-        run_lsrtm3d_adjoint_step(
+        run_born3d_adjoint_step(
             order, wave_grid, wave_block, adj_view,
             vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
@@ -482,7 +482,7 @@ void process_recursive_interval_3d(
         );
 
         if (grad != nullptr) {
-            calculate_grad_lsrtm3d_mp<<<wave_grid, wave_block>>>(
+            calculate_grad_born3d_mp<<<wave_grid, wave_block>>>(
                 u_this.data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
                 vp.data_ptr<float>(),
@@ -639,7 +639,7 @@ void run_full_imaging(
     }
     // RWI beta split (grad_split_iii_out bound): III goes there, grad_vp keeps II+IV.
     SWEEP_CHECK(rwi || !p.grad_split_iii_out.defined(),
-                "acoustic_lsrtm3d: grad_split_iii_out needs the RWI vp gradient (vp requires grad)");
+                "acoustic_born3d: grad_split_iii_out needs the RWI vp gradient (vp requires grad)");
     float* grad_iii = p.grad_split_iii_out.defined()
         ? bound_required(p.grad_split_iii_out, vp.sizes().vec(), "grad_split_iii_out").data_ptr<float>()
         : nullptr;
@@ -671,11 +671,11 @@ void run_full_imaging(
         // source is lambda_sc(it+1) = adjoint.u_now before the scattered step below ----
         if (rwi) {
             auto bg_adj_view = bg_adjoint.view();
-            compute_v2_lambda_bg_lsrtm3d<<<launch_config.grid, launch_config.block>>>(
+            compute_v2_lambda_bg_born3d<<<launch_config.grid, launch_config.block>>>(
                 vp.data_ptr<float>(), mp.data_ptr<float>(),
                 bg_adjoint.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
                 v2lbg.data_ptr<float>(), nx, ny, nz, B);
-            ACOUSTIC_LSRTM3D_ADJOINT(
+            ACOUSTIC_BORN3D_ADJOINT(
                 order, launch_config.grid, launch_config.block,
                 bg_adj_view, v2lbg.data_ptr<float>(),
                 lap_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx);
@@ -684,7 +684,7 @@ void run_full_imaging(
 
         auto adj_view = adjoint.view();
 
-        run_lsrtm3d_adjoint_step(
+        run_born3d_adjoint_step(
             order, launch_config.grid, launch_config.block, adj_view,
             vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
@@ -716,7 +716,7 @@ void run_full_imaging(
         float* bg_utt = (rwi ? u_fwd_it.select(0, 0) : u_fwd_it).data_ptr<float>();
         if (rwi) {
             float* sc_utt = u_fwd_it.select(0, 1).data_ptr<float>();
-            calculate_grad_lsrtm3d_vp_utt<<<launch_config.grid, launch_config.block>>>(
+            calculate_grad_born3d_vp_utt<<<launch_config.grid, launch_config.block>>>(
                 bg_utt, sc_utt,
                 bg_adjoint.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
                 mp.data_ptr<float>(), vp.data_ptr<float>(),
@@ -748,7 +748,7 @@ BackwardOutputCore backward_full_imaging_impl(const BackwardInputCore& p)
     // same): a stepped or cut-face call reaching the store-all path would run the
     // whole record per call.
     SWEEP_CHECK(p.cut_face_mask == 0 && p.bw_it_begin < 0 && p.bw_it_end == 0,
-                "acoustic_lsrtm3d full-storage backward is not stepped; domain "
+                "acoustic_born3d full-storage backward is not stepped; domain "
                 "decomposition uses backward_bs");
     BackwardOutputCore out;
     // The history stacks [bg_utt, sc_utt] exactly when vp needs its RWI gradient
@@ -804,14 +804,14 @@ void run_bs_imaging(
     const int it_hi = (p.bw_it_begin < 0) ? static_cast<int>(p.nt) : p.bw_it_begin;
     const int it_lo = p.bw_it_end;
     SWEEP_CHECK(0 <= it_lo && it_lo < it_hi && it_hi <= static_cast<int>(p.nt),
-                "acoustic_lsrtm3d stepped backward: require 0 <= bw_it_end < bw_it_begin <= nt, got [",
+                "acoustic_born3d stepped backward: require 0 <= bw_it_end < bw_it_begin <= nt, got [",
                 it_lo, ", ", it_hi, ") with nt=", p.nt);
     SWEEP_CHECK((p.cut_face_mask & ~0x3F) == 0,
-                "acoustic_lsrtm3d cut_face_mask uses bits 0..5 (x/z/y faces) only, got ", p.cut_face_mask);
+                "acoustic_born3d cut_face_mask uses bits 0..5 (x/z/y faces) only, got ", p.cut_face_mask);
     SWEEP_CHECK(p.step_phase == 0,
-                "acoustic_lsrtm3d backward does not implement step_phase (got ", p.step_phase, ")");
+                "acoustic_born3d backward does not implement step_phase (got ", p.step_phase, ")");
     SWEEP_CHECK(p.cut_face_mask == 0 || !p.boundary_on_disk,
-                "domain-decomposed acoustic_lsrtm3d backward_bs supports gpu/cpu boundary storage, not disk");
+                "domain-decomposed acoustic_born3d backward_bs supports gpu/cpu boundary storage, not disk");
     const bool first_segment = (it_hi == static_cast<int>(p.nt));
 
     AcousticWavefieldTensor adjoint;
@@ -827,7 +827,7 @@ void run_bs_imaging(
     AcousticWavefieldTensor forward;
     AcousticWavefieldTensor forward_sc;
     wavefields_required(p.forward_wavefields, rwi ? 6 : 3, vp,
-                        "acoustic_lsrtm3d/backward_bs reconstruction "
+                        "acoustic_born3d/backward_bs reconstruction "
                         "(cuda_layout.bs_reconstruction_nvar)");
     forward.bind(slice_wavefields(p.forward_wavefields, 0, 3), 3, /*use_pml=*/false);
     if (rwi)
@@ -849,7 +849,7 @@ void run_bs_imaging(
         v2lbg = pool_required(p.adjoint_workspace, N_SLOTS_RWI_BS - 1, vp, "adjoint_workspace");
     }
     SWEEP_CHECK(rwi || !p.grad_split_iii_out.defined(),
-                "acoustic_lsrtm3d: grad_split_iii_out needs the RWI vp gradient (vp requires grad)");
+                "acoustic_born3d: grad_split_iii_out needs the RWI vp gradient (vp requires grad)");
     float* grad_iii = p.grad_split_iii_out.defined()
         ? bound_required(p.grad_split_iii_out, vp.sizes().vec(), "grad_split_iii_out").data_ptr<float>()
         : nullptr;
@@ -936,11 +936,11 @@ void run_bs_imaging(
         // ---- background adjoint FIRST (lambda_bg = mu; rwi only) ----
         if (rwi) {
             auto bg_adj_view = bg_adjoint.view();
-            compute_v2_lambda_bg_lsrtm3d<<<launch_config.grid, launch_config.block>>>(
+            compute_v2_lambda_bg_born3d<<<launch_config.grid, launch_config.block>>>(
                 vp.data_ptr<float>(), mp.data_ptr<float>(),
                 bg_adjoint.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
                 v2lbg.data_ptr<float>(), nx, ny, nz, B);
-            ACOUSTIC_LSRTM3D_ADJOINT(
+            ACOUSTIC_BORN3D_ADJOINT(
                 order, launch_config.grid, launch_config.block,
                 bg_adj_view, v2lbg.data_ptr<float>(),
                 lap_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx);
@@ -949,7 +949,7 @@ void run_bs_imaging(
 
         auto adj_view = adjoint.view();
 
-        run_lsrtm3d_adjoint_step(
+        run_born3d_adjoint_step(
             order, launch_config.grid, launch_config.block, adj_view,
             vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
@@ -975,7 +975,7 @@ void run_bs_imaging(
             forward_nsrc
         );
 
-        ACOUSTIC_LSRTM3D_SINGLE_NOPML(
+        ACOUSTIC_BORN3D_SINGLE_NOPML(
             order,
             launch_config.grid,
             launch_config.block,
@@ -1011,10 +1011,10 @@ void run_bs_imaging(
         // so bg_{it-1} - 2 bg_it + bg_{it+1} = dt^2 vp^2 W(bg_it) exactly.
         // ---- scattered reconstruction sc[it-1] (boundary field 1) + vp imaging; rwi only ----
         if (rwi) {
-            ACOUSTIC_LSRTM3D_SINGLE_NOPML(
+            ACOUSTIC_BORN3D_SINGLE_NOPML(
                 order, launch_config.grid, launch_config.block,
                 sc_view, f_this.data_ptr<float>(), vp.data_ptr<float>(), lap_ctx, ctx);
-            add_lsrtm3d_scattered_coupling<<<launch_config.grid, launch_config.block>>>(
+            add_born3d_scattered_coupling<<<launch_config.grid, launch_config.block>>>(
                 sc_view.u_next, for_view.u_next,
                 forward.u_now_t.data_ptr<float>(), forward.u_prev_t.data_ptr<float>(),
                 mp.data_ptr<float>(), B, nx, ny, nz, p.M);
@@ -1022,7 +1022,7 @@ void run_bs_imaging(
                 it, sc_view.u_next, launch_config.grid, launch_config.block,
                 bs, save_width, 0, ctx, /*field_idx=*/1, /*wait_chunk=*/false, /*record_done=*/true);
 
-            calculate_grad_lsrtm3d_vp_2diff<<<launch_config.grid, launch_config.block>>>(
+            calculate_grad_born3d_vp_2diff<<<launch_config.grid, launch_config.block>>>(
                 forward.u_prev_t.data_ptr<float>(),     // bg[it+1]
                 forward.u_now_t.data_ptr<float>(),      // bg[it]
                 for_view.u_next,                        // bg[it-1], source-free
@@ -1072,7 +1072,7 @@ void run_bs_imaging(
     if (it_lo == 0 && p.nt > 0) {
         auto adj_view = adjoint.view();
 
-        run_lsrtm3d_adjoint_step(
+        run_born3d_adjoint_step(
             order, launch_config.grid, launch_config.block, adj_view,
             vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
@@ -1114,7 +1114,7 @@ BackwardOutputCore backward_bs_imaging_impl(const BackwardInputCore& p)
     // rwi (vp needs its gradient, cuda_layout_for_grads) binds 6 reconstruction
     // grids, the mp-only backward the background's 3.
     SWEEP_CHECK(p.forward_wavefields.size() == 3 || p.forward_wavefields.size() == 6,
-                "acoustic_lsrtm3d/backward_bs reconstruction: 3 grids (mp only) or 6 "
+                "acoustic_born3d/backward_bs reconstruction: 3 grids (mp only) or 6 "
                 "(with the RWI vp gradient), got ", p.forward_wavefields.size());
     const bool rwi = p.forward_wavefields.size() == 6;
     const auto& gs = grad_slots(p);
@@ -1161,12 +1161,12 @@ void run_ckpt_imaging(
     // zeroes u_next before any read; the psi shadows are written before they are
     // read (in the CPML cells; zero elsewhere, as the propagator allocated them).
     SWEEP_CHECK(static_cast<int>(p.forward_wavefields.size()) == CKPT_STATE_NVAR,
-                "acoustic_lsrtm3d/backward_ckpt requires the propagator-bound "
+                "acoustic_born3d/backward_ckpt requires the propagator-bound "
                 "forward_wavefields (cuda_layout.checkpoint_state_nvar): one replay "
                 "state set of ", CKPT_STATE_NVAR, " tensors, got ",
                 p.forward_wavefields.size());
     AcousticWavefieldTensor forward;
-    bind_replay_state_set(forward, p, vp, /*set=*/0, "acoustic_lsrtm3d ckpt replay state");
+    bind_replay_state_set(forward, p, vp, /*set=*/0, "acoustic_born3d ckpt replay state");
 
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,
@@ -1177,12 +1177,12 @@ void run_ckpt_imaging(
         p.checkpoint_steps,
         p.checkpoint_on_cpu,
         "backward_chunk",
-        "acoustic_lsrtm3d"
+        "acoustic_born3d"
     );
 
     // Python-allocated with the checkpoint snapshots; every row is written by the replay before the reverse pass reads it.
     auto chunk_forward = pool_required(p.checkpoint_replay, 0, {p.checkpoint_interval, B, nz, ny, nx},
-                                       "checkpoint_replay (acoustic_lsrtm3d/backward_ckpt, "
+                                       "checkpoint_replay (acoustic_born3d/backward_ckpt, "
                                        "cuda_layout.checkpoint_replay_shapes)");
 
     AcousticCPMLTensor cpml_tensor;
@@ -1212,7 +1212,7 @@ void run_ckpt_imaging(
             auto for_view = forward.view();
             float* u_this = chunk_forward.select(0, it - start).data_ptr<float>();
 
-            ACOUSTIC_LSRTM3D_SINGLE(
+            ACOUSTIC_BORN3D_SINGLE(
                 order,
                 launch_config.grid,
                 launch_config.block,
@@ -1244,7 +1244,7 @@ void run_ckpt_imaging(
         for (int it = end - 1; it >= start; --it) {
             auto adj_view = adjoint.view();
 
-            run_lsrtm3d_adjoint_step(
+            run_born3d_adjoint_step(
                 order, launch_config.grid, launch_config.block, adj_view,
                 vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
@@ -1322,7 +1322,7 @@ void run_recursive_imaging(
         checkpoint_steps_cpu,
         p.checkpoint_on_cpu,
         "backward_recursive",
-        "acoustic_lsrtm3d"
+        "acoustic_born3d"
     );
 
     float dx = p.spacing[0];
@@ -1387,18 +1387,18 @@ void run_recursive_imaging(
     // the same longest segment.
     const int scratch_depth = recursive_scratch_depth(max_segment_length);
     SWEEP_CHECK(static_cast<int>(p.forward_wavefields.size()) == (1 + scratch_depth) * CKPT_STATE_NVAR,
-                "acoustic_lsrtm3d/backward_recursive_ckpt requires the propagator-bound "
+                "acoustic_born3d/backward_recursive_ckpt requires the propagator-bound "
                 "forward_wavefields (cuda_layout.checkpoint_state_nvar + "
                 "recursive_state_depth): ", 1 + scratch_depth, " replay state sets of ",
                 CKPT_STATE_NVAR, " tensors, got ", p.forward_wavefields.size());
 
     AcousticWavefieldTensor start_state;
-    bind_replay_state_set(start_state, p, vp, /*set=*/0, "acoustic_lsrtm3d recursive start state");
+    bind_replay_state_set(start_state, p, vp, /*set=*/0, "acoustic_born3d recursive start state");
 
     std::vector<AcousticWavefieldTensor> scratch_states(scratch_depth);
     for (int level = 0; level < scratch_depth; ++level)
         bind_replay_state_set(scratch_states[level], p, vp, /*set=*/level + 1,
-                              "acoustic_lsrtm3d recursive scratch state");
+                              "acoustic_born3d recursive scratch state");
 
     for (int segment_idx = num_saved_checkpoints; segment_idx >= 0; --segment_idx) {
         int start = (segment_idx == 0) ? 0 : checkpoint_steps[segment_idx - 1];

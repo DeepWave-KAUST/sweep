@@ -17,8 +17,8 @@
 #include "../../shared/boundary_session.h"
 #include "../equations/acoustic2d/acoustic2d.h"
 #include "../equations/acoustic3d/acoustic3d.h"
-#include "../equations/acoustic_lsrtm2d/acoustic_lsrtm2d.h"
-#include "../equations/acoustic_lsrtm3d/acoustic_lsrtm3d.h"
+#include "../equations/acoustic_born2d/acoustic_born2d.h"
+#include "../equations/acoustic_born3d/acoustic_born3d.h"
 #include "../equations/acoustic_vrz2d/acoustic_vrz2d.h"
 #include "../equations/acoustic_vrz3d/acoustic_vrz3d.h"
 #include "../equations/acoustic_vti_1st_2d/acoustic_vti_1st_2d.h"
@@ -28,6 +28,7 @@
 #include "../equations/das_mu2d/das_mu2d.h"
 #include "../equations/das_mu3d/das_mu3d.h"
 #include "../equations/elastic2d/elastic2d.h"
+#include "../equations/elastic_born2d/elastic_born2d.h"
 #include "../equations/elastic3d/elastic3d.h"
 #include "../equations/elastic_tti_2nd2d/elastic_tti_2nd2d.h"
 #include "../equations/elastic_tti_sg2d/elastic_tti_sg2d.h"
@@ -53,16 +54,16 @@ const char* const ENTRY_NAMES[SWEEP_ENTRY_COUNT] = {
     "acoustic3d_backward_bs",
     "acoustic3d_backward_ckpt",
     "acoustic3d_backward_recursive_ckpt",
-    "acoustic_lsrtm2d_forward",
-    "acoustic_lsrtm2d_backward",
-    "acoustic_lsrtm2d_backward_bs",
-    "acoustic_lsrtm2d_backward_ckpt",
-    "acoustic_lsrtm2d_backward_recursive_ckpt",
-    "acoustic_lsrtm3d_forward",
-    "acoustic_lsrtm3d_backward",
-    "acoustic_lsrtm3d_backward_bs",
-    "acoustic_lsrtm3d_backward_ckpt",
-    "acoustic_lsrtm3d_backward_recursive_ckpt",
+    "acoustic_born2d_forward",
+    "acoustic_born2d_backward",
+    "acoustic_born2d_backward_bs",
+    "acoustic_born2d_backward_ckpt",
+    "acoustic_born2d_backward_recursive_ckpt",
+    "acoustic_born3d_forward",
+    "acoustic_born3d_backward",
+    "acoustic_born3d_backward_bs",
+    "acoustic_born3d_backward_ckpt",
+    "acoustic_born3d_backward_recursive_ckpt",
     "acoustic_vrz2d_forward",
     "acoustic_vrz2d_backward",
     "acoustic_vrz2d_backward_bs",
@@ -150,14 +151,14 @@ const char* const ENTRY_NAMES[SWEEP_ENTRY_COUNT] = {
     "qp_tti2d_backward",
     "qp_tti2d_backward_bs",
     "qp_tti2d_backward_ckpt",
-    "qp_vti_lsrtm2d_forward",
-    "qp_vti_lsrtm2d_backward",
-    "qp_vti_lsrtm2d_backward_bs",
-    "qp_vti_lsrtm2d_backward_ckpt",
-    "qp_tti_lsrtm2d_forward",
-    "qp_tti_lsrtm2d_backward",
-    "qp_tti_lsrtm2d_backward_bs",
-    "qp_tti_lsrtm2d_backward_ckpt",
+    "qp_vti_born2d_forward",
+    "qp_vti_born2d_backward",
+    "qp_vti_born2d_backward_bs",
+    "qp_vti_born2d_backward_ckpt",
+    "qp_tti_born2d_forward",
+    "qp_tti_born2d_backward",
+    "qp_tti_born2d_backward_bs",
+    "qp_tti_born2d_backward_ckpt",
     "sem2d_acoustic_forward",
     "sem2d_acoustic_backward",
     "sem2d_elastic_forward",
@@ -200,9 +201,14 @@ const char* const ENTRY_NAMES[SWEEP_ENTRY_COUNT] = {
     "sem3d_elastic_forward",
     "sem3d_elastic_backward",
     "sem3d_elastic_vs_forward",
-    "sem3d_elastic_vs_backward"
+    "sem3d_elastic_vs_backward",
+    "elastic_born2d_forward",
+    "elastic_born2d_backward",
+    "elastic_born2d_backward_bs",
+    "elastic_born2d_backward_ckpt",
+    "elastic_born2d_backward_recursive_ckpt"
 };
-const int ENTRY_KINDS[SWEEP_ENTRY_COUNT] = { 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3 };
+const int ENTRY_KINDS[SWEEP_ENTRY_COUNT] = { 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 0, 1, 1, 1, 1 };
 
 void fill_err(char* err, int cap, const char* what)
 {
@@ -219,9 +225,11 @@ int guarded(F f, char* err, int cap)
     catch (...) { fill_err(err, cap, "sweep core: unknown exception"); return 1; }
 }
 
-// The SEM entries (kind 3) start here; each takes its own twin struct.
+// The SEM entries (kind 3) are the run [SEM_FIRST, SEM_END); each takes its own
+// twin struct.  Entries appended after the run are forward/backward entries again.
 constexpr int SEM_FIRST = SWEEP_ENTRY_SEM2D_ACOUSTIC_FORWARD;
-const char* const SEM_STRUCTS[SWEEP_ENTRY_COUNT - SEM_FIRST] = {
+constexpr int SEM_END = SWEEP_ENTRY_SEM3D_ELASTIC_VS_BACKWARD + 1;
+const char* const SEM_STRUCTS[SEM_END - SEM_FIRST] = {
     "SemForwardInputCore",
     "SemBackwardInputCore",
     "SemElasticForwardInputCore",
@@ -320,7 +328,7 @@ void sem_dispatch(int entry, const void* in, int64_t arg)
 
 void dispatch(int entry, const void* in, void* out)
 {
-    SWEEP_CHECK(entry < SEM_FIRST || entry >= SWEEP_ENTRY_COUNT, "sweep_call: ", sweep_entry_name(entry),
+    SWEEP_CHECK(entry < SEM_FIRST || entry >= SEM_END, "sweep_call: ", sweep_entry_name(entry),
                 " is a SEM entry; call it through sweep_sem_call");
     switch (entry) {
         case 0: *static_cast<ForwardOutputCore*>(out) = acoustic2d::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
@@ -333,16 +341,16 @@ void dispatch(int entry, const void* in, void* out)
         case 7: *static_cast<BackwardOutputCore*>(out) = acoustic3d::backward_bs_core(*static_cast<const BackwardInputCore*>(in)); return;
         case 8: *static_cast<BackwardOutputCore*>(out) = acoustic3d::backward_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
         case 9: *static_cast<BackwardOutputCore*>(out) = acoustic3d::backward_recursive_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
-        case 10: *static_cast<ForwardOutputCore*>(out) = acoustic_lsrtm2d::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
-        case 11: *static_cast<BackwardOutputCore*>(out) = acoustic_lsrtm2d::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
-        case 12: *static_cast<BackwardOutputCore*>(out) = acoustic_lsrtm2d::backward_bs_core(*static_cast<const BackwardInputCore*>(in)); return;
-        case 13: *static_cast<BackwardOutputCore*>(out) = acoustic_lsrtm2d::backward_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
-        case 14: *static_cast<BackwardOutputCore*>(out) = acoustic_lsrtm2d::backward_recursive_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
-        case 15: *static_cast<ForwardOutputCore*>(out) = acoustic_lsrtm3d::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
-        case 16: *static_cast<BackwardOutputCore*>(out) = acoustic_lsrtm3d::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
-        case 17: *static_cast<BackwardOutputCore*>(out) = acoustic_lsrtm3d::backward_bs_core(*static_cast<const BackwardInputCore*>(in)); return;
-        case 18: *static_cast<BackwardOutputCore*>(out) = acoustic_lsrtm3d::backward_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
-        case 19: *static_cast<BackwardOutputCore*>(out) = acoustic_lsrtm3d::backward_recursive_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 10: *static_cast<ForwardOutputCore*>(out) = acoustic_born2d::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
+        case 11: *static_cast<BackwardOutputCore*>(out) = acoustic_born2d::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 12: *static_cast<BackwardOutputCore*>(out) = acoustic_born2d::backward_bs_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 13: *static_cast<BackwardOutputCore*>(out) = acoustic_born2d::backward_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 14: *static_cast<BackwardOutputCore*>(out) = acoustic_born2d::backward_recursive_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 15: *static_cast<ForwardOutputCore*>(out) = acoustic_born3d::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
+        case 16: *static_cast<BackwardOutputCore*>(out) = acoustic_born3d::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 17: *static_cast<BackwardOutputCore*>(out) = acoustic_born3d::backward_bs_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 18: *static_cast<BackwardOutputCore*>(out) = acoustic_born3d::backward_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 19: *static_cast<BackwardOutputCore*>(out) = acoustic_born3d::backward_recursive_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
         case 20: *static_cast<ForwardOutputCore*>(out) = acoustic_vrz2d::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
         case 21: *static_cast<BackwardOutputCore*>(out) = acoustic_vrz2d::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
         case 22: *static_cast<BackwardOutputCore*>(out) = acoustic_vrz2d::backward_bs_core(*static_cast<const BackwardInputCore*>(in)); return;
@@ -430,14 +438,19 @@ void dispatch(int entry, const void* in, void* out)
         case 104: *static_cast<BackwardOutputCore*>(out) = qp_tti2d::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
         case 105: *static_cast<BackwardOutputCore*>(out) = qp_tti2d::backward_bs_core(*static_cast<const BackwardInputCore*>(in)); return;
         case 106: *static_cast<BackwardOutputCore*>(out) = qp_tti2d::backward_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
-        case 107: *static_cast<ForwardOutputCore*>(out) = qp_vti_lsrtm2d::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
-        case 108: *static_cast<BackwardOutputCore*>(out) = qp_vti_lsrtm2d::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
-        case 109: *static_cast<BackwardOutputCore*>(out) = qp_vti_lsrtm2d::backward_bs_core(*static_cast<const BackwardInputCore*>(in)); return;
-        case 110: *static_cast<BackwardOutputCore*>(out) = qp_vti_lsrtm2d::backward_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
-        case 111: *static_cast<ForwardOutputCore*>(out) = qp_tti_lsrtm2d::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
-        case 112: *static_cast<BackwardOutputCore*>(out) = qp_tti_lsrtm2d::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
-        case 113: *static_cast<BackwardOutputCore*>(out) = qp_tti_lsrtm2d::backward_bs_core(*static_cast<const BackwardInputCore*>(in)); return;
-        case 114: *static_cast<BackwardOutputCore*>(out) = qp_tti_lsrtm2d::backward_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 107: *static_cast<ForwardOutputCore*>(out) = qp_vti_born2d::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
+        case 108: *static_cast<BackwardOutputCore*>(out) = qp_vti_born2d::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 109: *static_cast<BackwardOutputCore*>(out) = qp_vti_born2d::backward_bs_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 110: *static_cast<BackwardOutputCore*>(out) = qp_vti_born2d::backward_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 111: *static_cast<ForwardOutputCore*>(out) = qp_tti_born2d::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
+        case 112: *static_cast<BackwardOutputCore*>(out) = qp_tti_born2d::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 113: *static_cast<BackwardOutputCore*>(out) = qp_tti_born2d::backward_bs_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 114: *static_cast<BackwardOutputCore*>(out) = qp_tti_born2d::backward_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 158: *static_cast<ForwardOutputCore*>(out) = elastic_born2d::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
+        case 159: *static_cast<BackwardOutputCore*>(out) = elastic_born2d::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 160: *static_cast<BackwardOutputCore*>(out) = elastic_born2d::backward_bs_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 161: *static_cast<BackwardOutputCore*>(out) = elastic_born2d::backward_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
+        case 162: *static_cast<BackwardOutputCore*>(out) = elastic_born2d::backward_recursive_ckpt_core(*static_cast<const BackwardInputCore*>(in)); return;
         default: SWEEP_CHECK(false, "sweep_call: no entry ", entry);
     }
 }
@@ -495,7 +508,7 @@ int sweep_sem_call(int entry, const void* in, int64_t arg, char* err, int err_ca
 {
     return guarded([&] { sem_dispatch(entry, in, arg); }, err, err_cap);
 }
-const char* sweep_entry_struct(int entry) { return (entry >= SEM_FIRST && entry < SWEEP_ENTRY_COUNT) ? SEM_STRUCTS[entry - SEM_FIRST] : nullptr; }
+const char* sweep_entry_struct(int entry) { return (entry >= SEM_FIRST && entry < SEM_END) ? SEM_STRUCTS[entry - SEM_FIRST] : nullptr; }
 
 int sweep_forward_runner_create(int entry, const void* in, void** handle, char* err, int err_cap)
 {

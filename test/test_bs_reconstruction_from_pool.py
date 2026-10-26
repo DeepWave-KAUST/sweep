@@ -46,8 +46,8 @@ SENTINEL = 12345.0
 CASES = {
     "acoustic2d": (3, 0, "acoustic2d"),
     "acoustic3d": (3, 0, "acoustic3d"),
-    "lsrtm2d": (3, 0, "acoustic_lsrtm2d"),
-    "lsrtm3d": (3, 0, "acoustic_lsrtm3d"),
+    "born2d": (3, 0, "acoustic_born2d"),
+    "born3d": (3, 0, "acoustic_born3d"),
     "vrz2d": (3, 0, "acoustic_vrz2d"),
     "vrz3d": (3, 0, "acoustic_vrz3d"),
     "elastic2d": (7, 0, "elastic2d"),

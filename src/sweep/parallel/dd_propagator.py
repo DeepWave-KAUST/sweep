@@ -53,7 +53,7 @@ import numpy as np
 import torch
 
 from sweep.equations.slot_table import slot_table_of
-from sweep.parallel.dd_spec import ACOUSTIC_DD, ELASTIC_DD, LSRTM_DD, VRZ_DD, VRZ_DD_TILED
+from sweep.parallel.dd_spec import ACOUSTIC_DD, ELASTIC_DD, BORN_DD, VRZ_DD, VRZ_DD_TILED
 from sweep.propagator._c import (_canonical_to_cuda_record,
                                  _cuda_record_to_canonical)
 from sweep.parallel._topology import MeshTopology
@@ -411,7 +411,7 @@ class ModelParallel:
         # Which models want a gradient (sticky union over gradient calls) and
         # what the adjoint capture was built for.  Only consulted for an
         # equation whose compiled layout depends on it (cuda_layout_for_grads:
-        # AcousticLSRTM binds the scattered field only for vp's RWI gradient).
+        # AcousticBorn binds the scattered field only for vp's RWI gradient).
         self._grad_mask = None
         self._capture_grad_mask = None
         self._model_dtype = None  # pinned by the first capture; see _capture
@@ -433,10 +433,10 @@ class ModelParallel:
         # DECLARES: a fixed-slot layout (no rotating time-level block) is the
         # staggered first-order protocol; a divergence-form gradient needs the
         # coupling exchange; otherwise it is the plain second-order schedule.
-        # More than one rotating block is a multi-field equation (AcousticLSRTM /
-        # AcousticLSRTM3D: background + scattered), whose schedule ships every block.
+        # More than one rotating block is a multi-field equation (AcousticBorn /
+        # AcousticBorn3D: background + scattered), whose schedule ships every block.
         self._spec = (ELASTIC_DD if not table.u_blocks
-                      else LSRTM_DD if len(table.u_blocks) > 1
+                      else BORN_DD if len(table.u_blocks) > 1
                       else ACOUSTIC_DD if not self._dd_coupling_nvar
                       else VRZ_DD_TILED
                       if self.so in tuple(getattr(_layout, "dd_tiled_gradient_orders", ()) or ())
@@ -445,7 +445,7 @@ class ModelParallel:
         check_dd_admission(equation, _layout, self._spec)
         # LSRTM's stepped drivers refuse disk staging across a cut but would run
         # it on a single tile; refuse it here, up front, on every mesh.
-        if self._spec is LSRTM_DD and self._bstorage == "disk":
+        if self._spec is BORN_DD and self._bstorage == "disk":
             raise NotImplementedError(
                 f"domain decomposition of {type(equation).__name__} does not support "
                 f"BoundarySaving(storage='disk'). Use storage='gpu' or 'cpu'.")
@@ -731,7 +731,7 @@ class ModelParallel:
 
         self.fp, self.bp = cap["fp"], cap.get("bp")
         # The slot table of the layout the probe bound: per call for an equation
-        # with cuda_layout_for_grads (AcousticLSRTM reconstructs 3 grids without
+        # with cuda_layout_for_grads (AcousticBorn reconstructs 3 grids without
         # vp's RWI gradient, 6 with it).  Before _bind_adjoint_buffers, which
         # checks the reconstruction list against it.
         if self._layout_follows_grads():
@@ -831,7 +831,7 @@ class ModelParallel:
 
     def _layout_follows_grads(self):
         """The equation's compiled layout depends on which models want a
-        gradient (``cuda_layout_for_grads``, e.g. AcousticLSRTM's vp)."""
+        gradient (``cuda_layout_for_grads``, e.g. AcousticBorn's vp)."""
         return callable(getattr(self.equation, "cuda_layout_for_grads", None))
 
     def _bind_adjoint_buffers(self):
@@ -1229,7 +1229,7 @@ class ModelParallel:
         elif (self._need_adjoint and self._layout_follows_grads()
               and self._grad_mask != self._capture_grad_mask):
             # A model the adjoint capture took as gradient-free now wants one, and
-            # the compiled layout depends on it (AcousticLSRTM: vp's RWI gradient
+            # the compiled layout depends on it (AcousticBorn: vp's RWI gradient
             # binds the scattered field).  Re-capture, as the promotion above.
             if tiles is None:
                 raise RuntimeError(

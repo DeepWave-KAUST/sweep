@@ -41,8 +41,8 @@ from sweep.equations import (  # noqa: E402
     ElasticTTISG,
     ElasticTTISG3D,
     Acoustic3D,
-    AcousticLSRTM,
-    AcousticLSRTM3D,
+    AcousticBorn,
+    AcousticBorn3D,
     AcousticVRZ,
     AcousticVRZ3D,
     DASMu,
@@ -124,8 +124,8 @@ CUDA_SUITE_CONFIG = RunConfig(
 CASES = (
     Case("acoustic2d", Acoustic, (14, 16), "cpmlr"),
     Case("acoustic3d", Acoustic3D, (8, 8, 8), "cpmlr"),
-    Case("acoustic_lsrtm2d", AcousticLSRTM, (14, 16), "cpmlr"),
-    Case("acoustic_lsrtm3d", AcousticLSRTM3D, (8, 8, 8), "cpmlr"),
+    Case("acoustic_born2d", AcousticBorn, (14, 16), "cpmlr"),
+    Case("acoustic_born3d", AcousticBorn3D, (8, 8, 8), "cpmlr"),
     Case("acoustic_vrz2d", AcousticVRZ, (14, 16), "cpmlr"),
     Case("acoustic_vrz3d", AcousticVRZ3D, (8, 8, 8), "cpmlr"),
     Case("elastic2d", Elastic, (14, 16), "cpmls"),
@@ -221,11 +221,11 @@ KNOWN_MISSING_GRADIENTS = {
 # gaps, like the entries above.  Keep this table in step with the refusals.
 KNOWN_REFUSED_GRADIENTS = {
     ("acoustic_vrz", "wavelet"): "impl='c' VRZ refuses the source-wavelet gradient",
-    ("acoustic_lsrtm", "wavelet"): "impl='c' LSRTM refuses the source-wavelet gradient",
+    ("acoustic_born", "wavelet"): "impl='c' LSRTM refuses the source-wavelet gradient",
     # the RWI tomographic vp gradient (terms II+III+IV, Wu & Alkhalifah 2015)
     # comes from the full and boundary-saving backwards only.  (reason, modes):
     # those modes only.
-    ("acoustic_lsrtm", "vp"): ("impl='c' LSRTM refuses the RWI vp gradient in the checkpoint modes",
+    ("acoustic_born", "vp"): ("impl='c' LSRTM refuses the RWI vp gradient in the checkpoint modes",
                                ("ckpt_chunk", "ckpt_recursive")),
 }
 
@@ -251,8 +251,8 @@ def refused_gradient(case_name: str, grad_name: str, mode: str | None = None) ->
 
 
 def known_missing_gradient(case_name: str, grad_name: str, mode: str | None = None) -> str | None:
-    """Longest matching prefix wins, so ``acoustic_lsrtm3d`` can declare a gap
-    that ``acoustic_lsrtm`` does not.  A ``(reason, modes)`` entry declares the
+    """Longest matching prefix wins, so ``acoustic_born3d`` can declare a gap
+    that ``acoustic_born`` does not.  A ``(reason, modes)`` entry declares the
     gap in those modes only (``mode`` may carry a ``/<backend>`` suffix).
     Refused gradients count as declared gaps too."""
     return (_declared(KNOWN_MISSING_GRADIENTS, case_name, grad_name, mode)

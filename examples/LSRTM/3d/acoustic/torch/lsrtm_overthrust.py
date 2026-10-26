@@ -26,7 +26,7 @@ import tqdm
 
 import configure_overthrust as shared_config
 from fwi3d_overthrust import build_geometry, build_wavelet, load_models, save_wavelet_figure
-from sweep.equations import Acoustic3D, AcousticLSRTM3D
+from sweep.equations import Acoustic3D, AcousticBorn3D
 from sweep.propagator.options import BoundaryOptions, CUDAOptions, CkptOptions, EagerOptions, MemoryOptions
 from sweep.propagator.torch import PropTorch
 from sweep.signal import ricker
@@ -99,7 +99,7 @@ def build_acoustic_solver(shape, dev, cfg):
 
 
 def build_lsrtm_solver(shape, dev, cfg):
-    equation = AcousticLSRTM3D(spatial_order=cfg["spatial_order"], device=dev, backend="torch")
+    equation = AcousticBorn3D(spatial_order=cfg["spatial_order"], device=dev, backend="torch")
     common = dict(
         shape=shape,
         dev=dev,

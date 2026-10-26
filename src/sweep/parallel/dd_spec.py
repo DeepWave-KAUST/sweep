@@ -303,7 +303,7 @@ ACOUSTIC_DD = DDSpec(
 )
 
 
-#: AcousticLSRTM / AcousticLSRTM3D: TWO coupled second-order fields (background
+#: AcousticBorn / AcousticBorn3D: TWO coupled second-order fields (background
 #: + scattered) in one wavefield list, so every time-role reference resolves to
 #: one tensor PER rotating block (``runner.at_all``): the forward ships both
 #: ``u_now``, the backward both adjoints (lambda_sc, lambda_bg) and both
@@ -313,10 +313,10 @@ ACOUSTIC_DD = DDSpec(
 #: Same loops as acoustic, with ONE deliberate difference: no overlapped
 #: forward.  ``_overlap_ok`` checks the cut geometry, not whether the compiled
 #: forward implements the strip/interior ``step_phase`` split -- and
-#: acoustic_lsrtm2d/3d do not (both refuse a non-zero phase), so offering the
+#: acoustic_born2d/3d do not (both refuse a non-zero phase), so offering the
 #: overlapped loop would make the driver run each step twice.
-LSRTM_DD = DDSpec(
-    name="acoustic_lsrtm",
+BORN_DD = DDSpec(
+    name="acoustic_born",
     forward=ACOUSTIC_FWD,
     forward_overlapped=None,
     backward=ACOUSTIC_DD.backward,

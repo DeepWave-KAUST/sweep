@@ -399,16 +399,16 @@ def test_self_check_raises_on_broken_reverse():
 
 def test_multifield_second_order_reconstructs_all_pairs():
     """swap2nd reconstructs EVERY now/prev field-pair, so a multi-field 2nd-order
-    equation (AcousticLSRTM: background h1/h2 + scattered sh1/sh2) recovers its
+    equation (AcousticBorn: background h1/h2 + scattered sh1/sh2) recovers its
     scattered field too: the self-check passes (no raise — the scattered field is
     no longer zeroed) and the boundary-saved gradient matches the full-tape
     gradient.  Before generalising swap2nd the scattered field was dropped and
     the probe rejected this equation."""
-    from sweep.equations import AcousticLSRTM  # noqa: PLC0415
+    from sweep.equations import AcousticBorn  # noqa: PLC0415
     shape = (40, 48)
 
     def build(bs):
-        eq = AcousticLSRTM(spatial_order=SO, device="cuda", backend="torch")
+        eq = AcousticBorn(spatial_order=SO, device="cuda", backend="torch")
         st, rt = list(eq.default_source_fields), list(eq.default_receiver_fields)
         return PropTorch(
             eq, impl="eager", eager_options=EagerOptions(use_compile=False),

@@ -1,10 +1,10 @@
 """DD boundary CPU-staging equivalence check (acoustic or LSRTM, 2-D and 3-D).
 
     torchrun --standalone --nproc-per-node=<P> test/dd_offload_check.py
-    env: EQ(acoustic|lsrtm) DIM(2|3) MESH_PY MESH_PX MESH_NY
+    env: EQ(acoustic|born) DIM(2|3) MESH_PY MESH_PX MESH_NY
          BND_DTYPE(fp32|fp16|bf16|int8) TAIL
 
-EQ=lsrtm runs AcousticLSRTM / AcousticLSRTM3D: the record is the scattered
+EQ=born runs AcousticBorn / AcousticBorn3D: the record is the scattered
 field and both gradients are compared, the reflectivity mp and the RWI vp
 (from a nonzero mp, without which the vp gradient vanishes).  LSRTM has no
 boundary tail truncation, so gate B is skipped there.
@@ -39,7 +39,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from sweep.equations import Acoustic, Acoustic3D, AcousticLSRTM, AcousticLSRTM3D
+from sweep.equations import Acoustic, Acoustic3D, AcousticBorn, AcousticBorn3D
 from sweep.parallel import MeshTopology, ModelParallel
 from sweep.propagator.torch import PropTorch
 
@@ -81,9 +81,9 @@ else:
     gx, gy = np.meshgrid(np.arange(2, nx, 4), np.arange(2, ny, 4), indexing="xy")
     rec = np.stack([gx.ravel(), gy.ravel(), np.ones(gx.size, np.int32)], -1)[None].astype(np.int32)
 
-LSRTM = os.environ.get("EQ", "acoustic") == "lsrtm"
-if LSRTM:
-    EQ = AcousticLSRTM if DIM == 2 else AcousticLSRTM3D
+BORN = os.environ.get("EQ", "acoustic") == "born"
+if BORN:
+    EQ = AcousticBorn if DIM == 2 else AcousticBorn3D
     RECV = ["sh1"]
     # a dipping reflectivity sheet across every cut, plus lateral variation
     idx = np.indices(shape).astype(np.float32)
@@ -139,7 +139,7 @@ def compare(label, ga, gb, ref_peak=None, peak=None):
 
 g_gpu, peak_gpu = run("gpu")
 g_cpu, peak_cpu = run("cpu")
-if not LSRTM:
+if not BORN:
     g_gpu_t, _ = run("gpu", tail=TAIL)
     g_cpu_t, peak_cpu_t = run("cpu", tail=TAIL)
 g_cpu_2, _ = run("cpu")
@@ -180,7 +180,7 @@ def disk_is_refused():
 
 ok = True
 ok &= compare("A  cpu vs gpu", g_cpu, g_gpu, peak_gpu, peak_cpu)
-if not LSRTM:
+if not BORN:
     ok &= compare(f"B  cpu vs gpu, tail={TAIL}", g_cpu_t, g_gpu_t, peak_gpu, peak_cpu_t)
 ok &= compare("C  cpu run twice", g_cpu_2, g_cpu)
 d_ok, d_msg = disk_is_refused()

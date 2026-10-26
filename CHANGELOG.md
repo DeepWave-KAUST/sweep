@@ -10,6 +10,23 @@ and this project adheres to
 ## [Unreleased]
 
 ### Added
+- **`ElasticBorn`: Born modelling for the 2-D first-order elastic equation**
+  (Li, Guo, Li & Alkhalifah 2019, doi:10.1190/geo2017-0722.1, eq. 5 in
+  velocity-stress form).  Models `vp, vs, rho` (background) and `dvp, dvs,
+  drho` (absolute perturbation); fields: the Elastic set plus its scattered
+  twin `svx, svz, ssxx, sszz, ssxz` with its own CPML memories.  The scattered
+  step is the exact Jacobian of the Elastic step (stencil, CPML, per-edge free
+  surface and topography, the Robertsson surface coefficient included), so the
+  scattered record is the directional derivative of the Elastic record.
+  `impl='eager'` returns every gradient by autograd, the background ones being
+  the elastic RWI gradient; boundary saving reverses both fields exactly.
+  `impl='c'` (`elastic_born2d`) runs both fields in one fused velocity and one
+  fused stress kernel and reuses elastic2d's backward for the `dvp, dvs, drho`
+  gradients in every memory mode; it refuses the background and wavelet
+  gradients.  `CUDALayoutSpec.backward_state_slots` lets a driver's backward
+  bind a subset of its forward slots.  Notebook 45 (`45_lsrtm_elastic`) models
+  Born data, checks them against `Elastic`, images the three perturbations by
+  RTM and LSRTM and takes the elastic RWI background gradient.
 - **`sweep.datasets` gains `chevron-fwi-2014`**, the SEG 2014 Chevron FWI
   synthetic: 1600 shot gathers (321 receivers, 8 s at 4 ms, isotropic elastic,
   marine, with free-surface multiples), the starting vp, the source wavelet
@@ -42,15 +59,14 @@ and this project adheres to
   adjoint of the wavenumber-domain eq. 14. The forward is the same in all
   three. **This changes the default eager gradient of `AcousticVTI` /
   `AcousticTTI`** (it was `'exact'`).
-- **`AcousticVTILSRTM` / `AcousticTTILSRTM`** (aliases `AcousticVTIBorn` /
-  `AcousticTTIBorn`): the Born equations of the qP pair -- background and
-  scattered qP fields, each with its own S_n, the scattered one driven by the
-  reflectivity `mp` times the background update (derivation in
-  docs/user-guide/qp_born.md). Eager and `impl='c'` (`qp_vti_lsrtm2d` /
-  `qp_tti_lsrtm2d`, full and boundary saving); the compiled backward returns
-  the `mp` gradient and refuses the background models' and the wavelet's.
-  Example: `docs/notebooks/34_lsrtm_qp_vti_tti.ipynb` (RTM and LSRTM of a
-  tilted anisotropic bed with the isotropic, VTI and TTI operators).
+- **`AcousticVTIBorn` / `AcousticTTIBorn`**: the Born equations of the qP
+  pair -- background and scattered qP fields, each with its own S_n, the
+  scattered one driven by the reflectivity `mp` times the background update
+  (derivation in docs/user-guide/qp_born.md). Eager and `impl='c'`
+  (`qp_vti_born2d` / `qp_tti_born2d`, full and boundary saving); the compiled
+  backward returns the `mp` gradient and refuses the background models' and
+  the wavelet's. Example: `docs/notebooks/34_lsrtm_qp_vti_tti.ipynb` (RTM and
+  LSRTM of a tilted anisotropic bed with the isotropic, VTI and TTI operators).
 - **`Biot`: 2-D low-frequency Biot poroelastic waves** (eager).  Solid
   velocity, Darcy flux, total stress and pore pressure on the Virieux
   staggered grid; the stiff viscous drag is integrated exactly, so any
@@ -102,6 +118,13 @@ and this project adheres to
   load -- rebuild it.
 
 ### Changed
+- **The Born equations are named Born, not LSRTM** (no aliases kept):
+  `AcousticLSRTM` / `AcousticLSRTM3D` / `AcousticVTILSRTM` / `AcousticTTILSRTM`
+  are `AcousticBorn` / `AcousticBorn3D` / `AcousticVTIBorn` / `AcousticTTIBorn`
+  (modules `acoustic_born`, `acoustic_born3d`, `qP_born`), and the CUDA side
+  follows: `acoustic_born2d` / `acoustic_born3d` / `qp_vti_born2d` /
+  `qp_tti_born2d` entries, kernel and slot-table names.  LSRTM is the
+  inversion these operators serve; `SWEEP_LSRTM_SPLIT_III` keeps its name.
 - **`ElasticCurvilinear` follows Bartana, Xu & Rickett: collocated fields,
   asymmetric first-derivative operators and a rotated traction-free surface.**
   The momentum equation is discretised as a divergence, whose operator is the

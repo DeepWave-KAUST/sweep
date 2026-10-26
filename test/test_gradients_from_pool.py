@@ -34,7 +34,7 @@ CASES = {
     "elastic2d": ("elastic2d", False, ()),
     "elastic_tti_sg2d": ("elastic_tti_sg2d", False, ()),
     "acoustic_vti_1st_2d": ("acoustic_vti_1st_2d", False, ()),
-    "lsrtm2d": ("acoustic_lsrtm2d", True, ()),
+    "born2d": ("acoustic_born2d", True, ()),
     "das2d": ("das2d", False, ()),
     "elastic_tti_2nd2d": ("elastic_tti_2nd2d", False, ()),
     "vrz3d": ("acoustic_vrz3d", True, (0,)),
@@ -55,7 +55,7 @@ def test_backward_accumulates_into_the_handed_over_gradients(key, mode, monkeypa
     shape = suite.shape_for(spec, ns)
     scenario = suite.SCENARIOS["interior"]
     _true, models_init, grad_flags = suite.make_models(spec, shape)
-    if key == "lsrtm2d":
+    if key == "born2d":
         # The suite's Born case has a zero reflectivity, so its record -- and
         # every gradient -- is identically zero and a "was it written" check
         # could not tell binding from allocation. A reflector band fixes that.

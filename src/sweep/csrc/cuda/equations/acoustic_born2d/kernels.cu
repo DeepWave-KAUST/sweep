@@ -1,6 +1,6 @@
 #include "kernels.cuh"
 
-__global__ void calculate_grad_lsrtm_mp(
+__global__ void calculate_grad_born_mp(
     const float* __restrict__ u_tt_bg,
     const float* __restrict__ u_backward,
     const float* __restrict__ vp,
@@ -31,7 +31,7 @@ __global__ void calculate_grad_lsrtm_mp(
     grad_b[idx] += dt * dt * u_tt_b[idx] * u_backward_b[idx];
 }
 
-__global__ void calculate_grad_lsrtm_mp_utt(
+__global__ void calculate_grad_born_mp_utt(
     const float* __restrict__ u_forward_next,
     const float* __restrict__ u_forward_now,
     const float* __restrict__ u_forward_prev,
@@ -68,11 +68,11 @@ __global__ void calculate_grad_lsrtm_mp_utt(
 
 SWEEP_BY_ORDER_TABLE(acoustic2d_single_fn, acoustic2d_single_by_order, acoustic2d_single);
 SWEEP_BY_ORDER_TABLE(acoustic2d_single_nopml_fn, acoustic2d_single_nopml_by_order, acoustic2d_single_nopml);
-SWEEP_BY_ORDER_TABLE(acoustic_lsrtm2nd_fn, acoustic_lsrtm2nd_by_order, acoustic_lsrtm2nd);
-SWEEP_BY_ORDER_TABLE(acoustic_lsrtm2nd_adjoint_exact_fn, acoustic_lsrtm2nd_adjoint_exact_by_order, acoustic_lsrtm2nd_adjoint_exact);
+SWEEP_BY_ORDER_TABLE(acoustic_born2nd_fn, acoustic_born2nd_by_order, acoustic_born2nd);
+SWEEP_BY_ORDER_TABLE(acoustic_born2nd_adjoint_exact_fn, acoustic_born2nd_adjoint_exact_by_order, acoustic_born2nd_adjoint_exact);
 
 // v2_lambda = vp^2 * lambda  (per-cell, race-free pre-pass for the L* adjoint).
-__global__ void compute_v2_lambda_lsrtm2d(
+__global__ void compute_v2_lambda_born2d(
     const float* __restrict__ vp,
     const float* __restrict__ lambda,
     float* __restrict__ v2_lambda,
@@ -91,7 +91,7 @@ __global__ void compute_v2_lambda_lsrtm2d(
 // propagation plus the transpose of the scattered-source coupling arrive in one
 // combined right-hand side, so the shared lsrtm adjoint step can inject both:
 //   v2 = vp^2 * (lambda_bg + mp * lambda_sc).
-__global__ void compute_v2_lambda_bg_lsrtm2d(
+__global__ void compute_v2_lambda_bg_born2d(
     const float* __restrict__ vp,
     const float* __restrict__ mp,
     const float* __restrict__ lambda_bg,
@@ -118,7 +118,7 @@ __global__ void compute_v2_lambda_bg_lsrtm2d(
 // III = <lam, B'(v) p .* w>   (the singular image-point term)
 // grad_iii != nullptr keeps III apart so the caller can apply the paper's beta
 // weight (eq. 18-20); otherwise all three are summed into grad_vp.
-__global__ void calculate_grad_lsrtm_vp_utt(
+__global__ void calculate_grad_born_vp_utt(
     const float* __restrict__ bg_utt,
     const float* __restrict__ sc_utt,
     const float* __restrict__ lam_bg,
@@ -152,7 +152,7 @@ __global__ void calculate_grad_lsrtm_vp_utt(
 // own second difference (bg_next - 2 bg_now + bg_prev = dt^2 vp^2 Lap(bg)) so no
 // Laplacian is re-evaluated.  Interior only; the outer ring is overwritten by
 // the scattered boundary restore right afterwards.
-__global__ void add_lsrtm_scattered_coupling_2d(
+__global__ void add_born_scattered_coupling_2d(
     float* __restrict__ sc_next,
     const float* __restrict__ bg_next,
     const float* __restrict__ bg_now,
@@ -173,7 +173,7 @@ __global__ void add_lsrtm_scattered_coupling_2d(
 //   sc 2nd diff = dt^2 (sc_utt + mp*bg_utt)                         -> II + III
 // so the total matches the full mode, and III is recovered separately as
 // (2/v) * mp * (bg 2nd diff) * lam_sc for the same beta split.
-__global__ void calculate_grad_lsrtm_vp_2diff_2d(
+__global__ void calculate_grad_born_vp_2diff_2d(
     const float* __restrict__ bg_prev, const float* __restrict__ bg_now, const float* __restrict__ bg_next,
     const float* __restrict__ sc_prev, const float* __restrict__ sc_now, const float* __restrict__ sc_next,
     const float* __restrict__ lam_bg, const float* __restrict__ lam_sc,

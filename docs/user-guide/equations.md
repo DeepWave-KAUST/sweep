@@ -23,8 +23,8 @@ is supported for every class.
 | `ViscoAcoustic` | `['vp', 'Q', 'omega']` | 2D | Nearly constant-Q attenuation ([Zhu & Harris 2014](https://doi.org/10.1190/geo2013-0245.1)); decoupled dispersion / damping switches | ✅ |
 | `AcousticVRZ` | `['vp', 'z']` | 2D | Variable-density acoustic, impedance-style parameterization (``z`` = impedance) | ✅ |
 | `AcousticVRZ3D` | `['vp', 'z']` | 3D | 3D counterpart of `AcousticVRZ` | ✅ |
-| `AcousticLSRTM` | `['vp', 'mp']` | 2D | LSRTM-oriented variant (``mp`` = reflectivity perturbation) | ✅ |
-| `AcousticLSRTM3D` | `['vp', 'mp']` | 3D | 3D counterpart of `AcousticLSRTM` | ✅ |
+| `AcousticBorn` | `['vp', 'mp']` | 2D | LSRTM-oriented variant (``mp`` = reflectivity perturbation) | ✅ |
+| `AcousticBorn3D` | `['vp', 'mp']` | 3D | 3D counterpart of `AcousticBorn` | ✅ |
 | `AcousticVRR` | `['vp', 'rx', 'rz']` | 2D | Variable-density acoustic in vector-reflectivity form (``rx``, ``rz`` first-derivative density parameters) | ❌ |
 | `AcousticCurvilinear` | `['vp']` | 2D | `Acoustic` on a curvilinear grid for irregular topography (`topography=`); eager only | ❌ |
 
@@ -35,8 +35,8 @@ is supported for every class.
 | `AcousticAniso` | varies (see facade) | 2D / 3D | **Unified facade** — `method=` picks duveneck / liang / alkhalifah; mirrors the `DAS` facade | varies |
 | `AcousticVTI` | `['vp', 'epsilon', 'delta']` | 2D | Pure qP VTI, new acoustic approximation (Liang K. et al. 2023) — aliases `AcousticVTILiang` / `AcousticVTIDefault`; `s_gradient=` picks the adjoint ([forward, adjoint and Born](qp_born.md)) | ✅ full / bs |
 | `AcousticTTI` | `['vp', 'epsilon', 'delta', 'theta']` | 2D | Pure qP TTI (Liang K. et al. 2023, appendix A) — alias `AcousticTTILiang` | ✅ full / bs |
-| `AcousticVTILSRTM` | `['vp', 'epsilon', 'delta', 'mp']` | 2D | Born / LSRTM pair of `AcousticVTI` (background `h1`, scattered `sh1`, reflectivity `mp`) — alias `AcousticVTIBorn` | ✅ full / bs, `mp` gradient |
-| `AcousticTTILSRTM` | `['vp', 'epsilon', 'delta', 'theta', 'mp']` | 2D | Born / LSRTM pair of `AcousticTTI` — alias `AcousticTTIBorn` | ✅ full / bs, `mp` gradient |
+| `AcousticVTIBorn` | `['vp', 'epsilon', 'delta', 'mp']` | 2D | Born / LSRTM pair of `AcousticVTI` (background `h1`, scattered `sh1`, reflectivity `mp`) | ✅ full / bs, `mp` gradient |
+| `AcousticTTIBorn` | `['vp', 'epsilon', 'delta', 'theta', 'mp']` | 2D | Born / LSRTM pair of `AcousticTTI` | ✅ full / bs, `mp` gradient |
 | `AcousticTariq` | `['vv', 'v', 'eta']` | 2D | qP η-formulation, Alkhalifah 2000 — aliases `AcousticVTIAlkhalifah` / `AcousticTTIAlkhalifah` | ❌ |
 | `AcousticVTI1st` | `['vp', 'epsilon', 'delta', 'rho']` | 2D | 1st-order velocity-stress, Duveneck et al. 2008 — alias `AcousticVTIDuveneck` | ✅ |
 | `AcousticVTI1st3D` | `['vp', 'epsilon', 'delta', 'rho']` | 3D | 3D counterpart of `AcousticVTI1st` — aliases `AcousticVTIDuveneck3D` / `AcousticVTIDefault3D` | ✅ |
@@ -47,6 +47,7 @@ is supported for every class.
 | --- | --- | --- | --- | --- |
 | `Elastic` | `['vp', 'vs', 'rho']` | 2D | Velocity-stress elastic propagation (Virieux 1986) | ✅ |
 | `Elastic3D` | `['vp', 'vs', 'rho']` | 3D | 3D counterpart of `Elastic` | ✅ |
+| `ElasticBorn` | `['vp', 'vs', 'rho', 'dvp', 'dvs', 'drho']` | 2D | Born modelling of `Elastic` (background + scattered field), elastic LSRTM / RWI | ✅ |
 | `ElasticCurvilinear` | `['vp', 'vs', 'rho']` | 2D | `Elastic` on a curvilinear grid for irregular topography (`topography=`); eager only | ❌ |
 | `ElasticVRR` | `['vp', 'vs', 'Rp_x', 'Rp_z', 'Rs_x', 'Rs_z']` | 2D | Vector-reflectivity elastic (Soares & Sacchi 2025), momentum-stress form, no density model | ✅ |
 | `ViscoElastic` | `['vp', 'vs', 'rho', 'Qp', 'Qs']` | 2D | Nearly constant-Q visco-elastic, generalized standard linear solid (as SPECFEM2D); `vp`/`vs` given at `f_ref`, all five models differentiable | ✅ |
@@ -207,7 +208,7 @@ Roughly:
 - `Acoustic`: 2D acoustic equation
 - `Acoustic3D`: 3D counterpart
 - `AcousticVRZ`: acoustic variant with impedance-like parameterization
-- `AcousticLSRTM`: acoustic LSRTM-oriented variant
+- `AcousticBorn`: acoustic LSRTM-oriented variant
 
 ### Supported Backends
 

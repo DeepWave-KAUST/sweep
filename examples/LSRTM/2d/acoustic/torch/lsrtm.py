@@ -25,7 +25,7 @@ import torch
 import tqdm
 
 import configure_marmousi as shared_config
-from sweep.equations import Acoustic, AcousticLSRTM
+from sweep.equations import Acoustic, AcousticBorn
 from sweep.propagator.options import BoundaryOptions, CUDAOptions, CkptOptions, EagerOptions, MemoryOptions
 from sweep.propagator.torch import PropTorch
 from sweep.signal import ricker
@@ -42,7 +42,7 @@ def build_config(backend="torch", impl=None, device="auto"):
     cfg = shared_config.get_config("fwi_2d_acoustic_torch_common")
     cfg.update(
         {
-            "output_dir": "acoustic_lsrtm_torch",
+            "output_dir": "acoustic_born_torch",
             "fm": 10.0,
             "backend": backend,
             "impl": impl,
@@ -126,7 +126,7 @@ def build_acoustic_solver(shape, dev, cfg):
 
 
 def build_lsrtm_solver(shape, dev, cfg):
-    equation = AcousticLSRTM(
+    equation = AcousticBorn(
         spatial_order=cfg["spatial_order"],
         device=dev,
         backend="torch",

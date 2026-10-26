@@ -3,7 +3,7 @@
 `AcousticVTI` / `AcousticTTI` implement the decoupled pure-qP equation with the
 "new acoustic approximation" of Liang, Cao, Sun and Yin (2023, *Geophysics*
 88(1), WA335, [doi:10.1190/geo2022-0292.1](https://doi.org/10.1190/geo2022-0292.1)).
-`AcousticVTILSRTM` / `AcousticTTILSRTM` are their Born (LSRTM) equations. This
+`AcousticVTIBorn` / `AcousticTTIBorn` are their Born (LSRTM) equations. This
 page writes down the three operators the code implements: the forward step, its
 adjoint (the FWI gradient) and the Born equation. A worked example, RTM and LSRTM
 of a tilted anisotropic bed, is the notebook
@@ -154,7 +154,7 @@ first LSRTM iteration. Hence the default.
 
 ### impl='c'
 
-`qp_vti2d` / `qp_tti2d` (and `qp_vti_lsrtm2d` / `qp_tti_lsrtm2d`) run the same
+`qp_vti2d` / `qp_tti2d` (and `qp_vti_born2d` / `qp_tti_born2d`) run the same
 discretisation. The adjoint step is two launches: the state-dependent
 coefficients, the CPML adjoints of the own cell and the fused model gradient,
 then the transposed stencils. Because the backward needs the forward state of
@@ -196,7 +196,7 @@ $$
 $$
 
 For velocity LSRTM with the reflectivity $m_p = 2\,\delta V/V$ (as
-`AcousticLSRTM`):
+`AcousticBorn`):
 
 $$
 \frac{\partial^2 P_0}{\partial t^2} = V^2\mathcal L P_0 + f,\qquad
@@ -219,8 +219,8 @@ $$
 $$
 
 $\mathcal L_h[Q]$ being the bracket of the forward step with $S_n(\nabla Q)$ and
-the CPML memories of $Q$. This is what `AcousticVTILSRTM` / `AcousticTTILSRTM`
-step (`qP_lsrtm.py`; source on `h1`, receivers on `sh1`).
+the CPML memories of $Q$. This is what `AcousticVTIBorn` / `AcousticTTIBorn`
+step (`qP_born.py`; source on `h1`, receivers on `sh1`).
 
 **Why not linearise the space-domain step instead.** Linearising
 $\mathcal L_h[P_0 + \delta P]$ in $\delta P$ gives

@@ -48,8 +48,8 @@ if SOURCE_IMPORT and str(SRC_DIR) not in sys.path:
 from sweep.equations import (  # noqa: E402
     Acoustic,
     Acoustic3D,
-    AcousticLSRTM,
-    AcousticLSRTM3D,
+    AcousticBorn,
+    AcousticBorn3D,
     ViscoAcoustic,
     AcousticVRZ,
     AcousticVRZ3D,
@@ -84,7 +84,7 @@ class SolverSpec:
     source_type: tuple[str, ...]
     receiver_type: tuple[str, ...]
     pml_type: str
-    lsrtm: bool = False
+    born: bool = False
     elastic: bool = False
     supported_modes: tuple[str, ...] | None = None
     supported_scenarios: tuple[str, ...] | None = None
@@ -102,8 +102,8 @@ SOLVERS = {
     "acoustic3d": SolverSpec("acoustic3d", Acoustic3D, 3, ("vp",), ("h1",), ("h1",), "cpmlr"),
     "vrz2d": SolverSpec("vrz2d", AcousticVRZ, 2, ("vp", "z"), ("h1",), ("h1",), "cpmlr"),
     "vrz3d": SolverSpec("vrz3d", AcousticVRZ3D, 3, ("vp", "z"), ("h1",), ("h1",), "cpmlr"),
-    "lsrtm2d": SolverSpec("lsrtm2d", AcousticLSRTM, 2, ("vp", "mp"), ("h1",), ("sh1",), "cpmlr", True),
-    "lsrtm3d": SolverSpec("lsrtm3d", AcousticLSRTM3D, 3, ("vp", "mp"), ("h1",), ("sh1",), "cpmlr", True),
+    "born2d": SolverSpec("born2d", AcousticBorn, 2, ("vp", "mp"), ("h1",), ("sh1",), "cpmlr", True),
+    "born3d": SolverSpec("born3d", AcousticBorn3D, 3, ("vp", "mp"), ("h1",), ("sh1",), "cpmlr", True),
     # Visco-acoustic (Zhu & Harris NCQ): vp + Q + omega, acoustic pressure I/O.
     "visco2d": SolverSpec("visco2d", ViscoAcoustic, 2, ("vp", "Q", "omega"), ("h1",), ("h1",), "cpmlr"),
     "das2d": SolverSpec(
@@ -301,7 +301,7 @@ SCENARIOS = {
     ),
 }
 
-DEFAULT_SOLVERS = "acoustic2d,acoustic3d,vrz2d,vrz3d,lsrtm2d"
+DEFAULT_SOLVERS = "acoustic2d,acoustic3d,vrz2d,vrz3d,born2d"
 DEFAULT_MODES = "full,bs_gpu,bs_cpu,bs_cpu_pinned,bs_disk,bs_disk_async,ckpt_chunk,ckpt_recursive"
 DEFAULT_SCENARIOS = "interior,fd_edge,free_surface"
 
@@ -377,8 +377,8 @@ def require_cuda_bindings(solver_keys: list[str]):
         "acoustic3d": "acoustic3d",
         "vrz2d": "acoustic_vrz2d",
         "vrz3d": "acoustic_vrz3d",
-        "lsrtm2d": "acoustic_lsrtm2d",
-        "lsrtm3d": "acoustic_lsrtm3d",
+        "born2d": "acoustic_born2d",
+        "born3d": "acoustic_born3d",
         "visco2d": "visco_acoustic2d",
         "das2d": "das2d",
         "das3d": "das3d",
@@ -464,7 +464,7 @@ def make_models(spec: SolverSpec, shape: tuple[int, ...]):
     vp_init = depth_ramp(shape, 1800.0, 2400.0)
     vp_true = add_box(vp_init, 180.0)
 
-    if spec.lsrtm:
+    if spec.born:
         # A non-zero initial reflectivity, so the Born FORWARD is exercised: with
         # mp_init = 0 the record is identically zero and a record comparison can
         # never see a change in the forward (the gates ran that way until 2026-09).

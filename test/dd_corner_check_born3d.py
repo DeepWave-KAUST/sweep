@@ -1,4 +1,4 @@
-"""AcousticLSRTM3D variant of dd_corner_check: DD parity vs single domain.
+"""AcousticBorn3D variant of dd_corner_check: DD parity vs single domain.
 
 LSRTM carries TWO coupled fields (background + scattered) in one wavefield list,
 so domain decomposition has to rotate and halo-exchange both: the forward ships
@@ -12,7 +12,7 @@ dipping reflectivity sheet plus lateral variation), so a stale halo of any of
 the four carried fields shows up in the record or in a gradient.  Every
 comparison first asserts its signal is non-zero: 0 == 0 is not a pass.
 
-Launch: torchrun --standalone --nproc-per-node=N test/dd_corner_check_lsrtm3d.py --py P --px X
+Launch: torchrun --standalone --nproc-per-node=N test/dd_corner_check_born3d.py --py P --px X
         (N = P * X; --py 1 --px 1 is the single-card run of the full DD machinery)
 """
 from __future__ import annotations
@@ -22,7 +22,7 @@ import numpy as np, torch, torch.distributed as dist
 
 REPO_ROOT = Path(__file__).resolve().parents[1]; SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path: sys.path.insert(0, str(SRC_ROOT))
-from sweep.equations import AcousticLSRTM3D               # noqa: E402
+from sweep.equations import AcousticBorn3D               # noqa: E402
 from sweep.parallel import MeshTopology                   # noqa: E402
 from sweep.parallel.dd_propagator import ModelParallel    # noqa: E402
 from sweep.propagator import BoundarySaving, PropTorch     # noqa: E402
@@ -71,7 +71,7 @@ def main():
     wav = torch.as_tensor(ricker(nt, DT), device=dev)
 
     def build_prop():
-        eq = AcousticLSRTM3D(spatial_order=args.so, device=dev, backend="torch")
+        eq = AcousticBorn3D(spatial_order=args.so, device=dev, backend="torch")
         return PropTorch(eq, backend="torch", impl="c", shape=gshape, dh=DH, dt=DT, nt=nt,
                          abcn=args.abcn, source_type=["h1"], receiver_type=["sh1"], dev=dev,
                          free_surface=False, pml_type="cpmlr", memory=BoundarySaving())
@@ -122,7 +122,7 @@ def main():
                   f"by y: seam(+/-3)={yp[ny//2-3:ny//2+3].sum()/yp.sum():.2f}", flush=True)
     if rank == 0:
         gvp = f"{vp_ref.grad.norm():.2e}" if vpg else "n/a"
-        print(f"LSRTM3D py{args.py}xpx{args.px} nt{nt} src={args.src} vp_grad={int(vpg)}: signal={signal} "
+        print(f"BORN3D py{args.py}xpx{args.px} nt{nt} src={args.src} vp_grad={int(vpg)}: signal={signal} "
               f"|rec|max={np.abs(R).max():.2e} |g_vp|={gvp} |g_mp|={mp_ref.grad.norm():.2e} | "
               f"rec rel={rec_rel:.2e} vp.grad rel={vp_rel:.2e} mp.grad rel={mp_rel:.2e} "
               f"[bit rec={bits[0]} vp={bits[1]} mp={bits[2]}] -> {'PASS' if ok else 'FAIL'}(tol={TOL:.0e})",

@@ -1,7 +1,7 @@
 #include <cuda_runtime.h>
 
 
-#include "acoustic_lsrtm3d.h"
+#include "acoustic_born2d.h"
 #include "kernels.cuh"
 #include "../../common/acoustic.h"
 #include "../../common/boundary_runtime.cuh"
@@ -11,8 +11,10 @@
 #include "../../common/cudautils.h"
 #include "../../common/checkpoint_runtime.cuh"
 #include "../../launch/config.h"
+#include "../../operators/gradient.cuh"
+#include "../../operators/laplace.cuh"
 
-namespace acoustic_lsrtm3d {
+namespace acoustic_born2d {
 
 namespace {
 
@@ -23,12 +25,10 @@ std::vector<Buf> slice_wavefields(
 ) {
     SWEEP_CHECK(
         tensors.size() >= start + count,
-        "Acoustic LSRTM 3D wavefield buffer does not contain enough tensors."
+        "Acoustic LSRTM 2D wavefield buffer does not contain enough tensors."
     );
-    return std::vector<Buf>(
-        tensors.begin() + static_cast<long>(start),
-        tensors.begin() + static_cast<long>(start + count)
-    );
+    return std::vector<Buf>(tensors.begin() + static_cast<long>(start),
+                                      tensors.begin() + static_cast<long>(start + count));
 }
 
 } // namespace
@@ -38,29 +38,28 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
     const auto& p = in;
     ForwardOutputCore out;
 
-    SWEEP_CHECK(p.models.size() == 2, "Acoustic LSRTM 3D expects two models: vp and mp.");
+    SWEEP_CHECK(p.models.size() == 2, "Acoustic LSRTM 2D expects two models: vp and mp.");
 
     auto vp = p.models[0];
     auto mp = p.models[1];
 
     float dx = p.spacing[0];
-    float dy = p.spacing[1];
-    float dz = p.spacing[2];
+    float dz = p.spacing[1];
 
     int N = vp.size(0);
     int C = vp.size(1);
     int nz = vp.size(2);
-    int ny = vp.size(3);
-    int nx = vp.size(4);
-    int B = N * C;
+    int nx = vp.size(3);
 
     int nsrc = p.sources_loc.size(1);
     int nrec = p.receivers_loc.size(1);
+    int B = N * C;
+
     const int order = (p.M <= 4) ? static_cast<int>(2 * p.M) : -1;
 
-    SolverContext ctx{3, nx, ny, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
-                      p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, dy, dz};
-    // DD cut-aware: the CPML band (solver.in_cpml_3d) shrinks to the M halo on a
+    SolverContext ctx{2, nx, 0, nz, B, p.dt, p.nt, p.M, p.abcn, p.free_surface,
+                      p.lap_coes.data_ptr<float>(), p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
+    // DD cut-aware: the CPML band (solver.in_cpml_2d) shrinks to the M halo on a
     // cut face, and the boundary save kernels SKIP cut faces -- whose boundary
     // buffers are numel-0 under DD -- only if the mask reaches the context.
     ctx.set_cut_mask(p.cut_face_mask);
@@ -72,57 +71,56 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
     const int it0 = p.it_begin;
     const int it1 = (p.it_end < 0) ? static_cast<int>(p.nt) : p.it_end;
     SWEEP_CHECK(0 <= it0 && it0 <= it1 && it1 <= static_cast<int>(p.nt),
-                "acoustic_lsrtm3d stepped forward: require 0 <= it_begin <= it_end <= nt, got [",
+                "acoustic_born2d stepped forward: require 0 <= it_begin <= it_end <= nt, got [",
                 it0, ", ", it1, ") with nt=", p.nt);
     // No phase split here: the LSRTM DD schedule is serial (step, then exchange),
     // so a phased call would silently run the whole step twice.
     SWEEP_CHECK(p.step_phase == 0,
-                "acoustic_lsrtm3d forward does not implement step_phase (got ", p.step_phase,
+                "acoustic_born2d forward does not implement step_phase (got ", p.step_phase,
                 "); its DD schedule must be the serial one");
 
     // The propagator binds the forward wavefield state on EVERY call -- the
     // persistent save_all pool or the per-call transient set (_c.py
     // Wrapper.forward, ``params.wavefields = cp.forward_wavefields``, sized by
-    // AcousticLSRTM3D.cuda_layout base_nvar 6 + pml_nvar 18) -- so the list is
+    // AcousticBorn.cuda_layout base_nvar 6 + pml_nvar 12) -- so the list is
     // never empty and there is no unbound caller left to allocate for.
     AcousticWavefieldTensor bg;
     AcousticWavefieldTensor sc;
-    SWEEP_CHECK(p.wavefields.size() == 24,
-                "acoustic_lsrtm3d/forward requires the propagator-bound wavefields "
-                "(cuda_layout.base_nvar + pml_nvar = 24 tensors: bg+sc, each 12 with the "
+    SWEEP_CHECK(p.wavefields.size() == 18,
+                "acoustic_born2d/forward requires the propagator-bound wavefields "
+                "(cuda_layout.base_nvar + pml_nvar = 18 tensors: bg+sc, each 9 with the "
                 "psi double-buffer), got ", p.wavefields.size());
-    bg.bind(slice_wavefields(p.wavefields, 0, 12), 3, true);
-    sc.bind(slice_wavefields(p.wavefields, 12, 12), 3, true);
+    bg.bind(slice_wavefields(p.wavefields, 0, 9), 2, true);
+    sc.bind(slice_wavefields(p.wavefields, 9, 9), 2, true);
 
     AcousticCPMLTensor cpml_tensor;
-    cpml_tensor.bind(p.pml_vals, 3);
+    cpml_tensor.bind(p.pml_vals, 2);
     auto cpml = cpml_tensor.view();
 
-    // record_out is bound on every call: AcousticLSRTM3D.cuda_layout declares
+    // record_out is bound on every call: AcousticBorn.cuda_layout declares
     // record_shape, so cp.record_shape is never None and _c.py allocates it.
     auto record = bound_required(p.record_out, {N, nrec, p.nt},
-                                 "record_out (acoustic_lsrtm3d/forward, cuda_layout.record_shape)");
+                                 "record_out (acoustic_born2d/forward, cuda_layout.record_shape)");
+
     // u_allt_out is bound whenever save_all_wavefields is on: cuda_layout
     // declares save_all_shape, so cp.u_allt_shape is never None.
     // rwi: vp asks for its RWI tomographic gradient (cuda_layout_for_grads), read
     // off what the propagator bound -- the history then stacks [bg_utt, sc_utt]
-    // per step (history_fields(2); sc_utt feeds term II) and bs saves both fields'
-    // boundaries (last_two holds 2 fields).  Otherwise this is the reflectivity-
-    // only forward of the classic LSRTM, exactly as before.
-    const bool rwi = p.save_all_wavefields ? p.u_allt_out.dim() == 6
+    // per step (history_fields(2); the scattered u_tt feeds term II) and bs saves
+    // both fields' boundaries (last_two holds 2 fields).  Otherwise this is the
+    // reflectivity-only forward of the classic LSRTM, exactly as before.
+    const bool rwi = p.save_all_wavefields ? p.u_allt_out.dim() == 5
                    : (p.use_boundary_saving && p.last_two.size(0) == 2);
     Buf bg_utt_all;
-    if (p.save_all_wavefields && rwi) {
-        bg_utt_all = bound_required(p.u_allt_out, {p.nt, 2, B, nz, ny, nx},
-                                    "u_allt_out (acoustic_lsrtm3d/forward, cuda_layout.save_all_shape)");
-    } else if (p.save_all_wavefields) {
-        bg_utt_all = bound_required(p.u_allt_out, {p.nt, B, nz, ny, nx},
-                                    "u_allt_out (acoustic_lsrtm3d/forward, cuda_layout.save_all_shape)");
-    }
+    if (p.save_all_wavefields && rwi)
+        bg_utt_all = bound_required(p.u_allt_out, {p.nt, 2, B, nz, nx},
+                                    "u_allt_out (acoustic_born2d/forward, cuda_layout.save_all_shape)");
+    else if (p.save_all_wavefields)
+        bg_utt_all = bound_required(p.u_allt_out, {p.nt, B, nz, nx},
+                                    "u_allt_out (acoustic_born2d/forward, cuda_layout.save_all_shape)");
 
-    if (p.use_checkpoint) {
-        SWEEP_CHECK(p.checkpoints.size() == 8, "Acoustic LSRTM 3D checkpointing expects 8 checkpoint tensors.");
-    }
+    if (p.use_checkpoint)
+        SWEEP_CHECK(p.checkpoints.size() == 6, "Acoustic LSRTM 2D checkpointing expects 6 checkpoint tensors.");
     if (p.use_recursive_checkpoint) {
         SWEEP_CHECK(p.checkpoint_steps.defined(), "Recursive checkpointing expects checkpoint_steps.");
         SWEEP_CHECK(p.checkpoint_steps.dim() == 1, "checkpoint_steps must be 1-D.");
@@ -133,32 +131,31 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
     bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
     if (staged_boundary) {
         boundary_saver.allocate(
-            p.use_boundary_saving, 3, rwi ? 2 : 1, ctx, vp, save_width, 2,
-            true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu, p.last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging
+            p.use_boundary_saving, 2, rwi ? 2 : 1, ctx, vp, save_width, 2, true, false,
+            p.transfer_interval, p.boundary_cpu, p.boundary_gpu, p.last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging
         );
     } else {
         boundary_saver.allocate(
-            p.use_boundary_saving, 3, rwi ? 2 : 1, ctx, vp, save_width, 2,
-            true, true, 1, {}, p.boundary_gpu, p.last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging
+            p.use_boundary_saving, 2, rwi ? 2 : 1, ctx, vp, save_width, 2, true, true,
+            1, {}, p.boundary_gpu, p.last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging
         );
     }
     auto bs = boundary_saver.view();
 
-    auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);
+    auto launch_config = fdtd::Wave2D::make(nx, nz, B);
     auto source_config = fdtd::Geom::make(nsrc, B);
     auto record_config = fdtd::Geom::make(nrec, B);
 
-    LaplaceParam lap_ctx{nx, ny, p.M, p.lap_coes.data_ptr<float>(), dx, dy, dz};
-    GradParam grad_ctx{1, nx, nx * ny, p.M, p.grad_coes.data_ptr<float>(), dx, dy, dz};
+    LaplaceParam lap_ctx{nx, 1, p.M, p.lap_coes.data_ptr<float>(), dx, 0.f, dz};
+    GradParam grad_ctx{1, 0, nx, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, dz};
     GradParam grad_ctx_x{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dx, 0.f, 0.f};
-    GradParam grad_ctx_y{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dy, 0.f, 0.f};
     GradParam grad_ctx_z{1, 0, 0, p.M, p.grad_coes.data_ptr<float>(), dz, 0.f, 0.f};
 
     AsyncCopyContext async_copy(staged_boundary && p.use_boundary_saving);
     const std::vector<std::string> disk_files = p.boundary_disk_files.vec();   // the runtime keeps a pointer to it
     BoundaryRuntime boundary_runtime(
         boundary_saver,
-        3,
+        2,
         p.use_boundary_saving,
         p.boundary_on_cpu,
         p.boundary_on_disk,
@@ -171,14 +168,14 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
     );
     CheckpointRuntime checkpoint_runtime(
         p.checkpoints,
-        8,
+        6,
         p.use_checkpoint,
         p.use_recursive_checkpoint,
         p.checkpoint_interval,
         p.checkpoint_steps,
         p.checkpoint_on_cpu,
         "forward",
-        "acoustic_lsrtm3d"
+        "acoustic_born2d"
     );
 
     for (int it = it0; it < it1; ++it) {
@@ -188,7 +185,7 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
             : (rwi ? bg_utt_all.select(0, it).select(0, 0) : bg_utt_all.select(0, it)).data_ptr<float>();
         float* sc_utt_ptr = (bg_utt_all.defined() && rwi) ? bg_utt_all.select(0, it).select(0, 1).data_ptr<float>() : nullptr;
 
-        ACOUSTIC_LSRTM3D_COUPLED(
+        ACOUSTIC_BORN2D_COUPLED(
             order,
             launch_config.grid,
             launch_config.block,
@@ -202,27 +199,28 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
             lap_ctx,
             grad_ctx,
             grad_ctx_x,
-            grad_ctx_y,
             grad_ctx_z,
             cpml,
             ctx
         );
 
         if (p.use_boundary_saving && rwi) {
-            // field 0 = background, field 1 = scattered: the bs backward reconstructs both.
+            // field 0 = background, field 1 = scattered: the bs backward reconstructs
+            // both, since terms II/III/IV of the RWI vp gradient correlate against the
+            // scattered field.
             float* bs_fields[2] = { bg_view.u_now, sc_view.u_now };
             for (int f = 0; f < 2; ++f) {
-                boundary_runtime.save_forward_3d_field(
+                boundary_runtime.save_forward_2d_field(
                     it, p.nt, bs_fields[f], launch_config.grid, launch_config.block,
                     bs, save_width, 0, ctx, f, /*flush_chunk=*/f == 1);
             }
         } else if (p.use_boundary_saving) {
-            boundary_runtime.save_forward_3d(
+            boundary_runtime.save_forward_2d(
                 it, p.nt, bg_view.u_now, launch_config.grid, launch_config.block,
                 bs, save_width, 0, ctx);
         }
 
-        add_source_3d<<<source_config.grid, source_config.block>>>(
+        add_source<<<source_config.grid, source_config.block>>>(
             bg_view.u_next,
             p.source.data_ptr<float>(),
             p.sources_loc.data_ptr<int>(),
@@ -231,7 +229,7 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
             ctx
         );
 
-        record_kernel_3d<<<record_config.grid, record_config.block>>>(
+        record_kernel<<<record_config.grid, record_config.block>>>(
             sc_view.u_next,
             record.data_ptr<float>(),
             p.receivers_loc.data_ptr<int>(),
@@ -248,7 +246,7 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
 
     // last_two seeds the backward reconstruction: only once the final segment ran.
     if (p.use_boundary_saving && it1 == static_cast<int>(p.nt)) {
-        // [field, time, B, nz, ny, nx]; select(1, t) would broadcast bg into both fields.
+        // [field, time, B, nz, nx]; select(1, t) would broadcast bg into both fields.
         copy_tensor_cuda_async(boundary_saver.last_two.select(0, 0).select(0, 0), bg.u_prev_t);
         copy_tensor_cuda_async(boundary_saver.last_two.select(0, 0).select(0, 1), bg.u_now_t);
         if (rwi) {
@@ -259,7 +257,7 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
 
     boundary_runtime.synchronize();
 
-    out.wavefield = bg_utt_all.defined() ? bg_utt_all : Buf{};
+    out.wavefield = bg_utt_all;
     out.last_two = p.use_boundary_saving ? p.last_two : Buf{};   // the tensor Python bound
     out.record = record;
     return out;
@@ -267,4 +265,4 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
 
 
 
-} // namespace acoustic_lsrtm3d
+} // namespace acoustic_born2d

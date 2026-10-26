@@ -26,7 +26,7 @@ exact one of this forward map.
 
 Fields: the background (h1 ... zetaz) and the scattered field (sh1 ... szetaz),
 each with its own CPML memories.  Source on h1, receivers on sh1 by default, as
-:class:`~sweep.equations.AcousticLSRTM`.
+:class:`~sweep.equations.AcousticBorn`.
 """
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec, history_fields, record_single
@@ -166,8 +166,8 @@ class _QPBorn(SecondOrderEquation):
         return (u_next, bg[0], *aux0, su_next, sc[0], *aux1)
 
 
-@register_equation(aliases=("AcousticVTIBorn",))
-class AcousticVTILSRTM(_QPBorn):
+@register_equation()
+class AcousticVTIBorn(_QPBorn):
     """Born / LSRTM equation of the pure-qP VTI operator (:class:`AcousticVTI`).
 
     A background qP field ``h1`` in the smooth ``vp`` / ``epsilon`` /
@@ -184,7 +184,7 @@ class AcousticVTILSRTM(_QPBorn):
         ModelSpec("mp", aliases=("reflectivity", "ref"), description="Velocity reflectivity 2 dv / v of the Born scattering."),
     )
 
-    C_NAME = "qp_vti_lsrtm2d"
+    C_NAME = "qp_vti_born2d"
     _adjoint_fns = _vti.AcousticVTI._adjoint_fns
 
     def _rhs(self, f, aniso, dt, h, b):
@@ -196,11 +196,11 @@ class AcousticVTILSRTM(_QPBorn):
                              s_frozen=self.s_gradient == "frozen")
 
 
-@register_equation(aliases=("AcousticTTIBorn",))
-class AcousticTTILSRTM(_QPBorn):
+@register_equation()
+class AcousticTTIBorn(_QPBorn):
     """Born / LSRTM equation of the pure-qP TTI operator (:class:`AcousticTTI`).
 
-    As :class:`AcousticVTILSRTM`, with the tilt ``theta`` (radians).
+    As :class:`AcousticVTIBorn`, with the tilt ``theta`` (radians).
     """
 
     MODEL_SPECS = (
@@ -211,7 +211,7 @@ class AcousticTTILSRTM(_QPBorn):
         ModelSpec("mp", aliases=("reflectivity", "ref"), description="Velocity reflectivity 2 dv / v of the Born scattering."),
     )
 
-    C_NAME = "qp_tti_lsrtm2d"
+    C_NAME = "qp_tti_born2d"
     _adjoint_fns = _tti.AcousticTTI._adjoint_fns
 
     def _rhs(self, f, aniso, dt, h, b):

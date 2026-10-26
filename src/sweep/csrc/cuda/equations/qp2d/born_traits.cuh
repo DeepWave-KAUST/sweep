@@ -1,5 +1,5 @@
 // Driver traits of the Born (LSRTM) pair of the pure-qP equations,
-// AcousticVTILSRTM / AcousticTTILSRTM (qP_lsrtm.py): a background field and a
+// AcousticVTIBorn / AcousticTTIBorn (qP_born.py): a background field and a
 // scattered field, each with its own CPML memories and its own S_n, the
 // scattered field driven by mp times the background's update (kernels.cuh,
 // qp_born_forward).  The backward returns the reflectivity gradient: the
@@ -42,7 +42,7 @@ struct BornWavefield {
 template <bool TILT>
 struct BornDriver {
     static constexpr int NDIM = 2;
-    static constexpr const char* NAME = TILT ? "qp_tti_lsrtm2d" : "qp_vti_lsrtm2d";
+    static constexpr const char* NAME = TILT ? "qp_tti_born2d" : "qp_vti_born2d";
     static constexpr int NMODELS = TILT ? 5 : 4;     // vp, epsilon, delta[, theta], mp
     static constexpr int CKPT_NVAR = 6;
     static constexpr int BS_NVAR = 10;               // both frames: p + 4 memories each

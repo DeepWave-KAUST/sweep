@@ -24,7 +24,7 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "test"))
 
 import qp_aniso_consistency as Q  # noqa: E402
-from sweep.equations import AcousticTTI, AcousticTTILSRTM, AcousticVTI, AcousticVTILSRTM  # noqa: E402
+from sweep.equations import AcousticTTI, AcousticTTIBorn, AcousticVTI, AcousticVTIBorn  # noqa: E402
 from sweep.propagator.options import BoundarySaving, EagerOptions, Full  # noqa: E402
 from sweep.propagator.torch import PropTorch  # noqa: E402
 
@@ -72,7 +72,7 @@ def main():
     for cls in (AcousticVTI, AcousticTTI):
         cases += [(cls, 4, 10.0, 3, False), (cls, 4, (8.0, 12.0), 1, False), (cls, 4, (12.0, 8.0), 2, False)]
         cases += [(cls, so, 10.0, 1, False) for so in (2, 6, 10)]
-    cases += [(AcousticVTILSRTM, 4, 10.0, 2, True), (AcousticTTILSRTM, 4, (8.0, 12.0), 2, True)]
+    cases += [(AcousticVTIBorn, 4, 10.0, 2, True), (AcousticTTIBorn, 4, (8.0, 12.0), 2, True)]
     worst = 0.0
     for cls, so, dh, nshot, born in cases:
         ref = run(cls, so, dh, "eager", None, nshot, born)

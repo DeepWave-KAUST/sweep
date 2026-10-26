@@ -205,14 +205,16 @@ wavefields, and backend / binding behavior:
 - [Acoustic3D](acoustic3d.md)
 - [Acoustic1st](acoustic1st.md)
 - [AcousticVRZ / AcousticVRZ3D](acoustic_vrz.md)
-- [AcousticLSRTM](acoustic_lsrtm.md)
-- [AcousticLSRTM3D](acoustic_lsrtm3d.md)
+- [AcousticBorn](acoustic_born.md)
+- [AcousticBorn3D](acoustic_born3d.md)
 - [ViscoAcoustic](visco_acoustic.md)
 
 **Elastic family**
 
 - [Elastic](elastic.md)
 - [Elastic3D](elastic3d.md)
+- [ElasticBorn](elastic_born.md) — Born modelling (background + scattered
+  field), the elastic LSRTM / RWI operator
 - [ViscoElastic](visco_elastic.md)
 - [ElasticTTI](elastic_tti.md)
 - [ElasticTTISG](elastic_tti_sg.md)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AcousticLSRTM / AcousticLSRTM3D boundary staging: storage='cpu' against
+"""AcousticBorn / AcousticBorn3D boundary staging: storage='cpu' against
 storage='gpu' (and against itself, run twice), on one card, through the plain
 single-domain PropTorch and through a single-tile ModelParallel (the stepped DD
 path without a cut), with the mp gradient alone (one boundary field) and with
@@ -8,7 +8,7 @@ the RWI vp gradient too (two boundary fields: background and scattered).
 Staging only moves where the boundary lives, so every comparison must be
 bitwise in fp32.
 
-    PYTHONPATH=src python test/lsrtm_staging_check.py
+    PYTHONPATH=src python test/born_staging_check.py
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ import torch
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
-from sweep.equations import AcousticLSRTM, AcousticLSRTM3D  # noqa: E402
+from sweep.equations import AcousticBorn, AcousticBorn3D  # noqa: E402
 from sweep.parallel import MeshTopology, ModelParallel  # noqa: E402
 from sweep.propagator.torch import PropTorch  # noqa: E402
 
@@ -55,7 +55,7 @@ def setup(dim):
 
 def run(dim, path, storage, rwi):
     shape, vp, mp, wav, src, rec = setup(dim)
-    eq = (AcousticLSRTM if dim == 2 else AcousticLSRTM3D)(spatial_order=order, device=dev)
+    eq = (AcousticBorn if dim == 2 else AcousticBorn3D)(spatial_order=order, device=dev)
     prop = PropTorch(eq, backend="torch", impl="c", shape=shape, dh=dh, dt=dt, nt=nt, abcn=abcn,
                      source_type=["h1"], receiver_type=["sh1"], dev=dev,
                      boundary_saving_config={"enabled": True, "storage": storage,

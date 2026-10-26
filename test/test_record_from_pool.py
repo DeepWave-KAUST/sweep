@@ -31,7 +31,7 @@ CASES = {
     "acoustic3d": ("acoustic3d", 3),
     "vrz2d": ("acoustic_vrz2d", 3),
     "vrz3d": ("acoustic_vrz3d", 3),
-    "lsrtm2d": ("acoustic_lsrtm2d", 3),
+    "born2d": ("acoustic_born2d", 3),
     "visco2d": ("visco_acoustic2d", 3),
     "elastic2d": ("elastic2d", 4),
     "das2d": ("das2d", 4),
@@ -54,7 +54,7 @@ def test_the_forward_writes_the_handed_over_record(key, monkeypatch):
     shape = suite.shape_for(spec, ns)
     scenario = suite.SCENARIOS["interior"]
     _true, models_init, grad_flags = suite.make_models(spec, shape)
-    if key == "lsrtm2d":
+    if key == "born2d":
         models_init = list(models_init)   # a non-zero reflectivity, so the Born record is non-zero
         mp = models_init[1].copy(); mp[mp.shape[0] // 2:mp.shape[0] // 2 + 2, :] = 0.05
         models_init[1] = mp

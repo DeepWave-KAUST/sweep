@@ -28,7 +28,7 @@ import sweep.propagator._c as c_prop  # noqa: E402
 CASES = {
     "acoustic2d": "acoustic2d",
     "vrz2d": "acoustic_vrz2d",
-    "lsrtm2d": "acoustic_lsrtm2d",
+    "born2d": "acoustic_born2d",
     "elastic2d": "elastic2d",
     "das2d": "das2d",
     "das_mu2d": "das_mu2d",
@@ -48,7 +48,7 @@ def _run(key, monkeypatch, *, with_grad):
     shape = suite.shape_for(spec, ns)
     scenario = suite.SCENARIOS["interior"]
     _true, models_init, grad_flags = suite.make_models(spec, shape)
-    if key == "lsrtm2d":
+    if key == "born2d":
         models_init = list(models_init)   # a non-zero reflectivity, so the Born record is non-zero
         mp = models_init[1].copy(); mp[mp.shape[0] // 2:mp.shape[0] // 2 + 2, :] = 0.05
         models_init[1] = mp

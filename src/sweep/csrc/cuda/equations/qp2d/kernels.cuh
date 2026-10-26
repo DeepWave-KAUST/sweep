@@ -568,7 +568,7 @@ __global__ void qp_adjoint_apply(AcousticWavefieldPointer adj, Scratch scr,
 }
 
 // ---------------------------------------------------------------------------
-// Born (LSRTM) pair, qP_lsrtm.py: a background field and a scattered field
+// Born (LSRTM) pair, qP_born.py: a background field and a scattered field
 // with their own CPML memories and their own S_n, the scattered one driven by
 // mp times the background's update:
 //   bg' = 2 bg - bg_prev + r0,   sc' = 2 sc - sc_prev + r1 + mp r0,

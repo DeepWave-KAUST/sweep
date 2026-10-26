@@ -92,6 +92,13 @@ class CUDALayoutSpec:
     # double-buffers psi via pml_nvar): adjoint gets base+pml+adjoint_extra
     # tensors, forward stays base+pml.  0 = equation has no fused-adjoint path.
     adjoint_extra_nvar: int = 0
+    # The forward slots (indices into the base_nvar + pml_nvar list) the
+    # backward binds as its own state -- the adjoint wavefields and the
+    # checkpoint replay set take these slots' shapes, in this order.  For a
+    # driver whose forward steps more fields than its backward (ElasticBorn:
+    # the backward is elastic2d's, on the background field alone).  None =
+    # the whole forward list.
+    backward_state_slots: tuple | None = None
     boundary_tangent_pad: int = 0
     # Shell width in units of M (plus one cell): what the C-side
     # save_width/boundary_offset store.  1 = the reverse step's M.  An
@@ -186,7 +193,7 @@ class CUDALayoutSpec:
     # gradients.  False keeps wavelet.grad = None there, as the pybind shim did,
     # instead of handing autograd the untouched zero buffer.
     grads_out_wavelet_written: bool = True
-    # RWI (AcousticLSRTM / AcousticLSRTM3D): the backward can split term III of the
+    # RWI (AcousticBorn / AcousticBorn3D): the backward can split term III of the
     # tomographic vp gradient into BackwardInput.grad_split_iii_out (full and
     # boundary-saving modes) so the caller can apply the beta weight of Wu &
     # Alkhalifah (2015, eq. 18-20).  Opt-in at run time with SWEEP_LSRTM_SPLIT_III=1.
@@ -222,7 +229,7 @@ class CUDALayoutSpec:
         """Number of distinct fields the boundary saver writes per timestep.
 
         Defaults to ``base_nvar`` for backward compatibility, but second-order
-        time-stepping schemes (acoustic, acoustic_vrz, acoustic_lsrtm) only
+        time-stepping schemes (acoustic, acoustic_vrz, acoustic_born) only
         write the primary pressure field to the boundary buffer — they should
         set ``boundary_save_nvar=1`` to avoid over-allocating the GPU-side
         boundary tensors by a factor of ``base_nvar``.

@@ -140,7 +140,7 @@ TIER_A = [
     Cfg("elastic2d", "c", "bs_gpu", "free_surface", "canon"),
     Cfg("elastic3d", "c", "bs_gpu", "interior", "canon"),
     Cfg("vrz2d", "c", "bs_gpu", "interior", "canon"),
-    Cfg("lsrtm2d", "c", "bs_gpu", "interior", "canon"),
+    Cfg("born2d", "c", "bs_gpu", "interior", "canon"),
     # real physical interior
     Cfg("acoustic2d", "eager", "full", "interior", "phys"),
     Cfg("acoustic2d", "c", "bs_gpu", "interior", "phys"),
@@ -153,7 +153,7 @@ TIER_A = [
 # by anything here -- the one equation with a CUDA kernel outside the suite.
 # Run gate/evr_ab.py for it; gate/verify_all.sh does.
 ALL_SOLVERS = (
-    "acoustic2d", "acoustic3d", "vrz2d", "vrz3d", "lsrtm2d", "lsrtm3d",
+    "acoustic2d", "acoustic3d", "vrz2d", "vrz3d", "born2d", "born3d",
     "das2d", "das3d", "das_mu2d", "das_mu3d", "elastic2d", "elastic3d",
     "acoustic_vti_1st_2d", "acoustic_vti_1st_3d", "elastic_tti_sg2d",
     # The suite has had specs for these two since it was written; the list

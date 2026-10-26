@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """impl='c' against an eager twin of its forward, for the second-order acoustic
-family (Acoustic, Acoustic3D, AcousticLSRTM(3D), AcousticVRZ(3D), ViscoAcoustic).
+family (Acoustic, Acoustic3D, AcousticBorn(3D), AcousticVRZ(3D), ViscoAcoustic).
 
 The c kernels never update the outer M (halo) cells; eager's zero-padded
 stencils do.  ``eager+halo0`` (eager with the halo zeroed after every step)
@@ -39,7 +39,7 @@ import qp_aniso_consistency as Q  # noqa: E402
 from sweep import equations as E  # noqa: E402
 from sweep.propagator.options import BoundarySaving, Ckpt, EagerOptions, Full  # noqa: E402
 from sweep.propagator.torch import PropTorch  # noqa: E402
-from c_twins import (halo0, product_rule_acoustic3d, product_rule_lsrtm2d, product_rule_lsrtm3d,  # noqa: E402
+from c_twins import (halo0, product_rule_acoustic3d, product_rule_born2d, product_rule_born3d,  # noqa: E402
                      product_rule_vrz2d, product_rule_vrz3d)
 
 DT, DH, FM, ABCN = 1e-3, 10.0, 15.0, 12
@@ -118,8 +118,8 @@ def run(cls, so, label, grads):
 # The eager twin of each c forward: the halo kept at 0, and the CPML in the
 # kernel's own form (c_twins.py).
 TWINS = {"Acoustic3D": product_rule_acoustic3d, "AcousticVRZ": product_rule_vrz2d,
-         "AcousticVRZ3D": product_rule_vrz3d, "AcousticLSRTM": product_rule_lsrtm2d,
-         "AcousticLSRTM3D": product_rule_lsrtm3d}
+         "AcousticVRZ3D": product_rule_vrz3d, "AcousticBorn": product_rule_born2d,
+         "AcousticBorn3D": product_rule_born3d}
 
 
 def twin(cls):
@@ -129,8 +129,8 @@ def twin(cls):
 # "<class>+vp": the same class with vp requiring grad too (the LSRTM RWI path);
 # "<class>+w": with the wavelet requiring grad (d is linear in it: dot_w applies)
 GRADS = {"Acoustic": ["wavelet", "vp"], "Acoustic3D": ["wavelet", "vp"],
-         "AcousticLSRTM": ["mp"], "AcousticLSRTM+vp": ["mp", "vp"], "AcousticLSRTM+w": ["mp", "wavelet"],
-         "AcousticLSRTM3D": ["mp"], "AcousticLSRTM3D+vp": ["mp", "vp"], "AcousticLSRTM3D+w": ["mp", "wavelet"],
+         "AcousticBorn": ["mp"], "AcousticBorn+vp": ["mp", "vp"], "AcousticBorn+w": ["mp", "wavelet"],
+         "AcousticBorn3D": ["mp"], "AcousticBorn3D+vp": ["mp", "vp"], "AcousticBorn3D+w": ["mp", "wavelet"],
          "AcousticVRZ": ["vp", "z"], "AcousticVRZ3D": ["vp", "z"],
          "AcousticVRZ+w": ["vp", "z", "wavelet"], "AcousticVRZ3D+w": ["vp", "z", "wavelet"],
          "ViscoAcoustic": ["wavelet", "vp"]}

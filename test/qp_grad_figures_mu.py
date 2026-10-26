@@ -44,7 +44,7 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "test"))
 
 import qp_aniso_consistency as Q  # noqa: E402
-from sweep.equations import AcousticTTI, AcousticTTILSRTM, AcousticVTILSRTM  # noqa: E402
+from sweep.equations import AcousticTTI, AcousticTTIBorn, AcousticVTIBorn  # noqa: E402
 from sweep.propagator.options import BoundarySaving, EagerOptions, Full  # noqa: E402
 from sweep.propagator.torch import PropTorch  # noqa: E402
 
@@ -211,11 +211,11 @@ def main():
     # Born: the RTM image (m = 0); d_obs the eager TTI Born data of m_true
     obs = [md["vp_smooth"], md["epsilon"], md["delta"], md["theta"], md["m"]]
     rows = []
-    for cls, sg, lab in ((AcousticVTILSRTM, "adjoint", "VTI adjoint"), (AcousticTTILSRTM, "adjoint", "TTI adjoint"),
-                         (AcousticTTILSRTM, "frozen", "TTI frozen")):
-        bg = [md["vp_smooth"], md["epsilon"], md["delta"]] + ([md["theta"]] if cls is AcousticTTILSRTM else [])
+    for cls, sg, lab in ((AcousticVTIBorn, "adjoint", "VTI adjoint"), (AcousticTTIBorn, "adjoint", "TTI adjoint"),
+                         (AcousticTTIBorn, "frozen", "TTI frozen")):
+        bg = [md["vp_smooth"], md["epsilon"], md["delta"]] + ([md["theta"]] if cls is AcousticTTIBorn else [])
         print(f"born {lab}", flush=True)
-        g = gradients(cls, sg, args.nt, args.shots, AcousticTTILSRTM, obs, bg + [np.zeros_like(md["m"])], ["mp"])
+        g = gradients(cls, sg, args.nt, args.shots, AcousticTTIBorn, obs, bg + [np.zeros_like(md["m"])], ["mp"])
         rows.append((f"m {lab}", {k: v["mp"] for k, v in g.items()}))
         for k, v in g.items():
             saved[f"born|{lab}|{k}"] = v["mp"].astype(np.float32)

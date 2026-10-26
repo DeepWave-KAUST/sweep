@@ -87,8 +87,8 @@ CASES = {
     # in the others -- the modes never share a pool
     "elastic_tti_2nd2d": (lambda mode: 9 if mode == "full" else 11,
                           lambda mode: 8 if mode == "full" else None, ALL),
-    "lsrtm2d": (lambda mode: 1, None, ALL),
-    "lsrtm3d": (lambda mode: 2 if mode == "bs_gpu" else 1, None, ALL),
+    "born2d": (lambda mode: 1, None, ALL),
+    "born3d": (lambda mode: 2 if mode == "bs_gpu" else 1, None, ALL),
     # carrier + C0, C1 (+ C2 in the checkpoint modes) + R1 (+ UPREV in chunk mode)
     # + the cuFFT work area, both spectral terms on (slice 15)
     "visco2d": (lambda mode: {"full": 5, "ckpt_chunk": 7, "ckpt_recursive": 6}[mode], None,
@@ -97,7 +97,7 @@ CASES = {
 
 
 # suite keys whose compiled binding carries a family prefix
-BINDING = {"vrz3d": "acoustic_vrz3d", "lsrtm2d": "acoustic_lsrtm2d", "lsrtm3d": "acoustic_lsrtm3d",
+BINDING = {"vrz3d": "acoustic_vrz3d", "born2d": "acoustic_born2d", "born3d": "acoustic_born3d",
            "visco2d": "visco_acoustic2d"}
 
 

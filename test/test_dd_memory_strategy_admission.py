@@ -81,18 +81,18 @@ def test_dd_accepts_the_default_propagator():
 
 
 @pytest.mark.parametrize("cls_name, storage, refused", [
-    ("AcousticLSRTM3D", "disk", True),
-    ("AcousticLSRTM", "disk", True),     # refused across a cut by the driver, not on one tile
-    ("AcousticLSRTM", "cpu", False),     # the staged backward runs on the DD boundary session
-    ("AcousticLSRTM3D", "cpu", False),
-    ("AcousticLSRTM3D", "gpu", False),
+    ("AcousticBorn3D", "disk", True),
+    ("AcousticBorn", "disk", True),     # refused across a cut by the driver, not on one tile
+    ("AcousticBorn", "cpu", False),     # the staged backward runs on the DD boundary session
+    ("AcousticBorn3D", "cpu", False),
+    ("AcousticBorn3D", "gpu", False),
 ])
-def test_dd_lsrtm_boundary_storage_admission(cls_name, storage, refused, tmp_path):
+def test_dd_born_boundary_storage_admission(cls_name, storage, refused, tmp_path):
     import sweep.equations as eqs
     from sweep.parallel.dd_propagator import ModelParallel
     dev = torch.device("cuda:0")
     eq = getattr(eqs, cls_name)(spatial_order=4, device=dev, backend="torch")
-    shape = SHAPE if cls_name == "AcousticLSRTM" else (16, 16, 16)
+    shape = SHAPE if cls_name == "AcousticBorn" else (16, 16, 16)
     extra = {"disk_dir": str(tmp_path)} if storage == "disk" else {}
     prop = PropTorch(eq, backend="torch", impl="c", shape=shape, dh=DH, dt=DT, nt=NT,
                      abcn=ABCN, dev=dev, memory=BoundarySaving(storage=storage, **extra))

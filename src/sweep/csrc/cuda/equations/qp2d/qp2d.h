@@ -19,17 +19,17 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in);
 BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in);
 } // namespace qp_tti2d
 
-// Born (LSRTM) pair: qp_vti_lsrtm2d / qp_tti_lsrtm2d (born_traits.cuh).
-namespace qp_vti_lsrtm2d {
+// Born (LSRTM) pair: qp_vti_born2d / qp_tti_born2d (born_traits.cuh).
+namespace qp_vti_born2d {
 ForwardOutputCore forward_core(const ForwardInputCore& in);
 BackwardOutputCore backward_core(const BackwardInputCore& in);
 BackwardOutputCore backward_bs_core(const BackwardInputCore& in);
 BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in);
-} // namespace qp_vti_lsrtm2d
+} // namespace qp_vti_born2d
 
-namespace qp_tti_lsrtm2d {
+namespace qp_tti_born2d {
 ForwardOutputCore forward_core(const ForwardInputCore& in);
 BackwardOutputCore backward_core(const BackwardInputCore& in);
 BackwardOutputCore backward_bs_core(const BackwardInputCore& in);
 BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in);
-} // namespace qp_tti_lsrtm2d
+} // namespace qp_tti_born2d

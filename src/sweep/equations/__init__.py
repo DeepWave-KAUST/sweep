@@ -46,15 +46,16 @@ from . import (
     acoustic,
     acoustic1st,
     acoustic3d,
+    acoustic_born,
+    acoustic_born3d,
     acoustic_curvilinear,
-    acoustic_lsrtm,
-    acoustic_lsrtm3d,
     acoustic_vrr,
     acoustic_vrz,
     acoustic_vti_1st,
     biot,
     elastic,
     elastic3d,
+    elastic_born,
     elastic_curvilinear,
     elastic_tti,
     elastic_tti_2nd,
@@ -94,9 +95,9 @@ except ModuleNotFoundError:
 
 # The Born / LSRTM pair of the qP operators builds on qP_tti, so the same guard.
 try:
-    from . import qP_lsrtm  # noqa: F401  (registers AcousticVTILSRTM + AcousticTTILSRTM)
+    from . import qP_born  # noqa: F401  (registers AcousticVTIBorn + AcousticTTIBorn)
 except ModuleNotFoundError:
-    AcousticVTILSRTM = AcousticTTILSRTM = None
+    AcousticVTIBorn = AcousticTTIBorn = None
 
 # Bind every registered public name at module scope, so
 # ``from sweep.equations import Acoustic`` / ``AcousticVTILiang`` / ``Elastic3D``

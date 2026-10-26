@@ -9,18 +9,18 @@
 #include "../../operators/gradient.cuh"
 #include "../../operators/laplace.cuh"
 
-#define ACOUSTIC_LSRTM3D_SINGLE(order, grid, block, ...) \
+#define ACOUSTIC_BORN3D_SINGLE(order, grid, block, ...) \
     SWEEP_LAUNCH_BY_ORDER(acoustic3d_single_by_order, order, grid, block, __VA_ARGS__)
 
-#define ACOUSTIC_LSRTM3D_SINGLE_NOPML(order, grid, block, ...) \
+#define ACOUSTIC_BORN3D_SINGLE_NOPML(order, grid, block, ...) \
     SWEEP_LAUNCH_BY_ORDER(acoustic3d_single_nopml_by_order, order, grid, block, __VA_ARGS__)
 
-#define ACOUSTIC_LSRTM3D_COUPLED(order, grid, block, ...) \
-    SWEEP_LAUNCH_BY_ORDER(acoustic_lsrtm3d_coupled_by_order, order, grid, block, __VA_ARGS__)
+#define ACOUSTIC_BORN3D_COUPLED(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(acoustic_born3d_coupled_by_order, order, grid, block, __VA_ARGS__)
 
-// Exact transpose of a field's step (acoustic_lsrtm3d_adjoint_exact below).
-#define ACOUSTIC_LSRTM3D_ADJOINT(order, grid, block, ...) \
-    SWEEP_LAUNCH_BY_ORDER(acoustic_lsrtm3d_adjoint_exact_by_order, order, grid, block, __VA_ARGS__)
+// Exact transpose of a field's step (acoustic_born3d_adjoint_exact below).
+#define ACOUSTIC_BORN3D_ADJOINT(order, grid, block, ...) \
+    SWEEP_LAUNCH_BY_ORDER(acoustic_born3d_adjoint_exact_by_order, order, grid, block, __VA_ARGS__)
 
 template <int Order>
 __device__ inline float acoustic_cpml_update_3d(
@@ -213,7 +213,7 @@ SWEEP_BY_ORDER_DECL(acoustic3d_single_nopml_fn, acoustic3d_single_nopml_by_order
 // v2_lambda = vp^2 * lambda  (per-cell, race-free pre-pass for the L* adjoint).
 // (Defined in kernels.cu: a definition here is compiled into every TU that
 // includes this header.)
-__global__ void compute_v2_lambda_lsrtm3d(
+__global__ void compute_v2_lambda_born3d(
     const float* __restrict__ vp,
     const float* __restrict__ lambda,
     float* __restrict__ v2_lambda,
@@ -221,8 +221,8 @@ __global__ void compute_v2_lambda_lsrtm3d(
 );
 
 // Exact transpose of one step of a field advanced by acoustic_cpml_update_3d
-// (the product-rule CPML), the 3-D twin of acoustic_lsrtm2nd_adjoint_exact
-// (acoustic_lsrtm2d/kernels.cuh): per axis d, with g = dt^2 * v2l and
+// (the product-rule CPML), the 3-D twin of acoustic_born2nd_adjoint_exact
+// (acoustic_born2d/kernels.cuh): per axis d, with g = dt^2 * v2l and
 // gtmp_d = (1+b_d) g + b_d zeta*_d,
 //   lambda_next = 2 lambda - lambda_prev + sum_d [ L_d((1+b_d) gtmp_d) - D_d(b_d psi*_d + db_d gtmp_d) ]
 //   psi*_d'     = a_d psi*_d + da_d gtmp_d - D_d(a_d gtmp_d)
@@ -232,7 +232,7 @@ __global__ void compute_v2_lambda_lsrtm3d(
 // in_cpml reduces to L_d(g) and leaves its (zero) aux unwritten.  New psi* /
 // zeta* go to the double buffers; the caller rotates with swap_aux().
 template <int Order>
-__global__ void acoustic_lsrtm3d_adjoint_exact(
+__global__ void acoustic_born3d_adjoint_exact(
     AcousticWavefieldPointer wf,
     const float* __restrict__ v2l,
     LaplaceParam lap_ctx,
@@ -280,30 +280,30 @@ __global__ void acoustic_lsrtm3d_adjoint_exact(
         return;
     }
 
-    #define LSRTM3_GW(n) ( dt2 * g_b[n] )
+    #define BORN3_GW(n) ( dt2 * g_b[n] )
     // One axis: the transpose (full) or the plain L_d(g) (off the band).
-    #define LSRTM3_AXIS(FULL, AXIS, I, STRIDE, A, B_, DB, PSI, ZETA, PSIN, ZETAN, GCTX, INV, INV2, L_OUT, DGG_OUT) \
+    #define BORN3_AXIS(FULL, AXIS, I, STRIDE, A, B_, DB, PSI, ZETA, PSIN, ZETAN, GCTX, INV, INV2, L_OUT, DGG_OUT) \
     {                                                                                                    \
         float Lacc, Dgg = 0.0f;                                                                          \
         if (FULL) {                                                                                      \
             const float a_ = A[I];                                                                       \
             const float da = gradient<2, Order, X>(A, I, 0, 0, GCTX);                                    \
-            const float gtmp0 = B_[I] * ZETA[idx] + (1.0f + B_[I]) * LSRTM3_GW(idx);                     \
+            const float gtmp0 = B_[I] * ZETA[idx] + (1.0f + B_[I]) * BORN3_GW(idx);                     \
             Lacc = -lc[0] * ((1.0f + B_[I]) * gtmp0);                                                    \
             float Dgq = 0.0f;                                                                            \
             _Pragma("unroll")                                                                            \
             for (int k = 1; k <= (Order > 0 ? M_static : 16); ++k) {                                     \
                 if (Order <= 0 && k > halo) break;                                                       \
                 const int np = idx + k * STRIDE, nm = idx - k * STRIDE, ip = I + k, im = I - k;          \
-                const float tp = B_[ip] * ZETA[np] + (1.0f + B_[ip]) * LSRTM3_GW(np);                    \
-                const float tm = B_[im] * ZETA[nm] + (1.0f + B_[im]) * LSRTM3_GW(nm);                    \
+                const float tp = B_[ip] * ZETA[np] + (1.0f + B_[ip]) * BORN3_GW(np);                    \
+                const float tm = B_[im] * ZETA[nm] + (1.0f + B_[im]) * BORN3_GW(nm);                    \
                 Lacc += lc[k] * ((1.0f + B_[ip]) * tp + (1.0f + B_[im]) * tm);                           \
                 Dgg += gc[k] * ((B_[ip] * PSI[np] + DB[ip] * tp) - (B_[im] * PSI[nm] + DB[im] * tm));    \
                 Dgq += gc[k] * (A[ip] * tp - A[im] * tm);                                                \
             }                                                                                            \
             Lacc *= INV2; Dgg *= INV; Dgq *= INV;                                                        \
             PSIN[idx] = a_ * PSI[idx] + da * gtmp0 - Dgq;                                                \
-            ZETAN[idx] = a_ * (ZETA[idx] + LSRTM3_GW(idx));                                              \
+            ZETAN[idx] = a_ * (ZETA[idx] + BORN3_GW(idx));                                              \
         } else {                                                                                         \
             Lacc = dt2 * laplace<3, Order, AXIS>(g_b, ix, iy, iz, lap_ctx);                              \
         }                                                                                                \
@@ -311,24 +311,24 @@ __global__ void acoustic_lsrtm3d_adjoint_exact(
     }
 
     float Lx, Dx, Ly, Dy, Lz, Dz;
-    LSRTM3_AXIS(xfull, X, ix, 1,  cpml.ax, cpml.bx, cpml.dbxdx, f.psix, f.zetax, f.psixn, f.zetaxn, grad_ctx_x,
+    BORN3_AXIS(xfull, X, ix, 1,  cpml.ax, cpml.bx, cpml.dbxdx, f.psix, f.zetax, f.psixn, f.zetaxn, grad_ctx_x,
                 1.0f / lap_ctx.dx, 1.0f / (lap_ctx.dx * lap_ctx.dx), Lx, Dx)
-    LSRTM3_AXIS(yfull, Y, iy, sy, cpml.ay, cpml.by, cpml.dbydy, f.psiy, f.zetay, f.psiyn, f.zetayn, grad_ctx_y,
+    BORN3_AXIS(yfull, Y, iy, sy, cpml.ay, cpml.by, cpml.dbydy, f.psiy, f.zetay, f.psiyn, f.zetayn, grad_ctx_y,
                 1.0f / lap_ctx.dy, 1.0f / (lap_ctx.dy * lap_ctx.dy), Ly, Dy)
-    LSRTM3_AXIS(zfull, Z, iz, sz, cpml.az, cpml.bz, cpml.dbzdz, f.psiz, f.zetaz, f.psizn, f.zetazn, grad_ctx_z,
+    BORN3_AXIS(zfull, Z, iz, sz, cpml.az, cpml.bz, cpml.dbzdz, f.psiz, f.zetaz, f.psizn, f.zetazn, grad_ctx_z,
                 1.0f / lap_ctx.dz, 1.0f / (lap_ctx.dz * lap_ctx.dz), Lz, Dz)
-    #undef LSRTM3_AXIS
-    #undef LSRTM3_GW
+    #undef BORN3_AXIS
+    #undef BORN3_GW
 
     f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + (Lx + Ly + Lz - Dx - Dy - Dz);
 }
 
-using acoustic_lsrtm3d_adjoint_exact_fn = void (*)(AcousticWavefieldPointer, const float*,
+using acoustic_born3d_adjoint_exact_fn = void (*)(AcousticWavefieldPointer, const float*,
     LaplaceParam, GradParam, GradParam, GradParam, AcousticCPMLPointer, SolverContext);
-SWEEP_BY_ORDER_DECL(acoustic_lsrtm3d_adjoint_exact_fn, acoustic_lsrtm3d_adjoint_exact_by_order);
+SWEEP_BY_ORDER_DECL(acoustic_born3d_adjoint_exact_fn, acoustic_born3d_adjoint_exact_by_order);
 
 template <int Order>
-__global__ void acoustic_lsrtm3d_coupled(
+__global__ void acoustic_born3d_coupled(
     AcousticWavefieldPointer bg,
     AcousticWavefieldPointer sc,
     bool save_all_wavefields,
@@ -392,12 +392,12 @@ __global__ void acoustic_lsrtm3d_coupled(
     }
 }
 
-using acoustic_lsrtm3d_coupled_fn = void (*)(AcousticWavefieldPointer,
+using acoustic_born3d_coupled_fn = void (*)(AcousticWavefieldPointer,
     AcousticWavefieldPointer, bool, float*, float*, const float*, const float*, LaplaceParam,
     GradParam, GradParam, GradParam, GradParam, AcousticCPMLPointer, SolverContext);
-SWEEP_BY_ORDER_DECL(acoustic_lsrtm3d_coupled_fn, acoustic_lsrtm3d_coupled_by_order);
+SWEEP_BY_ORDER_DECL(acoustic_born3d_coupled_fn, acoustic_born3d_coupled_by_order);
 
-__global__ void calculate_grad_lsrtm3d_mp(
+__global__ void calculate_grad_born3d_mp(
     const float* __restrict__ u_tt_bg,
     const float* __restrict__ u_backward,
     const float* __restrict__ vp,
@@ -409,7 +409,7 @@ __global__ void calculate_grad_lsrtm3d_mp(
     float dt
 );
 
-__global__ void calculate_grad_lsrtm3d_mp_utt(
+__global__ void calculate_grad_born3d_mp_utt(
     const float* __restrict__ u_forward_next,
     const float* __restrict__ u_forward_now,
     const float* __restrict__ u_forward_prev,
@@ -425,24 +425,24 @@ __global__ void calculate_grad_lsrtm3d_mp_utt(
 
 // ---- RWI tomographic vp gradient (Wu & Alkhalifah 2015) ----
 
-__global__ void compute_v2_lambda_bg_lsrtm3d(
+__global__ void compute_v2_lambda_bg_born3d(
     const float* __restrict__ vp, const float* __restrict__ mp,
     const float* __restrict__ lambda_bg, const float* __restrict__ lambda_sc,
     float* __restrict__ v2_lambda, int nx, int ny, int nz, int B);
 
-__global__ void calculate_grad_lsrtm3d_vp_utt(
+__global__ void calculate_grad_born3d_vp_utt(
     const float* __restrict__ bg_utt, const float* __restrict__ sc_utt,
     const float* __restrict__ lam_bg, const float* __restrict__ lam_sc,
     const float* __restrict__ mp, const float* __restrict__ vp,
     float* __restrict__ grad_vp, float* __restrict__ grad_iii,
     int B, int nx, int ny, int nz, float dt);
 
-__global__ void add_lsrtm3d_scattered_coupling(
+__global__ void add_born3d_scattered_coupling(
     float* __restrict__ sc_next, const float* __restrict__ bg_next,
     const float* __restrict__ bg_now, const float* __restrict__ bg_prev,
     const float* __restrict__ mp, int B, int nx, int ny, int nz, int halo);
 
-__global__ void calculate_grad_lsrtm3d_vp_2diff(
+__global__ void calculate_grad_born3d_vp_2diff(
     const float* __restrict__ bg_prev, const float* __restrict__ bg_now, const float* __restrict__ bg_next,
     const float* __restrict__ sc_prev, const float* __restrict__ sc_now, const float* __restrict__ sc_next,
     const float* __restrict__ lam_bg, const float* __restrict__ lam_sc,

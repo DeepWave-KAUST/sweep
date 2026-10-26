@@ -1,4 +1,4 @@
-"""AcousticLSRTM / AcousticLSRTM3D (impl='c') pay for the RWI vp gradient only
+"""AcousticBorn / AcousticBorn3D (impl='c') pay for the RWI vp gradient only
 when vp asks for it.
 
 The RWI tomographic vp gradient needs a second adjoint and the scattered field
@@ -19,7 +19,7 @@ import torch
 
 from conftest import requires_binding
 
-from sweep.equations import AcousticLSRTM, AcousticLSRTM3D
+from sweep.equations import AcousticBorn, AcousticBorn3D
 from sweep.propagator import BoundarySaving, Full, PropTorch
 from sweep.propagator.options import Ckpt
 
@@ -40,11 +40,11 @@ def _case(dim):
     return shape, src, rec, 2200.0 + 60.0 * g, 0.03 + 0.01 * g
 
 
-@requires_binding("acoustic_lsrtm2d_forward", "acoustic_lsrtm3d_forward")
+@requires_binding("acoustic_born2d_forward", "acoustic_born3d_forward")
 @pytest.mark.parametrize("dim, mode", sorted(SLOTS))
 def test_vp_gradient_only_when_asked(dim, mode):
     shape, src, rec, vp0, mp0 = _case(dim)
-    eq = (AcousticLSRTM if dim == 2 else AcousticLSRTM3D)(spatial_order=4, device="cuda", backend="torch")
+    eq = (AcousticBorn if dim == 2 else AcousticBorn3D)(spatial_order=4, device="cuda", backend="torch")
     prop = PropTorch(eq, impl="c", memory=Full() if mode == "full" else BoundarySaving(),
                      shape=shape, dh=10.0, dt=0.0015, nt=60, abcn=10, device="cuda",
                      pml_type="cpmlr", source_type=["h1"], receiver_type=["sh1"], backend="torch")
@@ -75,7 +75,7 @@ def test_vp_gradient_only_when_asked(dim, mode):
     assert ws2 == ws1 and torch.equal(gv2, gv1) and torch.equal(gm2, gm1) and torch.equal(r2, r1)
 
 
-@requires_binding("acoustic_lsrtm2d_forward", "acoustic_lsrtm3d_forward")
+@requires_binding("acoustic_born2d_forward", "acoustic_born3d_forward")
 @pytest.mark.parametrize("dim", (2, 3))
 @pytest.mark.parametrize("what", ("wavelet", "ckpt_vp"))
 def test_gradients_the_backward_does_not_return_are_refused(dim, what):
@@ -85,7 +85,7 @@ def test_gradients_the_backward_does_not_return_are_refused(dim, what):
     coming back as zeros (2-D) or as the scattered adjoint (3-D wavelet).  The
     checkpoint modes keep serving the mp gradient."""
     shape, src, rec, vp0, mp0 = _case(dim)
-    eq = (AcousticLSRTM if dim == 2 else AcousticLSRTM3D)(spatial_order=4, device="cuda", backend="torch")
+    eq = (AcousticBorn if dim == 2 else AcousticBorn3D)(spatial_order=4, device="cuda", backend="torch")
     prop = PropTorch(eq, impl="c", memory=Ckpt(mode="chunk", chunks=4) if what == "ckpt_vp" else Full(),
                      shape=shape, dh=10.0, dt=0.0015, nt=60, abcn=10, device="cuda",
                      pml_type="cpmlr", source_type=["h1"], receiver_type=["sh1"], backend="torch")

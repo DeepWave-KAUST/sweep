@@ -1,13 +1,13 @@
-# AcousticLSRTM
+# AcousticBorn
 
-::: sweep.equations.AcousticLSRTM
+::: sweep.equations.AcousticBorn
 
 ## Term III on its own
 
 Wu & Alkhalifah (2015, eq. 18-20) weight the image-point term III of the RWI
 velocity gradient separately: `(II+IV) + beta*III`. Set
 `SWEEP_LSRTM_SPLIT_III=1` and the `impl='c'` full or boundary-saving backward
-of `AcousticLSRTM` / `AcousticLSRTM3D` puts II+IV in `vp.grad` and keeps III
+of `AcousticBorn` / `AcousticBorn3D` puts II+IV in `vp.grad` and keeps III
 aside, on the same grid:
 
 ```python
