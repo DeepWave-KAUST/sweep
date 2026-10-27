@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from sweep.equations import Acoustic
+from sweep.propagator.options import EagerOptions
 from sweep.propagator.torch import PropTorch
 
 NZ, NX, NT = 24, 28, 12
@@ -24,7 +25,10 @@ def prop():
                      receiver_type=["h1"],
                      # snapshots need the full tape; chunk checkpointing, the
                      # eager default, refuses return_wavefield outright
-                     use_ckpt=False)
+                     use_ckpt=False,
+                     # the buffer is the rollout's, not the step's: a cold
+                     # torch.compile of a 12-step run is nearly all its time
+                     eager_options=EagerOptions(use_compile=False))
 
 
 def _shoot(prop):

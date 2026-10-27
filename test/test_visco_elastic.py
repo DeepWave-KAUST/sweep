@@ -201,15 +201,18 @@ def test_gradient_matches_finite_difference(free_surface):
     the interior (the PML profile depends on the model non-differentiably)."""
     NZ, NX, wav, src, rec, m0, prop = _grad_setup(free_surface)
     g = torch.Generator().manual_seed(0)
-    d0 = prop()(wav, src.copy(), rec.copy(), models=m0)
-    wr = torch.randn(d0.shape, generator=g).to(DEVICE)
-    J = lambda ms: (prop()(wav, src.copy(), rec.copy(), models=ms) * wr).sum()
     ms = [m.clone().requires_grad_(True) for m in m0]
-    J(ms).backward()
+    # the differentiated run sizes the weights: J(ms) without a forward of its own
+    d = prop()(wav, src.copy(), rec.copy(), models=ms)
+    wr = torch.randn(d.shape, generator=g).to(DEVICE)
+    J = lambda ms: (prop()(wav, src.copy(), rec.copy(), models=ms) * wr).sum()
+    (d * wr).sum().backward()
     mask = torch.zeros(NZ, NX)
     mask[8:-8, 8:-8] = 1
     k = torch.ones(1, 1, 7, 7) / 49
-    for i, scale in enumerate([50.0, 30.0, 40.0, 3.0, 2.0]):
+    # Q steps of 5-7%: at 10-13% the central difference's truncation alone was 1.6e-2 (Qs,
+    # no free surface) of the 2e-2 tolerance
+    for i, scale in enumerate([50.0, 30.0, 40.0, 1.5, 1.0]):
         dm = torch.nn.functional.conv2d(torch.randn(1, 1, NZ, NX, generator=g), k, padding=3)[0, 0] * mask
         dm = (scale * dm / dm.abs().max()).to(DEVICE)
         eps = 1.0

@@ -10,6 +10,8 @@ a curved surface, and (c) the scheme stays bounded on a hill, which is
 what the staggered chain-rule predecessor could not do.
 """
 
+from functools import lru_cache
+
 import numpy as np
 import pytest
 import torch
@@ -73,13 +75,20 @@ def _hill(height_cells=6.0, sigma_cells=12.0):
     return np.round(z.max() - z).astype(np.int64)
 
 
+@lru_cache(maxsize=None)
+def _flat_record():
+    """The flat-grid run of the default geometry; two tests read it (a run is
+    deterministic, so one serves both)."""
+    sources, receivers = _geometry()
+    _, prop = _make_prop(topography=None)
+    return prop(_wavelet(), sources, receivers, models=_models())
+
+
 # --------------------------------------------------------------------------
 
 
 def test_flat_topography_runs_and_is_stable():
-    sources, receivers = _geometry()
-    _, prop = _make_prop(topography=None)
-    syn = prop(_wavelet(), sources, receivers, models=_models())
+    syn = _flat_record()
     assert torch.isfinite(syn).all(), "flat curvilinear run produced NaN/Inf"
     assert syn.abs().max().item() > 0, "record is identically zero"
 
@@ -87,8 +96,7 @@ def test_flat_topography_runs_and_is_stable():
 def test_zero_topography_matches_no_topography():
     """A flat ``topography`` array must be the same problem as no array."""
     sources, receivers = _geometry()
-    _, prop_none = _make_prop(topography=None)
-    a = prop_none(_wavelet(), sources, receivers, models=_models())
+    a = _flat_record()
     _, prop_zero = _make_prop(topography=np.zeros(NX, dtype=np.int64))
     b = prop_zero(_wavelet(), sources, receivers, models=_models())
     assert torch.equal(a, b)
@@ -317,7 +325,10 @@ def test_gradient_matches_finite_difference():
     g = vp.grad.detach()
 
     iz, ix = np.unravel_index(int(g.abs().argmax()), g.shape)
-    h = 10.0
+    # that cell is next to the source, where the misfit is far from linear in vp: h = 10 m/s
+    # left a 4.8% truncation error against the 5% tolerance (1.1% at 5 m/s, 0.27% at 2.5;
+    # float64 keeps the round-off orders below)
+    h = 2.5
     js = []
     for sgn in (+1.0, -1.0):
         vpp = vp0.clone()
@@ -417,14 +428,22 @@ def _snap_run(prop, topo, **kw):
     return snaps.detach().cpu()
 
 
+@lru_cache(maxsize=None)
+def _smooth_hill_physical():
+    """A smooth-hill propagator and its default (physical-grid) snapshots; two
+    tests read them (a run is deterministic, so one serves both)."""
+    topo = _smooth_hill()
+    _, prop = _make_prop(topography=topo)
+    return prop, _snap_run(prop, topo)
+
+
 def test_snapshots_are_the_grid_rows_interpolated_per_column():
     """The default snapshot is the computational one, each Cartesian row
     interpolated from the grid's rows around its depth -- checked against a
     plain per-column np.interp, and against a second run that asks for it."""
     topo = _smooth_hill()
-    _, prop = _make_prop(topography=topo)
+    prop, phys = _smooth_hill_physical()
     comp = _snap_run(prop, topo, snapshot_grid="computational")
-    phys = _snap_run(prop, topo)
     mapped = prop._curvilinear_snapshots(comp.clone())
     scale = float(comp.abs().max())
     assert float((phys - mapped).abs().max()) <= 1e-6 * scale
@@ -444,9 +463,7 @@ def test_snapshots_are_the_grid_rows_interpolated_per_column():
 
 
 def test_air_cells_are_zero_in_every_field():
-    topo = _smooth_hill()
-    _, prop = _make_prop(topography=topo)
-    phys = _snap_run(prop, topo)
+    prop, phys = _smooth_hill_physical()
     surf = prop.curvilinear_grid.h_surface.numpy() / DH
     air = np.arange(NZ)[:, None] < surf[None, :]
     assert air.any()
