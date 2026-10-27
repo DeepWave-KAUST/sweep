@@ -179,6 +179,11 @@ def _ac3d_bare_backward_input(c, mats, inv_M, wavelet, carry, grad_syn, deformed
     return check_filled(b)
 
 
+# NOT ROUTED (prop_c._C_ROUTES): the sem3d_acoustic_* kernels behind the two
+# Functions below put c² inside the element integral, i.e. solve div(c² grad u)
+# instead of the c² Laplace u of AcousticSEM3D{,Deformed} -- every reflection
+# coefficient comes out with the wrong sign. Kept for when the kernels apply c²
+# per node (forward + adjoint), as the C-PML strip kernels already do.
 class _SEMAcoustic3DC(torch.autograd.Function):
     @staticmethod
     def forward(ctx, c2_jx, c2_jy, c2_jz, inv_M, wavelet, c):

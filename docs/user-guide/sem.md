@@ -172,7 +172,7 @@ carries the per-equation column:
 | Backend | Coverage |
 | --- | --- |
 | `impl='eager'` | every equation (the BS framework hooks any `field_specs`) |
-| `impl='c'` | the five C-PML paths: `AcousticPotentialSEM2D`, `ElasticSEM2DDeformed`, `AcousticElasticSEM2D` (each requiring their C-PML), `AcousticSEM3D`, `AcousticSEM3DDeformed` |
+| `impl='c'` | the five C-PML paths: `AcousticPotentialSEM2D`, `ElasticSEM2DDeformed`, `AcousticElasticSEM2D`, `AcousticSEM3D`, `AcousticSEM3DDeformed` (each requiring their C-PML; the 3-D acoustic pair has no bare `impl='c'` path at all) |
 
 Asking for boundary saving anywhere else on `impl='c'` raises
 `NotImplementedError` — it used to be accepted and silently run the full

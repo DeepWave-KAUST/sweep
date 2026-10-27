@@ -4,8 +4,10 @@ Scalar analogue of :class:`ElasticSEM2DDeformed`: solves
 
     ∂²u/∂t² = c²(x) ∇²u + s(x, t)
 
-in weak form ``∫ v ü dΩ + ∫ c² ∇v · ∇u dΩ = ∫ v s dΩ`` on a Q2
-(9-node) deformed mesh, with the per-GLL Jacobian chain rule
+as ``ü = c² M⁻¹ (b − K u)`` with the c²-free stiffness ``K = ∫ ∇v · ∇u dΩ``
+and c² applied per global node (see :mod:`.acoustic2d` for why c² stays outside
+the integral), on a Q2 (9-node) deformed mesh, with the per-GLL Jacobian chain
+rule
 
     ∂/∂x = (∂ξ/∂x) ∂/∂ξ + (∂η/∂x) ∂/∂η
     ∂/∂z = (∂ξ/∂z) ∂/∂ξ + (∂η/∂z) ∂/∂η .
@@ -36,6 +38,7 @@ import torch
 from .._assembly import assemble, phys_grads
 from ..cpml.acoustic import CPMLProfile
 from ..mesh.boundaries import free_surface_node_idx
+from ..mesh.nodes import node_field
 from ..fields import DerivedInitState, DirichletNodes, FieldSpec, check_element_arrays
 from ..mesh.quad9 import Quad9Mesh, boundary_element_edges
 
@@ -68,7 +71,6 @@ class AcousticSEM2DDeformed(DerivedInitState, DirichletNodes):
     cpml: Optional[CPMLProfile]
 
     _D: torch.Tensor                 # (ngll, ngll) — Lagrange derivative matrix
-    _c2: torch.Tensor                # (E, ngll, ngll) — c² at GLL nodes
     _w_J: torch.Tensor               # (E, ngll, ngll) — w_α w_β |J|
     _ixx: torch.Tensor               # ∂ξ/∂x
     _ixz: torch.Tensor               # ∂ξ/∂z
@@ -90,8 +92,7 @@ class AcousticSEM2DDeformed(DerivedInitState, DirichletNodes):
         mass = torch.zeros(mesh.n_global, dtype=dtype, device=device)
         mass.index_add_(0, mesh.ibool.reshape(-1), mesh.w_jac.reshape(-1))
 
-        vp_squared_node = torch.zeros(mesh.n_global, dtype=dtype, device=device)
-        vp_squared_node[mesh.ibool] = vp_e * vp_e
+        vp_squared_node = node_field(mesh.ibool, mesh.n_global, vp_e * vp_e)
 
         return cls(
             mesh=mesh, vp_e=vp_e, vp_squared_node=vp_squared_node, mass=mass,
@@ -99,13 +100,13 @@ class AcousticSEM2DDeformed(DerivedInitState, DirichletNodes):
             dirichlet=tuple(dirichlet),
             dirichlet_idx=free_surface_node_idx(mesh, dirichlet, device),
             cpml=cpml,
-            _D=mesh.deriv, _c2=vp_e * vp_e, _w_J=mesh.w_jac,
+            _D=mesh.deriv, _w_J=mesh.w_jac,
             _ixx=mesh.inv_J[..., 0, 0], _ixz=mesh.inv_J[..., 0, 1],
             _iex=mesh.inv_J[..., 1, 0], _iez=mesh.inv_J[..., 1, 1],
         )
 
     # ------------------------------------------------------------------ #
-    # Symmetric stiffness K · u = ∫ c² ∇v · ∇u dΩ  — bare path + unit tests
+    # Symmetric stiffness K · u = ∫ ∇v · ∇u dΩ  (c²-free) — bare path + unit tests
     # ------------------------------------------------------------------ #
     def _phys_grad(self, u_global):
         """∂u/∂x, ∂u/∂z at every GLL node (inv_J chain rule)."""
@@ -115,10 +116,8 @@ class AcousticSEM2DDeformed(DerivedInitState, DirichletNodes):
 
     def stiffness_apply(self, u_global: torch.Tensor) -> torch.Tensor:
         du_dx, du_dz = self._phys_grad(u_global)
-        q_x = self._c2 * du_dx
-        q_z = self._c2 * du_dz
-        F_beta  = self._w_J * (q_x * self._ixx + q_z * self._ixz)
-        F_alpha = self._w_J * (q_x * self._iex + q_z * self._iez)
+        F_beta  = self._w_J * (du_dx * self._ixx + du_dz * self._ixz)
+        F_alpha = self._w_J * (du_dx * self._iex + du_dz * self._iez)
         r_e = (torch.einsum("db,ead->eab", self._D, F_beta)
                + torch.einsum("ga,egb->eab", self._D, F_alpha))
         return assemble(r_e, self.mesh.ibool, u_global)
@@ -200,8 +199,10 @@ class AcousticSEM2DDeformed(DerivedInitState, DirichletNodes):
             u_next, psi_x, psi_z, zeta_x, zeta_z = self._apply_dirichlet(
                 u_next, psi_x, psi_z, zeta_x, zeta_z)
         else:
+            # c² per node, as on the CPML path (where w_sum = -K u / M)
             Ku = self.stiffness_apply(u_now)
-            u_next = 2.0 * u_now - u_prev + dt2 * inv_M * (-Ku + b)
+            u_next = (2.0 * u_now - u_prev
+                      + dt2 * self.vp_squared_node * (-Ku * inv_M) + dt2 * inv_M * b)
             (u_next,) = self._apply_dirichlet(u_next)
         return (u_next, u_now, psi_x, psi_z, zeta_x, zeta_z)
 

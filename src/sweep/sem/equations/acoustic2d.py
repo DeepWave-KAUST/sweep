@@ -1,9 +1,9 @@
 """Element-local SEM operators for 2-D constant-density acoustic.
 
 Strong form    :  ∂²u/∂t²  =  c²(x) ∇²u  +  s(x, t)
-Weak form      :  ∫ v ü dΩ  +  ∫ c² ∇v · ∇u dΩ  =  ∫ v s dΩ
-Discretized    :  M ü  +  K u  =  b      (M diagonal after GLL collocation;
-                                          K applied element-locally)
+Discretized    :  ü  =  c² M⁻¹ (b − K u)     (c² per global node; M diagonal
+                                          after GLL collocation; K = ∫ ∇v · ∇u dΩ,
+                                          c²-free, applied element-locally)
 
 Conventions
 -----------
@@ -20,13 +20,15 @@ Boundaries
   With ``cpml=None`` the domain is a bare reflecting box (used by the operator
   unit tests). There is no paraxial / Stacey absorbing path.
 
-Two stiffness forms (deliberate, not redundant)
------------------------------------------------
-- :meth:`stiffness_apply` bakes c² inside the element integral → the *symmetric*
-  variational operator ``∇·(c²∇)`` (energy-conserving). Used by the bare path.
-- The CPML path (:meth:`_cpml_grads`) uses c²-free directional operators so vp²
-  can be factored out and applied per node alongside the per-node CPML
-  coefficients (``c²∇²``, non-symmetric — acceptable in/near the absorbing layer).
+c² stays outside the stiffness
+------------------------------
+Both paths apply c² per node to a c²-free Galerkin Laplacian: the bare path to
+:meth:`stiffness_apply`, the CPML path to its directional pieces
+(:meth:`_cpml_grads`), so away from the absorbing band the two are one scheme.
+This is still energy-conserving: K is symmetric PSD and ``M / c²`` is a diagonal
+mass. Baking c² into the integral instead gives ``∇·(c²∇u)``, a different PDE
+that keeps ``c² ∂u/∂n`` (not ``∂u/∂n``) continuous at a velocity jump and so
+flips the sign of every reflection coefficient.
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ import torch
 from .._assembly import assemble
 from ..cpml.acoustic import CPMLProfile
 from ..mesh.boundaries import free_surface_node_idx
+from ..mesh.nodes import node_field
 from ..fields import DerivedInitState, DirichletNodes, FieldSpec, check_element_arrays
 from ..mesh.quad4 import Quad4Mesh, boundary_element_edges
 
@@ -72,11 +75,9 @@ class AcousticSEM2D(DerivedInitState, DirichletNodes):
     dirichlet_idx: torch.Tensor
     cpml: Optional[CPMLProfile]
 
-    _c2_jx: torch.Tensor          # (E, ngll, ngll) — c² · w_α w_β · (dz/dx)
-    _c2_jz: torch.Tensor          # (E, ngll, ngll) — c² · w_α w_β · (dx/dz)
     _D: torch.Tensor              # (ngll, ngll) — Lagrange derivative matrix
-    _w_jx_noc2: torch.Tensor      # CPML path: w_α w_β · (dz/dx)   (no c²)
-    _w_jz_noc2: torch.Tensor      # CPML path: w_α w_β · (dx/dz)
+    _w_jx_noc2: torch.Tensor      # w_α w_β · (dz/dx)   (no c²)
+    _w_jz_noc2: torch.Tensor      # w_α w_β · (dx/dz)
     _w_jac: torch.Tensor          # CPML path: w_α w_β · |J|
     _inv_half_dx: float           # 2 / dx_e
     _inv_half_dz: float           # 2 / dz_e
@@ -99,21 +100,19 @@ class AcousticSEM2D(DerivedInitState, DirichletNodes):
         mass = torch.zeros(mesh.n_global, dtype=dtype, device=device)
         mass.index_add_(0, mesh.ibool.reshape(-1), m_e.reshape(-1))
 
-        # Per-element c² and Jacobian weights for the two stiffness forms.
+        # Jacobian weights of the c²-free stiffness.
         c2 = vp_e * vp_e
         Jx = mesh.dz_e / mesh.dx_e
         Jz = mesh.dx_e / mesh.dz_e
-        c2_jx = c2 * w_outer * Jx
-        c2_jz = c2 * w_outer * Jz
         w_jx_noc2 = (w_outer * Jx).expand(mesh.n_elements, -1, -1).contiguous()
         w_jz_noc2 = (w_outer * Jz).expand(mesh.n_elements, -1, -1).contiguous()
         w_jac = (w_outer * mesh.jacobian_det).expand(
             mesh.n_elements, -1, -1).contiguous()
 
-        # Per-global-node c² via first-touch scatter (last write wins; exact for
-        # continuous c², one adjacent value at discontinuities).
-        vp_squared_node = torch.zeros(mesh.n_global, dtype=dtype, device=device)
-        vp_squared_node[mesh.ibool] = c2
+        # Per-global-node c² from one element copy (exact for continuous c²,
+        # one adjacent value at discontinuities; the gradient is not
+        # multiplied by the share count -- see mesh/nodes.py).
+        vp_squared_node = node_field(mesh.ibool, mesh.n_global, c2)
 
         return cls(
             mesh=mesh,
@@ -124,8 +123,6 @@ class AcousticSEM2D(DerivedInitState, DirichletNodes):
             dirichlet=tuple(dirichlet),
             dirichlet_idx=free_surface_node_idx(mesh, dirichlet, device),
             cpml=cpml,
-            _c2_jx=c2_jx,
-            _c2_jz=c2_jz,
             _D=mesh.deriv,
             _w_jx_noc2=w_jx_noc2,
             _w_jz_noc2=w_jz_noc2,
@@ -135,16 +132,16 @@ class AcousticSEM2D(DerivedInitState, DirichletNodes):
         )
 
     # ------------------------------------------------------------------ #
-    # Symmetric stiffness K · u  (c² baked in) — bare path + unit tests.
+    # Symmetric stiffness K · u  (c²-free) — bare path + unit tests.
     # ------------------------------------------------------------------ #
     def stiffness_apply(self, u_global: torch.Tensor) -> torch.Tensor:
-        """``(K u)_global = Σ_e ∫ c² ∇v · ∇u dΩ`` assembled to global nodes."""
+        """``(K u)_global = Σ_e ∫ ∇v · ∇u dΩ`` assembled to global nodes."""
         u_e = u_global[self.mesh.ibool]
         du_dxi  = torch.einsum("bg,eag->eab", self._D, u_e)
         du_deta = torch.einsum("ag,egb->eab", self._D, u_e)
         r_e = (
-            torch.einsum("db,ead->eab", self._D, self._c2_jx * du_dxi)
-          + torch.einsum("ga,egb->eab", self._D, self._c2_jz * du_deta)
+            torch.einsum("db,ead->eab", self._D, self._w_jx_noc2 * du_dxi)
+          + torch.einsum("ga,egb->eab", self._D, self._w_jz_noc2 * du_deta)
         )
         return assemble(r_e, self.mesh.ibool, u_global)
 
@@ -241,8 +238,10 @@ class AcousticSEM2D(DerivedInitState, DirichletNodes):
             u_next, psi_x, psi_z, zeta_x, zeta_z = self._apply_dirichlet(
                 u_next, psi_x, psi_z, zeta_x, zeta_z)
         else:
+            # c² per node, as on the CPML path (where w_sum = -K u / M)
             Ku = self.stiffness_apply(u_now)
-            u_next = 2.0 * u_now - u_prev + dt2 * inv_M * (-Ku + b)
+            u_next = (2.0 * u_now - u_prev
+                      + dt2 * self.vp_squared_node * (-Ku * inv_M) + dt2 * inv_M * b)
             (u_next,) = self._apply_dirichlet(u_next)
         return (u_next, u_now, psi_x, psi_z, zeta_x, zeta_z)
 
