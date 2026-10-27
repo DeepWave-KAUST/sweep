@@ -34,8 +34,8 @@ from .cdrive import (AC_CPML_FIELDS, EL_CPML_FIELDS, EL_CPML_TRIPLES,
 from .drivers.acoustic2d import _SEMAcousticCpmlC
 from .drivers.elastic2d import _SEMElasticCpmlC
 from .drivers.fluid_solid import _SEMFluidSolidC
-from .drivers.bare import (_SEMAcousticC, _SEMElasticC, _SEMElastic3DC,
-                           _SEMElasticVS3DC, _VS3D_CPML)
+from .drivers.bare import (_SEMAcousticC, _SEMElasticC, _SEMAcoustic3DC,
+                           _SEMElastic3DC, _SEMElasticVS3DC, _VS3D_CPML)
 # The autograd Functions live in sweep.sem.drivers (one module per equation
 # family, filled through sweep.sem.cdrive); they are re-exported here for
 # the callers and tests that import them from prop_c. The bar for moving one
@@ -360,11 +360,6 @@ def _elem_thread_slice(t, name, m):
 # DERIVED FIRST -- the deformed classes subclass their flat twins, so the row
 # order is what keeps a Hex27 mesh off the Hex8 path. ``None`` means the pair
 # does not exist yet and the lookup raises.
-#
-# The bare 3-D acoustic pair is ``None`` on purpose: its kernels
-# (sem3d_acoustic_forward/backward) bake c² into the element integral, i.e.
-# solve div(c² grad u), which flips the sign of every reflection coefficient.
-# The eager classes now solve c² Laplace u; the kernels have not been redone.
 _C_ROUTES = (
     #  equation                with C-PML                      bare
     (AcousticPotentialSEM2D, "_forward_acoustic_cpml",   "_forward_acoustic"),
@@ -374,8 +369,9 @@ _C_ROUTES = (
     (ElasticSEM3DDeformed,   "_forward_elastic3d_deformed",
                              "_forward_elastic3d_deformed"),
     (ElasticSEM3D,           None,                       "_forward_elastic3d"),
-    (AcousticSEM3DDeformed,  "_forward_acoustic3d_cpml", None),
-    (AcousticSEM3D,          "_forward_acoustic3d_cpml", None),
+    (AcousticSEM3DDeformed,  "_forward_acoustic3d_cpml",
+                             "_forward_acoustic3d_deformed"),
+    (AcousticSEM3D,          "_forward_acoustic3d_cpml", "_forward_acoustic3d"),
 )
 
 # Equations the CUDA dispatch handles: the table's own keys. PropSEM reads
@@ -734,8 +730,8 @@ class SEMCudaPropagator(SEMPropagator):
 
     # Which impl='c' forward paths actually consume ``memory='boundary'``.
     # Derived from which methods wire c["bs"]: _forward_acoustic_cpml,
-    # _forward_elastic_cpml and _forward_acoustic3d_cpml (both 3-D acoustic
-    # families; their bare pair is refused in _C_ROUTES). The others run
+    # _forward_elastic_cpml, _forward_acoustic3d{,_cpml} and
+    # _forward_acoustic3d_deformed{,_cpml} -- six of the twelve. The others run
     # the full tape regardless, and asking for boundary saving on them used to
     # be silently ignored, so a caller believed they were saving memory and
     # reconstructing the wavefield when they were not.
@@ -813,9 +809,7 @@ class SEMCudaPropagator(SEMPropagator):
                     raise NotImplementedError(
                         f"{type(self.eq).__name__} "
                         f"{'with' if cpml is not None else 'without'} a C-PML "
-                        f"has no impl='c' kernel; use impl='eager'"
-                        + (" or abcn > 0" if issubclass(kind, AcousticSEM3D)
-                           else "") + ".")
+                        f"has no impl='c' kernel; use impl='eager'.")
                 return getattr(self, name)(wav)
         raise NotImplementedError(
             f"SEM impl='c' supports acoustic-potential, elastic, coupled "
@@ -956,6 +950,30 @@ class SEMCudaPropagator(SEMPropagator):
             "src_pattern": b.pattern(0),
             **b.rec(), **b.tail,
         }
+
+    def _forward_acoustic3d(self, wav):
+        """Flat Hex8 without a C-PML: the c²-free axis weights are geometry
+        (consts); c² enters per node."""
+        eq = self.eq
+        c = self._stamp_bs(self._acoustic3d_consts())
+        E, m = c["n_elements"], c["ngll"] ** 3
+        f32 = lambda x: x.to("cuda", torch.float32).reshape(E, m).contiguous()
+        c.update(w_jx=f32(eq._w_jx_noc2), w_jy=f32(eq._w_jy_noc2),
+                 w_jz=f32(eq._w_jz_noc2))
+        return (self._acoustic3d_bare(c, wav),)
+
+    def _forward_acoustic3d_deformed(self, wav):
+        """Hex27 topography without a C-PML: w_J + the 3x3 inv_J."""
+        c = self._stamp_bs(self._acoustic3d_consts())
+        c.update(self._base().metric3d(c["n_elements"], c["ngll"] ** 3),
+                 deformed=1)
+        return (self._acoustic3d_bare(c, wav),)
+
+    def _acoustic3d_bare(self, c, wav):
+        eq = self.eq
+        return _SEMAcoustic3DC.apply(
+            eq.vp_squared_node.to("cuda", torch.float32),
+            eq._inv_M.to("cuda", torch.float32), wav, c)
 
     def _forward_acoustic3d_cpml(self, wav):
         """Both 3-D acoustic C-PML families (flat and topography) run on the

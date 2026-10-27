@@ -1,7 +1,10 @@
 // sweep.sem CUDA (impl='c') backend — 3-D acoustic SEM backward (P5).
-// Adjoint-state, save-all; K is self-adjoint so the forward stiffness kernel
-// is reused for the reverse leapfrog. Grads: c2_jx/jy/jz (imaging), inv_M,
-// wavelet — PyTorch chains through the eager build() to vp_e.
+// Adjoint-state, save-all or boundary-free reverse march. The step is
+// u_next = 2u - u_prev + dt2 inv_M (pat w - C K0 u), C = diag(c^2) and K0 the
+// symmetric c^2-free stiffness, so the reverse leapfrog applies
+// (inv_M C K0)^T = K0 C inv_M with the same stiffness kernel. Grads: c2_node
+// (in the grad_c2_jx slot), inv_M, wavelet — PyTorch chains through the eager
+// build() to vp_e.
 #include "../../../core/device.h"
 #include "../../../core/sem_input_core.h"
 #include <cuda_runtime.h>
@@ -31,7 +34,7 @@ void acoustic3d_backward(const Sem3dBackwardInputCore& in) {
     const float* jx = def ? nullptr : in.c2_jx.data_ptr<float>();
     const float* jy = def ? nullptr : in.c2_jy.data_ptr<float>();
     const float* jz = def ? nullptr : in.c2_jz.data_ptr<float>();
-    const float* c2n = def ? in.c2_node.data_ptr<float>() : nullptr;
+    const float* c2n = in.c2_node.data_ptr<float>();     // (n_global,) c^2
     const float* wJ = def ? in.wJ.data_ptr<float>() : nullptr;
     const float* Ixx = def ? in.ixx.data_ptr<float>() : nullptr;
     const float* Ixy = def ? in.ixy.data_ptr<float>() : nullptr;
@@ -62,14 +65,11 @@ void acoustic3d_backward(const Sem3dBackwardInputCore& in) {
     float* Ktmp = in.Ktmp.data_ptr<float>();
     float* Ku   = in.Ku.data_ptr<float>();
     float* adj  = in.adj_src.data_ptr<float>();
-    float* gJx = in.grad_c2_jx.data_ptr<float>();
-    float* gJy = in.grad_c2_jy.data_ptr<float>();
-    float* gJz = in.grad_c2_jz.data_ptr<float>();
+    float* gC2 = in.grad_c2_jx.data_ptr<float>();   // (n_global,) dL/dc2_node
     float* gM = in.grad_inv_M.data_ptr<float>();
     float* gW = in.grad_wavelet.data_ptr<float>();
 
     const size_t sh_stiff = static_cast<size_t>(4 * m) * sizeof(float);
-    const size_t sh_imag  = static_cast<size_t>(2 * m) * sizeof(float);
     const dim3 grid(E, B);
     const int TPB = 256;
     const int nb = (ng + TPB - 1) / TPB;
@@ -84,16 +84,18 @@ void acoustic3d_backward(const Sem3dBackwardInputCore& in) {
     }
 
     for (int mm = nt; mm >= 1; --mm) {
-        // reverse leapfrog: a_m = 2 a_p1 - a_p2 - dt2 K(inv_M o a_p1) + R^T g
+        // reverse leapfrog: a_m = 2 a_p1 - a_p2 - dt2 K0(c^2 o inv_M o a_p1)
+        // + R^T g  (adj holds c^2 o inv_M o a_p1 until the adjoint source)
         sem2d::sem2d_scale2<<<nb, TPB, 0, stream>>>(a_p1, inv_M, 1.f, tmp, ng);
+        sem2d::sem2d_scale2<<<nb, TPB, 0, stream>>>(tmp, c2n, 1.f, adj, ng);
         cudaMemsetAsync(Ktmp, 0, ngb, stream);
         if (def)
             sem3d_acoustic_stiffness_deformed<<<grid, m, sh_stiff, stream>>>(
-                tmp, ibool, D, c2n, wJ, Ixx, Ixy, Ixz, Iex, Iey, Iez, Igx, Igy, Igz,
+                adj, ibool, D, wJ, Ixx, Ixy, Ixz, Iex, Iey, Iez, Igx, Igy, Igz,
                 Ktmp, ngll, E, ng);
         else
             sem3d_acoustic_stiffness<<<grid, m, sh_stiff, stream>>>(
-                tmp, ibool, D, jx, jy, jz, Ktmp, ngll, E, ng);
+                adj, ibool, D, jx, jy, jz, Ktmp, ngll, E, ng);
         cudaMemsetAsync(adj, 0, ngb, stream);
         if (nrec > 0)
             sem2d::sem2d_adjoint_source<<<rj, TPB, 0, stream>>>(
@@ -107,36 +109,30 @@ void acoustic3d_backward(const Sem3dBackwardInputCore& in) {
         const bool u_is_zero = (mm == 1);
         const float* u_line = bsm ? u_lo : (u_is_zero ? nullptr
                               : save_wf + static_cast<size_t>(mm - 2) * ng);
+        // Ku = K0 u^{mm-1}, then Ktmp (free after the leapfrog) = c^2 o Ku:
+        // the c^2 gradient takes the former, inv_M's and the march the latter
         cudaMemsetAsync(Ku, 0, ngb, stream);
         if (!u_is_zero) {
             if (def)
                 sem3d_acoustic_stiffness_deformed<<<grid, m, sh_stiff, stream>>>(
-                    u_line, ibool, D, c2n, wJ, Ixx, Ixy, Ixz, Iex, Iey, Iez,
+                    u_line, ibool, D, wJ, Ixx, Ixy, Ixz, Iex, Iey, Iez,
                     Igx, Igy, Igz, Ku, ngll, E, ng);
             else
                 sem3d_acoustic_stiffness<<<grid, m, sh_stiff, stream>>>(
                     u_line, ibool, D, jx, jy, jz, Ku, ngll, E, ng);
+            sem3d_accum_grad_c2<<<nb, TPB, 0, stream>>>(a_m, inv_M, Ku, dt2, gC2, ng);
         }
+        sem2d::sem2d_scale2<<<nb, TPB, 0, stream>>>(Ku, c2n, 1.f, Ktmp, ng);
         sem2d::sem2d_accum_gradM<<<nb, TPB, 0, stream>>>(
-            a_m, pattern, Ku, wavelet, km1, dt2, gM, ng);
+            a_m, pattern, Ktmp, wavelet, km1, dt2, gM, ng);
         sem2d::sem2d_accum_gradW<<<nb, TPB, 0, stream>>>(
             pattern, inv_M, a_m, dt2, km1, gW, ng);
-        if (!u_is_zero) {
-            sem2d::sem2d_scale2<<<nb, TPB, 0, stream>>>(inv_M, a_m, -dt2, tmp, ng);
-            if (def)
-                sem3d_acoustic_imaging_deformed<<<grid, m, sh_imag, stream>>>(
-                    u_line, tmp, ibool, D, wJ, Ixx, Ixy, Ixz, Iex, Iey, Iez,
-                    Igx, Igy, Igz, gJx, ngll, E, ng);
-            else
-                sem3d_acoustic_imaging<<<grid, m, sh_imag, stream>>>(
-                    u_line, tmp, ibool, D, gJx, gJy, gJz, ngll, E, ng);
-        }
         if (bsm && !u_is_zero) {
             // reverse-march: u^{mm-2} = 2 u^{mm-1} - u^{mm}
-            //   + dt2 invM (pat wav[mm-1] - K u^{mm-1});  Ku already holds
-            // K(u^{mm-1}) from the gradM recompute above.
+            //   + dt2 invM (pat wav[mm-1] - c^2 K0 u^{mm-1});  Ktmp already
+            // holds c^2 K0 u^{mm-1} from the gradient step above.
             sem2d::sem2d_acoustic_newmark<<<nb, TPB, 0, stream>>>(
-                u_lo, u_hi, Ku, pattern, inv_M, wavelet, km1, dt2, u_km1, ng);
+                u_lo, u_hi, Ktmp, pattern, inv_M, wavelet, km1, dt2, u_km1, ng);
             if (kdir > 0)
                 sem2d::sem2d_dirichlet_fill<<<db, TPB, 0, stream>>>(u_km1, didx, kdir);
             float* t2 = u_hi; u_hi = u_lo; u_lo = u_km1; u_km1 = t2;
