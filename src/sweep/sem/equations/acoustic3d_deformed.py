@@ -1,8 +1,9 @@
 """Constant-density acoustic SEM on a deformed Hex27 mesh — the 3-D analogue of
 :class:`AcousticSEM2DDeformed`.
 
-Weak form ``∫ v ü dΩ + ∫ c² ∇v · ∇u dΩ = ∫ v s dΩ`` on a Q2 (27-node) deformed
-mesh, with the per-GLL 3×3 Jacobian chain rule
+``ü = c² M⁻¹ (b − K u)`` with the c²-free stiffness ``K = ∫ ∇v · ∇u dΩ`` and c²
+per global node (see :mod:`.acoustic2d`), on a Q2 (27-node) deformed mesh, with
+the per-GLL 3×3 Jacobian chain rule
 
     ∂/∂x_d = Σ_m inv_J[m, d] ∂/∂ξ_m   (m ∈ {ξ, η, γ}, d ∈ {x, y, z}).
 
@@ -33,6 +34,7 @@ import torch
 from .._assembly import assemble, assemble_each
 from ..cpml.acoustic3d import CPML3DProfile
 from ..mesh.boundaries import free_surface_node_idx
+from ..mesh.nodes import node_field
 from ..fields import DerivedInitState, DirichletNodes, FieldSpec, check_element_arrays
 from ..mesh.hex27 import Hex27Mesh
 from ..mesh.hex8 import boundary_element_faces
@@ -76,7 +78,6 @@ class AcousticSEM3DDeformed(DerivedInitState, DirichletNodes):
     cpml: Optional[CPML3DProfile]
 
     _D: torch.Tensor
-    _c2: torch.Tensor                 # (E, ng, ng, ng)
     _w_J: torch.Tensor                # w₃ |J|
     # inv_J components I[m, d] = ∂ξ_m/∂x_d
     _I: tuple                         # 9 tensors: (xi_x, xi_y, xi_z, eta_x, ...)
@@ -87,8 +88,7 @@ class AcousticSEM3DDeformed(DerivedInitState, DirichletNodes):
         device, dtype = vp_e.device, vp_e.dtype
         mass = torch.zeros(mesh.n_global, dtype=dtype, device=device)
         mass.index_add_(0, mesh.ibool.reshape(-1), mesh.w_jac.reshape(-1))
-        vp_squared_node = torch.zeros(mesh.n_global, dtype=dtype, device=device)
-        vp_squared_node[mesh.ibool] = vp_e * vp_e
+        vp_squared_node = node_field(mesh.ibool, mesh.n_global, vp_e * vp_e)
         J = mesh.inv_J
         I = (J[..., 0, 0], J[..., 0, 1], J[..., 0, 2],
              J[..., 1, 0], J[..., 1, 1], J[..., 1, 2],
@@ -97,7 +97,7 @@ class AcousticSEM3DDeformed(DerivedInitState, DirichletNodes):
             mesh=mesh, vp_e=vp_e, vp_squared_node=vp_squared_node, mass=mass,
             _inv_M=1.0 / mass, dirichlet=tuple(dirichlet),
             dirichlet_idx=free_surface_node_idx(mesh, dirichlet, device),
-            cpml=cpml, _D=mesh.deriv, _c2=vp_e * vp_e, _w_J=mesh.w_jac, _I=I)
+            cpml=cpml, _D=mesh.deriv, _w_J=mesh.w_jac, _I=I)
 
     # ------------------------------------------------------------------ #
     # physical gradient via the 3×3 inv_J chain rule
@@ -110,15 +110,12 @@ class AcousticSEM3DDeformed(DerivedInitState, DirichletNodes):
         return du_dx, du_dy, du_dz
 
     def stiffness_apply(self, u_global: torch.Tensor) -> torch.Tensor:
-        D, wJ = self._D, self._w_J
-        (Ixx, Ixy, Ixz, Iex, Iey, Iez, Igx, Igy, Igz) = self._I
+        """``(K u)_global = Σ_e ∫ ∇v · ∇u dΩ`` (c²-free) assembled to global nodes."""
+        D = self._D
         u_e = u_global[self.mesh.ibool]
         du_dx, du_dy, du_dz = self._phys_grad_from_ref(
             _dxi(D, u_e), _deta(D, u_e), _dgam(D, u_e))
-        q_x = self._c2 * du_dx; q_y = self._c2 * du_dy; q_z = self._c2 * du_dz
-        F_xi  = wJ * (q_x * Ixx + q_y * Ixy + q_z * Ixz)
-        F_eta = wJ * (q_x * Iex + q_y * Iey + q_z * Iez)
-        F_gam = wJ * (q_x * Igx + q_y * Igy + q_z * Igz)
+        F_xi, F_eta, F_gam = self._proj_ref(du_dx, du_dy, du_dz)
         r_e = _DTxi(D, F_xi) + _DTeta(D, F_eta) + _DTgam(D, F_gam)
         return assemble(r_e, self.mesh.ibool, u_global)
 
@@ -209,8 +206,10 @@ class AcousticSEM3DDeformed(DerivedInitState, DirichletNodes):
              zeta_x, zeta_y, zeta_z) = self._apply_dirichlet(
                 u_next, psi_x, psi_y, psi_z, zeta_x, zeta_y, zeta_z)
         else:
+            # c² per node, as on the CPML path (where w_sum = -K u / M)
             Ku = self.stiffness_apply(u_now)
-            u_next = 2.0 * u_now - u_prev + dt2 * inv_M * (-Ku + b)
+            u_next = (2.0 * u_now - u_prev
+                      + dt2 * self.vp_squared_node * (-Ku * inv_M) + dt2 * inv_M * b)
             (u_next,) = self._apply_dirichlet(u_next)
         return (u_next, u_now, psi_x, psi_y, psi_z, zeta_x, zeta_y, zeta_z)
 

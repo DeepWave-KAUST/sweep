@@ -44,6 +44,7 @@ from ..cpml.acoustic import CPMLProfile
 from ..mesh.boundaries import free_surface_node_idx
 from ..fields import DerivedInitState, DirichletNodes, FieldSpec
 from ..mesh.domains import DomainMask, masked_inv_mass
+from ..mesh.nodes import node_field
 from ..mesh.quad9 import Quad9Mesh
 
 
@@ -123,14 +124,13 @@ class AcousticPotentialSEM2D(DerivedInitState, DirichletNodes):
         mass_geo = torch.zeros(mesh.n_global, dtype=dtype, device=device)
         mass_geo.index_add_(0, mesh.ibool.reshape(-1),
                             (mesh.w_jac * mask_e).reshape(-1))
-        # κ at nodes, scattered from FLUID elements only: at an interface node
-        # the fluid side's κ must win (last-write-wins over masked values would
-        # pick an arbitrary side — write only where the element is fluid).
+        # κ at nodes, read from one FLUID copy: at an interface node the
+        # fluid side's κ must win (a copy in a solid element would pick an
+        # arbitrary side), and one copy keeps the gradient from being
+        # multiplied by the share count (see mesh/nodes.py).
         kappa_e = rho_e * vp_e * vp_e
-        kappa_node = torch.zeros(mesh.n_global, dtype=dtype, device=device)
         sel = (mask_e.expand(shp) > 0).reshape(-1)
-        kappa_node.index_put_((mesh.ibool.reshape(-1)[sel],),
-                              kappa_e.reshape(-1)[sel])
+        kappa_node = node_field(mesh.ibool, mesh.n_global, kappa_e, sel)
         return cls(
             mesh=mesh, vp_e=vp_e, rho_e=rho_e, mass=mass,
             _inv_M=masked_inv_mass(mass, alive),

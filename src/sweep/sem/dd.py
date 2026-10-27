@@ -368,8 +368,7 @@ class _CompactEq3D:
 
     * material -- a strip-local trilinear interpolation on coordinates read
       from the layout's axes through the strip's own connectivity (the global
-      `x_e` is `x_axis[ibool % nx]`, exactly), then the same last-writer
-      scatter;
+      `x_e` is `x_axis[ibool % nx]`, exactly), one value per node;
     * `c_max` -- each strip's max of its interpolant, max-reduced (exact);
     * inverse mass -- the repeated addition of one value per node, which is
       what `index_add_` does on this mesh because the GLL weights are
@@ -380,11 +379,10 @@ class _CompactEq3D:
       (`finish_cpml`, once `c_max` is known).
 
     Bitwise: every consts entry and the materials equal the sliced global
-    equation (`test_sem_dd_consts_contract.py`). Gradients: a cut-plane node has
-    8 element copies globally but 4 on its owning strip, so the strip's scatter
-    under-counts the model gradient there by 2 -- `_CutMultiplicity` restores
-    it. Topography keeps the real equation (its profile is not separable and
-    its metrics are genuinely per-element-node).
+    equation (`test_sem_dd_consts_contract.py`). Gradients: one value per node
+    on the strip, like the equation's one-copy `vp_squared_node`, so nothing
+    needs rescaling at a cut. Topography keeps the real equation (its profile
+    is not separable and its metrics are genuinely per-element-node).
     """
 
 
@@ -470,30 +468,6 @@ class _CompactEq3D:
         # separable profile that IS the axis peak
         self.cpml = SimpleNamespace(b_x=axes["b_x"])
         return self
-
-
-class _CutMultiplicity(torch.autograd.Function):
-    """Identity forward; backward scales the gradient per node.
-
-    `vp2[ibool] = c2` is how both the equation and the strip turn the
-    per-element-node interpolant into a node field, and its backward hands the
-    node gradient to EVERY element copy of that node -- 8 copies for an
-    interior node, and the copies are identical, so the model gradient is the
-    node gradient times the multiplicity. A node on a cut plane has 8 copies
-    globally but only 4 on the strip that owns it (the x-split halves its
-    x-neighbours), so the strip's scatter under-counts it by exactly 2.
-    Measured before this: px=2 with the source on the cut, vp gradient
-    rel 0.499 against the fused path; px=3 (cuts away from the source) 4e-4.
-    """
-    @staticmethod
-    def forward(ctx, x, scale):
-        ctx.save_for_backward(scale)
-        return x.view_as(x)
-
-    @staticmethod
-    def backward(ctx, g):
-        (scale,) = ctx.saved_tensors
-        return g * scale, None
 
 
 def _free_surface_local(ml, sides, dev):
@@ -611,9 +585,8 @@ def _strip_interp_c2(src, tables, dims_l):
     the same eight products accumulated in the same corner order, and the
     weight is the same ``(w_z * w_y) * w_x`` association -- the factors depend
     on one axis each, so broadcasting them multiplies the identical floats.
-    The old path then did ``vp2[ibool] = c2``, a last-writer scatter over the
-    ``k`` element copies of each node; all ``k`` carry the same value, so the
-    node grid needs no scatter at all.
+    The old path then read one element copy of each node; all ``k`` copies
+    carry the same value, so the node grid needs no copies at all.
 
     The corner gather narrows the STRIP axis first
     (``index_select(2, ix)`` before dim 1 and dim 0). That is not a style
@@ -667,10 +640,8 @@ def _node_share_count(no, rows, cols, nyg, dims_g):
     """How many elements of the GLOBAL mesh touch each of this strip's nodes.
 
     ``k = 1, 2, 4 or 8``: a node is shared across an axis exactly when it is
-    an element boundary (``i % n_order == 0``) that is not a domain edge. Two
-    places need it and must not disagree -- the inverse mass assembles ``k``
-    identical contributions, and the model gradient reaches ``k`` element
-    copies of the node.
+    an element boundary (``i % n_order == 0``) that is not a domain edge. The
+    inverse mass assembles ``k`` identical contributions.
     """
     nxg, nyg_, nzg = dims_g
     iz = torch.div(rows, nyg, rounding_mode="floor")
@@ -1569,20 +1540,9 @@ class SEMModelParallel:
         c.update(cpml_slab_tables(c, self._global_yz_planes(ctx)))
         c["band_node"] = band_node_mask(c)   # the node kernels' fast-path test
         if compact:
-            # The old per-element-node path handed the node gradient to every
-            # element copy of the node (k of them on this strip) and
-            # _CutMultiplicity supplied the factor 2 a cut was missing (8
-            # copies globally, 4 here). On the node grid there is one copy,
-            # so the whole factor is applied here -- and it is exactly the
-            # GLOBAL share count, verified element-wise to equal the old
-            # (strip scatter) x (cut correction) at px = 1, 2 and 4. Summing
-            # k identical fp32 values and multiplying by k agree bitwise for
-            # k in {1, 2, 4, 8}: all powers of two.
-            mult = _share_product(
-                *_node_share_count(ctx.no, rows, cols, nyg, eq_g._dims),
-                dtype=torch.float32).reshape(-1).to("cuda")
-            mat = _CutMultiplicity.apply(ctx.vp2[s.r].to("cuda", torch.float32),
-                                         mult)
+            # one value per node, as the equation's vp_squared_node: the
+            # node gradient goes to the grid once, whatever the share count
+            mat = ctx.vp2[s.r].to("cuda", torch.float32)
         else:
             mat = eq_g.vp_squared_node.reshape(-1)[s.gm].to("cuda", torch.float32)
         return c, (mat,)

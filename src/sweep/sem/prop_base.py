@@ -888,8 +888,16 @@ class PropSEM:
             # the solver could not reach -- callers had to drop to
             # SEMCudaPropagator and assemble the call themselves, and the same
             # PropSEM call meant different things on the two backends.
-            from .prop_c import C_SUPPORTED, sem_c_available
-            if equation in C_SUPPORTED:
+            from .prop_c import C_SUPPORTED, c_route, sem_c_available
+            has_cpml = self.abcn_elements > 0
+            if equation in C_SUPPORTED and c_route(equation, has_cpml) is None:
+                # e.g. the bare 3-D acoustic box: 'auto' stays eager
+                if impl == "c":
+                    raise NotImplementedError(
+                        f"impl='c' has no CUDA kernel for {equation.__name__} "
+                        f"{'with' if has_cpml else 'without'} a C-PML "
+                        f"(abcn={self.abcn}). Use impl='eager'.")
+            elif equation in C_SUPPORTED:
                 if sem_c_available() and str(dev).startswith("cuda"):
                     self._use_c = True
                 elif impl == "c":

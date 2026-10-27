@@ -57,7 +57,14 @@ NZ, NX, ABCN, PAD = 49, 65, 6, 6 * 4
 # at nt=400 once the pad was cut from the gradient (it had folded the band's
 # error onto the outer ring).
 NT, DT = 400, 0.30 * (0.172 * NO * DH) / 4500.0
-CROP = 4                      # model pixels: cos 0.99996 at 2, 0.9999999 at 4
+# The band's one-element rim, in model pixels: rim's error stays inside the
+# first element (n_order pixels plus the node it shares with the next one).
+# Measured px=1 against the full tape: cos 0.998 at 2, 0.999993 at 4 (the
+# shared node is still in), 1.0 at 5 with rel err 3.5e-6 from 5 to 10 pixels.
+# 4 passed before kappa_node read one element copy: the old per-copy
+# gradient overcount weighed that ring differently (its rim error was 3e-4
+# of the gradient max then, 4e-3 now; 1e-7 vs 1e-6 from 5 on).
+CROP = NO + 1
 # --- coupled: element-local models over the WHOLE mesh, band included, so the
 # band overlaps REAL material. FS_NZ x FS_NX is that mesh (the crop below is in
 # its coordinates); the model PropSEM adds the band outside is smaller by it --

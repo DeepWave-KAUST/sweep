@@ -1,8 +1,10 @@
 """P5 parity: CUDA (impl='c') 3-D acoustic forward + adjoint vs eager
-(AcousticSEM3D, axis-aligned Hex8, velocity form).
+(AcousticSEM3D, axis-aligned Hex8, velocity form), with a C-PML.
 
 Forward gathers and dL/dvp vs eager full-tape autograd: cos >= 1-1e-4.
 Heterogeneous vp, free surface (top dirichlet) on/off, interior receivers.
+The bare (no C-PML) kernel solves div(c² grad u), not the eager c² Laplace u,
+and is refused.
 """
 from __future__ import annotations
 
@@ -62,28 +64,10 @@ def _prop(eq, use_cuda):
         eq, dt=DT, nt=NT, source_xz=[SRC], receiver_xz=REC)
 
 
-@pytest.mark.parametrize("dirichlet", [(), ("top",)], ids=["neumann", "fs"])
-def test_acoustic3d_forward_matches_eager(dirichlet):
-    eq, _ = _eq(dirichlet)
-    oe = _prop(eq, False).forward(_wav())[..., 0].T
-    oc = _prop(eq, True).forward(_wav())[..., 0].T
-    c = _cos(oc.cpu(), oe.cpu())
-    assert c >= 1 - 1e-4, f"forward cos={c:.6f}"
-
-
-@pytest.mark.parametrize("dirichlet", [(), ("top",)], ids=["neumann", "fs"])
-def test_acoustic3d_grads_match_eager(dirichlet):
-    def run(uc):
-        eq, vp = _eq(dirichlet, grad=True)
-        o = _prop(eq, uc).forward(_wav())
-        s = o[..., 0].T
-        W = torch.linspace(0.4, 1.6, s.numel(), device=s.device).reshape(s.shape)
-        (W * s).sum().backward()
-        return vp.grad.cpu()
-    ge = run(False)
-    gc = run(True)
-    c = _cos(gc, ge)
-    assert c >= 1 - 1e-4, f"grad vp cos={c:.6f}"
+def test_acoustic3d_bare_is_refused():
+    eq, _ = _eq(("top",))
+    with pytest.raises(NotImplementedError, match="without a C-PML"):
+        _prop(eq, True).forward(_wav())
 
 
 @pytest.mark.parametrize("dirichlet", [(), ("top",)], ids=["neumann", "fs"])

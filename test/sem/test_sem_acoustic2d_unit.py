@@ -92,7 +92,8 @@ def test_stiffness_psd(small_mesh):
 
 
 def test_stiffness_matches_laplacian_smooth(small_mesh):
-    """For a smooth field u, M⁻¹ K u ≈ -c² ∇²u (verifies the weak form).
+    """For a smooth field u, M⁻¹ K u ≈ -∇²u (verifies the weak form; K is
+    c²-free, the step applies c² per node).
 
     Use a doubly-periodic-on-the-boundary mode  u = sin(kx x) sin(kz z)
     with kx, kz chosen so u and ∂u/∂n vanish on the four faces — that way
@@ -113,7 +114,7 @@ def test_stiffness_matches_laplacian_smooth(small_mesh):
 
     Ku = eq.stiffness_apply(u)
     lap_proxy = Ku / eq.mass
-    ref = (c * c) * (kx * kx + kz * kz) * u
+    ref = (kx * kx + kz * kz) * u
 
     # Restrict to a clean interior (away from boundary where lumped-mass
     # projection has its largest artefact).

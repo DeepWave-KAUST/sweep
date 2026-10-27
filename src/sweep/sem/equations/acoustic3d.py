@@ -4,17 +4,18 @@ The 3-D analogue of :mod:`sweep.sem.equations.acoustic2d`. Same weak form, same
 double-convolution CPML, one extra spatial direction.
 
 Strong form    :  ∂²u/∂t²  =  c²(x) ∇²u  +  s(x, t)
-Weak form      :  ∫ v ü dΩ  +  ∫ c² ∇v · ∇u dΩ  =  ∫ v s dΩ
-Discretized    :  M ü  +  K u  =  b      (M diagonal after GLL collocation)
+Discretized    :  ü  =  c² M⁻¹ (b − K u)     (c² per global node, M diagonal,
+                                          K = ∫ ∇v · ∇u dΩ c²-free; see
+                                          :mod:`.acoustic2d` for why)
 
 Conventions
 -----------
 - Element-local axes ``(kz, ky, kx)`` ↔ reference ``(ζ, η, ξ)`` ↔ physical
   ``(z, y, x)``; all fields shape ``(E, ngll, ngll, ngll)``.
 - Geometric direction factors on the axis-aligned hex (constant per element):
-  ``G_a = (2/d_a)² · |J|`` with ``|J| = dx·dy·dz/8`` — so the c²-baked stiffness
-  weight along ``a`` is ``c² · w₃ · G_a`` (``w₃`` = GLL weight product). This is
-  the direct generalisation of the 2-D ``Jx = dz/dx`` factor.
+  ``G_a = (2/d_a)² · |J|`` with ``|J| = dx·dy·dz/8`` — so the stiffness weight
+  along ``a`` is ``w₃ · G_a`` (``w₃`` = GLL weight product). This is the direct
+  generalisation of the 2-D ``Jx = dz/dx`` factor.
 
 Boundaries
 ----------
@@ -34,6 +35,7 @@ import torch
 from .._assembly import assemble, assemble_each
 from ..cpml.acoustic3d import CPML3DProfile
 from ..mesh.boundaries import free_surface_node_idx
+from ..mesh.nodes import node_field
 from ..fields import DerivedInitState, DirichletNodes, FieldSpec, check_element_arrays
 from ..mesh.hex8 import Hex8Mesh, boundary_element_faces
 
@@ -66,11 +68,8 @@ class AcousticSEM3D(DerivedInitState, DirichletNodes):
     dirichlet_idx: torch.Tensor
     cpml: Optional[CPML3DProfile]
 
-    _c2_jx: torch.Tensor          # c² · w₃ · G_x
-    _c2_jy: torch.Tensor
-    _c2_jz: torch.Tensor
     _D: torch.Tensor              # (ngll, ngll) Lagrange derivative matrix
-    _w_jx_noc2: torch.Tensor      # CPML path: w₃ · G_x  (no c²)
+    _w_jx_noc2: torch.Tensor      # w₃ · G_x  (no c²)
     _w_jy_noc2: torch.Tensor
     _w_jz_noc2: torch.Tensor
     _w_jac: torch.Tensor          # CPML path: w₃ · |J|
@@ -103,18 +102,14 @@ class AcousticSEM3D(DerivedInitState, DirichletNodes):
         Gy = (2.0 / mesh.dy_e) ** 2 * jac
         Gz = (2.0 / mesh.dz_e) ** 2 * jac
         c2 = vp_e * vp_e
-        c2_jx = c2 * w3 * Gx
-        c2_jy = c2 * w3 * Gy
-        c2_jz = c2 * w3 * Gz
         ones_E = (lambda t: t.expand(mesh.n_elements, -1, -1, -1).contiguous())
         w_jx_noc2 = ones_E(w3 * Gx)
         w_jy_noc2 = ones_E(w3 * Gy)
         w_jz_noc2 = ones_E(w3 * Gz)
         w_jac = ones_E(w3 * jac)
 
-        # Per-global-node c² (first-touch scatter; last write wins).
-        vp_squared_node = torch.zeros(mesh.n_global, dtype=dtype, device=device)
-        vp_squared_node[mesh.ibool] = c2
+        # Per-global-node c² from one element copy (see mesh/nodes.py).
+        vp_squared_node = node_field(mesh.ibool, mesh.n_global, c2)
 
         return cls(
             mesh=mesh, vp_e=vp_e, vp_squared_node=vp_squared_node,
@@ -122,7 +117,6 @@ class AcousticSEM3D(DerivedInitState, DirichletNodes):
             dirichlet=tuple(dirichlet),
             dirichlet_idx=free_surface_node_idx(mesh, dirichlet, device),
             cpml=cpml,
-            _c2_jx=c2_jx, _c2_jy=c2_jy, _c2_jz=c2_jz,
             _D=mesh.deriv,
             _w_jx_noc2=w_jx_noc2, _w_jy_noc2=w_jy_noc2, _w_jz_noc2=w_jz_noc2,
             _w_jac=w_jac,
@@ -132,19 +126,19 @@ class AcousticSEM3D(DerivedInitState, DirichletNodes):
         )
 
     # ------------------------------------------------------------------ #
-    # Symmetric stiffness K · u  (c² baked in) — bare path + unit tests.
+    # Symmetric stiffness K · u  (c²-free) — bare path + unit tests.
     # ------------------------------------------------------------------ #
     def stiffness_apply(self, u_global: torch.Tensor) -> torch.Tensor:
-        """``(K u)_global = Σ_e ∫ c² ∇v · ∇u dΩ`` assembled to global nodes."""
+        """``(K u)_global = Σ_e ∫ ∇v · ∇u dΩ`` assembled to global nodes."""
         D = self._D
         u_e = u_global[self.mesh.ibool]                       # (E,kz,ky,kx)
         du_dxi   = torch.einsum("xX,ezyX->ezyx", D, u_e)      # ∂/∂x (last axis)
         du_deta  = torch.einsum("yY,ezYx->ezyx", D, u_e)      # ∂/∂y
         du_dzeta = torch.einsum("zZ,eZyx->ezyx", D, u_e)      # ∂/∂z
         r_e = (
-            torch.einsum("Xx,ezyX->ezyx", D, self._c2_jx * du_dxi)
-            + torch.einsum("Yy,ezYx->ezyx", D, self._c2_jy * du_deta)
-            + torch.einsum("Zz,eZyx->ezyx", D, self._c2_jz * du_dzeta)
+            torch.einsum("Xx,ezyX->ezyx", D, self._w_jx_noc2 * du_dxi)
+            + torch.einsum("Yy,ezYx->ezyx", D, self._w_jy_noc2 * du_deta)
+            + torch.einsum("Zz,eZyx->ezyx", D, self._w_jz_noc2 * du_dzeta)
         )
         return assemble(r_e, self.mesh.ibool, u_global)
 
@@ -241,8 +235,10 @@ class AcousticSEM3D(DerivedInitState, DirichletNodes):
              zeta_x, zeta_y, zeta_z) = self._apply_dirichlet(
                 u_next, psi_x, psi_y, psi_z, zeta_x, zeta_y, zeta_z)
         else:
+            # c² per node, as on the CPML path (where w_sum = -K u / M)
             Ku = self.stiffness_apply(u_now)
-            u_next = 2.0 * u_now - u_prev + dt2 * inv_M * (-Ku + b)
+            u_next = (2.0 * u_now - u_prev
+                      + dt2 * self.vp_squared_node * (-Ku * inv_M) + dt2 * inv_M * b)
             (u_next,) = self._apply_dirichlet(u_next)
         return (u_next, u_now, psi_x, psi_y, psi_z, zeta_x, zeta_y, zeta_z)
 
