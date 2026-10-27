@@ -13,12 +13,13 @@
 
 namespace sem3d {
 
-// Forward input for the 3-D acoustic SEM (velocity form: c^2 baked into the
-// separable stiffness weights c2_j{x,y,z} = vp^2 w3 G_{x,y,z}).
+// Forward input for the 3-D acoustic SEM without a C-PML (u_tt = c^2 Laplace u:
+// a c^2-free stiffness K0, then c^2 per node). The c2_j{x,y,z} names predate
+// that; the fields hold the weights w3 G_{x,y,z} (no c^2).
 struct Sem3dForwardInput {
     torch::Tensor ibool;              // (E, ngll^3) int64, flattened (kz,ky,kx)
     torch::Tensor D;                  // (ngll, ngll) f32
-    torch::Tensor c2_jx, c2_jy, c2_jz;  // (E, ngll^3) f32 stiffness weights
+    torch::Tensor c2_jx, c2_jy, c2_jz;  // (E, ngll^3) f32 c^2-FREE weights w3 G_axis
     torch::Tensor inv_M;              // (n_global,) f32
     torch::Tensor dirichlet_idx;      // (k,) int64 (may be empty)
     torch::Tensor src_pattern;        // (n_global,) f32
@@ -31,11 +32,14 @@ struct Sem3dForwardInput {
     torch::Tensor save_wavefield;     // (nt, batch, n_global) OPTIONAL
     torch::Tensor fin_u, fin_u_prev;  // (n_global,) OPTIONAL (bs=1)
     int bs = 0;
-    // deformed=1: Hex27 topography. c2_node (single per-node c^2) + w_J +
-    // the full per-node 3x3 inv_J drive sem3d_acoustic_stiffness_deformed;
-    // c2_j{x,y,z} are ignored. Empty otherwise (axis-aligned Hex8).
+    // c2_node: the per-node c^2 (n_global,) on both meshes -- the stiffness
+    // is c^2-free and c^2 multiplies K0 u per node (u_tt = c^2 Laplace u).
+    // deformed=1: Hex27 topography; w_J + the full per-node 3x3 inv_J drive
+    // sem3d_acoustic_stiffness_deformed and c2_j{x,y,z} are ignored. The
+    // metric is empty otherwise (axis-aligned Hex8).
     int deformed = 0;
-    torch::Tensor c2_node, wJ;        // (E, ngll^3)
+    torch::Tensor c2_node;            // (n_global,)
+    torch::Tensor wJ;                 // (E, ngll^3)
     torch::Tensor ixx, ixy, ixz, iex, iey, iez, igx, igy, igz;  // (E, ngll^3)
     double dt = 0.0;
     int nt = 0, ngll = 0, n_elements = 0, n_global = 0, n_rec = 0;
@@ -43,8 +47,9 @@ struct Sem3dForwardInput {
 };
 
 // Backward input (save-all adjoint). Returns
-// (grad_c2_jx, grad_c2_jy, grad_c2_jz, grad_inv_M, grad_wavelet); when
-// deformed=1 the single c^2 grad is returned in grad_c2_jx (grad_c2_node).
+// (grad_c2_jx, grad_c2_jy, grad_c2_jz, grad_inv_M, grad_wavelet), where
+// grad_c2_jx is dL/dc2_node (n_global,) and grad_c2_j{y,z} are unused: the
+// c^2-free stiffness weights are constants.
 struct Sem3dBackwardInput {
     torch::Tensor ibool, D, c2_jx, c2_jy, c2_jz, inv_M, dirichlet_idx;
     torch::Tensor src_pattern, wavelet, rec_G, rec_W;
@@ -53,11 +58,13 @@ struct Sem3dBackwardInput {
     torch::Tensor u_hi, u_lo, u_km1;  // (bs=1) rolling reconstruction levels
     int bs = 0;
     int deformed = 0;
-    torch::Tensor c2_node, wJ;        // (E, ngll^3)
+    torch::Tensor c2_node;            // (n_global,)
+    torch::Tensor wJ;                 // (E, ngll^3)
     torch::Tensor ixx, ixy, ixz, iex, iey, iez, igx, igy, igz;  // (E, ngll^3)
     torch::Tensor grad_syn;           // (n_rec, nt)
     torch::Tensor a_p1, a_p2, a_m, tmp, Ktmp, Ku, adj_src;   // (batch, n_global)
-    torch::Tensor grad_c2_jx, grad_c2_jy, grad_c2_jz;        // (E, ngll^3)
+    torch::Tensor grad_c2_jx;         // (n_global,) dL/dc2_node
+    torch::Tensor grad_c2_jy, grad_c2_jz;  // unused (may be empty)
     torch::Tensor grad_inv_M;         // (n_global,)
     torch::Tensor grad_wavelet;       // (nt,)
     double dt = 0.0;

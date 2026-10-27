@@ -43,15 +43,15 @@ R_EXPECT = (C2 - C1) / (C2 + C1)          # +0.5
 
 FAMILIES = {
     "2d": (AcousticSEM2D,
-           lambda: build_quad4_mesh(1, NEZ, H, NEZ * H, NO, dtype=DT64)),
+           lambda dt=DT64: build_quad4_mesh(1, NEZ, H, NEZ * H, NO, dtype=dt)),
     "2d_deformed": (AcousticSEM2DDeformed,
-                    lambda: build_axis_aligned_quad9(1, NEZ, H, NEZ * H,
-                                                     n_order=NO, dtype=DT64)),
+                    lambda dt=DT64: build_axis_aligned_quad9(
+                        1, NEZ, H, NEZ * H, n_order=NO, dtype=dt)),
     "3d": (AcousticSEM3D,
-           lambda: build_hex8_mesh(1, 1, NEZ, H, H, NEZ * H, NO, dtype=DT64)),
+           lambda dt=DT64: build_hex8_mesh(1, 1, NEZ, H, H, NEZ * H, NO, dtype=dt)),
     "3d_deformed": (AcousticSEM3DDeformed,
-                    lambda: build_axis_aligned_hex27(1, 1, NEZ, H, H, NEZ * H,
-                                                     n_order=NO, dtype=DT64)),
+                    lambda dt=DT64: build_axis_aligned_hex27(
+                        1, 1, NEZ, H, H, NEZ * H, n_order=NO, dtype=dt)),
 }
 
 
@@ -60,19 +60,24 @@ def _ricker(t):
     return (1.0 - 2.0 * a) * math.exp(-a)
 
 
-def _trace(name, cpml):
+def _two_layer(name, cpml, dtype=DT64):
     cls, mk = FAMILIES[name]
-    m = mk()
+    m = mk(dtype)
     # element-wise constant layers (decided by the element's mean depth)
     zc = m.z_e.reshape(m.n_elements, -1).mean(-1)
     shape = (m.n_elements,) + (1,) * (m.z_e.dim() - 1)
-    vp_e = torch.where(zc < Z_IFACE, C1, C2).to(DT64).reshape(shape).expand_as(m.z_e)
+    vp_e = torch.where(zc < Z_IFACE, C1, C2).to(dtype).reshape(shape).expand_as(m.z_e)
     kw = {}
     if cpml:
         build = build_cpml3d if m.z_e.dim() == 4 else build_cpml
         kw["cpml"] = build(m, dt=DT, sides=("bottom",), pml_thickness_elements=8,
                            c_max=C2, f_dominant=F0)
-    eq = cls.build(m, vp_e.contiguous(), dirichlet=(), **kw)
+    return cls.build(m, vp_e.contiguous(), dirichlet=(), **kw)
+
+
+def _trace(name, cpml):
+    eq = _two_layer(name, cpml)
+    m = eq.mesh
 
     zg = m.z_global
     src_nodes = (zg - Z_SRC).abs() < 1e-6
@@ -115,3 +120,30 @@ def test_bare_and_cpml_paths_agree_before_the_pml_echo(name):
     n = int(0.55 / DT)
     rel = float((a[:n] - b[:n]).norm() / a[:n].norm())
     assert rel < 1e-12, f"{name}: bare vs cpml rel {rel:.2e}"
+
+
+
+# ------------------------- impl='c' (3-D, CUDA) ---------------------------- #
+# The CUDA kernels against the eager classes pinned above, on the same jump: a
+# point source at the top of the column, all of the direct wave and the
+# interface reflection. A smooth model cannot catch a div(c² grad u) kernel
+# (the two forms differ only where c varies); this jump flips the reflection.
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+@pytest.mark.parametrize("cpml", [False, True], ids=["bare", "cpml"])
+@pytest.mark.parametrize("name", ["3d", "3d_deformed"])
+def test_cuda_two_layer_matches_eager(name, cpml):
+    from sweep.sem import SEMPropagator
+    from sweep.sem.prop_c import SEMCudaPropagator, sem_c_available
+    if not sem_c_available():
+        pytest.skip("needs the compiled SEM core")
+    nt = 2800                     # the reflection ends at ~0.7 s, the top echo is later
+    wav = torch.tensor([_ricker(n * DT) for n in range(nt)], dtype=DT64)
+    kw = dict(dt=DT, nt=nt, source_xz=[(H / 2, H / 2, Z_SRC)],
+              receiver_xz=[(H / 2, H / 2, Z_REC)])
+    with torch.no_grad():
+        ref = SEMPropagator.build(_two_layer(name, cpml), **kw).forward(wav)
+        out = SEMCudaPropagator.build(_two_layer(name, cpml, torch.float32),
+                                      **kw).forward(wav.float().cuda())
+    a, b = ref.reshape(-1), out.reshape(-1).double().cpu()
+    cos = float((a @ b) / (a.norm() * b.norm()))
+    assert cos > 1 - 1e-5, f"{name} {'cpml' if cpml else 'bare'}: c vs eager cos {cos:.7f}"

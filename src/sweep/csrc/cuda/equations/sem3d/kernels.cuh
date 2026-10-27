@@ -32,14 +32,17 @@
 
 namespace sem3d {
 
-// K u — symmetric separable stiffness, c^2 baked in the per-axis weights.
+// K0 u — symmetric separable stiffness with the c^2-FREE per-axis weights
+// w3 G_axis. The driver applies c^2 per node (u_tt = c^2 Laplace u, as on the
+// C-PML path); c^2 inside the integral would solve div(c^2 grad u) instead,
+// which flips every reflection coefficient.
 // One block per (element, batch item); m = ngll^3 threads; shared 4m floats.
 static __global__ void sem3d_acoustic_stiffness(
     const float* __restrict__ u,        // (batch, n_global)
     const int*    __restrict__ ibool,
     const float* __restrict__ D,
-    const float* __restrict__ c2_jx, const float* __restrict__ c2_jy,
-    const float* __restrict__ c2_jz,
+    const float* __restrict__ w_jx, const float* __restrict__ w_jy,
+    const float* __restrict__ w_jz,
     float* __restrict__ K,              // (batch, n_global)
     int ngll, int E, long n_global)
 {
@@ -68,9 +71,9 @@ static __global__ void sem3d_acoustic_stiffness(
         deta  += D[ky * ngll + q] * s_u[(kz * ngll + q) * ngll + kx];
         dzeta += D[kz * ngll + q] * s_u[(q * ngll + ky) * ngll + kx];
     }
-    s_fx[tid] = c2_jx[off] * dxi;
-    s_fy[tid] = c2_jy[off] * deta;
-    s_fz[tid] = c2_jz[off] * dzeta;
+    s_fx[tid] = w_jx[off] * dxi;
+    s_fy[tid] = w_jy[off] * deta;
+    s_fz[tid] = w_jz[off] * dzeta;
     __syncthreads();
 
     float r = 0.f;
@@ -82,47 +85,14 @@ static __global__ void sem3d_acoustic_stiffness(
     atomicAdd(&Kb[g], r);
 }
 
-// Imaging: grad_c2_j{x,y,z}[e,p] += (ref-grad_axis u)(ref-grad_axis y) at p,
-// with u the saved forward field and y = -dt2 inv_M o adjoint. atomicAdd so a
-// batched launch accumulates safely across batch items.
-static __global__ void sem3d_acoustic_imaging(
-    const float* __restrict__ u, const float* __restrict__ y,   // (batch, ng)
-    const int*    __restrict__ ibool, const float* __restrict__ D,
-    float* __restrict__ grad_c2_jx, float* __restrict__ grad_c2_jy,
-    float* __restrict__ grad_c2_jz,
-    int ngll, int E, long n_global)
-{
-    const int e = blockIdx.x;
-    if (e >= E) return;
-    const int m = ngll * ngll * ngll, tid = threadIdx.x;
-    if (tid >= m) return;
-    const int kx = tid % ngll, ky = (tid / ngll) % ngll, kz = tid / (ngll * ngll);
-    const int off = e * m + tid;
-    const float* ub = u + static_cast<size_t>(blockIdx.y) * n_global;
-    const float* yb = y + static_cast<size_t>(blockIdx.y) * n_global;
-
-    extern __shared__ float sh[];
-    float* s_u = sh;
-    float* s_y = sh + m;
-    const int g = ibool[off];
-    s_u[tid] = ub[g];
-    s_y[tid] = yb[g];
-    __syncthreads();
-
-    float ux_ = 0.f, uy_ = 0.f, uz_ = 0.f, yx_ = 0.f, yy_ = 0.f, yz_ = 0.f;
-    const int zy = (kz * ngll + ky) * ngll;
-    for (int q = 0; q < ngll; ++q) {
-        const float dx = D[kx * ngll + q], dy = D[ky * ngll + q], dz = D[kz * ngll + q];
-        ux_ += dx * s_u[zy + q];
-        uy_ += dy * s_u[(kz * ngll + q) * ngll + kx];
-        uz_ += dz * s_u[(q * ngll + ky) * ngll + kx];
-        yx_ += dx * s_y[zy + q];
-        yy_ += dy * s_y[(kz * ngll + q) * ngll + kx];
-        yz_ += dz * s_y[(q * ngll + ky) * ngll + kx];
-    }
-    atomicAdd(&grad_c2_jx[off], ux_ * yx_);
-    atomicAdd(&grad_c2_jy[off], uy_ * yy_);
-    atomicAdd(&grad_c2_jz[off], uz_ * yz_);
+// grad_c2[i] -= dt2 * a_m[i] * inv_M[i] * K0u[i]: the c^2 gradient of the
+// node-wise c^2 the driver applies to K0 u (forward line k, adjoint a_m).
+// Nodal like sem2d_accum_gradM, with its batch caveat.
+static __global__ void sem3d_accum_grad_c2(
+    const float* __restrict__ a_m, const float* __restrict__ inv_M,
+    const float* __restrict__ K0u, float dt2, float* __restrict__ grad_c2, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) grad_c2[i] -= dt2 * a_m[i] * inv_M[i] * K0u[i];
 }
 
 // ================== 3-D acoustic C-PML kernels (P6) =========================
@@ -751,15 +721,15 @@ static __global__ void sem3d_acoustic_cpml_combine(
 // the full per-node 3x3 inv_J (I[m,d] = d xi_m/d x_d, m in {xi,eta,gam}, d in
 // {x,y,z}) + w_J = w3 |J|, mirroring AcousticSEM3DDeformed. The physical
 // gradient P_d(f) = I[xi,d] G_xi(f) + I[eta,d] G_eta(f) + I[gam,d] G_gam(f); the
-// stiffness is P_d^T(w_J c2 P_d(u)) (symmetric -> reused for the reverse march).
+// stiffness is P_d^T(w_J P_d(u)) (symmetric -> reused for the reverse march).
 // On a flat mesh (I diagonal, cross terms 0) these reduce to the axis-aligned
 // arithmetic bit-for-bit. All kernels launch grid (E, batch), m = ngll^3 threads.
 
-// K u — deformed stiffness. Shared 4m (s_u + 3 ref fluxes F_xi/F_eta/F_gam).
+// K0 u — deformed stiffness, c^2-free like sem3d_acoustic_stiffness (the
+// driver applies c^2 per node). Shared 4m (s_u + 3 ref fluxes F_xi/F_eta/F_gam).
 static __global__ void sem3d_acoustic_stiffness_deformed(
     const float* __restrict__ u, const int* __restrict__ ibool,
-    const float* __restrict__ D, const float* __restrict__ c2,
-    const float* __restrict__ wJ,
+    const float* __restrict__ D, const float* __restrict__ wJ,
     const float* __restrict__ ixx, const float* __restrict__ ixy, const float* __restrict__ ixz,
     const float* __restrict__ iex, const float* __restrict__ iey, const float* __restrict__ iez,
     const float* __restrict__ igx, const float* __restrict__ igy, const float* __restrict__ igz,
@@ -794,11 +764,10 @@ static __global__ void sem3d_acoustic_stiffness_deformed(
     const float dudx = Ixx * dxi + Iex * deta + Igx * dgam;
     const float dudy = Ixy * dxi + Iey * deta + Igy * dgam;
     const float dudz = Ixz * dxi + Iez * deta + Igz * dgam;
-    const float c2v = c2[off], w = wJ[off];
-    const float qx = c2v * dudx, qy = c2v * dudy, qz = c2v * dudz;
-    s_fx[tid] = w * (qx * Ixx + qy * Ixy + qz * Ixz);       // F_xi
-    s_fy[tid] = w * (qx * Iex + qy * Iey + qz * Iez);       // F_eta
-    s_fz[tid] = w * (qx * Igx + qy * Igy + qz * Igz);       // F_gam
+    const float w = wJ[off];
+    s_fx[tid] = w * (dudx * Ixx + dudy * Ixy + dudz * Ixz);  // F_xi
+    s_fy[tid] = w * (dudx * Iex + dudy * Iey + dudz * Iez);  // F_eta
+    s_fz[tid] = w * (dudx * Igx + dudy * Igy + dudz * Igz);  // F_gam
     __syncthreads();
 
     float r = 0.f;
@@ -808,52 +777,6 @@ static __global__ void sem3d_acoustic_stiffness_deformed(
            + D[q * ngll + kz] * s_fz[(q * ngll + ky) * ngll + kx];
     }
     atomicAdd(&Kb[g], r);
-}
-
-// imaging: grad_c2[e,p] += w_J (P_x u P_x y + P_y u P_y y + P_z u P_z y) with u
-// the saved forward field and y = -dt2 invM o adjoint. Shared 2m.
-static __global__ void sem3d_acoustic_imaging_deformed(
-    const float* __restrict__ u, const float* __restrict__ y,
-    const int* __restrict__ ibool, const float* __restrict__ D,
-    const float* __restrict__ wJ,
-    const float* __restrict__ ixx, const float* __restrict__ ixy, const float* __restrict__ ixz,
-    const float* __restrict__ iex, const float* __restrict__ iey, const float* __restrict__ iez,
-    const float* __restrict__ igx, const float* __restrict__ igy, const float* __restrict__ igz,
-    float* __restrict__ grad_c2, int ngll, int E, long n_global)
-{
-    const int e = blockIdx.x;
-    if (e >= E) return;
-    const int m = ngll * ngll * ngll, tid = threadIdx.x;
-    if (tid >= m) return;
-    const int kx = tid % ngll, ky = (tid / ngll) % ngll, kz = tid / (ngll * ngll);
-    const int off = e * m + tid;
-    const float* ub = u + static_cast<size_t>(blockIdx.y) * n_global;
-    const float* yb = y + static_cast<size_t>(blockIdx.y) * n_global;
-
-    extern __shared__ float sh[];
-    float* s_u = sh; float* s_y = sh + m;
-    const int g = ibool[off];
-    s_u[tid] = ub[g]; s_y[tid] = yb[g];
-    __syncthreads();
-
-    const int zy = (kz * ngll + ky) * ngll;
-    float uxi = 0.f, ueta = 0.f, ugam = 0.f, yxi = 0.f, yeta = 0.f, ygam = 0.f;
-    for (int q = 0; q < ngll; ++q) {
-        const float dx = D[kx * ngll + q], dy = D[ky * ngll + q], dz = D[kz * ngll + q];
-        const int iy = (kz * ngll + q) * ngll + kx, iz = (q * ngll + ky) * ngll + kx;
-        uxi += dx * s_u[zy + q]; ueta += dy * s_u[iy]; ugam += dz * s_u[iz];
-        yxi += dx * s_y[zy + q]; yeta += dy * s_y[iy]; ygam += dz * s_y[iz];
-    }
-    const float Ixx = ixx[off], Ixy = ixy[off], Ixz = ixz[off];
-    const float Iex = iex[off], Iey = iey[off], Iez = iez[off];
-    const float Igx = igx[off], Igy = igy[off], Igz = igz[off];
-    const float uX = Ixx * uxi + Iex * ueta + Igx * ugam;
-    const float uY = Ixy * uxi + Iey * ueta + Igy * ugam;
-    const float uZ = Ixz * uxi + Iez * ueta + Igz * ugam;
-    const float yX = Ixx * yxi + Iex * yeta + Igx * ygam;
-    const float yY = Ixy * yxi + Iey * yeta + Igy * ygam;
-    const float yZ = Ixz * yxi + Iez * yeta + Igz * ygam;
-    atomicAdd(&grad_c2[off], wJ[off] * (uX * yX + uY * yY + uZ * yZ));
 }
 
 // deformed CPML forward 9-field grads: direct g_d = w_J P_d(u); weak

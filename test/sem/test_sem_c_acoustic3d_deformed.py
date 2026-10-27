@@ -2,9 +2,8 @@
 
 AcousticSEM3DDeformed (full per-node 3x3 inv_J chain rule) on a curved-top
 mesh: the CUDA deformed-metric kernels must match the eager equation on both
-the forward gathers and dL/dvp with 3-direction C-PML, and the CUDA
-boundary-saving path must equal the CUDA save-all path. The bare (reflecting
-box) kernel solves div(c² grad u), not the eager c² Laplace u, and is refused.
+the forward gathers and dL/dvp, bare (reflecting box) AND with 3-direction
+C-PML, and the CUDA boundary-saving path must equal the CUDA save-all path.
 
 All comparisons: cos >= 1-1e-4.
 """
@@ -84,15 +83,10 @@ def _grad(eq, vp, use_cuda, mem=None):
     return vp.grad.cpu()
 
 
-def test_deformed3d_bare_is_refused():
-    eq, _ = _eq(("top",))
-    with pytest.raises(NotImplementedError, match="without a C-PML"):
-        _prop(eq, True).forward(_wav())
-
-
 @pytest.mark.parametrize("dirichlet", [(), ("top",)], ids=["neumann", "fs"])
-def test_deformed3d_forward_matches_eager(dirichlet):
-    eq, _ = _eq(dirichlet, cpml=True)
+@pytest.mark.parametrize("cpml", [False, True], ids=["bare", "cpml"])
+def test_deformed3d_forward_matches_eager(dirichlet, cpml):
+    eq, _ = _eq(dirichlet, cpml=cpml)
     oe = _prop(eq, False).forward(_wav())[..., 0].T
     oc = _prop(eq, True).forward(_wav())[..., 0].T
     c = _cos(oc.cpu(), oe.cpu())
@@ -100,18 +94,20 @@ def test_deformed3d_forward_matches_eager(dirichlet):
 
 
 @pytest.mark.parametrize("dirichlet", [(), ("top",)], ids=["neumann", "fs"])
-def test_deformed3d_grads_match_eager(dirichlet):
-    ge = _grad(*_eq(dirichlet, grad=True, cpml=True), False)
-    gc = _grad(*_eq(dirichlet, grad=True, cpml=True), True)
+@pytest.mark.parametrize("cpml", [False, True], ids=["bare", "cpml"])
+def test_deformed3d_grads_match_eager(dirichlet, cpml):
+    ge = _grad(*_eq(dirichlet, grad=True, cpml=cpml), False)
+    gc = _grad(*_eq(dirichlet, grad=True, cpml=cpml), True)
     c = _cos(gc, ge)
     assert c >= 1 - 1e-4, f"grad vp cos={c:.6f}"
 
 
-def test_deformed3d_boundary_saving_matches_full():
+@pytest.mark.parametrize("cpml", [False, True], ids=["bare", "cpml"])
+def test_deformed3d_boundary_saving_matches_full(cpml):
     """CUDA boundary saving vs CUDA save-all AND vs eager full tape (fs on)."""
-    gc_full = _grad(*_eq(("top",), grad=True, cpml=True), True, mem=None)
-    gc_bs = _grad(*_eq(("top",), grad=True, cpml=True), True, mem="boundary")
-    ge = _grad(*_eq(("top",), grad=True, cpml=True), False)
+    gc_full = _grad(*_eq(("top",), grad=True, cpml=cpml), True, mem=None)
+    gc_bs = _grad(*_eq(("top",), grad=True, cpml=cpml), True, mem="boundary")
+    ge = _grad(*_eq(("top",), grad=True, cpml=cpml), False)
     assert _cos(gc_bs, gc_full) >= 1 - 1e-4, \
         f"c-BS vs c-full cos={_cos(gc_bs, gc_full):.6f}"
     assert _cos(gc_bs, ge) >= 1 - 1e-4, f"c-BS vs eager cos={_cos(gc_bs, ge):.6f}"

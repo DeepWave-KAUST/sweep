@@ -27,7 +27,7 @@ void acoustic3d_forward(const Sem3dForwardInputCore& in) {
     const float* jx = def ? nullptr : in.c2_jx.data_ptr<float>();
     const float* jy = def ? nullptr : in.c2_jy.data_ptr<float>();
     const float* jz = def ? nullptr : in.c2_jz.data_ptr<float>();
-    const float* c2n = def ? in.c2_node.data_ptr<float>() : nullptr;
+    const float* c2n = in.c2_node.data_ptr<float>();     // (n_global,) c^2
     const float* wJ = def ? in.wJ.data_ptr<float>() : nullptr;
     const float* Ixx = def ? in.ixx.data_ptr<float>() : nullptr;
     const float* Ixy = def ? in.ixy.data_ptr<float>() : nullptr;
@@ -71,14 +71,17 @@ void acoustic3d_forward(const Sem3dForwardInputCore& in) {
     const size_t ngb = static_cast<size_t>(ngB) * sizeof(float);
 
     for (int n = 0; n < nt; ++n) {
-        cudaMemsetAsync(K, 0, ngb, stream);
+        // u_next = 2u - u_prev + dt2 inv_M (pat w - c^2 K0 u): K0 u lands in
+        // u_next (scratch until newmark writes it), then K = c^2 o K0 u
+        cudaMemsetAsync(u_next, 0, ngb, stream);
         if (def)
             sem3d_acoustic_stiffness_deformed<<<grid, m, shmem, stream>>>(
-                u, ibool, D, c2n, wJ, Ixx, Ixy, Ixz, Iex, Iey, Iez, Igx, Igy, Igz,
-                K, ngll, E, ng);
+                u, ibool, D, wJ, Ixx, Ixy, Ixz, Iex, Iey, Iez, Igx, Igy, Igz,
+                u_next, ngll, E, ng);
         else
             sem3d_acoustic_stiffness<<<grid, m, shmem, stream>>>(
-                u, ibool, D, jx, jy, jz, K, ngll, E, ng);
+                u, ibool, D, jx, jy, jz, u_next, ngll, E, ng);
+        sem2d::sem2d_scale2<<<nb, TPB, 0, stream>>>(u_next, c2n, 1.f, K, ng);
         sem2d::sem2d_acoustic_newmark<<<nb, TPB, 0, stream>>>(
             u, u_prev, K, pattern, inv_M, wavelet, n, dt2, u_next, ng);
         if (kdir > 0)

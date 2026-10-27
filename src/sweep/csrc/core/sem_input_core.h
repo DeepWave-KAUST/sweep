@@ -993,7 +993,7 @@ struct SemElasticBackwardInputCore {
 struct Sem3dForwardInputCore {
     Buf ibool;   // (E, ngll^3) int64, flattened (kz,ky,kx)
     Buf D;   // (ngll, ngll) f32
-    Buf c2_jx;   // (E, ngll^3) f32 stiffness weights
+    Buf c2_jx;   // (E, ngll^3) f32 c^2-FREE weights w3 G_axis
     Buf c2_jy;
     Buf c2_jz;
     Buf inv_M;   // (n_global,) f32
@@ -1012,8 +1012,8 @@ struct Sem3dForwardInputCore {
     Buf fin_u_prev;
     int bs = 0;
     int deformed = 0;
-    Buf c2_node;   // (E, ngll^3)
-    Buf wJ;
+    Buf c2_node;   // (n_global,)
+    Buf wJ;   // (E, ngll^3)
     Buf ixx;   // (E, ngll^3)
     Buf ixy;
     Buf ixz;
@@ -1053,8 +1053,8 @@ struct Sem3dBackwardInputCore {
     Buf u_km1;
     int bs = 0;
     int deformed = 0;
-    Buf c2_node;   // (E, ngll^3)
-    Buf wJ;
+    Buf c2_node;   // (n_global,)
+    Buf wJ;   // (E, ngll^3)
     Buf ixx;   // (E, ngll^3)
     Buf ixy;
     Buf ixz;
@@ -1072,8 +1072,8 @@ struct Sem3dBackwardInputCore {
     Buf Ktmp;
     Buf Ku;
     Buf adj_src;
-    Buf grad_c2_jx;   // (E, ngll^3)
-    Buf grad_c2_jy;
+    Buf grad_c2_jx;   // (n_global,) dL/dc2_node
+    Buf grad_c2_jy;   // unused (may be empty)
     Buf grad_c2_jz;
     Buf grad_inv_M;   // (n_global,)
     Buf grad_wavelet;   // (nt,)

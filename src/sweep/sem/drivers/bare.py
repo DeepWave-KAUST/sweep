@@ -117,30 +117,39 @@ class _SEMElasticC(torch.autograd.Function):
 
 
 # --------------------------------------------------------------------------- #
-# 3-D acoustic, velocity form: flat Hex8 with the separable stiffness weights
-# c2_j{x,y,z} (= vp^2 w3 G_axis, so build() chains their grads to vp_e) or
-# deformed Hex27 with one per-node c^2 and the 3x3 inverse-Jacobian metric.
-# The same two C entries serve both, switched by ``deformed``.
+# 3-D acoustic, velocity form: u_tt = c^2 Laplace u. The stiffness K0 is
+# c^2-free -- flat Hex8 with the separable weights w3 G_axis (geometry,
+# constants), or deformed Hex27 with w_J and the 3x3 inverse-Jacobian metric --
+# and the kernels multiply K0 u by the per-node c^2 (``c2_node``, the
+# equation's one-copy ``vp_squared_node``), as the C-PML strip kernels do. The
+# only material input is c2_node; its gradient comes back in grad_c2_jx.
 # --------------------------------------------------------------------------- #
 _AC3D_BARE = ("ibool", "D", "dirichlet_idx", "src_pattern", "rec_G", "rec_W")
 _AC3D_METRIC = ("wJ",) + METRIC_NAMES
+_AC3D_WEIGHTS = (("c2_jx", "w_jx"), ("c2_jy", "w_jy"), ("c2_jz", "w_jz"))
 _AC3D_BARE_CARRY = ("save_wavefield", "fin_u", "fin_u_prev", "bs")
 
 
-def _ac3d_bare_forward_input(c, mats, inv_M, wavelet, mode, deformed):
+def _ac3d_geometry(s, c, A):
+    """The stiffness geometry on both structs: the metric (deformed) or the
+    c^2-free axis weights (flat); the other set is empty."""
+    s.deformed = int(c.get("deformed", 0))
+    if s.deformed:
+        fill(s, c, _AC3D_METRIC)
+        put(s, tuple(f for f, _ in _AC3D_WEIGHTS), A.empty)
+    else:
+        put(s, _AC3D_METRIC, A.empty)
+        for f, k in _AC3D_WEIGHTS:
+            setattr(s, f, c[k])
+
+
+def _ac3d_bare_forward_input(c, c2_node, inv_M, wavelet, mode):
     import sweep._C as _C
     A = Alloc(wavelet.device, c["n_global"], c["nt"])
     s = _C.Sem3dForwardInput()
     fill(s, c, _AC3D_BARE)
-    s.deformed = int(deformed)
-    if deformed:
-        fill(s, c, _AC3D_METRIC)
-        (s.c2_node,) = mats
-        put(s, ("c2_jx", "c2_jy", "c2_jz"), A.empty)
-    else:
-        put(s, _AC3D_METRIC + ("c2_node",), A.empty)
-        s.c2_jx, s.c2_jy, s.c2_jz = mats
-    s.inv_M, s.wavelet = inv_M, wavelet
+    _ac3d_geometry(s, c, A)
+    s.c2_node, s.inv_M, s.wavelet = c2_node, inv_M, wavelet
     put(s, ("u", "u_prev", "u_next", "K"), A.zeros)
     give(s, _record(A, c, "seis"))
     s.bs = int(mode == "ring")
@@ -150,25 +159,15 @@ def _ac3d_bare_forward_input(c, mats, inv_M, wavelet, mode, deformed):
     return check_filled(s)
 
 
-def _ac3d_bare_backward_input(c, mats, inv_M, wavelet, carry, grad_syn, deformed):
+def _ac3d_bare_backward_input(c, c2_node, inv_M, wavelet, carry, grad_syn):
     import sweep._C as _C
     A = Alloc(wavelet.device, c["n_global"], c["nt"])
     b = _C.Sem3dBackwardInput()
     fill(b, c, _AC3D_BARE)
-    b.deformed = int(deformed)
-    if deformed:
-        fill(b, c, _AC3D_METRIC)
-        (b.c2_node,) = mats
-        put(b, ("c2_jx", "c2_jy", "c2_jz"), A.empty)
-        # grad_c2_node comes back in the jx slot; jy / jz are unused
-        put(b, ("grad_c2_jx", "grad_c2_jy", "grad_c2_jz"),
-            lambda: torch.zeros_like(mats[0]))
-    else:
-        put(b, _AC3D_METRIC + ("c2_node",), A.empty)
-        b.c2_jx, b.c2_jy, b.c2_jz = mats
-        for nm, t in zip(("grad_c2_jx", "grad_c2_jy", "grad_c2_jz"), mats):
-            setattr(b, nm, torch.zeros_like(t))
-    b.inv_M, b.wavelet = inv_M, wavelet
+    _ac3d_geometry(b, c, A)
+    b.c2_node, b.inv_M, b.wavelet = c2_node, inv_M, wavelet
+    b.grad_c2_jx = torch.zeros_like(c2_node)
+    put(b, ("grad_c2_jy", "grad_c2_jz"), A.empty)
     give(b, carry)
     b.grad_syn = grad_syn
     put(b, ("u_hi", "u_lo", "u_km1"), A.zeros if b.bs else A.empty)
@@ -179,41 +178,15 @@ def _ac3d_bare_backward_input(c, mats, inv_M, wavelet, carry, grad_syn, deformed
     return check_filled(b)
 
 
-# NOT ROUTED (prop_c._C_ROUTES): the sem3d_acoustic_* kernels behind the two
-# Functions below put c² inside the element integral, i.e. solve div(c² grad u)
-# instead of the c² Laplace u of AcousticSEM3D{,Deformed} -- every reflection
-# coefficient comes out with the wrong sign. Kept for when the kernels apply c²
-# per node (forward + adjoint), as the C-PML strip kernels already do.
 class _SEMAcoustic3DC(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, c2_jx, c2_jy, c2_jz, inv_M, wavelet, c):
-        import sweep._C as _C
-        mats = (c2_jx, c2_jy, c2_jz)
-        need_bwd = any(t.requires_grad for t in mats + (inv_M, wavelet))
-        s = _ac3d_bare_forward_input(c, mats, inv_M, wavelet, memory_mode(c, need_bwd), False)
-        seis = _C.sem3d_acoustic_forward(s)
-        if need_bwd:
-            ctx.save_for_backward(*mats, inv_M, wavelet)
-            ctx.c, ctx.carry = c, take(s, _AC3D_BARE_CARRY)
-        return seis
-
-    @staticmethod
-    def backward(ctx, grad_seis):
-        import sweep._C as _C
-        *mats, inv_M, wavelet = ctx.saved_tensors
-        b = _ac3d_bare_backward_input(ctx.c, mats, inv_M, wavelet, ctx.carry,
-                                      grad_seis.contiguous().float(), False)
-        grads = _C.sem3d_acoustic_backward(b)
-        return grads_or_none(mats + [inv_M, wavelet], grads) + (None,)
-
-
-class _SEMAcoustic3DDeformedC(torch.autograd.Function):
+    """AcousticSEM3D / AcousticSEM3DDeformed without a C-PML (``deformed`` in
+    the consts picks the stiffness)."""
     @staticmethod
     def forward(ctx, c2_node, inv_M, wavelet, c):
         import sweep._C as _C
         need_bwd = any(t.requires_grad for t in (c2_node, inv_M, wavelet))
-        s = _ac3d_bare_forward_input(c, (c2_node,), inv_M, wavelet,
-                                     memory_mode(c, need_bwd), True)
+        s = _ac3d_bare_forward_input(c, c2_node, inv_M, wavelet,
+                                     memory_mode(c, need_bwd))
         seis = _C.sem3d_acoustic_forward(s)
         if need_bwd:
             ctx.save_for_backward(c2_node, inv_M, wavelet)
@@ -224,8 +197,8 @@ class _SEMAcoustic3DDeformedC(torch.autograd.Function):
     def backward(ctx, grad_seis):
         import sweep._C as _C
         c2_node, inv_M, wavelet = ctx.saved_tensors
-        b = _ac3d_bare_backward_input(ctx.c, (c2_node,), inv_M, wavelet, ctx.carry,
-                                      grad_seis.contiguous().float(), True)
+        b = _ac3d_bare_backward_input(ctx.c, c2_node, inv_M, wavelet, ctx.carry,
+                                      grad_seis.contiguous().float())
         g_c2, _gjy, _gjz, g_M, g_w = _C.sem3d_acoustic_backward(b)
         return grads_or_none((c2_node, inv_M, wavelet), (g_c2, g_M, g_w)) + (None,)
 

@@ -891,7 +891,7 @@ class PropSEM:
             from .prop_c import C_SUPPORTED, c_route, sem_c_available
             has_cpml = self.abcn_elements > 0
             if equation in C_SUPPORTED and c_route(equation, has_cpml) is None:
-                # e.g. the bare 3-D acoustic box: 'auto' stays eager
+                # e.g. ElasticSEM3D with a C-PML: 'auto' stays eager
                 if impl == "c":
                     raise NotImplementedError(
                         f"impl='c' has no CUDA kernel for {equation.__name__} "

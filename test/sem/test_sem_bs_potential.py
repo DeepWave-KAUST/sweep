@@ -151,12 +151,12 @@ def _run3_bare(impl, mem, wav):
     return s.detach().cpu().numpy(), vp.grad.cpu().numpy()
 
 
-def test_cuda_3d_bare_is_refused():
-    """Bare 3-D (abcn=0): the sem3d_acoustic kernel solves div(c² grad u), not
-    the eager c² Laplace u, so impl='c' refuses it and 'auto' stays eager."""
-    with pytest.raises(NotImplementedError, match="without a C-PML"):
-        _run3_bare("c", BoundarySaving(), _wav3())
-    p = PropSEM(AcousticSEM3D, shape=(NZ3, NY3, NX3), dh=20.0, dt=1.5e-3, nt=4,
-                n_order=4, free_surface=True, abcn=0, f_dominant=8.0,
-                dev="cuda", dtype=torch.float32)
-    assert p.impl == "eager"
+def test_cuda_bs_3d_bare_matches_full_and_eager():
+    """Bare 3-D (abcn=0, free surface): c-BS vs c-save-all AND vs eager full."""
+    wav = _wav3()          # calibration reuses the CPML config; amplitude-only
+    sf, gf = _run3_bare("c", Full(), wav)
+    sb, gb = _run3_bare("c", BoundarySaving(), wav)
+    se, ge = _run3_bare("eager", Full(), wav)
+    assert _cos(gb, gf) >= 1 - 1e-4, f"c-BS vs c-full grad cos={_cos(gb, gf):.6f}"
+    assert _cos(gb, ge) >= 1 - 1e-4, f"c-BS vs eager grad cos={_cos(gb, ge):.6f}"
+    assert _cos(sb, se) >= 1 - 1e-4, f"fwd cos={_cos(sb, se):.6f}"
