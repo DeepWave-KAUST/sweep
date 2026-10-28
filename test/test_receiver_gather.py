@@ -43,7 +43,47 @@ def test_flat_gather_samples_and_differentiates_like_indexing(kernel):
     (ref * g).sum().backward()
     assert torch.equal(a.grad, b.grad)
     names = _node_names(flat)
-    assert "IndexSelectBackward0" in names and "IndexBackward0" not in names, names
+    assert "IndexBackward0" not in names, names
+    assert ("IndexSelectBackward0" if kernel is None else "_FootprintGatherBackward") in names, names
+
+
+DEVICES = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
+FIVE = np.outer([1.0, 4.0, 6.0, 4.0, 1.0], [1.0, 4.0, 6.0, 4.0, 1.0]).astype(np.float32) / 256.0
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("spacing", [1, 2, 4])
+def test_footprint_gather_matches_the_tap_by_tap_sum(device, spacing):
+    """One gather for the whole footprint gives the numbers the tap-by-tap
+    gather gave, forward and backward, also where neighbouring receivers'
+    footprints overlap (every cell then sums several receivers' taps, so the
+    order they are summed in shows)."""
+    shape = (2, 1, 30, 40)
+    xs = np.arange(2, 38, spacing)
+    coords = torch.tensor(np.stack([np.stack([xs, np.full_like(xs, 5 + b)], -1) for b in range(2)])).to(device)
+    rec = ReceiverTorch(coords, gather_kernel=FIVE, shape=shape)
+    a = torch.randn(shape, generator=torch.Generator().manual_seed(2), dtype=torch.float32).to(device)
+    a.requires_grad_(True)
+    b = a.detach().clone().requires_grad_(True)
+    g = torch.randn(shape[0] * len(xs), generator=torch.Generator().manual_seed(3)).to(device)
+    out = rec(a)
+    ref = None
+    for index, w in rec.taps:                       # the tap-by-tap gather it replaces
+        part = w * b.reshape(-1).index_select(0, index)
+        ref = part if ref is None else ref + part
+    assert torch.equal(out, ref)
+    (out * g).sum().backward()
+    (ref * g).sum().backward()
+    assert torch.equal(a.grad, b.grad)
+
+
+def test_footprint_gather_double_backward():
+    shape = (1, 1, 12, 14)
+    coords = torch.tensor([[[4, 5], [6, 5], [9, 7]]])
+    rec = ReceiverTorch(coords, gather_kernel=BINOMIAL, shape=shape)
+    f = torch.randn(shape, dtype=torch.float64, requires_grad=True)
+    assert torch.autograd.gradcheck(lambda x: rec(x), (f,))
+    assert torch.autograd.gradgradcheck(lambda x: rec(x) ** 2, (f,), (torch.randn(3, dtype=torch.float64),))
 
 
 def test_3d():
