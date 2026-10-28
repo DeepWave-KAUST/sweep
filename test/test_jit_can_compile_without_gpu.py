@@ -47,6 +47,12 @@ def no_shipped_core(monkeypatch, tmp_path):
     # ...and no cached local core either: the host's ~/.cache/torch_extensions
     # must not answer "a core is at hand" for tests about the nvcc path.
     monkeypatch.setenv("TORCH_EXTENSIONS_DIR", str(tmp_path / "ext"))
+    # ...and a CUDA 12 torch, whatever this one is. Under CUDA 13 the nvcc path
+    # first checks its targets against nvcc 13's floor (no sm_70): that refuses
+    # the 7.0 these tests name, and asks a mocked device for its arch.
+    # test_shipped_core.py pins the floor.
+    import torch
+    monkeypatch.setattr(torch.version, "cuda", "12.8")
     return monkeypatch
 
 

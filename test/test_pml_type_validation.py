@@ -18,10 +18,9 @@ PML_TYPES = ("cpmlr", "cpmls", "spml")
 
 
 def _build(cls):
-    try:
-        return cls(device="cpu")
-    except ImportError as exc:  # e.g. Acoustic1st needs jax
-        pytest.skip(f"{cls.__name__}: {exc}")
+    # On the torch backend, the one PropTorch serves: Acoustic1st defaults to
+    # jax, which PropTorch refuses before it looks at pml_type.
+    return cls(device="cpu", backend="torch")
 
 
 @pytest.mark.parametrize("cls", sorted(E.equation_classes().values(), key=lambda c: c.__name__),
@@ -46,6 +45,14 @@ def test_unsupported_pml_type_is_refused(cls):
 def test_acoustic1st_keeps_spml():
     pytest.importorskip("jax")
     assert E.Acoustic1st(device="cpu").supported_pml == ["cpmls", "spml"]
+
+
+def test_propjax_refuses_it_too():
+    """Acoustic1st's default backend is jax, and PropJax serves that."""
+    pytest.importorskip("jax")
+    from sweep.propagator.jax import PropJax
+    with pytest.raises(ValueError, match="Acoustic1st does not support pml_type='cpmlr'"):
+        PropJax(E.Acoustic1st(device="cpu"), shape=(32, 32), dh=10.0, dt=1e-3, pml_type="cpmlr")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA GPU")

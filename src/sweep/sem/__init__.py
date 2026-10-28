@@ -60,7 +60,8 @@ from .equations import *                                    # noqa: F401,F403
 globals().update(_equations.equation_classes())
 from .constitutive import thomsen_to_vti_cij
 from .propagator import (SEMPropagator, PointStamp, PointStamp3D, EdgeStamp,
-                         build_point_stamp, build_moment_stamp)
+                         build_point_stamp, build_point_stamps, build_moment_stamp,
+                         locate_points)
 from .prop_base import PropSEM
 from .boundary_saving import run_boundary_saved
 from .discretization import suggest_discretization, SEMDiscretization
@@ -99,7 +100,9 @@ __all__ = [
     "PointStamp3D",
     "EdgeStamp",
     "build_point_stamp",
+    "build_point_stamps",
     "build_moment_stamp",
+    "locate_points",
     "PropSEM",
     "run_boundary_saved",
     "suggest_discretization",

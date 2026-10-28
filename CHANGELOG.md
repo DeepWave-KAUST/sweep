@@ -125,6 +125,28 @@ and this project adheres to
   follows: `acoustic_born2d` / `acoustic_born3d` / `qp_vti_born2d` /
   `qp_tti_born2d` entries, kernel and slot-table names.  LSRTM is the
   inversion these operators serve; `SWEEP_LSRTM_SPLIT_III` keeps its name.
+- **`ElasticCurvilinear` on `impl='eager'` runs 1.8-5.5x faster per step
+  compiled, gradients 3-3.5x, and takes `EagerOptions(cpml_strips=True)`.**
+  Under `torch.compile` its asymmetric stencils, the free-surface closure block
+  and the Kreiss-Oliger filter now run as shifted slices that fuse with the step;
+  they were cuDNN convs and an einsum, and the operator's kernel cache, keyed by
+  a tuple holding a `torch.dtype`, hid their taps from Dynamo, so the graph
+  broke at every derivative.  The filter runs on the surface band only, and the
+  CPML memories can sit on the absorbing strips, which on shot batches gives
+  another 1.1-1.2x and halves the gradient memory (2048² x 4 shots: the
+  gradient used to run out of 48 GB, now 36 GB, 17 GB with strips).  Measured
+  at order 16 on an RTX 6000 Ada, 1024²-2048² grids; the gain grows with the
+  grid and the shot count.  Uncompiled the record and the gradients are bit for
+  bit the old ones; a single shot (1024²) runs 1.3x faster forward and 1.8x
+  faster gradient there, from the receiver change below.
+- **A receiver footprint (`source_receiver_stencil`: `ElasticCurvilinear`'s
+  5x5, `ElasticTTI`'s 3x3) is gathered with one `index_select`** where it took
+  one per tap, and its backward scatters the taps into one zeroed field where
+  every tap zeroed a full field for autograd to sum: per step and receiver
+  field, a third of the forward launches, and one full field written in the
+  backward where there were one per tap.  The taps are summed in the old
+  order, forward and backward, so records and gradients are bit for bit the
+  old ones.
 - **`ElasticCurvilinear` follows Bartana, Xu & Rickett: collocated fields,
   asymmetric first-derivative operators and a rotated traction-free surface.**
   The momentum equation is discretised as a divergence, whose operator is the
@@ -199,6 +221,22 @@ and this project adheres to
   `use_apm` stay, unused.
 
 ### Fixed
+- **`PropSEM` no longer spends seconds per call locating its sources and
+  receivers on a topography mesh.** A point on a deformed (Quad9 / Hex27)
+  mesh was located by a Newton solve in torch scalars, one point at a time
+  -- 0.07-0.18 s a point on a 3 km line meshed at 4-8 m -- and `impl='c'` kept the
+  stamps keyed on the whole geometry of a call, so every new source position
+  located every receiver again: 37 receivers cost 4.7 s per call against
+  0.11 s of propagation (2-D elastic, 0.14 M nodes). The points of a call are
+  now located in one batched Newton (float64, also on float32 meshes, where
+  it used to stop at the float32 round-off) and stamped in one copy to the
+  device, and every point's location and stamp are kept on the mesh, least
+  recently used out first (`POINT_RECORD_SIZE` points), so a shot at the same
+  receivers locates only its source. The same call now costs 0.12 s; 600
+  never-seen receivers locate and stamp in 17 ms (were ~80 s). Locations are
+  unchanged to 1e-13 on float64 meshes (records to 1e-15); on float32 meshes
+  they are now exact, which moves records by ~3e-5, the old locator's own
+  error there. `build_point_stamps` and `locate_points` take a list of points.
 - **CPU math no longer depends on oneMKL's VML first-call race.** PyTorch's
   x86 wheels run `torch.sqrt` / `exp` / `log` ... on CPU float tensors through
   oneMKL VML, whose CPU detection is not thread-safe: on AVX-512 Intel CPUs the

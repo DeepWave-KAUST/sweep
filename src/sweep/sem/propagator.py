@@ -30,6 +30,7 @@ element edge is an :class:`EdgeStamp` over the elements that meet there.
 from __future__ import annotations
 
 import warnings
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Optional, Protocol, runtime_checkable
 
@@ -114,6 +115,37 @@ def lagrange_basis_deriv_at(nodes: torch.Tensor, x: float) -> torch.Tensor:
     return torch.as_tensor(out, dtype=nodes.dtype, device=nodes.device)
 
 
+def _lagrange_np(nodes, t):
+    """``ℓ_j(t)`` ``(P, n)`` at every entry of ``t`` ``(P,)`` -- the products
+    of :func:`lagrange_basis_at` in the same order, so the same numbers."""
+    out = np.ones((t.size, nodes.size))
+    for j in range(nodes.size):
+        for k in range(nodes.size):
+            if k != j:
+                out[:, j] *= (t - nodes[k]) / (nodes[j] - nodes[k])
+    return out
+
+
+def _lagrange_deriv_np(nodes, t):
+    """``ℓ'_j(t)`` ``(P, n)`` -- :func:`lagrange_basis_deriv_at`'s sums in the
+    same order, so the same numbers."""
+    n = nodes.size
+    out = np.zeros((t.size, n))
+    for j in range(n):
+        total = np.zeros(t.size)
+        for m in range(n):
+            if m == j:
+                continue
+            term = np.full(t.size, 1.0 / (nodes[j] - nodes[m]))
+            for k in range(n):
+                if k == j or k == m:
+                    continue
+                term *= (t - nodes[k]) / (nodes[j] - nodes[k])
+            total += term
+        out[:, j] = total
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Q2 single-point evaluation (for the Quad9 Newton locator).
 # --------------------------------------------------------------------------- #
@@ -139,166 +171,276 @@ def _q2_jacobian_one(control_xy: torch.Tensor, xi: float, eta: float) -> torch.T
     return torch.stack([dxdxi, dxdeta], dim=-1)            # (2_xz, 2_ξη)
 
 
+# --------------------------------------------------------------------------- #
+# Newton on the Q2 map, for many points at once (Quad9 / Hex27 locators).
+# --------------------------------------------------------------------------- #
+def _q2_np(t):
+    """``(ψ, ψ')`` of the three Q2 nodes at every entry of ``t``, each
+    ``(n, 3)`` -- :func:`q2_basis_at` / :func:`q2_basis_deriv_at` in numpy."""
+    return (np.stack([0.5 * t * (t - 1.0), 1.0 - t * t, 0.5 * t * (t + 1.0)], -1),
+            np.stack([t - 0.5, -2.0 * t, t + 0.5], -1))
+
+
+def _newton_q2(control, target, tol, start, *, max_iter=40):
+    """Newton on the Q2 map ``x(ξ, η[, γ])`` of ``P`` points at once, in float64.
+
+    ``control`` is ``(P, 3, 3, 2)`` (Quad9: ``[i(η), j(ξ), xz]``) or
+    ``(P, 3, 3, 3, 3)`` (Hex27: ``[k(γ), i(η), j(ξ), xyz]``), ``target``
+    ``(P, d)``, ``tol`` ``(P,)``, ``start`` ``(P, d)`` local coordinates in
+    ``(ξ, η[, γ])`` order. Returns ``(local (P, d), converged (P,))``.
+
+    Each point runs the one-point iteration and stops where it would: when the
+    residual is below its ``tol`` (checked before the update). It does **not**
+    clamp to [-1, 1] -- an overshoot past ±1 means the point lies in a
+    neighbouring element, and the locators rely on seeing that -- only a ±3
+    guard against runaway. (Clamping every step made Newton stall on the
+    reference-square edge near a curved inter-element boundary and report
+    non-convergence.) A singular Jacobian leaves that point unconverged.
+    """
+    d = target.shape[1]
+    loc = np.array(start, dtype=np.float64)
+    done = np.zeros(len(target), dtype=bool)
+    ok = np.zeros(len(target), dtype=bool)
+    for _ in range(max_iter):
+        act = np.flatnonzero(~done)
+        if act.size == 0:
+            break
+        (px, dpx), (pe, dpe) = _q2_np(loc[act, 0]), _q2_np(loc[act, 1])
+        c = control[act]
+        if d == 2:
+            pos = np.einsum("ni,nj,nijk->nk", pe, px, c)
+        else:
+            pg, dpg = _q2_np(loc[act, 2])
+            pos = np.einsum("nk,ni,nj,nkijd->nd", pg, pe, px, c)
+        resid = target[act] - pos
+        conv = np.sqrt((resid * resid).sum(-1)) < tol[act]
+        ok[act[conv]] = done[act[conv]] = True
+        go = ~conv
+        if not go.any():
+            break
+        act, resid, c = act[go], resid[go], c[go]
+        px, dpx, pe, dpe = px[go], dpx[go], pe[go], dpe[go]
+        if d == 2:
+            J = np.stack([np.einsum("ni,nj,nijk->nk", pe, dpx, c),
+                          np.einsum("ni,nj,nijk->nk", dpe, px, c)], -1)        # (n, xz, ξη)
+            det = J[:, 0, 0] * J[:, 1, 1] - J[:, 0, 1] * J[:, 1, 0]
+            good = np.isfinite(det) & (det != 0.0)
+            det = np.where(good, det, 1.0)
+            delta = np.stack([(J[:, 1, 1] * resid[:, 0] - J[:, 0, 1] * resid[:, 1]) / det,
+                              (J[:, 0, 0] * resid[:, 1] - J[:, 1, 0] * resid[:, 0]) / det], -1)
+        else:
+            pg, dpg = pg[go], dpg[go]
+            J = np.stack([np.einsum("nk,ni,nj,nkijd->nd", pg, pe, dpx, c),
+                          np.einsum("nk,ni,nj,nkijd->nd", pg, dpe, px, c),
+                          np.einsum("nk,ni,nj,nkijd->nd", dpg, pe, px, c)], -1)  # (n, xyz, ξηγ)
+            det = np.linalg.det(J)
+            good = np.isfinite(det) & (det != 0.0)
+            delta = np.zeros_like(resid)
+            if good.any():
+                delta[good] = np.linalg.solve(J[good], resid[good][..., None])[..., 0]
+        done[act[~good]] = True
+        loc[act] = np.clip(loc[act] + delta, -3.0, 3.0)
+    return loc, ok
+
+
 def _newton_xi_eta(control_xy: torch.Tensor, x_target: float, z_target: float,
                    *, max_iter: int = 40, tol: Optional[float] = None,
                    xi0: float = 0.0, eta0: float = 0.0,
                    ) -> tuple[float, float, bool]:
-    """2D Newton on the Q2 map ``x(ξ, η)``. Returns ``(ξ, η, converged)``.
-
-    Crucially it does **not** clamp ξ, η to [-1, 1] during iteration — an
-    overshoot past ±1 means the point lies in a *neighbouring* element,
-    and the caller relies on seeing that to pick the right element. A
-    mild ±3 guard only prevents true runaway. (The old version clamped
-    every step, which made Newton stall on the reference-square edge for
-    points near a curved inter-element boundary and then wrongly report
-    non-convergence — the locator robustness bug this fixes.)
-    """
+    """2D Newton on the Q2 map ``x(ξ, η)`` of one element. Returns
+    ``(ξ, η, converged)`` -- :func:`_newton_q2` for one point."""
     if tol is None:
-        # Scale the convergence tolerance to the coordinate magnitude and the
-        # dtype round-off floor. A fixed absolute tol (e.g. 1e-5 m) sits BELOW
-        # the float32 residual floor (~|coord|·eps ≈ 1e-4 for O(1000 m) coords),
-        # so Newton can never reach it and valid points get rejected (~half of
-        # them on a float32 mesh). Relative-to-coordinate-scale fixes that for
-        # both float32 and float64.
-        eps = torch.finfo(control_xy.dtype).eps
-        tol = 32.0 * eps * (abs(x_target) + abs(z_target) + 1.0)
-    xi_v, eta_v = float(xi0), float(eta0)
-    target = torch.tensor([x_target, z_target], dtype=control_xy.dtype,
-                          device=control_xy.device)
-    resid_norm = float("inf")
-    for _ in range(max_iter):
-        pos = _q2_eval_one(control_xy, xi_v, eta_v)
-        resid = target - pos
-        resid_norm = resid.norm().item()
-        if resid_norm < tol:
-            return xi_v, eta_v, True
-        J = _q2_jacobian_one(control_xy, xi_v, eta_v)
-        delta = torch.linalg.solve(J, resid)
-        xi_v  = max(-3.0, min(3.0, xi_v + float(delta[0].item())))
-        eta_v = max(-3.0, min(3.0, eta_v + float(delta[1].item())))
-    return xi_v, eta_v, resid_norm < tol
+        tol = _newton_tol((x_target, z_target))
+    loc, ok = _newton_q2(control_xy.detach().cpu().double().numpy()[None],
+                         np.array([[x_target, z_target]], dtype=np.float64),
+                         np.array([tol]), np.array([[xi0, eta0]], dtype=np.float64),
+                         max_iter=max_iter)
+    return float(loc[0, 0]), float(loc[0, 1]), bool(ok[0])
 
 
-def _locate_in_quad9(mesh: Quad9Mesh, x: float, z: float,
-                     *, tol: Optional[float] = None
-                     ) -> tuple[int, float, float]:
-    """Robustly locate ``(x, z)`` in the deformed Quad9 mesh.
+def _newton_tol(coords):
+    """Newton's residual tolerance at a point: scaled to the coordinate
+    magnitude and float64's round-off floor, where the iteration runs
+    whatever the mesh dtype (a fixed absolute tol sits below the floor for
+    large coordinates). ``coords`` may be one point or ``(P, d)``."""
+    c = np.abs(np.asarray(coords, dtype=np.float64))
+    return 32.0 * np.finfo(np.float64).eps * (c.sum(-1) + 1.0)
 
-    The mesh has uniform x columns, so the column index ``ex`` is exact;
-    only the row ``ez`` is ambiguous near curved inter-element edges. We
-    therefore order the rows of column ``ex`` by element-centre-z
-    proximity and run Newton in each candidate until one lands inside the
-    reference square ``[-1, 1]²``. Returns ``(elem_id, ξ_s, η_s)`` with
-    ξ, η clamped to [-1, 1] (a point exactly on a shared edge is accepted
-    on whichever side converges first).
+
+def _locate_geometry(mesh):
+    """The locators' view of a deformed mesh, built once per mesh: float64
+    control nodes, element-centre depths in the mesh dtype (the candidate
+    order), the element column width."""
+    geo = mesh.__dict__.get("_locate_geometry")
+    if geo is None:
+        control = mesh.control_xy if isinstance(mesh, Quad9Mesh) else mesh.control_xyz
+        cz = mesh.z_e.mean(dim=tuple(range(1, mesh.z_e.dim())))
+        geo = {
+            "control": control.detach().cpu().double().numpy(),
+            "cz": cz.detach().cpu().numpy(),
+            "dx_e": (float(mesh.x_e[:, 0, :].max().item()) / mesh.nex
+                     if isinstance(mesh, Quad9Mesh) else None),
+        }
+        mesh.__dict__["_locate_geometry"] = geo
+    return geo
+
+
+def _locate_many(mesh, coords, cols, n_rows, elem_of_row):
+    """The shared search of :func:`_locate_in_quad9_many` /
+    :func:`_locate_in_hex27_many`: every point tries the rows of its element
+    column nearest in depth first (at most 8), takes the first element whose
+    reference cube holds it (overshoot <= 1e-6), else the least overshoot
+    below 0.05; local coordinates come back clamped to [-1, 1]."""
+    geo = _locate_geometry(mesh)
+    P, d = coords.shape
+    cz = geo["cz"][elem_of_row(np.arange(n_rows)[None, :], cols[:, None])]       # (P, n_rows)
+    z = coords[:, -1].astype(cz.dtype)
+    order = np.argsort(np.abs(cz - z[:, None]), axis=1, kind="stable")[:, :min(8, n_rows)]
+    tol = _newton_tol(coords)
+    elem = np.full(P, -1, dtype=np.int64)
+    loc = np.zeros((P, d))
+    best = np.full(P, np.inf)
+    best_elem = np.full(P, -1, dtype=np.int64)
+    best_loc = np.zeros((P, d))
+    pending = np.arange(P)
+    for k in range(order.shape[1]):
+        if pending.size == 0:
+            break
+        e = elem_of_row(order[pending, k], cols[pending])
+        got, ok = _newton_q2(geo["control"][e], coords[pending], tol[pending], np.zeros((pending.size, d)))
+        over = np.maximum((np.abs(got) - 1.0).max(-1), 0.0)
+        inside = ok & (over <= 1e-6)
+        elem[pending[inside]] = e[inside]
+        loc[pending[inside]] = got[inside]
+        closer = ok & ~inside & (over < best[pending])
+        upd = pending[closer]
+        best[upd], best_elem[upd], best_loc[upd] = over[closer], e[closer], got[closer]
+        pending = pending[~inside]
+    near = pending[best[pending] < 0.05]
+    elem[near], loc[near] = best_elem[near], best_loc[near]
+    return elem, np.clip(loc, -1.0, 1.0), pending[best[pending] >= 0.05], best
+
+
+def _locate_in_quad9_many(mesh: Quad9Mesh, xz):
+    """``(elem_id (P,), ξ (P,), η (P,))`` of ``P`` points ``(x, z)`` in a
+    deformed Quad9 mesh, all located together (one batched Newton).
+
+    The mesh has uniform x columns, so the column ``ex`` is exact; only the
+    row ``ez`` is ambiguous near curved inter-element edges, which is why
+    the rows are tried nearest-first until one reference square holds the
+    point. A point exactly on a shared edge is accepted on whichever side
+    converges first.
     """
+    xz = np.asarray(xz, dtype=np.float64).reshape(-1, 2)
     nex, nez = mesh.nex, mesh.nez
-    x_max = float(mesh.x_e[:, 0, :].max().item())
-    dx_e = x_max / nex
-    ex = max(min(int(x / dx_e), nex - 1), 0)
-
-    col = torch.arange(nez, device=mesh.z_e.device) * nex + ex
-    cz = mesh.z_e[col].mean(dim=(1, 2))                # (nez,) ~ element centre z
-    order = torch.argsort((cz - z).abs()).tolist()
-
-    clamp = lambda v: min(1.0, max(-1.0, v))
-    best = None                                        # (overshoot, e, xi, eta)
-    for ez in order[: min(8, nez)]:
-        e = ez * nex + ex
-        control = mesh.control_xy[e]
-        xi, eta, ok = _newton_xi_eta(control, x, z, tol=tol)
-        if not ok:
-            continue
-        overshoot = max(abs(xi) - 1.0, abs(eta) - 1.0, 0.0)
-        if overshoot <= 1e-6:
-            return e, clamp(xi), clamp(eta)
-        if best is None or overshoot < best[0]:
-            best = (overshoot, e, xi, eta)
-    # Point sits just outside every reference square it was tried in
-    # (on a curved shared edge) — accept the closest, clamped.
-    if best is not None and best[0] < 0.05:
-        _, e, xi, eta = best
-        return e, clamp(xi), clamp(eta)
-    raise RuntimeError(
-        f"could not locate (x={x}, z={z}) in any Quad9 element of column "
-        f"ex={ex} (nearest overshoot "
-        f"{best[0] if best is not None else float('nan'):.2e})"
-    )
+    ex = np.clip((xz[:, 0] / _locate_geometry(mesh)["dx_e"]).astype(np.int64), 0, nex - 1)
+    elem, loc, failed, best = _locate_many(mesh, xz, ex, nez, lambda ez, ex: ez * nex + ex)
+    if failed.size:
+        i = failed[0]
+        raise RuntimeError(
+            f"could not locate (x={xz[i, 0]}, z={xz[i, 1]}) in any Quad9 element of "
+            f"column ex={ex[i]} (nearest overshoot {best[i]:.2e})")
+    return elem, loc[:, 0], loc[:, 1]
 
 
-# --------------------------------------------------------------------------- #
-# Hex27 single-point evaluation + Newton locator (3-D deformed mesh).
-# --------------------------------------------------------------------------- #
-def _hex27_eval_one(control_xyz, xi, eta, gam):
-    """Q2 map (ξ, η, γ) → (x, y, z) at one point. control_xyz: (3,3,3,3)."""
-    t = lambda v: torch.tensor([v], dtype=control_xyz.dtype, device=control_xyz.device)
-    pg = q2_basis_at(t(gam))[0]; pe = q2_basis_at(t(eta))[0]; px = q2_basis_at(t(xi))[0]
-    return torch.einsum("k,i,j,kijd->d", pg, pe, px, control_xyz)
+def _locate_in_quad9(mesh: Quad9Mesh, x: float, z: float
+                     ) -> tuple[int, float, float]:
+    """``(elem_id, ξ, η)`` of one point -- :func:`_locate_in_quad9_many`."""
+    e, xi, eta = _locate_in_quad9_many(mesh, [[x, z]])
+    return int(e[0]), float(xi[0]), float(eta[0])
 
 
-def _hex27_jacobian_one(control_xyz, xi, eta, gam):
-    """3×3 Jacobian J[d, m] = ∂x_d/∂ξ_m at one point."""
-    t = lambda v: torch.tensor([v], dtype=control_xyz.dtype, device=control_xyz.device)
-    pg, dpg = q2_basis_at(t(gam))[0], q2_basis_deriv_at(t(gam))[0]
-    pe, dpe = q2_basis_at(t(eta))[0], q2_basis_deriv_at(t(eta))[0]
-    px, dpx = q2_basis_at(t(xi))[0],  q2_basis_deriv_at(t(xi))[0]
-    dxi  = torch.einsum("k,i,j,kijd->d", pg, pe, dpx, control_xyz)
-    deta = torch.einsum("k,i,j,kijd->d", pg, dpe, px, control_xyz)
-    dgam = torch.einsum("k,i,j,kijd->d", dpg, pe, px, control_xyz)
-    return torch.stack([dxi, deta, dgam], dim=-1)         # (3_d, 3_m)
-
-
-def _newton_xeg(control_xyz, x, y, z, *, max_iter=40, tol=None,
-                xi0=0.0, eta0=0.0, gam0=0.0):
-    """3-D Newton on the Q2 map. Returns ``(ξ, η, γ, converged)`` (unclamped)."""
-    if tol is None:
-        eps = torch.finfo(control_xyz.dtype).eps
-        tol = 32.0 * eps * (abs(x) + abs(y) + abs(z) + 1.0)
-    xi_v, eta_v, gam_v = float(xi0), float(eta0), float(gam0)
-    target = torch.tensor([x, y, z], dtype=control_xyz.dtype, device=control_xyz.device)
-    resid_norm = float("inf")
-    for _ in range(max_iter):
-        pos = _hex27_eval_one(control_xyz, xi_v, eta_v, gam_v)
-        resid = target - pos
-        resid_norm = resid.norm().item()
-        if resid_norm < tol:
-            return xi_v, eta_v, gam_v, True
-        J = _hex27_jacobian_one(control_xyz, xi_v, eta_v, gam_v)
-        delta = torch.linalg.solve(J, resid)
-        xi_v  = max(-3.0, min(3.0, xi_v + float(delta[0])))
-        eta_v = max(-3.0, min(3.0, eta_v + float(delta[1])))
-        gam_v = max(-3.0, min(3.0, gam_v + float(delta[2])))
-    return xi_v, eta_v, gam_v, resid_norm < tol
-
-
-def _locate_in_hex27(mesh: Hex27Mesh, x, y, z, *, tol=None):
-    """Locate ``(x, y, z)`` in a deformed Hex27 mesh (uniform x/y columns, only
-    the z-row ambiguous under topography). Returns ``(elem_id, ξ, η, γ)``."""
+def _locate_in_hex27_many(mesh: Hex27Mesh, xyz):
+    """``(elem_id, ξ, η, γ)`` (each ``(P,)``) of ``P`` points ``(x, y, z)`` in a
+    deformed Hex27 mesh: uniform x/y columns, only the z-row ambiguous under
+    topography -- :func:`_locate_in_quad9_many` in 3-D."""
+    xyz = np.asarray(xyz, dtype=np.float64).reshape(-1, 3)
     nex, ney, nez = mesh.nex, mesh.ney, mesh.nez
-    dx_e, dy_e = mesh.dx_e, mesh.dy_e
-    ex = max(min(int(x / dx_e), nex - 1), 0)
-    ey = max(min(int(y / dy_e), ney - 1), 0)
-    col = (torch.arange(nez, device=mesh.z_e.device) * ney + ey) * nex + ex
-    cz = mesh.z_e[col].mean(dim=(1, 2, 3))
-    order = torch.argsort((cz - z).abs()).tolist()
-    clamp = lambda v: min(1.0, max(-1.0, v))
-    best = None
-    for ez in order[: min(8, nez)]:
-        e = (ez * ney + ey) * nex + ex
-        xi, eta, gam, ok = _newton_xeg(mesh.control_xyz[e], x, y, z, tol=tol)
-        if not ok:
-            continue
-        overshoot = max(abs(xi) - 1.0, abs(eta) - 1.0, abs(gam) - 1.0, 0.0)
-        if overshoot <= 1e-6:
-            return e, clamp(xi), clamp(eta), clamp(gam)
-        if best is None or overshoot < best[0]:
-            best = (overshoot, e, xi, eta, gam)
-    if best is not None and best[0] < 0.05:
-        _, e, xi, eta, gam = best
-        return e, clamp(xi), clamp(eta), clamp(gam)
-    raise RuntimeError(
-        f"could not locate (x={x}, y={y}, z={z}) in any Hex27 element of column "
-        f"(ex={ex}, ey={ey})")
+    ex = np.clip((xyz[:, 0] / mesh.dx_e).astype(np.int64), 0, nex - 1)
+    ey = np.clip((xyz[:, 1] / mesh.dy_e).astype(np.int64), 0, ney - 1)
+    elem, loc, failed, _ = _locate_many(mesh, xyz, ey * nex + ex, nez,
+                                        lambda ez, col: ez * (ney * nex) + col)
+    if failed.size:
+        i = failed[0]
+        raise RuntimeError(
+            f"could not locate (x={xyz[i, 0]}, y={xyz[i, 1]}, z={xyz[i, 2]}) in any "
+            f"Hex27 element of column (ex={ex[i]}, ey={ey[i]})")
+    return elem, loc[:, 0], loc[:, 1], loc[:, 2]
+
+
+def _locate_in_hex27(mesh: Hex27Mesh, x, y, z):
+    """``(elem_id, ξ, η, γ)`` of one point -- :func:`_locate_in_hex27_many`."""
+    e, xi, eta, gam = _locate_in_hex27_many(mesh, [[x, y, z]])
+    return int(e[0]), float(xi[0]), float(eta[0]), float(gam[0])
+
+
+#: Points a mesh remembers -- located, and stamped -- least recently used out
+#: first. A streamer brings new receiver positions at every shot and recorded
+#: coordinates rarely repeat, so a record of every point ever asked for would
+#: grow with the survey; a miss costs a batched Newton and a weight evaluation.
+POINT_RECORD_SIZE = 1 << 16
+
+
+class _PointRecord:
+    """A least-recently-used ``{point: value}`` of at most ``size`` entries."""
+
+    def __init__(self, size):
+        self.size, self._d = size, OrderedDict()
+
+    def get(self, key):
+        value = self._d.get(key)
+        if value is not None:
+            self._d.move_to_end(key)
+        return value
+
+    def put(self, key, value):
+        self._d[key] = value
+        self._d.move_to_end(key)
+        while len(self._d) > self.size:
+            self._d.popitem(last=False)
+
+    def __len__(self):
+        return len(self._d)
+
+
+def _record(mesh, name):
+    """The mesh's :class:`_PointRecord` ``name`` (made on first use)."""
+    rec = mesh.__dict__.get(name)
+    if rec is None:
+        rec = mesh.__dict__[name] = _PointRecord(POINT_RECORD_SIZE)
+    return rec
+
+
+def locate_points(mesh, points):
+    """``[(elem_id, ξ, η[, γ]), ...]`` of ``points`` (``(x, z)`` / ``(x, y, z)``).
+    On a deformed mesh the points it has not located yet are located together,
+    one batched Newton for all of them, and every answer is kept on the mesh,
+    so the stamps built next -- and the next shot's, at the same receivers --
+    find it; callers that stamp many points call it first. The axis-aligned
+    meshes locate in closed form."""
+    if isinstance(mesh, Quad4Mesh):
+        return [_locate_quad(mesh, *p) for p in points]
+    if isinstance(mesh, Hex8Mesh):
+        return [_hex8_local(mesh, *p) for p in points]
+    rec = _record(mesh, "_located")
+    keys = [tuple(map(float, p)) for p in points]
+    found = {}
+    for k in dict.fromkeys(keys):
+        hit = rec.get(k)
+        if hit is not None:
+            found[k] = hit
+    todo = [k for k in dict.fromkeys(keys) if k not in found]
+    if todo:
+        cols = (_locate_in_quad9_many if isinstance(mesh, Quad9Mesh) else _locate_in_hex27_many)(mesh, todo)
+        for k, *row in zip(todo, *cols):
+            found[k] = (int(row[0]),) + tuple(float(v) for v in row[1:])
+            rec.put(k, found[k])
+    return [found[k] for k in keys]
+
+
+def _located(mesh, coords):
+    """``(elem_id, ξ, η[, γ])`` of one point on a deformed mesh."""
+    return locate_points(mesh, [coords])[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -388,6 +530,47 @@ class PointStamp3D:
         return self._outer().reshape(-1)
 
 
+def _cached_stamp(mesh, kind, coords, build):
+    """``build(mesh, *coords)``, kept on the mesh: a point stamps the same way
+    every time, and a survey's receivers are stamped again at every shot."""
+    rec = _record(mesh, "_stamps")
+    key = (kind,) + tuple(map(float, coords))
+    stamp = rec.get(key)
+    if stamp is None:
+        stamp = build(mesh, *coords)
+        rec.put(key, stamp)
+    return stamp
+
+
+def build_point_stamps(mesh, points):
+    """:func:`build_point_stamp` of every point in ``points``. The ones the mesh
+    has not stamped yet are located together and stamped together -- their
+    weights reach the mesh's device in one copy -- and every stamp is kept
+    on the mesh for the next call."""
+    rec = _record(mesh, "_stamps")
+    keys = [("point",) + tuple(map(float, p)) for p in points]
+    found = {}
+    for k in dict.fromkeys(keys):
+        hit = rec.get(k)
+        if hit is not None:
+            found[k] = hit
+    todo = [k for k in dict.fromkeys(keys) if k not in found]
+    if todo:
+        for k, stamp in zip(todo, _build_point_stamps(mesh, [k[1:] for k in todo])):
+            found[k] = stamp
+            rec.put(k, stamp)
+    return [found[k] for k in keys]
+
+
+def _build_point_stamps(mesh, coords):
+    """Uncached :func:`build_point_stamps`."""
+    loc = np.array(locate_points(mesh, coords), dtype=np.float64)
+    elem = loc[:, 0].astype(np.int64)
+    if isinstance(mesh, (Hex8Mesh, Hex27Mesh)):
+        return _hex_stamps(mesh, elem, loc[:, 1], loc[:, 2], loc[:, 3])
+    return _quad_stamps(mesh, elem, loc[:, 1], loc[:, 2])
+
+
 def build_point_stamp(mesh, *coords):
     """Locate a point and build the Lagrange/derivative weights.
 
@@ -395,36 +578,40 @@ def build_point_stamp(mesh, *coords):
     3-D :class:`Hex8Mesh` takes ``(x, y, z)``. Dispatches on mesh type:
     closed-form (ξ, η[, γ]) for axis-aligned :class:`Quad4Mesh` /
     :class:`Hex8Mesh`, Newton-Raphson on the Q2 map for a deformed
-    :class:`Quad9Mesh`.
+    :class:`Quad9Mesh` / :class:`Hex27Mesh` (call :func:`locate_points` with
+    all the points first to locate them together). The stamp is kept on the
+    mesh and handed back for the same point.
     """
-    if isinstance(mesh, Hex8Mesh):
-        x, y, z = coords
-        if not (0.0 <= x <= mesh.x_max and 0.0 <= y <= mesh.y_max
-                and 0.0 <= z <= mesh.z_max):
-            raise ValueError(f"point ({x}, {y}, {z}) outside domain")
-        ex = min(int(x / mesh.dx_e), mesh.nex - 1)
-        ey = min(int(y / mesh.dy_e), mesh.ney - 1)
-        ez = min(int(z / mesh.dz_e), mesh.nez - 1)
-        xi_s    = 2.0 * (x - ex * mesh.dx_e) / mesh.dx_e - 1.0
-        eta_s   = 2.0 * (y - ey * mesh.dy_e) / mesh.dy_e - 1.0
-        gamma_s = 2.0 * (z - ez * mesh.dz_e) / mesh.dz_e - 1.0
-        return PointStamp3D(
-            elem_id=(ez * mesh.ney + ey) * mesh.nex + ex,
-            w_gamma=lagrange_basis_at(mesh.xi, gamma_s),
-            w_eta=lagrange_basis_at(mesh.xi, eta_s),
-            w_xi=lagrange_basis_at(mesh.xi, xi_s),
-        )
-    if isinstance(mesh, Hex27Mesh):
-        x, y, z = coords
-        elem_id, xi_s, eta_s, gamma_s = _locate_in_hex27(mesh, x, y, z)
-        return PointStamp3D(
-            elem_id=elem_id,
-            w_gamma=lagrange_basis_at(mesh.xi, gamma_s),
-            w_eta=lagrange_basis_at(mesh.xi, eta_s),
-            w_xi=lagrange_basis_at(mesh.xi, xi_s),
-        )
-    x, z = coords
-    return _quad_stamp(mesh, *_locate_quad(mesh, x, z))
+    return _cached_stamp(mesh, "point", coords, _build_point_stamp)
+
+
+def _build_point_stamp(mesh, *coords):
+    return _build_point_stamps(mesh, [coords])[0]
+
+
+def _hex8_local(mesh, x, y, z):
+    """``(elem_id, ξ, η, γ)`` of a point in the axis-aligned :class:`Hex8Mesh`
+    (closed form)."""
+    if not (0.0 <= x <= mesh.x_max and 0.0 <= y <= mesh.y_max
+            and 0.0 <= z <= mesh.z_max):
+        raise ValueError(f"point ({x}, {y}, {z}) outside domain")
+    ex = min(int(x / mesh.dx_e), mesh.nex - 1)
+    ey = min(int(y / mesh.dy_e), mesh.ney - 1)
+    ez = min(int(z / mesh.dz_e), mesh.nez - 1)
+    return ((ez * mesh.ney + ey) * mesh.nex + ex,
+            2.0 * (x - ex * mesh.dx_e) / mesh.dx_e - 1.0,
+            2.0 * (y - ey * mesh.dy_e) / mesh.dy_e - 1.0,
+            2.0 * (z - ez * mesh.dz_e) / mesh.dz_e - 1.0)
+
+
+def _hex_stamps(mesh, elem, xi, eta, gam):
+    """The :class:`PointStamp3D` of each ``(elem_id, ξ, η, γ)``, their weights
+    moved to the mesh's device in one copy (the stamps hold views of it)."""
+    nodes = mesh.xi.detach().cpu().numpy().astype(np.float64)
+    w = np.stack([_lagrange_np(nodes, np.asarray(t, dtype=np.float64)) for t in (gam, eta, xi)], 1)
+    W = torch.as_tensor(w, dtype=mesh.xi.dtype, device=mesh.xi.device)
+    return [PointStamp3D(elem_id=int(e), w_gamma=W[p, 0], w_eta=W[p, 1], w_xi=W[p, 2])
+            for p, e in enumerate(elem)]
 
 
 def _locate_quad(mesh, x, z):
@@ -440,7 +627,7 @@ def _locate_quad(mesh, x, z):
         eta_s = 2.0 * (z - ez * mesh.dz_e) / mesh.dz_e - 1.0
         return ez * mesh.nex + ex, xi_s, eta_s
     if isinstance(mesh, Quad9Mesh):
-        return _locate_in_quad9(mesh, x, z)
+        return _located(mesh, (x, z))
     raise TypeError(f"unsupported mesh type {type(mesh).__name__}")
 
 
@@ -455,30 +642,32 @@ def _quad_jacobian(mesh, elem_id, xi_s, eta_s):
 
 def _quad_stamp(mesh, elem_id, xi_s, eta_s):
     """The :class:`PointStamp` of element ``elem_id`` at local ``(ξ, η)``."""
+    return _quad_stamps(mesh, [elem_id], [xi_s], [eta_s])[0]
+
+
+def _quad_stamps(mesh, elem, xi, eta):
+    """The :class:`PointStamp` of each ``(elem_id, ξ, η)``: Lagrange weights
+    and derivatives as :func:`lagrange_basis_at` gives them, the inverse
+    Jacobian of the Q2 map in float64, and the weights moved to the mesh's
+    device in one copy (the stamps hold views of it)."""
+    nodes = mesh.xi.detach().cpu().numpy().astype(np.float64)
+    xi, eta = np.asarray(xi, dtype=np.float64), np.asarray(eta, dtype=np.float64)
+    w = np.stack([_lagrange_np(nodes, eta), _lagrange_np(nodes, xi),
+                  _lagrange_deriv_np(nodes, eta), _lagrange_deriv_np(nodes, xi)], 1)
+    W = torch.as_tensor(w, dtype=mesh.xi.dtype, device=mesh.xi.device)
     if isinstance(mesh, Quad4Mesh):
-        return PointStamp(
-            elem_id=elem_id,
-            w_eta=lagrange_basis_at(mesh.xi, eta_s),
-            w_xi=lagrange_basis_at(mesh.xi, xi_s),
-            dw_eta=lagrange_basis_deriv_at(mesh.xi, eta_s),
-            dw_xi=lagrange_basis_deriv_at(mesh.xi, xi_s),
-            ixx=2.0 / mesh.dx_e, ixz=0.0, iex=0.0, iez=2.0 / mesh.dz_e,
-        )
-    control = mesh.control_xy[elem_id]
-    J = _q2_jacobian_one(control, xi_s, eta_s)
-    det = (J[0, 0] * J[1, 1] - J[0, 1] * J[1, 0]).item()
-    ixx =  J[1, 1].item() / det
-    ixz = -J[0, 1].item() / det
-    iex = -J[1, 0].item() / det
-    iez =  J[0, 0].item() / det
-    return PointStamp(
-        elem_id=elem_id,
-        w_eta=lagrange_basis_at(mesh.xi, eta_s),
-        w_xi=lagrange_basis_at(mesh.xi, xi_s),
-        dw_eta=lagrange_basis_deriv_at(mesh.xi, eta_s),
-        dw_xi=lagrange_basis_deriv_at(mesh.xi, xi_s),
-        ixx=ixx, ixz=ixz, iex=iex, iez=iez,
-    )
+        inv = [(2.0 / mesh.dx_e, 0.0, 0.0, 2.0 / mesh.dz_e)] * len(xi)
+    else:
+        c = _locate_geometry(mesh)["control"][np.asarray(elem, dtype=np.int64)]
+        (px, dpx), (pe, dpe) = _q2_np(xi), _q2_np(eta)
+        dxi = np.einsum("ni,nj,nijk->nk", pe, dpx, c)              # (∂x/∂ξ, ∂z/∂ξ)
+        deta = np.einsum("ni,nj,nijk->nk", dpe, px, c)             # (∂x/∂η, ∂z/∂η)
+        det = dxi[:, 0] * deta[:, 1] - deta[:, 0] * dxi[:, 1]
+        inv = np.stack([deta[:, 1] / det, -deta[:, 0] / det,
+                        -dxi[:, 1] / det, dxi[:, 0] / det], -1).tolist()
+    return [PointStamp(elem_id=int(e), w_eta=W[p, 0], w_xi=W[p, 1], dw_eta=W[p, 2], dw_xi=W[p, 3],
+                       ixx=i[0], ixz=i[1], iex=i[2], iez=i[3])
+            for p, (e, i) in enumerate(zip(elem, inv))]
 
 
 # --------------------------------------------------------------------------- #
@@ -543,7 +732,12 @@ def build_moment_stamp(mesh, *coords):
     Inside an element it IS that function's stamp. On an element edge or
     corner it is an :class:`EdgeStamp` over every element whose closure holds
     the point. 3-D meshes have no moment-tensor stamp; they get the plain one.
+    Kept on the mesh, as :func:`build_point_stamp` keeps its stamps.
     """
+    return _cached_stamp(mesh, "moment", coords, _build_moment_stamp)
+
+
+def _build_moment_stamp(mesh, *coords):
     if not isinstance(mesh, (Quad4Mesh, Quad9Mesh)):
         return build_point_stamp(mesh, *coords)
     x, z = coords
@@ -790,10 +984,11 @@ class SEMPropagator:
         # then every source meets all the elements at its point, to take each
         # field's load from the ones that carry it
         edge_all = getattr(eq, "source_field_elements", None) is not None
+        locate_points(eq.mesh, list(source_xz) + list(receiver_xz))
         sources   = [(build_moment_stamp if edge_all or kind in _DERIVATIVE_KINDS
                       else build_point_stamp)(eq.mesh, *xz)
                      for xz, kind in zip(source_xz, source_kinds)]
-        receivers = [build_point_stamp(eq.mesh, *xz) for xz in receiver_xz]
+        receivers = build_point_stamps(eq.mesh, receiver_xz)
         return cls(eq=eq, dt=dt, nt=nt, sources=sources, receivers=receivers,
                    source_kinds=source_kinds, source_payloads=source_payloads,
                    receiver_type=resolve_field_types(
