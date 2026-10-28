@@ -1919,7 +1919,7 @@ class PropSEM:
         (source, receiver) key like the fused path's point stamps were."""
         from types import SimpleNamespace
         from .dd import SEMModelParallel, StripTopology, _Stamps
-        from .propagator import _check_pml_placement
+        from .propagator import _check_pml_placement, locate_points
         dev = torch.device("cuda")
         dd = getattr(self, "_dd1", None)
         if dd is None:
@@ -1932,6 +1932,8 @@ class PropSEM:
             key = tuple(tuple(map(float, xz)) for xz in pts)
             hit = cache.get(key)
             if hit is None:
+                if self.equation is AcousticSEM3DDeformed:
+                    locate_points(self.mesh, pts)
                 hit = cache[key] = _Stamps.of([self._stamp3d(*xz) for xz in pts], dev)
             return hit
 
@@ -2001,24 +2003,25 @@ class PropSEM:
     def _c_cache_stamps(self, shot_src, receivers):
         """Fill ``_c_src_stamps`` / ``_c_rec_stamps`` for this geometry, reusing
         them when the geometry has not moved."""
-        from .propagator import build_moment_stamp, build_point_stamp
+        from .propagator import build_moment_stamp, build_point_stamps, locate_points
         src_key = tuple(tuple(map(float, xz)) for s in shot_src for xz in s)
         rec_rows = [tuple(receivers[b].reshape(-1).tolist())
                     for b in range(receivers.shape[0])]
         key = (src_key, tuple(rec_rows))
         if getattr(self, "_c_stamp_key", None) == key:
             return
+        first = {row: b for b, row in reversed(list(enumerate(rec_rows)))}
+        locate_points(self.mesh, [xz for s in shot_src for xz in s]
+                      + [xz for b in first.values() for xz in self._rec_row(receivers, b)])
         # a moment tensor is stamped in every element at an edge (EdgeStamp),
         # exactly as the eager build does it
-        stamp = build_moment_stamp if self._src_moment is not None else build_point_stamp
-        self._c_src_stamps = [[stamp(self.mesh, *xz) for xz in s] for s in shot_src]
-        row_cache = {}                        # dedupe expanded receiver rows
-        self._c_rec_stamps = []
-        for b, row in enumerate(rec_rows):
-            if row not in row_cache:
-                row_cache[row] = [build_point_stamp(self.mesh, *xz)
-                                  for xz in self._rec_row(receivers, b)]
-            self._c_rec_stamps.append(row_cache[row])
+        if self._src_moment is not None:
+            self._c_src_stamps = [[build_moment_stamp(self.mesh, *xz) for xz in s] for s in shot_src]
+        else:
+            self._c_src_stamps = [build_point_stamps(self.mesh, s) for s in shot_src]
+        row_cache = {row: build_point_stamps(self.mesh, self._rec_row(receivers, b))
+                     for row, b in first.items()}     # dedupe expanded receiver rows
+        self._c_rec_stamps = [row_cache[row] for row in rec_rows]
         self._c_stamp_key = key
 
     def _c_prop(self, eq, b, sv):
