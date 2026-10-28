@@ -27,6 +27,20 @@ def _fp32_reference():
 
 _fp32_reference()
 
+
+def _no_jax_preallocation():
+    """torch and jax share this process. On its first op JAX's GPU client
+    takes 75% of the device up front and keeps it, so one jax test early in a
+    run (the parity check in test_acoustic_vti_1st) left torch ~7.5 GiB of a
+    32 GiB V100 for the rest of the session, and the 3-D elastic c tests after
+    it OOMed -- a slightly different set every run, none of them alone. JAX
+    reads this when it creates the GPU client, not at import, so setting it
+    here is in time as long as no jax op has run yet."""
+    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
+
+_no_jax_preallocation()
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 SRC = ROOT / "src"
