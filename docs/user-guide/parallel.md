@@ -126,9 +126,9 @@ On fp32 gpu-direct boundaries the DD gradient is **bit-identical** to the
 single-domain gradient (`test/test_dd_backward_two_tile*.py`,
 `test/dd_api_check.py`), including with boundary tail truncation
 (`test/test_dd_tail_two_tile.py`). `AcousticVRZ3D` runs the same gradient
-kernels on one card and under DD at every order. `AcousticLSRTM` and
-`AcousticLSRTM3D` are bit-identical too, record and both gradients
-(`test/dd_corner_check_lsrtm2d.py`, `test/dd_corner_check_lsrtm3d.py`).
+kernels on one card and under DD at every order. `AcousticBorn` and
+`AcousticBorn3D` are bit-identical too, record and both gradients
+(`test/dd_corner_check_born2d.py`, `test/dd_corner_check_born3d.py`).
 `pad_to_mesh` pads the split axes up to the tile multiple; a padded run is a
 (slightly) different discrete problem than an unpadded one, so compare like
 against like — the example scripts' `--check` mode does exactly that.
@@ -136,7 +136,7 @@ against like — the example scripts' `--check` mode does exactly that.
 ## Scope and limits
 
 - Equations: those with stepped compiled kernels — `Acoustic` (2-D),
-  `Acoustic3D`, `AcousticVRZ3D`, `AcousticLSRTM` (2-D), `AcousticLSRTM3D`,
+  `Acoustic3D`, `AcousticVRZ3D`, `AcousticBorn` (2-D), `AcousticBorn3D`,
   `Elastic` (2-D) and `Elastic3D`. The LSRTM pair carries two coupled fields
   (background and scattered), and DD rotates and halo-exchanges both; its
   backward returns the reflectivity `mp` gradient and, when `vp` requires

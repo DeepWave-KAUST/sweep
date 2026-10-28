@@ -82,9 +82,9 @@ _FWI_3D_ACOUSTIC_COMMON = {
     "model_stride_x": 4,
 }
 
-_LSRTM_3D_ACOUSTIC_COMMON = {
+_BORN_3D_ACOUSTIC_COMMON = {
     **_FWI_3D_ACOUSTIC_COMMON,
-    "output_dir": "acoustic_3d_lsrtm_overthrust",
+    "output_dir": "acoustic_3d_born_overthrust",
     "epochs": 51,
     "show_every": 10,
     "batchsize": 2,
@@ -145,23 +145,23 @@ _CONFIGS = {
             "pinned_memory": True,
         },
     },
-    "lsrtm_3d_acoustic_jax": {
-        **_LSRTM_3D_ACOUSTIC_COMMON,
-        "output_dir": "acoustic_3d_lsrtm_overthrust_jax",
+    "born_3d_acoustic_jax": {
+        **_BORN_3D_ACOUSTIC_COMMON,
+        "output_dir": "acoustic_3d_born_overthrust_jax",
         "use_ckpt": True,
         "ckpt_chunks": 16,
     },
-    "lsrtm_3d_acoustic_torch_common": {
-        **_LSRTM_3D_ACOUSTIC_COMMON,
+    "born_3d_acoustic_torch_common": {
+        **_BORN_3D_ACOUSTIC_COMMON,
     },
-    "lsrtm_3d_acoustic_torch_eager": {
-        "output_dir": "acoustic_3d_lsrtm_overthrust_torch",
+    "born_3d_acoustic_torch_eager": {
+        "output_dir": "acoustic_3d_born_overthrust_torch",
         "use_compile": True,
         "use_ckpt": True,
         "ckpt_chunks": 16,
     },
-    "lsrtm_3d_acoustic_torch_cuda": {
-        "output_dir": "acoustic_3d_lsrtm_overthrust_cuda",
+    "born_3d_acoustic_torch_cuda": {
+        "output_dir": "acoustic_3d_born_overthrust_cuda",
         "boundary_saving_config": {
             "enabled": True,
             "storage": "gpu",

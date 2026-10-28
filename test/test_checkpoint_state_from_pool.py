@@ -55,12 +55,12 @@ RESIDUAL = {
     ("elastic_tti_2nd2d", "ckpt_chunk"): 0,
     ("vrz2d", "ckpt_chunk"): 0, ("vrz2d", "ckpt_recursive"): 0,
     ("vrz3d", "ckpt_chunk"): 0, ("vrz3d", "ckpt_recursive"): 0,
-    ("lsrtm2d", "ckpt_chunk"): 0, ("lsrtm2d", "ckpt_recursive"): 0,
+    ("born2d", "ckpt_chunk"): 0, ("born2d", "ckpt_recursive"): 0,
     ("visco2d", "ckpt_chunk"): 0, ("visco2d", "ckpt_recursive"): 0,
-    ("lsrtm3d", "ckpt_chunk"): 0, ("lsrtm3d", "ckpt_recursive"): 0,
+    ("born3d", "ckpt_chunk"): 0, ("born3d", "ckpt_recursive"): 0,
 }
 BINDING = {"vrz2d": "acoustic_vrz2d", "vrz3d": "acoustic_vrz3d",
-           "lsrtm2d": "acoustic_lsrtm2d", "lsrtm3d": "acoustic_lsrtm3d", "visco2d": "visco_acoustic2d"}
+           "born2d": "acoustic_born2d", "born3d": "acoustic_born3d", "visco2d": "visco_acoustic2d"}
 FUNC = {"ckpt_chunk": "backward_ckpt_func", "ckpt_recursive": "backward_recursive_ckpt_func"}
 PARAMS = [pytest.param(k, m, marks=requires_binding(f"{BINDING.get(k, k)}_forward"))
           for (k, m) in RESIDUAL]

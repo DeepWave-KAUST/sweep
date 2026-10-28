@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Wall time of one forward + backward of the second-order acoustic family's
-impl='c' propagators (Acoustic, Acoustic3D, AcousticVRZ(3D), AcousticLSRTM(3D),
+impl='c' propagators (Acoustic, Acoustic3D, AcousticVRZ(3D), AcousticBorn(3D),
 the LSRTM ones also with the RWI vp gradient, ViscoAcoustic), for an A/B of two source trees
 (run once per tree, PYTHONPATH pointing at it): production-like sizes, one
 shot, the memory modes given (a mode a case refuses or runs out of memory in is
@@ -19,7 +19,7 @@ import time
 import numpy as np
 import torch
 
-from sweep.equations import (Acoustic, Acoustic3D, AcousticLSRTM, AcousticLSRTM3D, AcousticVRZ,
+from sweep.equations import (Acoustic, Acoustic3D, AcousticBorn, AcousticBorn3D, AcousticVRZ,
                              AcousticVRZ3D, ViscoAcoustic)
 from sweep.propagator.options import BoundarySaving, Ckpt, Full
 from sweep.propagator.torch import PropTorch
@@ -30,10 +30,10 @@ CASES = {
     "acoustic3d": (Acoustic3D, (160, 160, 160), 30, 8, 300, ("vp",)),
     "vrz2d": (AcousticVRZ, (800, 1600), 50, 8, 1500, ("vp", "z")),
     "vrz3d": (AcousticVRZ3D, (160, 160, 160), 30, 8, 300, ("vp", "z")),
-    "lsrtm2d": (AcousticLSRTM, (800, 1600), 50, 8, 1500, ("mp",)),
-    "lsrtm2d_rwi": (AcousticLSRTM, (800, 1600), 50, 8, 1500, ("mp", "vp")),
-    "lsrtm3d": (AcousticLSRTM3D, (160, 160, 160), 30, 8, 300, ("mp",)),
-    "lsrtm3d_rwi": (AcousticLSRTM3D, (160, 160, 160), 30, 8, 300, ("mp", "vp")),
+    "born2d": (AcousticBorn, (800, 1600), 50, 8, 1500, ("mp",)),
+    "born2d_rwi": (AcousticBorn, (800, 1600), 50, 8, 1500, ("mp", "vp")),
+    "born3d": (AcousticBorn3D, (160, 160, 160), 30, 8, 300, ("mp",)),
+    "born3d_rwi": (AcousticBorn3D, (160, 160, 160), 30, 8, 300, ("mp", "vp")),
     "visco2d": (ViscoAcoustic, (800, 1600), 50, 8, 1500, ("vp",)),
 }
 MODES = {"full": lambda: Full(), "bs": lambda: BoundarySaving(storage="gpu"),

@@ -3,7 +3,7 @@ import functools
 from ._cpml import cpml_axis_update
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec, history_fields, history_plain, record_single
-from .slot_table import ACOUSTIC_LSRTM2D, ACOUSTIC_LSRTM2D_MP
+from .slot_table import ACOUSTIC_BORN2D, ACOUSTIC_BORN2D_MP
 
 from .fields import FieldSpec, ModelSpec
 from .utils import zero_top_halo_fields
@@ -72,12 +72,12 @@ def step(u_now, u_pre, psix, psiz, zetax, zetaz,
 # declared explicitly (``checkpoint_state_nvar``); the recursive backward bisects
 # each segment and keeps one scratch set per level (``recursive_state_depth``).
 # the background field's 7 + its psi double-buffer: the replay runs the forward
-# kernel, which reads the neighbours' psi (acoustic_lsrtm2d/backward.cu)
+# kernel, which reads the neighbours' psi (acoustic_born2d/backward.cu)
 _CKPT_REPLAY_STATE_NVAR = 9
 
 
 def _adjoint_workspace_shapes(B, nt, shape, mode, rwi=True):
-    """The compiled backward's scratch (acoustic_lsrtm2d/backward.cu WorkspaceSlot),
+    """The compiled backward's scratch (acoustic_born2d/backward.cu WorkspaceSlot),
     one padded grid per shot each: the vp^2*lambda grid of every adjoint step,
     plus the replayed step's background u_tt in the recursive-checkpoint mode, or
     -- in the full and boundary-saving modes when vp needs its RWI tomographic
@@ -91,7 +91,7 @@ def _adjoint_workspace_shapes(B, nt, shape, mode, rwi=True):
 
 
 def refuse_c_grads(equation, wavelet_grad, model_grad_mask, checkpoint):
-    """The gradients impl='c' AcousticLSRTM / AcousticLSRTM3D do not return,
+    """The gradients impl='c' AcousticBorn / AcousticBorn3D do not return,
     refused before anything runs (a silently zero or wrong gradient is what
     this guards):
 
@@ -117,7 +117,7 @@ def refuse_c_grads(equation, wavelet_grad, model_grad_mask, checkpoint):
             "and return the mp gradient. Use one of those, detach vp, or use impl='eager'.")
 
 @register_equation()
-class AcousticLSRTM(SecondOrderEquation):
+class AcousticBorn(SecondOrderEquation):
     """Second-order 2-D acoustic Born / LSRTM wave equation.
 
     Two coupled scalar wave equations: a *background* pressure-like field
@@ -137,7 +137,7 @@ class AcousticLSRTM(SecondOrderEquation):
     path at the old cost.
     """
 
-    C_NAME = "acoustic_lsrtm2d"
+    C_NAME = "acoustic_born2d"
 
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("velocity",), description="Background acoustic velocity model.", unit="m/s"),
@@ -173,7 +173,7 @@ class AcousticLSRTM(SecondOrderEquation):
                 kernels ship template specialisations only for
                 ``spatial_order ∈ {2, 4, 6, 8}``. Above 8 the dispatcher
                 drops to a generic runtime path (``order = -1`` in
-                ``src/sweep/csrc/cuda/equations/acoustic_lsrtm2d/forward.cu``)
+                ``src/sweep/csrc/cuda/equations/acoustic_born2d/forward.cu``)
                 which uses more registers and runs noticeably slower.
                 The PyTorch eager path is unaffected. Defaults to 4.
             device: Device for the operator's static kernels. Use
@@ -241,9 +241,9 @@ class AcousticLSRTM(SecondOrderEquation):
             # Domain decomposition: the forward and backward_bs drivers honour the
             # stepped it_begin/it_end (bw_it_begin/bw_it_end) range and the cut-face
             # mask, and the slot table lets ModelParallel rotate and halo-exchange
-            # BOTH coupled fields (two rotating blocks -> parallel.dd_spec.LSRTM_DD).
+            # BOTH coupled fields (two rotating blocks -> parallel.dd_spec.BORN_DD).
             stepped=True,
-            slots=ACOUSTIC_LSRTM2D if rwi else ACOUSTIC_LSRTM2D_MP,
+            slots=ACOUSTIC_BORN2D if rwi else ACOUSTIC_BORN2D_MP,
             base_nvar=6,
             # 2 wavefields (bg+sc); each: psix,psiz,zetax,zetaz (4) + psixn,psizn (2)
             # for the race-free forward psi double-buffer -> 2*(4+2)=12.

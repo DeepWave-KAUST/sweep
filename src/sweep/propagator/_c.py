@@ -58,7 +58,7 @@ def _get_C():
 
 
 # ---------------------------------------------------------------------------
-# RWI: term III of the AcousticLSRTM tomographic vp gradient, split out
+# RWI: term III of the AcousticBorn tomographic vp gradient, split out
 # ---------------------------------------------------------------------------
 # Wu & Alkhalifah (2015) weight the singular image-point term III of the
 # reflection vp gradient on its own: grad_v = (II + IV) + beta * III.  With
@@ -73,8 +73,8 @@ _LAST_GRAD_SPLIT_III = None
 def last_grad_split_iii():
     """Term III of the last split LSRTM backward, on the model grid, or None.
 
-    Only populated with ``SWEEP_LSRTM_SPLIT_III=1`` on AcousticLSRTM /
-    AcousticLSRTM3D in the full or boundary-saving mode; ``vp.grad`` then holds
+    Only populated with ``SWEEP_LSRTM_SPLIT_III=1`` on AcousticBorn /
+    AcousticBorn3D in the full or boundary-saving mode; ``vp.grad`` then holds
     II+IV, so the paper's weighted gradient is ``vp.grad + beta * III``.
     """
     return _LAST_GRAD_SPLIT_III
@@ -956,7 +956,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
 
     def _cuda_layout(self):
         # An equation whose layout depends on which models need a gradient
-        # (AcousticLSRTM: vp's RWI gradient doubles the backward) declares it per
+        # (AcousticBorn: vp's RWI gradient doubles the backward) declares it per
         # call; forward() sets the mask before anything below allocates for it.
         for_grads = getattr(self.equation, "cuda_layout_for_grads", None)
         if callable(for_grads):
@@ -1064,7 +1064,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             and self._boundary_cache_disk_dir == disk_dir
             and self._boundary_cache_nt == (self.nt if nt_saved is None else nt_saved)
             and getattr(self, '_boundary_cache_dtype', None) == boundary_dtype
-            # the saved field count can change per call (AcousticLSRTM: 2 when vp
+            # the saved field count can change per call (AcousticBorn: 2 when vp
             # needs its RWI gradient, else 1)
             and getattr(self, '_boundary_cache_nvar', None) == self._boundary_nvar_key()
         ):
@@ -1347,7 +1347,11 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         # (adjoint_pml_slab=False); elastic memory variables are own-cell only
         # and reuse the forward slab shapes.
         adjoint_wavefields_n = total_wavefields + int(getattr(cuda_layout, "adjoint_extra_nvar", 0))
-        if getattr(cuda_layout, "adjoint_pml_slab", False):
+        state_slots = cuda_layout.backward_state_slots
+        if state_slots is not None:
+            adjoint_wavefield_shapes = [wavefield_shapes[i] for i in state_slots] + \
+                [[self.B, 1, *self.shape_cuda]] * int(cuda_layout.adjoint_extra_nvar)
+        elif getattr(cuda_layout, "adjoint_pml_slab", False):
             extra = adjoint_wavefields_n - total_wavefields
             adjoint_wavefield_shapes = list(wavefield_shapes) + \
                 [[self.B, 1, *self.shape_cuda]] * extra
@@ -1427,7 +1431,9 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         if mode not in ("ckpt", "recursive"):
             return ()
         shapes = [(batch_size, 1, *s[2:]) for s in self._forward_wavefield_shapes()]
-        if layout.checkpoint_state_nvar is not None:
+        if layout.backward_state_slots is not None:
+            shapes = [shapes[i] for i in layout.backward_state_slots]
+        elif layout.checkpoint_state_nvar is not None:
             shapes = shapes[:int(layout.checkpoint_state_nvar)]
         elif layout.slots is not None:
             forward_slots = [slot for slot in layout.slots.slots if not slot.adjoint_only]
@@ -1484,7 +1490,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         else:
             workspace_shapes = workspace_nvar * [[self.B, 1, *self.shape_cuda]]
         # The slot list itself is part of the key: it can change per call with
-        # the same mode (AcousticLSRTM: vp's RWI gradient adds slots).
+        # the same mode (AcousticBorn: vp's RWI gradient adds slots).
         shapes_key = tuple(tuple(int(x) for x in s) for s in workspace_shapes)
         if (
             self._workspace_cache_batch is not None

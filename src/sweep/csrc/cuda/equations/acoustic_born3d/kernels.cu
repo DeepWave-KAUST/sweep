@@ -1,6 +1,6 @@
 #include "kernels.cuh"
 
-__global__ void calculate_grad_lsrtm3d_mp(
+__global__ void calculate_grad_born3d_mp(
     const float* __restrict__ u_tt_bg,
     const float* __restrict__ u_backward,
     const float* __restrict__ vp,
@@ -37,7 +37,7 @@ __global__ void calculate_grad_lsrtm3d_mp(
     grad_b[idx] += dt * dt * u_tt_b[idx] * u_backward_b[idx];
 }
 
-__global__ void calculate_grad_lsrtm3d_mp_utt(
+__global__ void calculate_grad_born3d_mp_utt(
     const float* __restrict__ u_forward_next,
     const float* __restrict__ u_forward_now,
     const float* __restrict__ u_forward_prev,
@@ -81,11 +81,11 @@ __global__ void calculate_grad_lsrtm3d_mp_utt(
 
 SWEEP_BY_ORDER_TABLE(acoustic3d_single_fn, acoustic3d_single_by_order, acoustic3d_single);
 SWEEP_BY_ORDER_TABLE(acoustic3d_single_nopml_fn, acoustic3d_single_nopml_by_order, acoustic3d_single_nopml);
-SWEEP_BY_ORDER_TABLE(acoustic_lsrtm3d_coupled_fn, acoustic_lsrtm3d_coupled_by_order, acoustic_lsrtm3d_coupled);
-SWEEP_BY_ORDER_TABLE(acoustic_lsrtm3d_adjoint_exact_fn, acoustic_lsrtm3d_adjoint_exact_by_order, acoustic_lsrtm3d_adjoint_exact);
+SWEEP_BY_ORDER_TABLE(acoustic_born3d_coupled_fn, acoustic_born3d_coupled_by_order, acoustic_born3d_coupled);
+SWEEP_BY_ORDER_TABLE(acoustic_born3d_adjoint_exact_fn, acoustic_born3d_adjoint_exact_by_order, acoustic_born3d_adjoint_exact);
 
 // v2_lambda = vp^2 * lambda  (per-cell, race-free pre-pass for the L* adjoint).
-__global__ void compute_v2_lambda_lsrtm3d(
+__global__ void compute_v2_lambda_born3d(
     const float* __restrict__ vp,
     const float* __restrict__ lambda,
     float* __restrict__ v2_lambda,
@@ -102,11 +102,11 @@ __global__ void compute_v2_lambda_lsrtm3d(
 }
 
 // ---- RWI tomographic vp gradient (Wu & Alkhalifah 2015); 3-D twins of the
-// acoustic_lsrtm2d kernels -- see there for the derivation of each term. ----
+// acoustic_born2d kernels -- see there for the derivation of each term. ----
 
 // Background adjoint lambda_bg = mu: its own propagation plus the transpose of the
 // scattered-source coupling, v2 = vp^2 * (lambda_bg + mp * lambda_sc).
-__global__ void compute_v2_lambda_bg_lsrtm3d(
+__global__ void compute_v2_lambda_bg_born3d(
     const float* __restrict__ vp,
     const float* __restrict__ mp,
     const float* __restrict__ lambda_bg,
@@ -128,7 +128,7 @@ __global__ void compute_v2_lambda_bg_lsrtm3d(
 // Full mode, from the stored second time derivatives:
 //   grad_v += (2 dt^2 / v) [ sc_utt*lam_sc (II) + bg_utt*lam_bg (IV) + mp*bg_utt*lam_sc (III) ]
 // grad_iii != nullptr keeps III apart for the paper's beta weight.
-__global__ void calculate_grad_lsrtm3d_vp_utt(
+__global__ void calculate_grad_born3d_vp_utt(
     const float* __restrict__ bg_utt,
     const float* __restrict__ sc_utt,
     const float* __restrict__ lam_bg,
@@ -160,7 +160,7 @@ __global__ void calculate_grad_lsrtm3d_vp_utt(
 
 // Boundary-saving: the scattered reverse recursion's coupling source
 // mp * vp^2 * Lap(bg) = mp * (source-free bg second difference).  Interior only.
-__global__ void add_lsrtm3d_scattered_coupling(
+__global__ void add_born3d_scattered_coupling(
     float* __restrict__ sc_next,
     const float* __restrict__ bg_next,
     const float* __restrict__ bg_now,
@@ -181,7 +181,7 @@ __global__ void add_lsrtm3d_scattered_coupling(
 
 // Boundary-saving vp gradient from the reconstructed second differences:
 // bg 2nd diff -> IV, sc 2nd diff -> II + III; III recovered as (2/v)*mp*bg2*lam_sc.
-__global__ void calculate_grad_lsrtm3d_vp_2diff(
+__global__ void calculate_grad_born3d_vp_2diff(
     const float* __restrict__ bg_prev, const float* __restrict__ bg_now, const float* __restrict__ bg_next,
     const float* __restrict__ sc_prev, const float* __restrict__ sc_now, const float* __restrict__ sc_next,
     const float* __restrict__ lam_bg, const float* __restrict__ lam_sc,

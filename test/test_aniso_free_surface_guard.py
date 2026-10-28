@@ -26,8 +26,8 @@ cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 # Thomsen / tilt / Alkhalifah parameters: any of them makes the medium anisotropic.
 ANISO_PARAMS = {"epsilon", "delta", "gamma", "eta", "theta", "phi"}
 
-EXPECTED = {"AcousticVTI1st", "AcousticVTI1st3D", "AcousticVTI", "AcousticTTI", "AcousticVTILSRTM",
-            "AcousticTTILSRTM", "AcousticTariq", "ElasticTTI", "ElasticTTISG", "ElasticTTISG3D",
+EXPECTED = {"AcousticVTI1st", "AcousticVTI1st3D", "AcousticVTI", "AcousticTTI", "AcousticVTIBorn",
+            "AcousticTTIBorn", "AcousticTariq", "ElasticTTI", "ElasticTTISG", "ElasticTTISG3D",
             "ElasticTTI2nd"}
 
 

@@ -105,7 +105,7 @@ __global__ void add_source_3d_signed(
 
 // Boundary-saving reverse reconstruction, for equations that restore the strips
 // AFTER the time-reversed step and inject the forward source after that
-// (acoustic2d/3d, acoustic_lsrtm2d/3d, elastic_tti_2nd2d).  The reversed step
+// (acoustic2d/3d, acoustic_born2d/3d, elastic_tti_2nd2d).  The reversed step
 // leaves w^{it-1} - s^{it} in u (the source term is the one thing it cannot
 // reverse); the restore then overwrites the strips with the saved TRUE
 // w^{it-1}, which already carries s^{it}.  A source cell inside a strip would

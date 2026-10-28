@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import torch
 
-from sweep.equations import AcousticTTI, AcousticTTILSRTM, AcousticVTI
+from sweep.equations import AcousticTTI, AcousticTTIBorn, AcousticVTI
 from sweep.equations.qP_vti import qp_stability_ratio
 from sweep.propagator.options import EagerOptions, Full
 from sweep.propagator.torch import PropTorch
@@ -65,7 +65,7 @@ def test_no_warning_below_the_limit(cls):
 
 
 def test_born_pair_checks_too():
-    eq = AcousticTTILSRTM(spatial_order=4)
+    eq = AcousticTTIBorn(spatial_order=4)
     models = [torch.full((8, 8), v) for v in (3000.0, 0.2, 0.1, 0.5, 0.0)]
     with pytest.warns(UserWarning, match="stability limit"):
         eq.check_stability(models, 3e-3, (10.0, 10.0))

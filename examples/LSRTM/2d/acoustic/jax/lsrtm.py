@@ -30,7 +30,7 @@ import optax
 import tqdm
 
 import configure_marmousi as shared_config
-from sweep.equations import Acoustic, AcousticLSRTM
+from sweep.equations import Acoustic, AcousticBorn
 from sweep.propagator.jax import PropJax
 from sweep.signal import ricker
 
@@ -39,7 +39,7 @@ def build_config():
     cfg = shared_config.get_config("fwi_2d_acoustic_torch_common")
     cfg.update(
         {
-            "output_dir": "acoustic_lsrtm_jax",
+            "output_dir": "acoustic_born_jax",
             "fm": 10.0,
             "lr_ref": 0.01,
         }
@@ -83,7 +83,7 @@ def build_acoustic_solver(shape, cfg):
 
 def build_lsrtm_solver(shape, cfg):
     return PropJax(
-        AcousticLSRTM(spatial_order=cfg["spatial_order"], backend="jax"),
+        AcousticBorn(spatial_order=cfg["spatial_order"], backend="jax"),
         shape=shape,
         dev=None,
         dh=cfg["dh"],

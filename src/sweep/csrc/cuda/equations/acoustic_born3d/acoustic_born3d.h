@@ -3,7 +3,7 @@
 #include "../../../core/outputs.h"
 #include "../../../core/runner.h"
 
-namespace acoustic_lsrtm3d {
+namespace acoustic_born3d {
     
 ForwardOutputCore forward_core(const ForwardInputCore& in);
 
@@ -15,4 +15,4 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in);
 
 BackwardOutputCore backward_recursive_ckpt_core(const BackwardInputCore& in);
 
-} // namespace acoustic_lsrtm3d
+} // namespace acoustic_born3d

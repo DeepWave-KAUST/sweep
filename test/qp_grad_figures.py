@@ -34,7 +34,7 @@ sys.path.insert(0, str(REPO / "test"))
 
 import qp_aniso_consistency as Q  # noqa: E402
 import qp_born_consistency as B  # noqa: E402
-from sweep.equations import AcousticTTI, AcousticTTILSRTM, AcousticVTI, AcousticVTILSRTM  # noqa: E402
+from sweep.equations import AcousticTTI, AcousticTTIBorn, AcousticVTI, AcousticVTIBorn  # noqa: E402
 from sweep.propagator.options import BoundarySaving, EagerOptions, Full  # noqa: E402
 from sweep.propagator.torch import PropTorch  # noqa: E402
 
@@ -148,7 +148,7 @@ def main():
     tag = f"so{args.so}_{args.config}"
     saved = {}
     for eq, cls, fn in (("vti", AcousticVTI, fwi_grads), ("tti", AcousticTTI, fwi_grads),
-                        ("born-vti", AcousticVTILSRTM, born_grads), ("born-tti", AcousticTTILSRTM, born_grads)):
+                        ("born-vti", AcousticVTIBorn, born_grads), ("born-tti", AcousticTTIBorn, born_grads)):
         for sg in ("adjoint", "frozen"):
             names, g, src = fn(cls, args.so, sg, cfg, args.aniso)
             title = f"{eq.upper()} {sg}, so {args.so}, {cfg['shape'][0]}x{cfg['shape'][1]}, {cfg['nt']} steps"

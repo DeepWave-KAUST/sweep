@@ -65,7 +65,7 @@ def _build(cls, shape, nt, free_surface):
 
 CASES = [
     # equations that borrow another family's kernels -- the ones at risk
-    ("DASMu", 2), ("DASMu3D", 3), ("AcousticLSRTM", 2), ("AcousticVRZ3D", 3),
+    ("DASMu", 2), ("DASMu3D", 3), ("AcousticBorn", 2), ("AcousticVRZ3D", 3),
     # controls: own drivers, own slab installation
     ("Acoustic", 2), ("Acoustic3D", 3), ("Elastic", 2), ("Elastic3D", 3),
 ]

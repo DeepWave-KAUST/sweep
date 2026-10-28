@@ -300,7 +300,7 @@ class SteppedBindingRunner:
 
         One tensor for the single-field acoustic / VRZ families (identical to
         :meth:`at`); one per field for a multi-field equation such as
-        AcousticLSRTM3D, whose background and scattered fields both carry a
+        AcousticBorn3D, whose background and scattered fields both carry a
         halo the next step's stencil reads across the cut.
         """
         assert buf == "fwd", f"forward runner cannot resolve {buf!r}"
@@ -580,7 +580,7 @@ class SteppedBackwardRunner:
         The block starts are the ones this runner rotates (``adj_u_blocks`` /
         ``recon_u_blocks``), so the resolution can never disagree with the
         rotation.  One tensor per list for the single-field families; for
-        AcousticLSRTM3D both adjoints (lambda_sc, lambda_bg) and both
+        AcousticBorn3D both adjoints (lambda_sc, lambda_bg) and both
         reconstructions (background, scattered).
         """
         if buf == "adj":

@@ -1160,7 +1160,7 @@ def test_forward_runner_matches_the_monolithic_entry_bit_for_bit():
 def test_non_runner_equations_expose_no_factory():
     _core_or_skip()
     import sweep._C as _C
-    assert getattr(_C, "acoustic_lsrtm2d_forward_runner", None) is None
-    assert getattr(_C, "acoustic_lsrtm2d_backward_bs_runner", None) is None
+    assert getattr(_C, "acoustic_born2d_forward_runner", None) is None
+    assert getattr(_C, "acoustic_born2d_backward_bs_runner", None) is None
     assert callable(getattr(_C, "acoustic2d_forward_runner", None))
     assert callable(getattr(_C, "acoustic2d_backward_bs_runner", None))

@@ -1,5 +1,5 @@
-"""AcousticLSRTM (2-D) DD parity vs single domain -- the 2-D twin of
-dd_corner_check_lsrtm3d.py.
+"""AcousticBorn (2-D) DD parity vs single domain -- the 2-D twin of
+dd_corner_check_born3d.py.
 
 LSRTM carries TWO coupled fields (background + scattered) in one wavefield list,
 so domain decomposition rotates and halo-exchanges both: the forward ships both
@@ -14,7 +14,7 @@ reflectivity sheet crosses every cut; every comparison first asserts its signal
 is non-zero, and the gradients must be alive ON the cut columns, where a halo or
 reconstruction bug shows first.
 
-Launch: torchrun --standalone --nproc-per-node=N test/dd_corner_check_lsrtm2d.py --px N
+Launch: torchrun --standalone --nproc-per-node=N test/dd_corner_check_born2d.py --px N
         (--px 1 runs the full DD machinery on one card)
 """
 from __future__ import annotations
@@ -24,7 +24,7 @@ import numpy as np, torch, torch.distributed as dist
 
 REPO_ROOT = Path(__file__).resolve().parents[1]; SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path: sys.path.insert(0, str(SRC_ROOT))
-from sweep.equations import AcousticLSRTM                    # noqa: E402
+from sweep.equations import AcousticBorn                    # noqa: E402
 from sweep.parallel import MeshTopology, pad_to_mesh         # noqa: E402
 from sweep.parallel.dd_propagator import ModelParallel       # noqa: E402
 from sweep.propagator import BoundarySaving, PropTorch        # noqa: E402
@@ -66,7 +66,7 @@ def main():
     wav = torch.as_tensor(((1 - 2 * a) * np.exp(-a)).astype(np.float32), device=dev)
 
     def build():
-        eq = AcousticLSRTM(spatial_order=args.so, device=dev, backend="torch")
+        eq = AcousticBorn(spatial_order=args.so, device=dev, backend="torch")
         return PropTorch(eq, backend="torch", impl="c", shape=padded_shape, dh=DH, dt=DT, nt=nt,
                          abcn=args.abcn, source_type=["h1"], receiver_type=["sh1"], dev=dev,
                          free_surface=False, pml_type="cpmlr", memory=BoundarySaving())
@@ -104,7 +104,7 @@ def main():
     mp_rel = float((mp_dd.grad - mp_ref.grad).norm() / (mp_ref.grad.norm() + 1e-30))
     ok = shape_ok and signal and cut_alive and all(bits)
     if rank == 0:
-        print(f"LSRTM2D px{args.px} nt{nt} src={args.src}(x{sx}) vp_grad={int(vpg)} padded={padded_shape}: "
+        print(f"BORN2D px{args.px} nt{nt} src={args.src}(x{sx}) vp_grad={int(vpg)} padded={padded_shape}: "
               f"signal={signal} shape_ok={shape_ok} cut_alive={cut_alive}(x={cuts}) | "
               f"vp.grad rel={vp_rel:.2e} mp.grad rel={mp_rel:.2e} "
               f"[bit rec={bits[0]} vp={bits[1]} mp={bits[2]}] -> {'PASS' if ok else 'FAIL'}", flush=True)

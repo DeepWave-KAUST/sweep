@@ -25,7 +25,7 @@ c-vs-eager comparison -- would hide it.
 
 Measured on the unfixed core (21b68328, fp32 gpu storage):
 
-* Acoustic / Acoustic3D / AcousticLSRTM / AcousticLSRTM3D: in-strip sources
+* Acoustic / Acoustic3D / AcousticBorn / AcousticBorn3D: in-strip sources
   3.7e-4..2.5e-2 (illumination 1.3e-2..1.4e-2); out-of-strip controls
   1e-8..3.2e-6 (the top of that range is order 8 + free surface with the
   source 5-7 cells from the left edge; <= 9e-7 elsewhere). ``tol = 1e-5``.
@@ -35,7 +35,7 @@ Measured on the unfixed core (21b68328, fp32 gpu storage):
   whether or not the source is near it, so ``1e-5`` is not attainable there and
   it gets ``tol = 1e-3``: 8x above that floor, 33x below the smallest red.
 
-Illumination: ``AcousticLSRTM``/``AcousticLSRTM3D``/``ElasticTTI2nd`` return an
+Illumination: ``AcousticBorn``/``AcousticBorn3D``/``ElasticTTI2nd`` return an
 all-zero ``source_illumination`` from the gradient backward under both
 strategies (it is an RTM-mode output there), so for them only the gradients are
 compared -- but a non-zero illumination from either strategy is compared too,
@@ -53,8 +53,8 @@ from conftest import requires_binding, ricker
 from sweep.equations import (
     Acoustic,
     Acoustic3D,
-    AcousticLSRTM,
-    AcousticLSRTM3D,
+    AcousticBorn,
+    AcousticBorn3D,
     ElasticTTI2nd,
 )
 from sweep.propagator.options import BoundarySaving, Full
@@ -67,7 +67,7 @@ SHAPE2D, NT2D = (48, 64), 350          # (nz, nx)
 SHAPE3D, NT3D = (24, 20, 28), 300      # (nz, ny, nx)
 
 BINDINGS = ("acoustic2d_backward_bs", "acoustic3d_backward_bs",
-            "acoustic_lsrtm2d_backward_bs", "acoustic_lsrtm3d_backward_bs",
+            "acoustic_born2d_backward_bs", "acoustic_born3d_backward_bs",
             "elastic_tti_2nd2d_backward_bs")
 
 
@@ -87,8 +87,8 @@ class Eq:
 EQS = (
     Eq("acoustic2d", Acoustic, 2, ("h1",), ("h1",), 0, True, (4, 8), 1e-5),
     Eq("acoustic3d", Acoustic3D, 3, ("h1",), ("h1",), 0, True, (4,), 1e-5),
-    Eq("lsrtm2d", AcousticLSRTM, 2, ("h1",), ("sh1",), 0, False, (4, 8), 1e-5),
-    Eq("lsrtm3d", AcousticLSRTM3D, 3, ("h1",), ("sh1",), 0, False, (4,), 1e-5),
+    Eq("born2d", AcousticBorn, 2, ("h1",), ("sh1",), 0, False, (4, 8), 1e-5),
+    Eq("born3d", AcousticBorn3D, 3, ("h1",), ("sh1",), 0, False, (4,), 1e-5),
     # restore_backward_2d_field(..., offset=-M): strip = physical row/col 0 (and
     # nz-1 / nx-1) plus M pad cells outside the box. tol: see module docstring.
     Eq("tti2nd2d", ElasticTTI2nd, 2, ("uz",), ("ux", "uz"), -1, False, (4, 8), 1e-3),
@@ -178,7 +178,7 @@ def _models(eq, shape):
         box &= keep.reshape([-1 if i == ax else 1 for i in range(len(shape))])
     box = box.astype(np.float32)
 
-    if eq.key.startswith("lsrtm"):
+    if eq.key.startswith("born"):
         # Non-zero initial reflectivity, so the Born forward is exercised.
         return [vp, 0.08 * box], [vp, 0.04 * box], [False, True]
     if eq.key.startswith("tti2nd"):
@@ -324,7 +324,7 @@ STORAGE_CASES = (
     ("acoustic2d-o4-fs-strip-top-z1", "acoustic2d", True, [(1, SHAPE2D[1] // 2)]),
     ("acoustic3d-o4-nofs-strip-front-y1", "acoustic3d", False,
      [(SHAPE3D[0] // 2, 1, SHAPE3D[2] // 2)]),
-    ("lsrtm2d-o4-fs-strip-top-z1", "lsrtm2d", True, [(1, SHAPE2D[1] // 2)]),
+    ("born2d-o4-fs-strip-top-z1", "born2d", True, [(1, SHAPE2D[1] // 2)]),
 )
 
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """eager vs impl='c' consistency of the qP Born (LSRTM) pair.
 
-``AcousticVTILSRTM`` / ``AcousticTTILSRTM`` run on ``qp_vti_lsrtm2d`` /
-``qp_tti_lsrtm2d`` in full and boundary-saving mode.  The background models
+``AcousticVTIBorn`` / ``AcousticTTIBorn`` run on ``qp_vti_born2d`` /
+``qp_tti_born2d`` in full and boundary-saving mode.  The background models
 are fixed (no grad, as in LSRTM), the reflectivity ``mp`` requires grad; the
 misfit is 0.5 |d(mp) - d_obs|^2 with d_obs the eager Born data of a reflector.
 Evaluated at mp = 0 (the RTM gradient) and at mp = 0.5 mp_true (a non-zero
@@ -29,11 +29,11 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "test"))
 
 import qp_aniso_consistency as Q  # noqa: E402
-from sweep.equations import AcousticTTILSRTM, AcousticVTILSRTM  # noqa: E402
+from sweep.equations import AcousticTTIBorn, AcousticVTIBorn  # noqa: E402
 from sweep.propagator.options import EagerOptions, Full  # noqa: E402
 from sweep.propagator.torch import PropTorch  # noqa: E402
 
-EQUATIONS = {"vti": AcousticVTILSRTM, "tti": AcousticTTILSRTM}
+EQUATIONS = {"vti": AcousticVTIBorn, "tti": AcousticTTIBorn}
 MODES = dict(Q.MODES)   # eager-cpu: eager's own device spread, the floor of the comparison
 
 

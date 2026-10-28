@@ -1,4 +1,4 @@
-"""impl='c' (qp_vti2d / qp_tti2d, qp_vti_lsrtm2d / qp_tti_lsrtm2d) against eager.
+"""impl='c' (qp_vti2d / qp_tti2d, qp_vti_born2d / qp_tti_born2d) against eager.
 
 The pure-qP operators take S_n from the wavefield's gradient direction, so the
 discrete step is nonlinear in p; ``s_gradient`` picks the backward:
@@ -23,7 +23,7 @@ import torch
 torch.backends.cudnn.allow_tf32 = False
 torch.backends.cuda.matmul.allow_tf32 = False
 
-from sweep.equations import AcousticTTI, AcousticTTILSRTM, AcousticVTI, AcousticVTILSRTM  # noqa: E402
+from sweep.equations import AcousticTTI, AcousticTTIBorn, AcousticVTI, AcousticVTIBorn  # noqa: E402
 from sweep.propagator.options import BoundarySaving, Ckpt, EagerOptions, Full  # noqa: E402
 from sweep.propagator.torch import PropTorch  # noqa: E402
 
@@ -136,7 +136,7 @@ def test_boundary_saving_reproduces_full(cls, s_gradient):
         assert _rel(gb[k], gf[k]) < 1e-3, (k, _rel(gb[k], gf[k]))
 
 
-@pytest.mark.parametrize("cls", [AcousticVTI, AcousticTTI, AcousticVTILSRTM])
+@pytest.mark.parametrize("cls", [AcousticVTI, AcousticTTI, AcousticVTIBorn])
 @pytest.mark.parametrize("s_gradient", ["adjoint", "frozen"])
 def test_int8_boundary_storage_is_refused(cls, s_gradient):
     """int8 frames move the qP gradients by 8-15% away from the source."""
@@ -157,7 +157,7 @@ def test_adjoint_mode_matches_eager_to_its_floor(cls):
         assert _rel(gc[k], gg[k]) < max(3 * floor, 1e-4), (k, _rel(gc[k], gg[k]), floor)
 
 
-@pytest.mark.parametrize("cls", [AcousticVTI, AcousticTTILSRTM])
+@pytest.mark.parametrize("cls", [AcousticVTI, AcousticTTIBorn])
 def test_exact_with_boundary_saving_is_refused(cls):
     with pytest.raises(NotImplementedError, match="s_gradient='exact'"):
         names = cls(spatial_order=4).models
@@ -188,7 +188,7 @@ def _born_mp_gradient(cls, impl, memory, s_gradient, dev="cuda"):
     return mp.grad.detach().double().cpu()
 
 
-@pytest.mark.parametrize("cls", [AcousticVTILSRTM, AcousticTTILSRTM])
+@pytest.mark.parametrize("cls", [AcousticVTIBorn, AcousticTTIBorn])
 def test_born_reflectivity_gradient_frozen(cls):
     """'frozen' is linear in the residual: impl='c' matches eager to round-off."""
     ge = _born_mp_gradient(cls, "eager", None, "frozen")
@@ -199,7 +199,7 @@ def test_born_reflectivity_gradient_frozen(cls):
     assert _rel(gb, gf) < 1e-3, _rel(gb, gf)
 
 
-@pytest.mark.parametrize("cls", [AcousticVTILSRTM, AcousticTTILSRTM])
+@pytest.mark.parametrize("cls", [AcousticVTIBorn, AcousticTTIBorn])
 def test_born_reflectivity_gradient_adjoint(cls):
     """'adjoint' is nonlinear in the residual (percent-level fp32 spread for the
     Born pair): compare against eager's own gpu / cpu spread."""
@@ -236,4 +236,4 @@ def test_eager_compiled_matches_uncompiled(cls, s_gradient):
 
 def test_born_refuses_background_gradients():
     with pytest.raises(NotImplementedError, match="reflectivity"):
-        _run(AcousticVTILSRTM, "c", Full(), "adjoint", grads=["vp", "mp"])
+        _run(AcousticVTIBorn, "c", Full(), "adjoint", grads=["vp", "mp"])

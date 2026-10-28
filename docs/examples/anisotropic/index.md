@@ -25,7 +25,7 @@ displacement formulation.
 
     ---
 
-    `AcousticVTILSRTM` / `AcousticTTILSRTM`, the Born pair of the pure-qP
+    `AcousticVTIBorn` / `AcousticTTIBorn`, the Born pair of the pure-qP
     equations, on a tilted anisotropic bed: TTI Born data imaged by RTM and by
     least-squares RTM with the isotropic, VTI and TTI operators. Only TTI puts
     the tilted bed where it is; VTI does worse than ignoring the anisotropy.

@@ -19,8 +19,8 @@
 // ../acoustic2d/kernels.cuh — same header, token-identical weak template
 // definitions in another TU, which is ODR-safe.  Everything defined HERE is
 // visco-private and carries the ``visco_acoustic2d_`` prefix so no mangled
-// name can collide with a different body elsewhere (see the lsrtm2d ODR
-// incident note in ../acoustic_lsrtm2d/kernels.cuh).
+// name can collide with a different body elsewhere (see the born2d ODR
+// incident note in ../acoustic_born2d/kernels.cuh).
 
 // vp-gradient carrier, recomputed from the RAW pressure history.
 //

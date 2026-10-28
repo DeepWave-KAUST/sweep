@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Emulate boundary saving's rebuild of the Born scattered field from the
-full-mode history of impl='c' (AcousticVTILSRTM).
+full-mode history of impl='c' (AcousticVTIBorn).
 
 Full mode keeps, per step, the scattered state of step it + 1 and the
 background update r0 of step it (u_allt, qp_born_forward).  From the last two
@@ -31,7 +31,7 @@ sys.path.insert(0, str(REPO / "test"))
 
 import qp_aniso_consistency as Q  # noqa: E402
 import qp_born_consistency as B  # noqa: E402
-from sweep.equations import AcousticVTILSRTM  # noqa: E402
+from sweep.equations import AcousticVTIBorn  # noqa: E402
 from sweep.propagator.options import Full  # noqa: E402
 from sweep.propagator.torch import PropTorch  # noqa: E402
 
@@ -51,7 +51,7 @@ def wrapper_node(t):
 
 def history(so, cfg, aniso, mp0):
     dev = torch.device("cuda")
-    eq = AcousticVTILSRTM(spatial_order=so, device=dev, backend="torch", s_gradient="frozen")
+    eq = AcousticVTIBorn(spatial_order=so, device=dev, backend="torch", s_gradient="frozen")
     prop = PropTorch(eq, impl="c", memory=Full(), shape=cfg["shape"], abcn=cfg["abcn"], dh=cfg["dh"],
                      dt=cfg["dt"], dev=dev, nt=cfg["nt"], B=1)
     bg = Q.model_arrays(eq.models[:-1], cfg["shape"], aniso)

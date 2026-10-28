@@ -34,7 +34,7 @@ required binding is a `SWEEP_CHECK`; only `illum_out` and the ADCIG cube keep a
 fallback allocation), boundary and checkpoint runtime orchestration, the time loop,
 and output packing.
 Still hand-written: das2d/3d (a third shape — derivative-buffer form),
-elastic_tti_2nd2d, acoustic_lsrtm2d/3d, acoustic_vrz3d, acoustic_vti_1st_2d/3d,
+elastic_tti_2nd2d, acoustic_born2d/3d, acoustic_vrz3d, acoustic_vti_1st_2d/3d,
 visco_acoustic2d.
 
 ### Persistent runners
@@ -644,7 +644,7 @@ log.
 
 | Tool | Coverage | Usage |
 |---|---|---|
-| `gate/bitgate.py` tier **A** (27 configurations, ~2 min) | acoustic2d/3d, elastic2d/3d, vrz2d, lsrtm2d: eager+c × full/bs_gpu/bs_cpu/bs_gpu_int8/ckpt_chunk/ckpt_recursive × interior/free_surface/free_surface_all4 × canonical/physical grids. Run after every commit. | `gate/run_gate.sh A base_A.pt` |
+| `gate/bitgate.py` tier **A** (27 configurations, ~2 min) | acoustic2d/3d, elastic2d/3d, vrz2d, born2d: eager+c × full/bs_gpu/bs_cpu/bs_gpu_int8/ckpt_chunk/ckpt_recursive × interior/free_surface/free_surface_all4 × canonical/physical grids. Run after every commit. | `gate/run_gate.sh A base_A.pt` |
 | tier **C** (36, ~2 min) | One eager-full and one c-bs_gpu run for every equation in `ALL_SOLVERS` (18, shallow but complete) | `gate/run_gate.sh C base_C.pt` |
 | tier **B** (198, ~12 min) | Every equation × 7 c-side memory modes + physical grid + free surface; run when a stage is finished. `gate/noise_floors.json` records the gradient tolerance for the configurations already measured as non-deterministic (DAS, 3-D ckpt, int8); the record and the loss stay strict always. Configurations an equation refuses by construction are recorded as their error text (an error compares equal to an error): recursive checkpointing on elastic_tti_sg2d/sg3d and elastic_tti_2nd2d (`C_HAS_RECURSIVE_CKPT = False`), boundary saving on das3d and visco2d (`supports_boundary_saving_c = False`). | `gate/run_gate.sh B base_B.pt`; for a subset, `$PY gate/bitgate.py --tier B --only elastic --compare gate/base_B.pt` |
 | tier **T** (9) | Topography (hill/stairs, image method); every other tier is flat ground | `gate/run_gate.sh T base_T.pt` |

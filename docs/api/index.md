@@ -48,13 +48,13 @@
       <p>Variable density via vertical impedance perturbation.</p>
       <div class="sweep-api__card-models">models: <span class="sweep-api__chip teal">vp</span> <span class="sweep-api__chip teal">z</span></div>
     </a>
-    <a class="sweep-api__card" href="equations/acoustic_lsrtm/">
-      <div class="sweep-api__card-hd"><code>AcousticLSRTM</code><div class="sweep-api__card-tags"><span>2D</span><span>Born</span></div></div>
+    <a class="sweep-api__card" href="equations/acoustic_born/">
+      <div class="sweep-api__card-hd"><code>AcousticBorn</code><div class="sweep-api__card-tags"><span>2D</span><span>Born</span></div></div>
       <p>LSRTM-aware acoustic; <code>mp</code> reflectivity perturbation field.</p>
       <div class="sweep-api__card-models">models: <span class="sweep-api__chip teal">vp</span> <span class="sweep-api__chip teal">mp</span></div>
     </a>
-    <a class="sweep-api__card" href="equations/acoustic_lsrtm3d/">
-      <div class="sweep-api__card-hd"><code>AcousticLSRTM3D</code><div class="sweep-api__card-tags"><span>3D</span><span>Born</span></div></div>
+    <a class="sweep-api__card" href="equations/acoustic_born3d/">
+      <div class="sweep-api__card-hd"><code>AcousticBorn3D</code><div class="sweep-api__card-tags"><span>3D</span><span>Born</span></div></div>
       <p>3-D extension of LSRTM-aware acoustic.</p>
       <div class="sweep-api__card-models">models: <span class="sweep-api__chip teal">vp</span> <span class="sweep-api__chip teal">mp</span></div>
     </a>

@@ -222,7 +222,7 @@ def rhs_cpml(
     and the next CPML memories ``(psixn, psizn, zetaxn, zetazn)``.
 
     ``step_cpml`` adds it to ``2 u_now - u_pre``; the Born equation
-    (``qP_lsrtm``) also scatters it into the perturbation field.
+    (``qP_born``) also scatters it into the perturbation field.
     ``s_frozen`` takes S's wavefield direction out of the gradient (see
     ``AcousticVTI(s_gradient=...)``); the values are the same either way.
     ``s_override`` replaces S by a given field (the adjoint mode's backward).

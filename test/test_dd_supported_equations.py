@@ -23,12 +23,12 @@ import pytest
 
 from sweep.equations.slot_table import slot_table_of
 from sweep.parallel.dd_propagator import check_dd_admission
-from sweep.parallel.dd_spec import ACOUSTIC_DD, ELASTIC_DD, LSRTM_DD, VRZ_DD, VRZ_DD_TILED
+from sweep.parallel.dd_spec import ACOUSTIC_DD, ELASTIC_DD, BORN_DD, VRZ_DD, VRZ_DD_TILED
 
 DEV = "cpu"
 
 ACCEPTED = ["Acoustic", "Acoustic3D", "AcousticVRZ3D", "Elastic", "Elastic3D",
-            "AcousticLSRTM", "AcousticLSRTM3D"]
+            "AcousticBorn", "AcousticBorn3D"]
 
 
 def _make(name):
@@ -40,7 +40,7 @@ def _spec_of(eq):
     table = slot_table_of(eq)
     layout = eq.cuda_layout
     return (ELASTIC_DD if not table.u_blocks
-            else LSRTM_DD if len(table.u_blocks) > 1
+            else BORN_DD if len(table.u_blocks) > 1
             else ACOUSTIC_DD if not layout.dd_coupling_nvar
             else VRZ_DD_TILED if eq.so in layout.dd_tiled_gradient_orders
             else VRZ_DD)
@@ -129,7 +129,7 @@ def test_phase_need_is_derived_from_the_spec_not_hardcoded():
                    for ph in tuple(getattr(bwd, "prologue", ()) or ()) + tuple(bwd.phases))
 
     assert not needs(ACOUSTIC_DD)
-    assert not needs(LSRTM_DD)
+    assert not needs(BORN_DD)
     assert needs(ELASTIC_DD)
     assert needs(VRZ_DD)
     assert needs(VRZ_DD_TILED)

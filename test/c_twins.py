@@ -8,7 +8,7 @@ What a twin changes against the plain eager equation:
 * ``halo0``: the outer M (halo) cells of every output field are zeroed after
   each step -- the c kernels never update them, eager's zero-padded stencils do.
 * ``product_rule``: the CPML term d(a psi)/dx taken as da/dx * psi + a * dpsi/dx
-  (the product rule of acoustic3d, acoustic_vrz2d/3d and acoustic_lsrtm2d/3d),
+  (the product rule of acoustic3d, acoustic_vrz2d/3d and acoustic_born2d/3d),
   where eager differentiates a * psi as one field (cpml_axis_update) like the
   2-D acoustic kernel.  Both are consistent CPMLs; they differ at O(h^2) inside
   the absorbing layer.  da/dx is the first-difference stencil of the 1-D
@@ -160,8 +160,8 @@ def product_rule_acoustic3d(base):
     return V
 
 
-def product_rule_lsrtm2d(base):
-    """AcousticLSRTM with both fields' CPML in acoustic_lsrtm2d's product-rule
+def product_rule_born2d(base):
+    """AcousticBorn with both fields' CPML in acoustic_born2d's product-rule
     form (acoustic_cpml_update_2d): sc' = ... + dt^2 (v^2 W(sc) + mp v^2 W(bg))."""
 
     class V(base):
@@ -191,8 +191,8 @@ def product_rule_lsrtm2d(base):
     return V
 
 
-def product_rule_lsrtm3d(base):
-    """AcousticLSRTM3D with both fields' CPML in acoustic_lsrtm3d's product-rule
+def product_rule_born3d(base):
+    """AcousticBorn3D with both fields' CPML in acoustic_born3d's product-rule
     form (acoustic_cpml_update_3d): sc' = ... + dt^2 (v^2 W(sc) + mp v^2 W(bg))."""
 
     class V(base):

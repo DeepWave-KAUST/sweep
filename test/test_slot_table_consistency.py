@@ -105,8 +105,8 @@ DECLARED = [
     ("AcousticVRZ3D", "ACOUSTIC_VRZ3D"),
     ("Elastic", "ELASTIC2D"),
     ("Elastic3D", "ELASTIC3D"),
-    ("AcousticLSRTM3D", "ACOUSTIC_LSRTM3D"),
-    ("AcousticLSRTM", "ACOUSTIC_LSRTM2D"),
+    ("AcousticBorn3D", "ACOUSTIC_BORN3D"),
+    ("AcousticBorn", "ACOUSTIC_BORN2D"),
 ]
 
 
@@ -168,8 +168,8 @@ def test_dd_wavefield_counts():
         "Elastic3D": (36, 36, 12, 3),
         # two coupled acoustic fields (bg + scattered), psi double buffer; the
         # exact CPML adjoint adds a zeta shadow per axis and field; recon 3 + 3
-        "AcousticLSRTM3D": (24, 30, 6, 0),
-        "AcousticLSRTM": (18, 22, 6, 0),
+        "AcousticBorn3D": (24, 30, 6, 0),
+        "AcousticBorn": (18, 22, 6, 0),
     }
     for name, want in expected.items():
         t = getattr(E, name)(device="cpu", backend="torch").cuda_layout.slots
@@ -332,9 +332,9 @@ def test_the_local_capture_copies_that_remain_are_deliberate():
         f"unexpected {sorted(local - set(keep))}, gone {sorted(set(keep) - local)}")
 
 
-def test_lsrtm2d_rotates_and_ships_both_fields():
-    """2-D twin of the LSRTM3D table: background 0..8, scattered 9..17, 3+3 recon."""
-    t = ST.ACOUSTIC_LSRTM2D
+def test_born2d_rotates_and_ships_both_fields():
+    """2-D twin of the BORN3D table: background 0..8, scattered 9..17, 3+3 recon."""
+    t = ST.ACOUSTIC_BORN2D
     assert t.u_blocks == (0, 9)
     assert t.recon_u_blocks == (0, 3)
     bg = ((3, 7), (4, 8))
@@ -344,8 +344,8 @@ def test_lsrtm2d_rotates_and_ships_both_fields():
     assert t.pairs(adjoint=True) == t.pairs(adjoint=False) + ((5, 18), (6, 19), (14, 20), (15, 21))
 
 
-def test_lsrtm3d_rotates_and_ships_both_fields():
-    """AcousticLSRTM3D is the one multi-field rotating table.
+def test_born3d_rotates_and_ships_both_fields():
+    """AcousticBorn3D is the one multi-field rotating table.
 
     Every count the DD driver derives must cover BOTH fields: two rotating
     blocks in the forward/adjoint list (background 0..11, scattered 12..23) and
@@ -353,7 +353,7 @@ def test_lsrtm3d_rotates_and_ships_both_fields():
     are resolved by name (``recon_u_blocks``) instead of reusing ``u_blocks``.
     The scattered field's psi pairs are the background's shifted by 12.
     """
-    t = ST.ACOUSTIC_LSRTM3D
+    t = ST.ACOUSTIC_BORN3D
     assert t.u_blocks == (0, 12)
     assert t.recon_u_blocks == (0, 3)
     bg = ((3, 9), (4, 10), (7, 11))
@@ -365,10 +365,10 @@ def test_lsrtm3d_rotates_and_ships_both_fields():
 
 
 @pytest.mark.parametrize("eq_name, rwi_table, mp_table", [
-    ("AcousticLSRTM", "ACOUSTIC_LSRTM2D", "ACOUSTIC_LSRTM2D_MP"),
-    ("AcousticLSRTM3D", "ACOUSTIC_LSRTM3D", "ACOUSTIC_LSRTM3D_MP"),
+    ("AcousticBorn", "ACOUSTIC_BORN2D", "ACOUSTIC_BORN2D_MP"),
+    ("AcousticBorn3D", "ACOUSTIC_BORN3D", "ACOUSTIC_BORN3D_MP"),
 ])
-def test_lsrtm_layout_follows_vp_grad(eq_name, rwi_table, mp_table):
+def test_born_layout_follows_vp_grad(eq_name, rwi_table, mp_table):
     """Without vp's RWI gradient the layout reconstructs the background alone:
     the per-call table keeps the forward/adjoint geometry and drops the
     scattered reconstruction block, so ModelParallel rotates 3 grids, not 6."""

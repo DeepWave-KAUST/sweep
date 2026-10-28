@@ -38,12 +38,25 @@ angle-domain common-image gathers.
     ---
 
     The RWI velocity gradient splits into a transmission half and a reflection
-    half from two equations: `Acoustic` gives term I, `AcousticLSRTM` gives
+    half from two equations: `Acoustic` gives term I, `AcousticBorn` gives
     II+III+IV. Shows the paper's eq. 15 identity, how to weight the image-point
     term III with the paper's beta, and the same anatomy in 3-D, where the
     wavepath becomes a pair of tubes and the image point a Fresnel-zone patch.
 
     [:material-notebook-outline: Open notebook](../../notebooks/32_rwi_acoustic_vs_lsrtm_gradient.ipynb)
+
+-   ![LSRTM elastic](../../figures/gallery/45_lsrtm_elastic.png){ loading=lazy }
+
+    **LSRTM · elastic (Born, variable density)**
+
+    ---
+
+    `ElasticBorn`, the Born equation of `Elastic` (Li et al. 2019): Born data
+    checked against a finite difference of `Elastic` data, elastic RTM and
+    least-squares RTM of δvp, δvs and δρ on `impl='c'`, and the background
+    (elastic RWI) gradient on `impl='eager'`.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/45_lsrtm_elastic.ipynb)
 
 -   ![ADCIG](../../figures/gallery/16_adcig.png){ loading=lazy }
 

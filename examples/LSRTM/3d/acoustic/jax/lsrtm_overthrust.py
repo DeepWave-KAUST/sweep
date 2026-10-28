@@ -31,7 +31,7 @@ import tqdm
 
 import configure_overthrust as shared_config
 from fwi3d_overthrust import build_geometry, build_wavelet, load_models, save_wavelet_figure
-from sweep.equations import Acoustic3D, AcousticLSRTM3D
+from sweep.equations import Acoustic3D, AcousticBorn3D
 from sweep.propagator.jax import PropJax
 from sweep.signal import ricker
 
@@ -60,7 +60,7 @@ def build_acoustic_solver(shape, cfg):
 
 
 def build_lsrtm_solver(shape, cfg):
-    equation = AcousticLSRTM3D(
+    equation = AcousticBorn3D(
         spatial_order=cfg["spatial_order"],
         backend="jax",
     )

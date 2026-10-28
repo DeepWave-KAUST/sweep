@@ -32,13 +32,12 @@ Finite difference (sweep.equations, run with PropTorch):
   Acoustic               ['vp']                                                              yes            yes
   Acoustic1st            ['vp', 'rho']                                                       no             no
   Acoustic3D             ['vp']                                                              yes            yes
+  AcousticBorn           ['vp', 'mp']                                                        yes            yes
+  AcousticBorn3D         ['vp', 'mp']                                                        yes            yes
   AcousticCurvilinear    ['vp']                                                              no             no
-  AcousticLSRTM          ['vp', 'mp']                                                        yes            yes
-  AcousticLSRTM3D        ['vp', 'mp']                                                        yes            yes
   AcousticTTI            ['vp', 'epsilon', 'delta', 'theta']                                 yes            yes
   AcousticTTIAlkhalifah  ['vv', 'v', 'eta']                                                  no             no
   AcousticTTIBorn        ['vp', 'epsilon', 'delta', 'theta', 'mp']                           yes            yes
-  AcousticTTILSRTM       ['vp', 'epsilon', 'delta', 'theta', 'mp']                           yes            yes
   AcousticTTILiang       ['vp', 'epsilon', 'delta', 'theta']                                 yes            yes
   AcousticTariq          ['vv', 'v', 'eta']                                                  no             no
   AcousticVRR            ['vp', 'rx', 'rz']                                                  no             no
@@ -53,7 +52,6 @@ Finite difference (sweep.equations, run with PropTorch):
   AcousticVTIDefault3D   ['vp', 'epsilon', 'delta', 'rho']                                   yes            yes
   AcousticVTIDuveneck    ['vp', 'epsilon', 'delta', 'rho']                                   yes            yes
   AcousticVTIDuveneck3D  ['vp', 'epsilon', 'delta', 'rho']                                   yes            yes
-  AcousticVTILSRTM       ['vp', 'epsilon', 'delta', 'mp']                                    yes            yes
   AcousticVTILiang       ['vp', 'epsilon', 'delta']                                          yes            yes
   Biot                   ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']                     no             no
   DASElastic             ['vp', 'vs', 'rho']                                                 yes            yes
@@ -64,6 +62,7 @@ Finite difference (sweep.equations, run with PropTorch):
   DASZhao3D              ['vp', 'vs', 'rho']                                                 yes            yes
   Elastic                ['vp', 'vs', 'rho']                                                 yes            yes
   Elastic3D              ['vp', 'vs', 'rho']                                                 yes            yes
+  ElasticBorn            ['vp', 'vs', 'rho', 'dvp', 'dvs', 'drho']                           yes            yes
   ElasticCurvilinear     ['vp', 'vs', 'rho']                                                 no             no
   ElasticTTI             ['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']  no             no
   ElasticTTI2nd          ['vh', 'vs', 'rho', 'epsilon', 'eta', 'theta']                      yes            yes
