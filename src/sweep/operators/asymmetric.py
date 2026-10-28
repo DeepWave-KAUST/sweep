@@ -263,6 +263,12 @@ class CollocatedAsymmetricOperator:
         self.n_top_adj = 2 * L
         self.n_win_adj = 3 * L
         self.top_block_adj = self._divergence_block()
+        # The blocks' non-zero entries per output row, as Python floats: the
+        # compiled step writes them out as slices (see _splice_top).
+        self._block_taps = {
+            key: tuple(tuple((int(w), float(block[r, w])) for w in np.flatnonzero(block[r]))
+                       for r in range(block.shape[0]))
+            for key, block in (("top", self.top_block), ("top_adj", self.top_block_adj))}
 
         self._torch_cache = {}
 
@@ -367,10 +373,20 @@ class CollocatedAsymmetricOperator:
 
     # -- torch application -------------------------------------------------
 
-    def _torch(self, tensor_like):
+    def kernels(self, tensor_like):
+        """The stencils as conv kernels on ``tensor_like``'s device and dtype:
+        ``kz``/``kx`` (gradient), ``kz_adj``/``kx_adj`` (divergence), and the
+        free-surface blocks ``top``/``top_adj``.  Built once per device and
+        dtype, with their taps registered for the compiled step's slice form
+        (:func:`sweep.operators.torch.register_stencil`)."""
         import torch
+        from sweep.operators.torch import register_stencil
 
-        key = (str(tensor_like.device), tensor_like.dtype)
+        # One string key: under torch.compile a tensor fetched from a dict
+        # keyed by a tuple holding a ``torch.dtype`` reaches Dynamo without a
+        # source, its registered taps cannot be read, and the graph breaks at
+        # every derivative (torch 2.9).
+        key = f"{tensor_like.device}|{tensor_like.dtype}"
         cached = self._torch_cache.get(key)
         if cached is not None:
             return cached
@@ -382,33 +398,54 @@ class CollocatedAsymmetricOperator:
 
         k = 2 * self.L + 1
         cached = {
-            "kz": _t(self.coef, (1, 1, k, 1)),
-            "kz_adj": _t(self.coef_adj, (1, 1, k, 1)),
-            "kx": _t(self.coef, (1, 1, 1, k)),
-            "kx_adj": _t(self.coef_adj, (1, 1, 1, k)),
+            "kz": register_stencil(_t(self.coef, (1, 1, k, 1))),
+            "kz_adj": register_stencil(_t(self.coef_adj, (1, 1, k, 1))),
+            "kx": register_stencil(_t(self.coef, (1, 1, 1, k))),
+            "kx_adj": register_stencil(_t(self.coef_adj, (1, 1, 1, k))),
             "top": _t(self.top_block, self.top_block.shape),
             "top_adj": _t(self.top_block_adj, self.top_block_adj.shape),
         }
         self._torch_cache[key] = cached
         return cached
 
+    _torch = kernels
+
     @staticmethod
     def _conv(u, kernel):
-        import torch.nn.functional as F
+        # ``apply_kernels`` is the zero-padded conv, or its slice form inside
+        # a compiled step.
+        from sweep.operators.torch import apply_kernels
 
-        pad = (kernel.shape[-2] // 2, kernel.shape[-1] // 2)
-        return F.conv2d(u, kernel, padding=pad)
+        return apply_kernels(u, kernel)
 
-    def _splice_top(self, out, u, block, surf, n_top, n_win):
-        """Replace ``out[surf : surf+n_top]`` with ``block @ u[surf : surf+n_win]``."""
+    def _splice_top(self, out, u, block, surf, n_top, n_win, taps=None,
+                    kernel=None):
+        """Replace ``out[surf : surf+n_top]`` with ``block @ u[surf : surf+n_win]``.
+
+        Inside a compiled step (``kernel``, the conv the interior rows came
+        from, has its taps registered) the block -- ``taps``, its non-zero
+        entries per row -- is written out row by row as shifted slices of
+        ``u``, which fuse with the rest of the step; the einsum is a matmul
+        Inductor cannot fuse."""
         import torch
+        from sweep.operators.torch import _compiled_taps
 
         win = u[..., surf:surf + n_win, :]
         if win.shape[-2] != n_win:
             raise ValueError(
                 f"grid too shallow for the free-surface stencil block: need "
                 f"{n_win} rows below the surface, got {win.shape[-2]}")
-        top = torch.einsum("rw,bcwx->bcrx", block, win)
+        if taps is not None and _compiled_taps(kernel) is not None:
+            rows = []
+            for row_taps in taps[:n_top]:
+                row = None
+                for w, c in row_taps:
+                    term = win[..., w:w + 1, :] * c
+                    row = term if row is None else row + term
+                rows.append(row)
+            top = torch.cat(rows, dim=-2)
+        else:
+            top = torch.einsum("rw,bcwx->bcrx", block, win)
         return torch.cat([out[..., :surf, :], top,
                           out[..., surf + n_top:, :]], dim=-2)
 
@@ -455,7 +492,8 @@ class CollocatedAsymmetricOperator:
             return self._splice_top(
                 self._conv(u, kernel), u, self._torch(u)[block_key], int(surf),
                 n_top if n_top is not None else self.n_top,
-                n_win if n_win is not None else self.n_win)
+                n_win if n_win is not None else self.n_win,
+                taps=self._block_taps[block_key], kernel=kernel)
         if mode == "mirror_odd":
             return self._conv(self._odd_extend(u, int(surf)), kernel)
         if mode == "mirror_even":

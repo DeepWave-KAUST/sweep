@@ -60,6 +60,7 @@ from __future__ import annotations
 import numpy as np
 
 from .base import FirstOrderEquation
+from ._cpml import Strips, cpml_update
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
 from ._registry import register_equation
@@ -85,6 +86,22 @@ def _tangent_image(vx, vz, geom):
     ghost_z = b * src_x - a * src_z
     return (torch.cat([ghost_x, vx[..., surf:, :]], dim=-2),
             torch.cat([ghost_z, vz[..., surf:, :]], dim=-2))
+
+
+def _z_src(field, kernel, scale, m, clear):
+    """``cpml_update``'s ``src`` for an eta-derivative of ``field``.
+
+    The compiled step retakes the derivative on the strips from a window of
+    ``field``, which is exact only where the free-surface closure leaves the
+    plain stencil alone: rows ``>= clear`` (``None``: no free surface, so
+    everywhere).  A strip that reaches above them takes its cells from the
+    full-grid derivative instead.
+    """
+    if clear is not None and isinstance(m, Strips):
+        lo, hi = m.widths
+        if lo or field.shape[-2] - hi < clear:
+            return None
+    return (field, kernel, scale)
 
 
 def step_curv_asym(
@@ -121,6 +138,10 @@ def step_curv_asym(
     alpha, beta = geom["alpha"], geom["beta"]
     surf = geom["surface_row"] if free_surface else None
     below = geom["below"]
+    k = op.kernels(sxx)
+    # Rows from which the eta-stencils are the plain interior ones: the
+    # closures reach 2L rows below the surface at most.
+    clear = None if surf is None else surf + 2 * op.L
 
     # ---------------------------------------------------------------
     # Momentum:  rho dv_i/dt = (1/J) d_zeta_m ( J T_mj sigma_ij )
@@ -144,14 +165,12 @@ def step_curv_asym(
     d_f1z = op.d_x_adj(f1z) / d_xi
     d_f3z = op.d_z_adj(f3z, surf, flux_mode) / d_eta
 
-    m_txxx = ax * m_txxx + bx * d_f1x
-    d_f1x = d_f1x + m_txxx
-    m_txxz = az * m_txxz + bz * d_f3x
-    d_f3x = d_f3x + m_txxz
-    m_tzzx = ax * m_tzzx + bx * d_f1z
-    d_f1z = d_f1z + m_tzzx
-    m_tzzz = az * m_tzzz + bz * d_f3z
-    d_f3z = d_f3z + m_tzzz
+    d_f1x, m_txxx = cpml_update(d_f1x, m_txxx, ax, bx, (f1x, k["kx_adj"], d_xi))
+    d_f3x, m_txxz = cpml_update(d_f3x, m_txxz, az, bz,
+                                _z_src(f3x, k["kz_adj"], d_eta, m_txxz, clear))
+    d_f1z, m_tzzx = cpml_update(d_f1z, m_tzzx, ax, bx, (f1z, k["kx_adj"], d_xi))
+    d_f3z, m_tzzz = cpml_update(d_f3z, m_tzzz, az, bz,
+                                _z_src(f3z, k["kz_adj"], d_eta, m_tzzz, clear))
 
     acc = dt / (rho * jac)
     if free_surface and geom.get("mass_weight") is not None:
@@ -193,17 +212,16 @@ def step_curv_asym(
         # (``shifted``) stencils are used even when the flux uses its
         # exact odd image.
         grad_mode = "zero" if closure == "zero" else "shifted"
+        vx_g, vz_g = vx, vz
         vx_eta = op.d_z(vx, surf, grad_mode) / d_eta
         vz_eta = op.d_z(vz, surf, grad_mode) / d_eta
 
-    m_vxx = ax * m_vxx + bx * vx_xi
-    vx_xi = vx_xi + m_vxx
-    m_vxz = az * m_vxz + bz * vx_eta
-    vx_eta = vx_eta + m_vxz
-    m_vzx = ax * m_vzx + bx * vz_xi
-    vz_xi = vz_xi + m_vzx
-    m_vzz = az * m_vzz + bz * vz_eta
-    vz_eta = vz_eta + m_vzz
+    vx_xi, m_vxx = cpml_update(vx_xi, m_vxx, ax, bx, (vx, k["kx"], d_xi))
+    vx_eta, m_vxz = cpml_update(vx_eta, m_vxz, az, bz,
+                                _z_src(vx_g, k["kz"], d_eta, m_vxz, clear))
+    vz_xi, m_vzx = cpml_update(vz_xi, m_vzx, ax, bx, (vz, k["kx"], d_xi))
+    vz_eta, m_vzz = cpml_update(vz_eta, m_vzz, az, bz,
+                                _z_src(vz_g, k["kz"], d_eta, m_vzz, clear))
 
     dvx_dx = vx_xi + alpha * vx_eta
     dvx_dz = beta * vx_eta
@@ -224,8 +242,7 @@ def step_curv_asym(
         inv_len2 = geom["inv_len2"]      # 1 / (1 + h'^2)
         v_t = (vx + hp * vz) * inv_len
         dvt_xi = op.d_x(v_t) / d_xi
-        m_txzx = ax * m_txzx + bx * dvt_xi
-        dvt_xi = dvt_xi + m_txzx
+        dvt_xi, m_txzx = cpml_update(dvt_xi, m_txzx, ax, bx, (v_t, k["kx"], d_xi))
         # d(v.t)/ds = eps'_11 + v . dt/ds  ->  subtract the curvature term
         eps_tt = inv_len * dvt_xi - (vx * geom["tau_x"] + vz * geom["tau_z"])
         m_surf = 4.0 * lame_mu * (lame_lambda + lame_mu) / lame_lambda_2mu
@@ -367,15 +384,15 @@ class ElasticCurvilinear(FirstOrderEquation):
         FieldSpec("sxx", aliases=("stress_xx",), description="Normal stress in the x direction.", supports_source=True, supports_receiver=True),
         FieldSpec("szz", aliases=("stress_zz",), description="Normal stress in the z direction.", supports_source=True, supports_receiver=True),
         FieldSpec("sxz", aliases=("stress_xz", "shear_xz"), description="Shear stress component.", supports_source=True),
-        FieldSpec("m_vxx", description="CPML memory for dvx/dxi.", internal=True, boundary_related=True),
-        FieldSpec("m_vxz", description="CPML memory for dvx/deta.", internal=True, boundary_related=True),
-        FieldSpec("m_vzx", description="CPML memory for dvz/dxi.", internal=True, boundary_related=True),
-        FieldSpec("m_vzz", description="CPML memory for dvz/deta.", internal=True, boundary_related=True),
-        FieldSpec("m_txxx", description="CPML memory for the xi-flux of sigma_x.", internal=True, boundary_related=True),
-        FieldSpec("m_txxz", description="CPML memory for the eta-flux of sigma_x.", internal=True, boundary_related=True),
-        FieldSpec("m_tzzx", description="CPML memory for the xi-flux of sigma_z.", internal=True, boundary_related=True),
-        FieldSpec("m_tzzz", description="CPML memory for the eta-flux of sigma_z.", internal=True, boundary_related=True),
-        FieldSpec("m_txzx", description="CPML memory for the free-surface tangential velocity derivative.", internal=True, boundary_related=True),
+        FieldSpec("m_vxx", description="CPML memory for dvx/dxi.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_vxz", description="CPML memory for dvx/deta.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_vzx", description="CPML memory for dvz/dxi.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_vzz", description="CPML memory for dvz/deta.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_txxx", description="CPML memory for the xi-flux of sigma_x.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_txxz", description="CPML memory for the eta-flux of sigma_x.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_tzzx", description="CPML memory for the xi-flux of sigma_z.", internal=True, boundary_related=True, cpml_axis="x"),
+        FieldSpec("m_tzzz", description="CPML memory for the eta-flux of sigma_z.", internal=True, boundary_related=True, cpml_axis="z"),
+        FieldSpec("m_txzx", description="CPML memory for the free-surface tangential velocity derivative.", internal=True, boundary_related=True, cpml_axis="x"),
         FieldSpec("hg_x", description="Hourglass-stiffness auxiliary for vx.", internal=True, boundary_related=True),
         FieldSpec("hg_z", description="Hourglass-stiffness auxiliary for vz.", internal=True, boundary_related=True),
     )
@@ -608,7 +625,7 @@ class ElasticCurvilinear(FirstOrderEquation):
         needs a value from the void.
         """
         import torch
-        import torch.nn.functional as F
+        from sweep.operators.torch import _compiled_taps, apply_kernels, register_stencil
 
         cache = geom.get("damper")
         if cache is None:
@@ -617,6 +634,7 @@ class ElasticCurvilinear(FirstOrderEquation):
             n = max(self.surface_damping_rows, 3)
             taper = np.clip(1.0 - rows / float(n), 0.0, 1.0)
             taper[rows < 0] = 0.0
+            live = np.flatnonzero(taper)
             like = geom["below"]
             k = np.array([1.0, -4.0, 6.0, -4.0, 1.0]) / 16.0
             # Fade the filter out across the horizontal PML.  Filtering the
@@ -638,16 +656,29 @@ class ElasticCurvilinear(FirstOrderEquation):
             cache = {
                 "wz": wz * xmask,
                 "wx": wx * xmask,
-                "kz": torch.as_tensor(k, device=like.device,
-                                      dtype=like.dtype).reshape(1, 1, 5, 1),
-                "kx": torch.as_tensor(k, device=like.device,
-                                      dtype=like.dtype).reshape(1, 1, 1, 5),
+                "kz": register_stencil(torch.as_tensor(
+                    k, device=like.device, dtype=like.dtype).reshape(1, 1, 5, 1)),
+                "kx": register_stencil(torch.as_tensor(
+                    k, device=like.device, dtype=like.dtype).reshape(1, 1, 1, 5)),
+                # The rows the filter acts on: both weights vanish elsewhere.
+                "band": (int(live[0]), int(live[-1]) + 1) if live.size else None,
             }
             geom["damper"] = cache
 
         def apply(u):
-            u = u - cache["wz"] * F.conv2d(u, cache["kz"], padding=(2, 0))
-            u = u - cache["wx"] * F.conv2d(u, cache["kx"], padding=(0, 2))
+            band = cache["band"]
+            if band is not None and _compiled_taps(cache["kz"]) is not None:
+                # Compiled: filter the band only.  Elsewhere both weights are
+                # zero and the filter hands ``u`` back, but the step would
+                # still read and write the whole field for it, twice.
+                r0, r1 = band
+                lo, hi = max(r0 - 2, 0), min(r1 + 2, u.shape[-2])
+                dz = apply_kernels(u[..., lo:hi, :], cache["kz"])[..., r0 - lo:r1 - lo, :]
+                part = u[..., r0:r1, :] - cache["wz"][..., r0:r1, :] * dz
+                part = part - cache["wx"][..., r0:r1, :] * apply_kernels(part, cache["kx"])
+                return torch.cat([u[..., :r0, :], part, u[..., r1:, :]], dim=-2)
+            u = u - cache["wz"] * apply_kernels(u, cache["kz"])
+            u = u - cache["wx"] * apply_kernels(u, cache["kx"])
             return u
 
         return apply
@@ -665,7 +696,7 @@ class ElasticCurvilinear(FirstOrderEquation):
         seismic band and leaves the Rayleigh wave where it is.
         """
         import torch
-        import torch.nn.functional as F
+        from sweep.operators.torch import apply_kernels, register_stencil
 
         cache = geom.get("hourglass")
         if cache is None:
@@ -692,14 +723,14 @@ class ElasticCurvilinear(FirstOrderEquation):
             k = np.array([1.0, -4.0, 6.0, -4.0, 1.0]) / 16.0
             cache = {
                 "w": w,
-                "kz": torch.as_tensor(k, device=like.device,
-                                      dtype=like.dtype).reshape(1, 1, 5, 1),
+                "kz": register_stencil(torch.as_tensor(
+                    k, device=like.device, dtype=like.dtype).reshape(1, 1, 5, 1)),
             }
             geom["hourglass"] = cache
 
         def apply_s(u):
             u = cache["w"] * u
-            u = F.conv2d(u, cache["kz"], padding=(2, 0))
+            u = apply_kernels(u, cache["kz"])
             return cache["w"] * u
 
         return float(dt) * 2.0 * np.pi * self.hourglass_frequency, apply_s

@@ -3,6 +3,37 @@ import numpy as np
 import torch
 
 
+class _FootprintGather(torch.autograd.Function):
+    """``sum_t weights[t] * flat[index[t]]``: a receiver footprint (``index``
+    ``(ntaps, n)``, ``weights`` ``(ntaps, 1)``) sampled with one gather.
+
+    The same numbers as gathering it tap by tap (``index_select``, scale, add,
+    in tap order), forward and backward, for a fraction of the launches: tap
+    by tap, every tap's backward zeroed a full field and scattered into it, and
+    autograd then summed those fields -- per step and receiver field, a full
+    field written ``ntaps`` times over.  Here the taps scatter into one zeroed
+    field, in the order autograd summed them (last tap first)."""
+
+    @staticmethod
+    def forward(ctx, flat, index, weights):
+        parts = flat.index_select(0, index.reshape(-1)).view(index.shape) * weights
+        out = parts[0]
+        for t in range(1, parts.shape[0]):
+            out = out + parts[t]
+        ctx.save_for_backward(index, weights)
+        ctx.numel = flat.numel()
+        return out
+
+    @staticmethod
+    def backward(ctx, grad):
+        index, weights = ctx.saved_tensors
+        parts = weights * grad
+        out = grad.new_zeros(ctx.numel)
+        for t in reversed(range(index.shape[0])):
+            out.index_add_(0, index[t], parts[t])
+        return out, None, None
+
+
 class ReceiverTorch(ReceiverBase, torch.nn.Module):
 
     def __init__(self, coords, gather_kernel=None, shape=None):
@@ -44,6 +75,10 @@ class ReceiverTorch(ReceiverBase, torch.nn.Module):
                         offsets.append((dz, dx, w))
             self.gather_offsets = offsets
         self.taps = None if shape is None else self._flat_taps(coords, shape)
+        self.footprint = None
+        if self.taps is not None and self.gather_offsets is not None and len(self.taps) > 1:
+            self.footprint = (torch.stack([index for index, _ in self.taps]),
+                              torch.tensor([[w] for _, w in self.taps], device=coords.device))
 
     def _flat_taps(self, coords, shape):
         """``[(flat index, weight or None), ...]``, one per gather offset."""
@@ -80,6 +115,9 @@ class ReceiverTorch(ReceiverBase, torch.nn.Module):
     def _gather_flat(self, wavefield):
         """``(B * nrec,)`` samples of one ``(B, 1, *spatial)`` field."""
         flat = wavefield.reshape(-1)
+        if self.footprint is not None:
+            index, weights = self.footprint
+            return _FootprintGather.apply(flat, index, weights.to(flat.dtype))
         out = None
         for index, w in self.taps:
             part = flat.index_select(0, index)

@@ -17,8 +17,8 @@ import torch
 import torch.nn.functional as F
 
 import sweep.operators.torch as OPS
-from sweep.equations import (Acoustic, Acoustic3D, AcousticVRZ3D, DASMu, Elastic, ElasticTTI, ElasticVRR,
-                             ViscoElastic)
+from sweep.equations import (Acoustic, Acoustic3D, AcousticVRZ3D, DASMu, Elastic, ElasticCurvilinear, ElasticTTI,
+                             ElasticVRR, ViscoElastic)
 from sweep.equations.elastic3d import Elastic as Elastic3D
 from sweep.equations.utils import to_backend
 from sweep.operators.general import StaggeredDerivative
@@ -107,6 +107,8 @@ def test_kernels_the_slice_form_cannot_express_stay_unregistered():
 # one graph per rollout, and the record and gradients of the uncompiled conv
 # path.  Compiling is most of this file's runtime.
 _HILL = np.array([2, 2, 1, 1, 0, 0, 0, 1, 1, 2, 2, 2, 1, 0, 0, 1])
+# A smooth hill for the boundary-fitted grid (surface rows, fractional).
+_CURV_HILL = 2.0 - 2.0 * np.exp(-((np.arange(44) - 22.0) / 8.0) ** 2)
 
 EQUATIONS = [
     pytest.param(Acoustic, (40, 44), {}, id="acoustic2d"),
@@ -126,16 +128,22 @@ EQUATIONS = [
     pytest.param(ElasticVRR, (40, 44), {}, id="elastic_vrr"),
     pytest.param(ViscoElastic, (40, 44), {"free_surface": True}, id="visco_elastic_free_surface"),
     pytest.param(DASMu, (40, 44), {"free_surface": True}, id="dasmu2d_free_surface"),
+    # Its operator caches its kernels, and its free-surface closure is a
+    # block of one-sided stencils; both once broke the graph at every
+    # derivative.
+    pytest.param(ElasticCurvilinear, (40, 44), {"free_surface": True, "topography": _CURV_HILL},
+                 id="elastic_curvilinear"),
 ]
 MODEL_VALUES = {"vp": 2500.0, "vs": 1400.0, "rho": 2000.0, "z": 5.0e6, "vp0": 2500.0, "vs0": 1400.0,
                 "epsilon": 0.1, "delta": 0.05, "gamma": 0.05, "theta": 0.3, "phi": 0.2,
                 "Rp_x": 0.01, "Rp_z": 0.01, "Rs_x": 0.01, "Rs_z": 0.01, "Qp": 80.0, "Qs": 60.0}
 
 
-def _run(cls, shape, surface, use_compile, backend=None, fullgraph=False):
+def _run(cls, shape, surface, use_compile, backend=None, fullgraph=False, cpml_strips=False):
     """Forward + backward."""
     eq = cls(spatial_order=4, device=DEV, backend="torch")
-    opts = EagerOptions(use_compile=use_compile, compile_backend=backend, compile_fullgraph=fullgraph)
+    opts = EagerOptions(use_compile=use_compile, compile_backend=backend, compile_fullgraph=fullgraph,
+                        cpml_strips=cpml_strips)
     solver = PropTorch(eq, shape=shape, dh=10.0, dt=1e-3, dev=DEV, impl="eager", abcn=4, nt=60,
                        eager_options=opts, **surface)
     wavelet = torch.zeros(60, device=DEV)
@@ -204,6 +212,25 @@ def test_compiled_rollout_is_one_conv_free_graph_matching_uncompiled(cls, shape,
     torch._dynamo.reset()
     counts = []
     run = _run(cls, shape, surface, True, _counting_convs(counts, "aot_eager"), fullgraph=True)
+    assert len(counts) == 1, f"{len(counts)} graphs compiled for one rollout"
+    assert counts == [0], f"conv left in the compiled step: {counts}"
+    _assert_matches(run, _run(cls, shape, surface, False))
+
+
+@requires_compile
+@pytest.mark.usefixtures("_release_compiled_state")
+@pytest.mark.parametrize("cls,shape,surface", [
+    pytest.param(Elastic, (40, 44), {"free_surface": True}, id="elastic2d_free_surface"),
+    pytest.param(ElasticCurvilinear, (40, 44), {"free_surface": True, "topography": _CURV_HILL},
+                 id="elastic_curvilinear"),
+    pytest.param(ElasticCurvilinear, (40, 44), {}, id="elastic_curvilinear_no_free_surface"),
+])
+def test_compiled_strips_rollout_is_one_conv_free_graph_matching_uncompiled(cls, shape, surface):
+    """The same with the CPML memories on the absorbing strips: there the
+    compiled step retakes each derivative from a window of its field."""
+    torch._dynamo.reset()
+    counts = []
+    run = _run(cls, shape, surface, True, _counting_convs(counts, "aot_eager"), fullgraph=True, cpml_strips=True)
     assert len(counts) == 1, f"{len(counts)} graphs compiled for one rollout"
     assert counts == [0], f"conv left in the compiled step: {counts}"
     _assert_matches(run, _run(cls, shape, surface, False))
