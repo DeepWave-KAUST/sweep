@@ -26,8 +26,28 @@ concurrency:
 
 jobs:
   pytest:
+    name: pytest (${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # One job ran the whole suite in ~15 min, most of it in a few dozen SEM /
+    # Biot physics tests. Four jobs of a few minutes each run side by side;
+    # a new test file lands in `rest` (or in `sem` under test/sem/).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: sem-biot
+            args: test/sem/test_biot_sem.py
+            floor: 30
+          - name: sem
+            args: test/sem --ignore=test/sem/test_biot_sem.py
+            floor: 100
+          - name: rest
+            args: test --ignore=test/sem --ignore=test/test_skill_snippets.py
+            floor: 300
+          - name: skill
+            args: test/test_skill_snippets.py
+            floor: 8
     steps:
       - uses: actions/checkout@v4
 
@@ -49,18 +69,18 @@ jobs:
         env:
           CUDA_VISIBLE_DEVICES: ''
           OMP_NUM_THREADS: '4'      # unbounded OMP thrashes a 2-core runner
-        run: pytest test/ -q --junitxml=report.xml
+        run: pytest ${{ matrix.args }} -q --junitxml=report.xml
 
       - name: Refuse a green run that executed almost nothing
         # A skip is not a failure, and half this suite is gated on CUDA or on a
         # compiled binding: without a floor, "the tests passed" and "the tests
-        # did not run" print the same summary. 313 executed on a CPU-only
-        # runner when this was added.
-        run: python .github/scripts/assert_executed_floor.py report.xml 300
+        # did not run" print the same summary. Each shard has its own floor,
+        # well below what it executes on a CPU-only runner.
+        run: python .github/scripts/assert_executed_floor.py report.xml ${{ matrix.floor }}
 
       - name: Upload the report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-report
+          name: pytest-report-${{ matrix.name }}
           path: report.xml
