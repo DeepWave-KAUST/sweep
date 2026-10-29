@@ -109,6 +109,7 @@ only, and the C-PML is required wherever the ring IS the C-PML band.
 | `AcousticElasticSEM2D` | `['vp', 'vs', 'rho']` | quad9 | 2D | Coupled fluid–solid (ocean over seabed): split acoustic + elastic C-PML, records `p, vx, vz` by default under PropSEM (also `chi, u_x, u_z`) | ✅ | ✅ (C-PML; fp32; +anchors) |
 | `BiotVSSEM2DDeformed` | `['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']` | quad9 | 2D | [Biot poroelastic](sem.md#poroelastic-waves-biot) velocity–stress with Darcy flux, the FD `Biot`'s equations and names (pore pressure continuous, flux element-local): topography + C-PML, open-pore surface, fluid (`rho = 0`) and dry elastic (`M = 0`) regions, viscous attenuation (`viscous_q`), records `vx, vz, p, qx, qz, sxx, szz, sxz` | ❌ | ❌ (dissipative) |
 | `BiotAnisoPermSEM2DDeformed` | `['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b_xx', 'b_xz', 'b_zz']` | quad9 | 2D | `BiotVSSEM2DDeformed` with an [anisotropic permeability](sem.md#anisotropic-permeability-and-viscous-attenuation) (drag tensor) | ❌ | ❌ (dissipative) |
+| `ViscoBiotVSSEM2DDeformed` | `['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b', 'Qp', 'Qs']` | quad9 | 2D | `BiotVSSEM2DDeformed` with a [GSLS frame](sem.md#frame-attenuation): `Qp` on the drained P modulus, `Qs` on the shear modulus | ❌ | ❌ (dissipative) |
 
 For the authoritative list of equations exported by your installation,
 with their models and compiled-binding support, use the CLI:

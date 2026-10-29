@@ -36,6 +36,11 @@ and this project adheres to
   0.3-1.5% in amplitude (`test/sem/specfem_compare/run_compare_visco.py`). Eager, 2-D; no
   boundary saving (dissipative). The band and the moduli factors of the fit are shared with
   the FD class (`sweep.equations.visco_elastic.gsls_band`, `gsls_moduli_factors`).
+- **`ViscoBiotVSSEM2DDeformed`: Biot with an attenuating frame.** The models of
+  `BiotVSSEM2DDeformed` and the frame's `Qp` (drained P modulus) and `Qs` (shear), the GSLS
+  of the visco-elastic class on the frame part of the total stress; the pore fluid's share
+  of `H` does not relax and `viscous_q` works as before. A dry solid gives the visco-elastic
+  class's records to round-off, `Q = inf` Biot's bit for bit.
 - **`PropSEM(impl='eager', memory=Ckpt(chunks=K))` checkpoints single shots and
   per-shot models**, which it used to refuse (`nshots=1`) or loop without
   (per-shot models): `sweep.sem.ckpt_rollout` keeps one state per `K` steps and

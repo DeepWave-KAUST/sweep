@@ -769,6 +769,19 @@ costs a memory variable per flux component. `equation_options` passes any of
 an equation's own `build` keywords; a name the equation does not take is
 refused.
 
+### Frame attenuation
+
+`ViscoBiotVSSEM2DDeformed` attenuates the frame with the GSLS of
+[`ViscoElasticVSSEM2DDeformed`](#visco-elastic-attenuation): the models end in `Qp` and
+`Qs`, which act on the drained P modulus `H - C^2 / M` and on the shear modulus `mu`;
+`f_ref`, `f_band` and `n_sls` come through `equation_options`, as for the visco-elastic
+class, and `H` and `mu` are taken as the moduli at `f_ref`. The fluid's share of `H`
+does not relax, and `viscous_q` attenuates the drag as before. The memories enter the frame
+part of the total stress only. In a dry solid (`M = 0`) the class gives the records of
+`ViscoElasticVSSEM2DDeformed` to round-off, and element arrays of `Q = inf` give those of
+`BiotVSSEM2DDeformed` bit for bit (`test/sem/test_sem_visco_biot.py`, with the gradients
+in `Qp` and `Qs` against central differences).
+
 ### Fluid and dry elastic regions
 
 An element without a solid frame (`rho = 0`) is a fluid, one without a pore

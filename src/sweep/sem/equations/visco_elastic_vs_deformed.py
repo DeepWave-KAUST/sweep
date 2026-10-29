@@ -36,6 +36,7 @@ attenuation is dissipative.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import ClassVar, Optional
 
 import torch
@@ -49,9 +50,69 @@ from ..mesh.quad9 import Quad9Mesh
 from .elastic_vs_deformed import ElasticVSSEM2DDeformed
 
 
-def _memory_specs(n_sls):
+def gsls_memory_specs(n_sls):
+    """The ``3 n_sls`` element-local memories, ``r_xx_l, r_zz_l, r_xz_l`` per mechanism."""
     return [FieldSpec(f"r_{c}_{l}", internal=True, layout="element")
             for l in range(n_sls) for c in ("xx", "zz", "xz")]
+
+
+def gsls_setup(Qp_e, Qs_e, f_ref, f_band, n_sls, who):
+    """The GSLS of ``n_sls`` mechanisms over ``f_band`` (default: SPECFEM's factor-12 band
+    around ``f_ref``) for the quality factors ``Qp_e``, ``Qs_e``: a namespace of the band,
+    the relaxation times, the fit's ``q_min`` (``Q`` below it is refused, naming ``who``),
+    the strengths ``tp``, ``ts`` and the factors ``(s_U, s_R)`` of
+    :func:`~sweep.equations.visco_elastic.gsls_moduli_factors` for each."""
+    if not 1 <= int(n_sls) <= MAX_SLS:
+        raise ValueError(f"n_sls must be in [1, {MAX_SLS}], got {n_sls}")
+    f_ref, n_sls = float(f_ref), int(n_sls)
+    f_band = gsls_band(f_ref, f_band)
+    tau_sigma = gsls_relaxation_times(n_sls, *f_band)
+    fit = GSLSFit(tau_sigma, *f_band)
+    q_min = fit.min_valid_q()
+    q_lo = float(torch.minimum(Qp_e.detach().min(), Qs_e.detach().min()))
+    if not q_lo > q_min:
+        raise ValueError(
+            f"{who}: min(Qp, Qs) = {q_lo:.3g} is below {q_min:.3g}, where the constant-Q fit "
+            f"yields a negative relaxation strength (n_sls={n_sls}, f_band={f_band}). Bound Q "
+            "from below.")
+    tp, ts = fit.tau(Qp_e), fit.tau(Qs_e)
+    return SimpleNamespace(f_ref=f_ref, f_band=f_band, n_sls=n_sls, q_min=q_min,
+                           tau_sigma=tuple(float(t) for t in tau_sigma), tp=tp, ts=ts,
+                           p=gsls_moduli_factors(tp, tau_sigma, f_ref),
+                           s=gsls_moduli_factors(ts, tau_sigma, f_ref))
+
+
+def gsls_weights(tau_sigma, dt):
+    """Trapezoidal memory-update weights ``r+ = a_l r - c_l F``:
+    ``a_l = (1 - dt/2ts) / (1 + dt/2ts)``, ``c_l = (dt/ts) / (1 + dt/2ts)``."""
+    a_l, c_l = [], []
+    for ts in tau_sigma:
+        half = 0.5 * dt / ts
+        a_l.append((1.0 - half) / (1.0 + half))
+        c_l.append((dt / ts) / (1.0 + half))
+    return a_l, c_l
+
+
+def gsls_memories(mem, p_tau, m_tau, weights, d_vx_dx, d_vz_dz, exz):
+    """The memories one step on (FD ``ViscoElastic``'s update): ``mem`` is ``(r_xx_l,
+    r_zz_l, r_xz_l)`` per mechanism, ``p_tau`` / ``m_tau`` the relaxed P / shear moduli times
+    the strengths. Returns the new memories and the sums ``r+ + r`` per stress component,
+    whose ``dt / 2`` multiple the stress takes (their time average)."""
+    a_l, c_l = weights
+    theta = d_vx_dx + d_vz_dz
+    new_mem = []
+    sum_xx = sum_zz = sum_xz = 0.0
+    for l in range(len(p_tau)):
+        r_xx, r_zz, r_xz = mem[3 * l:3 * l + 3]
+        tp, ts = p_tau[l] * theta, m_tau[l]
+        n_xx = a_l[l] * r_xx - c_l[l] * (tp - 2.0 * ts * d_vz_dz)
+        n_zz = a_l[l] * r_zz - c_l[l] * (tp - 2.0 * ts * d_vx_dx)
+        n_xz = a_l[l] * r_xz - c_l[l] * (ts * exz)
+        sum_xx = sum_xx + (n_xx + r_xx)
+        sum_zz = sum_zz + (n_zz + r_zz)
+        sum_xz = sum_xz + (n_xz + r_xz)
+        new_mem += [n_xx, n_zz, n_xz]
+    return new_mem, sum_xx, sum_zz, sum_xz
 
 
 class ViscoElasticVSSEM2DDeformed(ElasticVSSEM2DDeformed):
@@ -85,22 +146,8 @@ class ViscoElasticVSSEM2DDeformed(ElasticVSSEM2DDeformed):
         constant over ``f_band = (f_min, f_max)`` (default: SPECFEM's factor-12 band around
         ``f_ref``) with ``n_sls`` mechanisms (SPECFEM's default 3; 1 to 4)."""
         check_element_arrays(mesh, Qp_e=Qp_e, Qs_e=Qs_e)
-        if not 1 <= int(n_sls) <= MAX_SLS:
-            raise ValueError(f"n_sls must be in [1, {MAX_SLS}], got {n_sls}")
-        f_ref, n_sls = float(f_ref), int(n_sls)
-        f_band = gsls_band(f_ref, f_band)
-        tau_sigma = gsls_relaxation_times(n_sls, *f_band)
-        fit = GSLSFit(tau_sigma, *f_band)
-        q_min = fit.min_valid_q()
-        q_lo = float(torch.minimum(Qp_e.detach().min(), Qs_e.detach().min()))
-        if not q_lo > q_min:
-            raise ValueError(
-                f"ViscoElasticVSSEM2DDeformed: min(Qp, Qs) = {q_lo:.3g} is below {q_min:.3g}, "
-                "where the constant-Q fit yields a negative relaxation strength "
-                f"(n_sls={n_sls}, f_band={f_band}). Bound Q from below.")
-        tp, ts = fit.tau(Qp_e), fit.tau(Qs_e)
-        sU_p, sR_p = gsls_moduli_factors(tp, tau_sigma, f_ref)
-        sU_s, sR_s = gsls_moduli_factors(ts, tau_sigma, f_ref)
+        g = gsls_setup(Qp_e, Qs_e, f_ref, f_band, n_sls, cls.__name__)
+        (sU_p, sR_p), (sU_s, sR_s) = g.p, g.s
         # The elastic build on the unrelaxed velocities: mass, geometry, the free surface,
         # the C-PML and the unrelaxed Lame set (bit for bit the elastic one at Q = inf).
         eq = ElasticVSSEM2DDeformed.build(
@@ -110,27 +157,17 @@ class ViscoElasticVSSEM2DDeformed(ElasticVSSEM2DDeformed):
         pi_R = rho_e * vp_e * vp_e * sR_p
         mu_R = rho_e * vs_e * vs_e * sR_s
         eq.Qp_e, eq.Qs_e = Qp_e, Qs_e
-        eq.f_ref, eq.f_band, eq.n_sls, eq.q_min = f_ref, f_band, n_sls, q_min
-        eq._tau_sigma = tuple(float(t) for t in tau_sigma)
-        eq._p_tau = tuple(pi_R * t for t in tp)
-        eq._m_tau = tuple(mu_R * t for t in ts)
-        eq.field_specs = ElasticVSSEM2DDeformed.field_specs + _memory_specs(n_sls)
+        eq.f_ref, eq.f_band, eq.n_sls, eq.q_min = g.f_ref, g.f_band, g.n_sls, g.q_min
+        eq._tau_sigma = g.tau_sigma
+        eq._p_tau = tuple(pi_R * t for t in g.tp)
+        eq._m_tau = tuple(mu_R * t for t in g.ts)
+        eq.field_specs = ElasticVSSEM2DDeformed.field_specs + gsls_memory_specs(g.n_sls)
         return eq
 
     def unrelaxed_velocities(self):
         """``(vp_U, vs_U)``, ``(E, ngll, ngll)``: the velocities the explicit stress update
         runs at -- take ``dt`` from the CFL condition on ``vp_U``."""
         return self.vp_e, self.vs_e
-
-    def relaxation_coefficients(self, dt):
-        """Trapezoidal memory-update weights ``r+ = a_l r - c_l F``:
-        ``a_l = (1 - dt/2ts) / (1 + dt/2ts)``, ``c_l = (dt/ts) / (1 + dt/2ts)``."""
-        a_l, c_l = [], []
-        for ts in self._tau_sigma:
-            half = 0.5 * dt / ts
-            a_l.append((1.0 - half) / (1.0 + half))
-            c_l.append((dt / ts) / (1.0 + half))
-        return a_l, c_l
 
     @property
     def reverse_step(self):
@@ -179,21 +216,9 @@ class ViscoElasticVSSEM2DDeformed(ElasticVSSEM2DDeformed):
             d_vz_dx = d_vz_dx + m_vzx
         inc_xx, inc_zz, inc_xz = self._stress_increment(
             d_vx_dx, d_vx_dz, d_vz_dx, d_vz_dz, dt)
-        a_l, c_l = self.relaxation_coefficients(dt)
-        theta = d_vx_dx + d_vz_dz
-        exz = d_vx_dz + d_vz_dx
-        new_mem = []
-        sum_xx = sum_zz = sum_xz = 0.0
-        for l in range(self.n_sls):
-            r_xx, r_zz, r_xz = mem[3 * l:3 * l + 3]
-            tp, ts = self._p_tau[l] * theta, self._m_tau[l]
-            n_xx = a_l[l] * r_xx - c_l[l] * (tp - 2.0 * ts * d_vz_dz)
-            n_zz = a_l[l] * r_zz - c_l[l] * (tp - 2.0 * ts * d_vx_dx)
-            n_xz = a_l[l] * r_xz - c_l[l] * (ts * exz)
-            sum_xx = sum_xx + (n_xx + r_xx)
-            sum_zz = sum_zz + (n_zz + r_zz)
-            sum_xz = sum_xz + (n_xz + r_xz)
-            new_mem += [n_xx, n_zz, n_xz]
+        new_mem, sum_xx, sum_zz, sum_xz = gsls_memories(
+            mem, self._p_tau, self._m_tau, gsls_weights(self._tau_sigma, dt),
+            d_vx_dx, d_vz_dz, d_vx_dz + d_vz_dx)
         half_dt = 0.5 * dt
         sigma_xx = sigma_xx + inc_xx + half_dt * sum_xx
         sigma_zz = sigma_zz + inc_zz + half_dt * sum_zz
