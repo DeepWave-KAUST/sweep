@@ -42,6 +42,7 @@ from .mesh.quad9 import Quad9Mesh
 from .mesh.hex8 import Hex8Mesh
 from .mesh.hex27 import Hex27Mesh
 from .basis.quad9 import q2_basis_at, q2_basis_deriv_at
+from .._compile import compile_or_fallback
 from ._assembly import element_mean, scatter_point_sources
 from .fields import resolve_field_types
 
@@ -1263,11 +1264,15 @@ class SEMPropagator:
 
     def _step_fn(self, compile_step):
         """``eq.step``, or its ``torch.compile`` wrapper cached on the
-        propagator so the compilation is paid once across calls."""
+        propagator so the compilation is paid once across calls. A compiler
+        that cannot build the step (CPU with g++ < 10) warns once and leaves
+        it uncompiled -- see :func:`sweep._compile.compile_or_fallback`."""
         if not compile_step:
             return self.eq.step
         if getattr(self, "_compiled_step", None) is None:
-            self._compiled_step = torch.compile(self.eq.step)
+            self._compiled_step = compile_or_fallback(
+                self.eq.step, self._dev_dtype()[0],
+                f"the {type(self.eq).__name__} step")
         return self._compiled_step
 
     def _run_boundary_saved(self, source_spec, wavelet, rec_G, rec_W, recv,

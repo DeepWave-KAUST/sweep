@@ -7,6 +7,7 @@ import torch
 from torch.utils.checkpoint import checkpoint as ckpt_torch
 
 
+from sweep._compile import compiler_failures as _compiler_failures, compiler_hint, failure_reason
 from sweep.propagator.base import PropBase
 from sweep.propagator.options import EAGER_DEFAULTS
 from sweep.equations._cpml import StripLayout
@@ -106,21 +107,6 @@ def _raise_dynamo_recompile_limit(target=32):
     for name in names:
         if getattr(cfg, name) < target:
             setattr(cfg, name, target)
-
-
-def _compiler_failures():
-    """Exception types meaning the compiler failed, as opposed to the code it
-    compiles: a step that is wrong eagerly raises its own error and must keep
-    doing so. The names moved between torch releases, so collect what exists."""
-    found = []
-    for module, name in (("torch._dynamo.exc", "BackendCompilerFailed"),
-                         ("torch._inductor.exc", "InductorError"),
-                         ("torch._inductor.exc", "CppCompileError")):
-        try:
-            found.append(getattr(__import__(module, fromlist=[name]), name))
-        except (ImportError, AttributeError):
-            pass
-    return tuple(found)
 
 
 class _SettledSteps:
@@ -315,14 +301,13 @@ class _PropTorchEager(
     def _disable_compile(self, exc):
         """Run uncompiled from now on, and say so once."""
         self.use_compile = False
-        reason = str(exc).strip().splitlines()
-        reason = reason[0] if reason else type(exc).__name__
+        hint = compiler_hint("cuda" if "cuda" in str(self.dev) else "cpu")
         warnings.warn(
             f"torch.compile could not build the {type(self.equation).__name__} step on "
-            f"{self.dev} ({type(exc).__name__}: {reason[:200]}); running it uncompiled, "
-            "which is slower but gives the same result. On CPU, Inductor needs "
-            "g++ >= 10. Pass eager_options=EagerOptions(use_compile=False) to skip "
-            "the attempt.", RuntimeWarning, stacklevel=3)
+            f"{self.dev} ({type(exc).__name__}: {failure_reason(exc)}); running it uncompiled, "
+            f"which is slower but gives the same result.{hint} Pass "
+            "eager_options=EagerOptions(use_compile=False) to skip the attempt.",
+            RuntimeWarning, stacklevel=3)
 
     def _mark_compile_step_begin(self):
         if self.use_compile and self.dev is not None and "cuda" in str(self.dev):

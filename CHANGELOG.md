@@ -22,6 +22,16 @@ and this project adheres to
   `gate/run_reorder_checks.sh`.  Notebook outputs `fwi_ddp.py` and
   `15_wavefield_topography.gif` are no longer tracked.
 
+### Fixed
+- `PropSEM(impl='eager')` with `compile_step=True` no longer fails when
+  `torch.compile` cannot build the step, e.g. on CPU with g++ older than 10
+  (`InductorError: CppCompileError`, `-std=c++20` rejected). As on the FD eager
+  path, the step runs uncompiled -- single-shot loop, boundary saving and the
+  vmapped multi-shot step alike -- with one `RuntimeWarning` that quotes the
+  compiler's error and names `torch._inductor.config.cpp.cxx` / `$CXX`; later
+  calls skip the attempt. Results are the same; errors of the step itself
+  still propagate.
+
 ## [0.3.6] - 2026-10-29
 
 ### Added

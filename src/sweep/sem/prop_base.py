@@ -75,6 +75,7 @@ import numbers
 import torch
 import torch.utils.checkpoint
 
+from .._compile import compile_or_fallback
 from .mesh import MESH_BUILDERS
 from .mesh.hex8 import hex8_layout
 from .cpml.acoustic import build_cpml
@@ -1831,7 +1832,8 @@ class PropSEM:
         vstep = torch.vmap(lambda fields, src: eq.step(fields, src, dt),
                            in_dims=(0, 0))
         if compile_step:
-            vstep = torch.compile(vstep)
+            vstep = compile_or_fallback(vstep, dev,
+                                        f"the vmapped {type(eq).__name__} step")
 
         ar = torch.arange(B, device=dev)[:, None, None]
 

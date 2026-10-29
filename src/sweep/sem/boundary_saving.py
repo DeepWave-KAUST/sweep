@@ -43,6 +43,7 @@ import copy
 
 import torch
 
+from .._compile import compile_or_fallback
 from ._assembly import scatter_point_sources
 
 
@@ -567,9 +568,11 @@ def run_boundary_saved(eq, source_spec, wavelet, rec_G, rec_W, dt, nt,
     """
     if compile_step:
         eq = copy.copy(eq)                          # isolate the step monkeypatch
-        eq.step = torch.compile(eq.step)
     (specs, grad_idx, recv_idx, n_src,
      device, dtype) = _bs_setup(eq, recv_idx)
+    if compile_step:
+        eq.step = compile_or_fallback(eq.step, device,
+                                      f"the {type(eq).__name__} step")
 
     cpml_zero_idx, save_idx = cpml_node_masks(eq)
     elem_fields = list(getattr(eq, "bs_elem_ring_save", ()) or ())
