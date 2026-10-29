@@ -6,7 +6,7 @@ revealing the model's internal structure. No axes, no colorbar.
 
 Run inside the ``ifwitorch`` env:
 
-    python figures/scripts/overthrust_3d_render.py
+    python utils/overthrust_3d_render.py
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import numpy as np
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 — registers 3D projection
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 MODEL_NPY = ROOT / "examples" / "models" / "overthrust" / "true_3d.npy"
 OUT = ROOT / "docs" / "assets" / "cards" / "overthrust_3d.png"
 CARD_W, CARD_H = 9.6, 3.2  # ≈ 3:1 to match other gallery covers

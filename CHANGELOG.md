@@ -9,6 +9,19 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Removed
+- Stale examples and repo-root leftovers: `examples/FWI/` and
+  `examples/LSRTM/` (unlinked scripts, covered by the notebooks; their
+  `_shared` helpers `configure_overthrust`, `fwi3d_overthrust`, `mpi_utils`
+  and `models/overthrust/extract_2d_slice.py` go with them),
+  `examples/ipynb/`, `convert_3d_overthrust_vites_to_npy.py` (superseded by
+  `download_3d_overthrust.py`), `real_traced_model_demo.py` (needed an
+  unshipped model), the root `figures/` directory (the Overthrust card script
+  moved to `utils/`), `.vscode/`, `utils/generate_eq_init.py` and its backup
+  (replaced by the equation registry), and `gate/sync_to_ibex.sh` /
+  `gate/run_reorder_checks.sh`.  Notebook outputs `fwi_ddp.py` and
+  `15_wavefield_topography.gif` are no longer tracked.
+
 ## [0.3.6] - 2026-10-29
 
 ### Added

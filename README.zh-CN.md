@@ -83,7 +83,7 @@ print("vp gradient shape:", tuple(vp_t.grad.shape))
 - **Hello SWEEP** —— forward / backward / 5 行 FWI 循环: [`docs/notebooks/00_hello_fwi.ipynb`](docs/notebooks/00_hello_fwi.ipynb)
 - **Marmousi 上的 FWI**(声波 / 弹性 / 多尺度): 见 [`docs/notebooks/01_*`–`03_*`](docs/notebooks/)
 - **波场、DAS、各向异性、RTM**: [`docs/notebooks/04_*`–`08_*`](docs/notebooks/)
-- **生产脚本**(多 GPU、MPI 炮并行、多炮 batching): 在 [`examples/`](examples/) 目录下
+- **生产脚本**(多 GPU 炮并行和区域分解、地形演示): 在 [`examples/`](examples/) 目录下
 
 ## 引用
 

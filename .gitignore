@@ -47,3 +47,6 @@ site/
 # noise for anyone cloning and leaks our directory layout. Keep them local, or
 # promote the durable parts into docs/.
 /_*/
+# written next to the notebooks when nb12 / nb15 run
+docs/notebooks/fwi_ddp.py
+docs/notebooks/15_wavefield_topography.gif
