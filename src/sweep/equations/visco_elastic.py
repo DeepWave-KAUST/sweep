@@ -46,6 +46,35 @@ def gsls_relaxation_times(n_sls, f_min, f_max):
     return 1.0 / (2.0 * np.pi * f)
 
 
+def gsls_band(f_ref, f_band=None):
+    """``f_band`` as ``(f_min, f_max)``, or by default SPECFEM's band: a factor 12
+    centred (geometrically) on ``f_ref``."""
+    if f_band is None:
+        r = np.sqrt(12.0)
+        f_band = (f_ref / r, f_ref * r)
+    return float(f_band[0]), float(f_band[1])
+
+
+def gsls_moduli_factors(taus, tau_sigma, f_ref):
+    """For strengths ``taus`` (list of L tensors) return ``(s_U, s_R)``: the
+    factors mapping ``rho v^2`` (v = phase velocity at ``f_ref``) to the
+    unrelaxed and relaxed moduli of the GSLS with relaxation times ``tau_sigma``.
+
+    ``m = M(w_ref)/M_R = a + i b``; the phase velocity is
+    ``v = sqrt(M_R/rho) / Re(m^-1/2)`` so ``M_R = rho v^2 cos^2(phi/2)/|m|``."""
+    import torch
+    wt = 2.0 * np.pi * f_ref * tau_sigma
+    ca = wt ** 2 / (1.0 + wt ** 2)
+    cb = wt / (1.0 + wt ** 2)
+    a = 1.0 + sum(float(ca[l]) * t for l, t in enumerate(taus))
+    b = sum(float(cb[l]) * t for l, t in enumerate(taus))
+    absm = torch.sqrt(a * a + b * b)
+    cos2 = 0.5 * (1.0 + a / absm)            # cos^2(phi/2), phi = atan2(b, a)
+    s_R = cos2 / absm
+    s_U = s_R * (1.0 + sum(taus))
+    return s_U, s_R
+
+
 def _poly_det(mat):
     """Determinant of a small matrix of polynomials (ascending coefficient
     arrays), by the Leibniz formula -- exact up to float64 rounding."""
@@ -320,11 +349,8 @@ class ViscoElastic(FirstOrderEquation):
         if not 1 <= int(n_sls) <= MAX_SLS:
             raise ValueError(f"n_sls must be in [1, {MAX_SLS}], got {n_sls}")
         super().__init__(spatial_order, device, backend)
-        if f_band is None:
-            r = np.sqrt(12.0)
-            f_band = (f_ref / r, f_ref * r)
         self.f_ref = float(f_ref)
-        self.f_band = (float(f_band[0]), float(f_band[1]))
+        self.f_band = gsls_band(f_ref, f_band)
         self.n_sls = int(n_sls)
         self.tau_sigma = gsls_relaxation_times(self.n_sls, *self.f_band)
         # As Python floats for the step: a numpy array read there is traced as
@@ -349,23 +375,8 @@ class ViscoElastic(FirstOrderEquation):
 
     # ------------------------------------------------------------------ models
     def _moduli_factors(self, taus):
-        """For strengths ``taus`` (list of L tensors) return ``(s_U, s_R)``: the
-        factors mapping ``rho v^2`` (v = phase velocity at f_ref) to the
-        unrelaxed and relaxed moduli.
-
-        ``m = M(w_ref)/M_R = a + i b``; the phase velocity is
-        ``v = sqrt(M_R/rho) / Re(m^-1/2)`` so ``M_R = rho v^2 cos^2(phi/2)/|m|``."""
-        import torch
-        wt = 2.0 * np.pi * self.f_ref * self.tau_sigma
-        ca = wt ** 2 / (1.0 + wt ** 2)
-        cb = wt / (1.0 + wt ** 2)
-        a = 1.0 + sum(float(ca[l]) * t for l, t in enumerate(taus))
-        b = sum(float(cb[l]) * t for l, t in enumerate(taus))
-        absm = torch.sqrt(a * a + b * b)
-        cos2 = 0.5 * (1.0 + a / absm)            # cos^2(phi/2), phi = atan2(b, a)
-        s_R = cos2 / absm
-        s_U = s_R * (1.0 + sum(taus))
-        return s_U, s_R
+        """``(s_U, s_R)`` for strengths ``taus``: see :func:`gsls_moduli_factors`."""
+        return gsls_moduli_factors(taus, self.tau_sigma, self.f_ref)
 
     def prepare_models(self, models):
         """``(vp, vs, rho, Qp, Qs)`` -> ``[lam_U, mu_U, rho, lam_U + 2 mu_U,

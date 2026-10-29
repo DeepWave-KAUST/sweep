@@ -87,7 +87,7 @@ The `impl="c"` column says whether `PropSEM(impl='c')` can route the class to
 the CUDA kernels; every class runs on `impl="eager"`. The
 `BoundarySaving()` column is the CUDA-side coverage of
 [boundary saving](sem.md#boundary-saving) -- on `impl="eager"` it works for
-every class but the dissipative Biot one; ✅ = both backends, "eager" = eager
+every class but the dissipative ones (Biot, visco-elastic); ✅ = both backends, "eager" = eager
 only, and the C-PML is required wherever the ring IS the C-PML band.
 
 | Equation | Models | Mesh | Dim | Notes | `impl="c"` | `BoundarySaving()` |
@@ -105,6 +105,7 @@ only, and the C-PML is required wherever the ring IS the C-PML band.
 | `ElasticVSSEM3D` | `['vp', 'vs', 'rho']` | hex8 | 3D | 3-D velocity–stress elastic with C-PML, flat mesh | ✅ | eager |
 | `ElasticVSSEM3DDeformed` | `['vp', 'vs', 'rho']` | hex27 | 3D | 3-D elastic with **both** topography and absorbing boundaries (the velocity–stress family is where 3-D C-PML exists) | ❌ | eager |
 | `ElasticVTISEM2DDeformed` | `['vp', 'vs', 'rho', 'epsilon', 'delta']` | quad9 | 2D | VTI anisotropic velocity–stress: topography + C-PML | ❌ | eager |
+| `ViscoElasticVSSEM2DDeformed` | `['vp', 'vs', 'rho', 'Qp', 'Qs']` | quad9 | 2D | [Visco-elastic](sem.md#visco-elastic-attenuation) velocity–stress, the GSLS of the FD `ViscoElastic` and of SPECFEM2D (`vp`, `vs` at `f_ref`): topography + C-PML; `f_ref`, `f_band`, `n_sls` through `equation_options` | ❌ | ❌ (dissipative) |
 | `AcousticElasticSEM2D` | `['vp', 'vs', 'rho']` | quad9 | 2D | Coupled fluid–solid (ocean over seabed): split acoustic + elastic C-PML, records `p, vx, vz` by default under PropSEM (also `chi, u_x, u_z`) | ✅ | ✅ (C-PML; fp32; +anchors) |
 | `BiotVSSEM2DDeformed` | `['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']` | quad9 | 2D | [Biot poroelastic](sem.md#poroelastic-waves-biot) velocity–stress with Darcy flux, the FD `Biot`'s equations and names (pore pressure continuous, flux element-local): topography + C-PML, open-pore surface, fluid (`rho = 0`) and dry elastic (`M = 0`) regions, viscous attenuation (`viscous_q`), records `vx, vz, p, qx, qz, sxx, szz, sxz` | ❌ | ❌ (dissipative) |
 | `BiotAnisoPermSEM2DDeformed` | `['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b_xx', 'b_xz', 'b_zz']` | quad9 | 2D | `BiotVSSEM2DDeformed` with an [anisotropic permeability](sem.md#anisotropic-permeability-and-viscous-attenuation) (drag tensor) | ❌ | ❌ (dissipative) |

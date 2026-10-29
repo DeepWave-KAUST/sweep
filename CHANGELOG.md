@@ -26,6 +26,16 @@ and this project adheres to
   skill.  The docs page *AI assistants (Agent Skills)* covers the install,
   and `test/test_skill_snippets.py` runs every code block of the skill so
   its examples cannot fall behind the API.
+- **`ViscoElasticVSSEM2DDeformed`: visco-elastic attenuation on the SEM.** The velocity-stress
+  elastic SEM with the generalized standard linear solid of the FD `ViscoElastic`, which is
+  SPECFEM2D's: models `vp, vs, rho, Qp, Qs` (velocities at `f_ref`), `f_ref`, `f_band` and
+  `n_sls` through `equation_options`, element-local memory variables advanced with the
+  trapezoidal rule, all five models differentiable, `Q = inf` the elastic step bit for bit.
+  Against SPECFEM2D's `ATTENUATION_VISCOELASTIC` (Q = 30, half-space) the records agree to
+  1.4% in relative L2 (1.7% for the elastic pair) and the visco/elastic spectral ratios to
+  0.3-1.5% in amplitude (`test/sem/specfem_compare/run_compare_visco.py`). Eager, 2-D; no
+  boundary saving (dissipative). The band and the moduli factors of the fit are shared with
+  the FD class (`sweep.equations.visco_elastic.gsls_band`, `gsls_moduli_factors`).
 - **`PropSEM(impl='eager', memory=Ckpt(chunks=K))` checkpoints single shots and
   per-shot models**, which it used to refuse (`nshots=1`) or loop without
   (per-shot models): `sweep.sem.ckpt_rollout` keeps one state per `K` steps and

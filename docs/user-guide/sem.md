@@ -646,6 +646,42 @@ corner): the moment tensor differentiates the basis, whose gradient jumps
 across the edge, and stamped in one element the explosion came out 1-2%
 lopsided. A force needs none of this; its stamp has no derivative.
 
+## Visco-elastic attenuation
+
+`ViscoElasticVSSEM2DDeformed` adds attenuation to `ElasticVSSEM2DDeformed` with the
+rheology of the FD `sweep.equations.ViscoElastic`, which is also SPECFEM2D's: `n_sls`
+standard linear solids whose relaxation times are fixed over the band `f_band`, with
+strengths fitted for a constant `Qp` and `Qs` over that band. The models are `vp`, `vs`,
+`rho`, `Qp` and `Qs`, where `vp` and `vs` are the phase velocities at `f_ref`:
+
+```python
+from sweep.sem import PropSEM, ViscoElasticVSSEM2DDeformed
+
+solver = PropSEM(ViscoElasticVSSEM2DDeformed, shape=(nz, nx), dh=5.0, dt=5e-4,
+                 free_surface=True, f_dominant=12.0, source_type=["sxx", "szz"],
+                 receiver_type=["vx", "vz"], equation_options={"f_ref": 12.0, "n_sls": 3})
+seis = solver(wavelet, sources, receivers, models=[vp, vs, rho, qp, qs])
+```
+
+The memory variables are element-local, as the stresses are, and they are updated as in the
+FD class at every GLL node. The explicit stress update runs at the unrelaxed velocities,
+which exceed `vp` and `vs` for a finite Q (by about 8% at Q = 10 over the default band), so
+the time step should be taken from those (`unrelaxed_velocities()` of the built equation).
+All five models are differentiable. Q must exceed the lower bound of the fit (about 1.8 for
+three mechanisms over the default band), and element arrays of `Q = inf` give the elastic
+step bit for bit. The C-PML terms run on every element, without the band split. Boundary
+saving is refused because the attenuation is dissipative; use `Full()` or
+`Ckpt(chunks=...)`.
+
+`test/sem/test_sem_visco_elastic.py` checks the elastic limit, the checkpointed and vmapped
+rollouts, and the gradients in `vp`, `Qp` and `Qs` against central differences.
+`test/sem/specfem_compare/run_compare_visco.py` compares the class with SPECFEM2D's
+`ATTENUATION_VISCOELASTIC` on a homogeneous half-space with Q = 30 (velocities at 12 Hz,
+three mechanisms). The visco-elastic records agree to 1.4% in relative L2, against 1.7%
+for the elastic records on the same meshes, and the visco/elastic spectral ratios of the
+two codes agree to 0.3% in amplitude and 4 mrad in phase (medians over 4-25 Hz, offsets up
+to 200 m), and to 0.8-1.5% and 12-15 mrad at offsets of 200-450 m.
+
 ## Poroelastic waves (Biot)
 
 `BiotVSSEM2DDeformed` solves the equations of the FD `sweep.equations.Biot` —
