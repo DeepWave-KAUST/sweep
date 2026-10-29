@@ -115,20 +115,21 @@ def test_batched_int8_ring_gives_each_shot_its_own_scale():
     assert float(out[0, idx].abs().max()) > 0.0, "the quiet shot came back empty"
 
 
-@pytest.mark.parametrize("store", [None, "fp32", "bf16", "fp16", "int8"])
+@pytest.mark.parametrize("store", [None, "fp32", "bf16", "int8"])
 def test_the_eager_ring_takes_the_same_spellings_the_c_ring_does(store):
     """``bs_store_dtype`` used to reach ``torch.zeros`` unresolved on this
     path, so "bf16" -- which the C ring accepts (prop_c._band_store) -- came
-    back as a TypeError from inside the allocator. The two support different
-    SETS (the C kernels have no fp16), but they must fail the same way."""
+    back as a TypeError from inside the allocator. The two take the same set
+    and fail the same way; fp16 is refused on both (a plain fp16 cast flushed
+    the SEM's small field values to zero)."""
     recon = SEMReconState(2, [0], torch.arange(4), torch.arange(0),
                           torch.device("cpu"), torch.float32,
                           store_dtype=store)
     assert recon.ring[0].dtype is not None
-    with pytest.raises(ValueError, match="bs_store_dtype"):
-        SEMReconState(2, [0], torch.arange(4), torch.arange(0),
-                      torch.device("cpu"), torch.float32,
-                      store_dtype="bfloat16")          # the C path's ValueError
+    for bad in ("bfloat16", "fp16", torch.float16):         # the C path's ValueError
+        with pytest.raises(ValueError, match="bs_store_dtype"):
+            SEMReconState(2, [0], torch.arange(4), torch.arange(0),
+                          torch.device("cpu"), torch.float32, store_dtype=bad)
 
 
 def test_the_batched_rollout_is_the_one_a_shared_model_takes(monkeypatch):

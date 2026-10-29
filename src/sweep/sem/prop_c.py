@@ -668,6 +668,18 @@ class _ConstsBase:
                 "ihz": float(eq._inv_half_dz)}
 
 
+
+# The impl='c' forward paths that consume memory='boundary' (see
+# _SEMCudaPropagator._assert_memory_supported); the 2-D ones only with their C-PML.
+_BS_ANY_CPML = (AcousticSEM3D, AcousticSEM3DDeformed)
+_BS_NEEDS_CPML = (AcousticPotentialSEM2D, ElasticSEM2DDeformed, AcousticElasticSEM2D)
+
+
+def c_boundary_saving_supported(equation, has_cpml) -> bool:
+    """Do the CUDA kernels run boundary saving for ``equation`` (a class)?"""
+    return (issubclass(equation, _BS_ANY_CPML)
+            or (issubclass(equation, _BS_NEEDS_CPML) and has_cpml))
+
 class SEMCudaPropagator(SEMPropagator):
     """``impl='c'`` propagator (acoustic-potential + elastic; forward + adjoint)."""
 
@@ -738,21 +750,18 @@ class SEMCudaPropagator(SEMPropagator):
     #
     # Note the 2-D pair is CPML-ONLY: the bare AcousticPotentialSEM2D path is
     # inlined in _forward_components and never sets the flag.
-    _BS_ANY_CPML = (AcousticSEM3D, AcousticSEM3DDeformed)
-    _BS_NEEDS_CPML = (AcousticPotentialSEM2D, ElasticSEM2DDeformed,
-                      AcousticElasticSEM2D)
+    _BS_ANY_CPML = _BS_ANY_CPML
+    _BS_NEEDS_CPML = _BS_NEEDS_CPML
 
     def _assert_memory_supported(self, memory):
         if memory != "boundary":
             return
         eq = self.eq
         has_cpml = getattr(eq, "cpml", None) is not None
-        if isinstance(eq, self._BS_ANY_CPML):
-            return
-        if isinstance(eq, self._BS_NEEDS_CPML) and has_cpml:
+        if c_boundary_saving_supported(type(eq), has_cpml):
             return
         why = ("without a C-PML (the bare path never wires the flag)"
-               if isinstance(eq, self._BS_NEEDS_CPML) else "at all")
+               if issubclass(type(eq), self._BS_NEEDS_CPML) else "at all")
         raise NotImplementedError(
             f"memory='boundary' is not implemented for {type(eq).__name__} on "
             f"impl='c' {why}. It used to be accepted and ignored, which looked "

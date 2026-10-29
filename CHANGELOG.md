@@ -44,6 +44,18 @@ and this project adheres to
   `compile_step`. Compiled, the step is ~3x faster on GPU and CPU, at a one-time
   compile per grid size (seconds on a GPU, ~40 s on a CPU);
   `EagerOptions(use_compile=False)` gives the uncompiled step, unchanged.
+- **`PropSEM` takes PropTorch's default memory strategy.** Without `memory=`,
+  `impl='c'` now saves the boundary where its kernels run boundary saving (the
+  five C-PML paths; the full tape elsewhere) and eager checkpoints -- in chunks
+  of 8 steps rather than `Ckpt()`'s 100, since the CUDA-graph rollout rebuilds
+  its graphs per call at a cost that grows with the chunk (2-D elastic, one
+  forward+backward call on an A100: 201x401 with nt=1000, 0.51 / 0.81 s for
+  chunks of 8 / 100 and 1.24 s on the full tape; 801x1601 with nt=500, 1.27 /
+  2.16 s and 1.13 s). Both used to take the full tape. `memory_strategy` reports
+  `'full'` / `'boundary'` / `'ckpt'`, as on PropTorch. The default gives way to
+  the full tape for `return_wavefield=True` and for the CUDA-graph compile modes;
+  `create_graph=True` and a second backward (`retain_graph=True`) need an
+  explicit `memory=Full()`, and say so.
 - **The compiled SEM eager step is faster on GPU: 1.05-1.75x forward,
   1.07-1.57x forward+backward (H100), most on 3-D and large 2-D** (A100,
   forward | forward+backward: 1.4x | 1.35x for 2-D elastic at 801x1601, 1.4x |
@@ -89,6 +101,12 @@ and this project adheres to
   `15_wavefield_topography.gif` are no longer tracked.
 
 ### Fixed
+- `PropSEM(memory=BoundarySaving(storage_dtype='fp16'))` is refused on both
+  backends. The eager ring stored a plain fp16 cast, which flushes the SEM's
+  small field values to zero: 2-D elastic gradients came out 15% and 2-D
+  acoustic 6% off the full tape (bf16 5e-5, int8 2e-4); `impl='c'` refused it
+  already, under an internal option's name. PropTorch's fp16 ring is
+  block-normalised; the SEM rings take fp32, bf16 and int8.
 - `PropSEM(impl='eager')` compiling its step no longer fails when
   `torch.compile` cannot build it, e.g. on CPU with g++ older than 10
   (`InductorError: CppCompileError`, `-std=c++20` rejected). As on the FD eager

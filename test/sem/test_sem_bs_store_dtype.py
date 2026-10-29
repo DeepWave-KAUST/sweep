@@ -360,11 +360,13 @@ def _cos3(a, b):
     return float(a @ b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
 
-def test_bad_store_dtype_rejected():
-    # fp16 is a storage_dtype BoundarySaving takes (the eager ring has it) and
-    # the C ring does not: refused there, not stored as fp32
-    with pytest.raises(ValueError, match="bs_store_dtype"):
-        _run("c", "boundary", "full", "fp16")
+@pytest.mark.parametrize("impl", ["c", "eager"])
+def test_fp16_ring_is_refused(impl):
+    # fp16 is a storage_dtype BoundarySaving takes on PropTorch; PropSEM refuses it
+    # on both backends instead of storing it as fp32 or as a plain fp16 cast,
+    # which flushed the SEM's small field values to zero
+    with pytest.raises(NotImplementedError, match="fp16"):
+        _run(impl, "boundary", "full", "fp16")
 
 
 # Per-precision bars, each about 10x above what is measured on this

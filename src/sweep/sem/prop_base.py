@@ -437,6 +437,17 @@ _OPTION_HINTS = {
                     "compiled by default)",
 }
 
+# The chunk of the default memory on impl='eager', Ckpt(chunks=_DEFAULT_CKPT_CHUNK);
+# see PropSEM._default_memory. Measured on an A100, one forward+backward call of
+# 2-D elastic at 201x401, nt=1000: chunks 8 / 32 / 100 take 0.51 / 0.61 / 0.81 s
+# (the full tape 1.24 s); at 801x1601, nt=500: 1.27 / 1.47 / 2.16 s (full 1.13 s).
+_DEFAULT_CKPT_CHUNK = 8
+
+# The memory strategy a PropSEM built without memory= takes in place of
+# _default_memory's; None keeps that. test/conftest.py sets Full(): the suite's
+# memory=None meant the full tape when it was written.
+_DEFAULT_MEMORY = None
+
 # The EagerOptions a PropSEM built without eager_options= runs with; None is
 # EagerOptions()'s defaults, PropTorch's. test/conftest.py sets an uncompiled
 # one: compiling every propagator of the suite would cost CI hours on CPU.
@@ -478,11 +489,12 @@ def _reject_unsupported(self, kwargs, *, adj,
                 "return_wavefield needs impl='eager': the CUDA kernels run the "
                 "whole time loop inside one call and keep no intermediate "
                 "state to copy out.")
-        if self._memory == "boundary":
+        # the default strategy gives way: snapshots run the full tape
+        if self._memory == "boundary" and self._memory_explicit:
             raise ValueError(
                 "return_wavefield is not available with memory=BoundarySaving() "
                 "-- the forward state is discarded and reconstructed.")
-        if self._ckpt_chunk:
+        if self._ckpt_chunk and self._memory_explicit:
             raise ValueError(
                 "return_wavefield is not available with memory=Ckpt() -- the "
                 "checkpointed rollout keeps one state per chunk, not per step.")
@@ -712,11 +724,17 @@ class PropSEM:
         read: ``_memory`` (``None`` or ``'boundary'``), ``_bs_store`` (the
         ring's storage dtype; ``None`` keeps the compute precision) and
         ``_ckpt_chunk`` (steps per checkpointed chunk). What PropSEM cannot
-        do is refused, never dropped."""
+        do is refused, never dropped. ``memory=None`` takes PropTorch's default
+        strategy (see ``_default_memory``); ``memory_strategy`` names the one
+        in force, as on PropTorch."""
         from sweep.propagator.options import (BoundarySaving, Ckpt, Full,
                                               as_memory_strategy)
         m = as_memory_strategy(memory)
-        self.memory = Full() if m is None else m
+        self._memory_explicit = m is not None
+        self.memory = m if m is not None else self._default_memory()
+        m = self.memory
+        self.memory_strategy = ("boundary" if isinstance(m, BoundarySaving) else
+                                "ckpt" if isinstance(m, Ckpt) else "full")
         self._memory = self._bs_store = self._ckpt_chunk = None
         refusal = getattr(self.equation, "bs_refusal", None)
         if isinstance(m, BoundarySaving) and refusal:
@@ -733,6 +751,11 @@ class PropSEM:
                     f"PropSEM's boundary saving keeps its ring on the device "
                     f"and takes storage_dtype only; BoundarySaving("
                     f"{', '.join(b + '=...' for b in bad)}) is not supported.")
+            if m.storage_dtype == "fp16":
+                raise NotImplementedError(
+                    "PropSEM's boundary rings take storage_dtype 'fp32', 'bf16' or "
+                    "'int8'; fp16 is not supported (a plain fp16 cast flushes the "
+                    "SEM's small field values to zero; bf16 has fp32's range).")
             self._memory = "boundary"
             # 'fp32', the default, is "no compression": the compute dtype
             self._bs_store = None if m.storage_dtype == "fp32" else m.storage_dtype
@@ -760,6 +783,26 @@ class PropSEM:
                     "histories impl='c' boundary saving keeps; it needs "
                     "impl='c' and memory=BoundarySaving().")
         self._bs_store_elem = bs_store_dtype_elem
+
+    def _default_memory(self):
+        """PropTorch's default strategy: boundary saving on ``impl='c'`` where its
+        kernels run it (else the full tape), checkpointing on eager -- in chunks of
+        ``_DEFAULT_CKPT_CHUNK`` steps, which the CUDA-graph rollout runs faster
+        than ``Ckpt()``'s 100 (it rebuilds its graphs per call, at a cost that
+        grows with the chunk). A CUDA-graph compile mode on CUDA takes the full
+        tape, the one memory mode it works with (``_check_compile_mode``)."""
+        from sweep.propagator.options import BoundarySaving, Ckpt, Full
+        if _DEFAULT_MEMORY is not None:
+            return dataclasses.replace(_DEFAULT_MEMORY)
+        if self._use_c:
+            from .prop_c import c_boundary_saving_supported
+            return (BoundarySaving() if c_boundary_saving_supported(
+                self.equation, self.abcn_elements > 0) else Full())
+        if (self.eager_options.use_compile
+                and self.eager_options.compile_mode in ("reduce-overhead", "max-autotune")
+                and torch.device(self.dev).type == "cuda"):
+            return Full()
+        return Ckpt(chunks=_DEFAULT_CKPT_CHUNK)
 
     def _resolve_equation(self, equation, shape, abcn_elements, source_type, receiver_type,
                           equation_options=None):

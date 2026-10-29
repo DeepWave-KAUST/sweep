@@ -264,5 +264,8 @@ def _propsem_test_defaults(monkeypatch):
     themselves, and test_sem_eager_options checks the real default. (A conftest in
     test/sem would shadow this module for the ``from conftest import ...`` lines.)"""
     import sweep.sem.prop_base as prop_base
-    from sweep.propagator import EagerOptions
+    from sweep.propagator import EagerOptions, Full
     monkeypatch.setattr(prop_base, "_DEFAULT_EAGER_OPTIONS", EagerOptions(use_compile=False))
+    # and, as when the SEM tests were written, memory=None is the full tape there
+    # (PropSEM's own default is PropTorch's strategy: test_sem_memory_api checks it)
+    monkeypatch.setattr(prop_base, "_DEFAULT_MEMORY", Full())

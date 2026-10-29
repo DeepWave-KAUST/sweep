@@ -37,9 +37,12 @@ The options PropTorch has mean what they mean there:
 - `topography` — the surface row of every column, `(nx,)` in 2-D and
   `(ny, nx)` in 3-D, fractional rows allowed: a free surface on top, which the
   curved mesh follows (it passes through the rows at the element nodes);
-- `memory` — `Full()` (default), `BoundarySaving(storage_dtype=...)` or
+- `memory` — `Full()`, `BoundarySaving(storage_dtype=...)` or
   `Ckpt(chunks=...)` from `sweep.propagator` (see
-  [Boundary saving](#boundary-saving));
+  [Boundary saving](#boundary-saving)). Without it PropSEM takes PropTorch's
+  default strategy: boundary saving on `impl='c'` where its kernels have it
+  (else the full tape) and checkpointing on eager, in chunks of 8 steps;
+  `memory_strategy` reports `'full'`, `'boundary'` or `'ckpt'`;
 - `impl` — `None` runs the CUDA kernels where the equation has them and the
   device is CUDA, eager otherwise; `'eager'` / `'c'` choose;
 - `eager_options` — `EagerOptions(...)` from `sweep.propagator` (or its dict),
@@ -85,8 +88,8 @@ Three things speed it up, and they combine:
   warns once and runs the step uncompiled. The vmapped multi-shot batch of
   boundary saving runs uncompiled, and the CUDA-graph modes (`reduce-overhead`,
   `max-autotune`) go with `Full()` only.
-- **`memory=Ckpt(chunks=K)`** checkpoints a single shot, or each shot of a
-  per-shot model batch: the forward pass keeps one state every `K` steps, and
+- **`memory=Ckpt(chunks=K)`** — eager's default, with `K = 8` — checkpoints a
+  single shot, or each shot of a per-shot model batch: the forward pass keeps one state every `K` steps, and
   the backward pass recomputes each chunk under autograd. Peak memory is `nt/K`
   states plus one chunk's tape. On CUDA each chunk is captured once per call as
   a CUDA graph and replayed `nt/K` times, so the time loop issues no kernels
@@ -110,10 +113,10 @@ forward + backward call in GB:
 | --- | --- | --- | --- |
 | `impl='c'`, `Full()` | 0.025 / 0.060 (3.2) | 0.24 / 0.89 (20.4) | 0.30 / 0.83 (20.9) |
 | `impl='c'`, `BoundarySaving()` | 0.025 / 0.12 (1.2) | 0.24 / 1.39 (3.4) | — |
-| eager, `use_compile=False` | 1.92 / 7.98 (8.3) | 2.65 / 11.33 (37.8) | 2.38 / 9.37 (35.7) |
-| eager (compiled, the default) | 0.59 / 1.85 (6.8) | 0.67 / 2.65 (21.7) | 0.66 / 2.41 (16.3) |
+| eager, `use_compile=False`, `Full()` | 1.92 / 7.98 (8.3) | 2.65 / 11.33 (37.8) | 2.38 / 9.37 (35.7) |
+| eager, `Full()` | 0.59 / 1.85 (6.8) | 0.67 / 2.65 (21.7) | 0.66 / 2.41 (16.3) |
 | eager, `use_compile=False`, `Ckpt(chunks=8)` | 0.41 / 1.47 (1.3) | 1.48 / 5.65 (3.9) | 0.80 / 3.36 (7.9) |
-| eager, `Ckpt(chunks=8)` | 0.072 / 0.33 (1.2) | 0.48 / 2.17 (3.5) | 0.42 / 1.53 (7.7) |
+| eager, `Ckpt(chunks=8)` (the defaults) | 0.072 / 0.33 (1.2) | 0.48 / 2.17 (3.5) | 0.42 / 1.53 (7.7) |
 
 Where the equation has CUDA kernels (the `impl="c"` column of the
 [equation table](equations.md#sem-family-spectral-elements)), `impl='c'` is the
@@ -124,10 +127,13 @@ runs everything else: the equations without CUDA kernels
 (`AcousticSEM2DDeformed`, `ElasticVSSEM2DDeformed`, `ElasticVTISEM2DDeformed`,
 `ElasticVSSEM3DDeformed` and the Biot forms), the CPU, fp64,
 [wavefield snapshots](#wavefield-snapshots) and second derivatives
-(`create_graph=True` with `Full()`). On a GPU, the compiled step (the default)
-with `Ckpt(chunks=8)` is its fastest configuration for single shots, at about
-the memory of `impl='c'` with `BoundarySaving()`; `chunks` from 8 to 32 run
-about as fast. On large 3-D meshes the step is bound by the GPU rather than by
+(`create_graph=True` with `Full()`). On a GPU, its defaults — the compiled
+step and `Ckpt(chunks=8)` — are its fastest configuration for single shots, at
+about the memory of `impl='c'` with `BoundarySaving()`. Longer chunks cost more
+there: the CUDA graphs are rebuilt per call, at a cost that grows with the
+chunk (2-D elastic at 201 × 401, nt = 1000, one forward + backward call on an
+A100: 0.51 / 0.61 / 0.81 s for chunks of 8 / 32 / 100 steps, 1.24 s with
+`Full()`). On large 3-D meshes the step is bound by the GPU rather than by
 issuing kernels, the graphs save little, and the recomputation can make `Ckpt`
 slower than compiled `Full()` (1.35× for 3-D acoustic at 81³ on an H100), which
 is the faster choice there where its tape fits in memory.
@@ -258,7 +264,10 @@ Knobs:
   precision** — and the constructor's `bs_store_dtype_elem` sets a separate
   dtype for the ELEMENT rings (`impl='c'`). In the
   shot batch the int8 quantisation scale is **per (field, step, shot)**, so one
-  loud shot cannot degrade a quiet shot's reconstruction.
+  loud shot cannot degrade a quiet shot's reconstruction. `'fp16'`, which
+  PropTorch takes, is refused: a plain fp16 ring flushes the SEM's small field
+  values to zero (2-D elastic gradients came out 15% off), where `'bf16'` keeps
+  fp32's range.
 - `bs_band_mode='full' | 'rim'` (constructor) — what the ring covers: the whole
   band (default; gradient equals the full tape everywhere) or only its
   interface line. See **Rim mode**.
@@ -752,7 +761,8 @@ The fields are the ones the receivers record from (`v_z` behind
 `receiver_type=["vz"]`, `chi` behind `p` on the potential form); the shots
 run one by one. A receiver records through the same basis, so its trace is the
 snapshot at its grid point. `impl='c'` keeps no intermediate state and refuses
-snapshots, as does boundary saving.
+snapshots, as do an explicit `BoundarySaving()` and `Ckpt()`; the default
+strategy gives way to the full tape for them.
 
 ## The model edge
 

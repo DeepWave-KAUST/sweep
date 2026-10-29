@@ -326,6 +326,11 @@ class _CkptRolloutFn(torch.autograd.Function):
                 "tape inside the backward pass); use memory=Full() for create_graph=True "
                 "/ higher-order gradients.")
         R = ctx.R
+        if R is None:
+            raise RuntimeError(
+                "memory=Ckpt's checkpointed rollout runs one backward pass per forward "
+                "(it frees its checkpoints in it); a second one (retain_graph=True) "
+                "needs memory=Full().")
         R.run_backward(gseis)
         g_wav = R.g_wav[..., :R.nt].clone() if ctx.wav_grad else None
         g_leaves = [g.clone() if used else None for g, used in zip(R.g_leaves, R.used)]
