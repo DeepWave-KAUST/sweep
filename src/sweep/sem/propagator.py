@@ -955,6 +955,8 @@ class SEMPropagator:
     source_payloads: list
     receiver_type: list = None        # field names, in output-component order
     _compiled_step: object = None     # cached torch.compile(eq.step), lazy
+    _compiled_key: object = None      # the compile settings it was built with
+    grid_label: str | None = None     # names the size in compile notices ("a 201x401 grid")
 
     @classmethod
     def build(
@@ -1295,7 +1297,7 @@ class SEMPropagator:
         if getattr(self, "_compiled_step", None) is None or self._compiled_key != key:
             self._compiled_step = compile_or_fallback(
                 self.eq.step, self._dev_dtype()[0],
-                f"the {type(self.eq).__name__} step", compile_options)
+                f"the {type(self.eq).__name__} step", compile_options, size=self.grid_label)
             self._compiled_key = key
         return self._compiled_step
 
@@ -1321,8 +1323,8 @@ class SEMPropagator:
         source = source_spec if like is None else (*source_spec, like)
 
         def step_of(eq):
-            return compile_or_fallback(eq.step, rec_W.device,
-                                       f"the {type(eq).__name__} step", compile_options)
+            return compile_or_fallback(eq.step, rec_W.device, f"the {type(eq).__name__} step",
+                                       compile_options, size=self.grid_label)
 
         return run_checkpointed(self.eq, step_of, source, wavelet, rec_GI, rec_W,
                                 recv, self.dt, self.nt, int(chunk))
@@ -1343,5 +1345,6 @@ class SEMPropagator:
                 "reconstructed.")
         seis = run_boundary_saved(
             self.eq, source_spec, wavelet, rec_G, rec_W, self.dt, self.nt,
-            compile_options=compile_options, store_dtype=store_dtype, recv_idx=recv)
+            compile_options=compile_options, compile_size=self.grid_label,
+            store_dtype=store_dtype, recv_idx=recv)
         return torch.stack(seis, -1).transpose(0, 1)

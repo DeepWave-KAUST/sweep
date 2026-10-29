@@ -13,7 +13,7 @@ import sweep._compile as C
 import sweep.propagator._torch_eager as TE
 import sweep.sem.prop_base as PB
 from sweep.propagator import BoundarySaving, Ckpt, EagerOptions
-from sweep.sem import PropSEM, AcousticSEM2D
+from sweep.sem import PropSEM, AcousticSEM2D, ElasticVSSEM2DDeformed
 
 SHAPE, NT = (21, 33), 40
 
@@ -24,14 +24,16 @@ def _prop(**kw):
                    impl="eager", **kw)
 
 
-def _call(prop, nshots=1):
+def _call(prop, nshots=1, grad=True):
+    """One call in grad mode; ``grad`` makes the model require grad and runs the backward."""
     w = torch.zeros(NT, dtype=torch.float64)
     w[3] = 1.0
     src = np.array([[10 + 10 * b, 2.0] for b in range(nshots)])
     rec = np.stack([np.arange(2, 31, 4), np.full(8, 2.0)], 1)[None]
-    vp = torch.full(SHAPE, 2000.0, dtype=torch.float64, requires_grad=True)
+    vp = torch.full(SHAPE, 2000.0, dtype=torch.float64, requires_grad=grad)
     out = prop(w, src, rec, models=[vp])
-    out.square().sum().backward()
+    if grad:
+        out.square().sum().backward()
     return out.detach(), vp.grad
 
 
@@ -139,3 +141,94 @@ def test_reduce_overhead_runs_the_full_tape():
     r1, g1 = run(EagerOptions(compile_mode="reduce-overhead"))
     rel = lambda a, b: float((a - b).norm() / b.norm())
     assert rel(r1, r0) < 1e-5 and rel(g1, g0) < 1e-4
+
+
+def _announced(capsys):
+    return [ln for ln in capsys.readouterr().err.splitlines()
+            if ln.startswith("sweep: torch.compile is compiling")]
+
+
+def test_each_new_compile_is_announced(compiles, capsys, monkeypatch):
+    """Once per new grid size, shot count, dtype and gradient recording, before it
+    compiles; the first line of the process says how long it takes and how to turn
+    it off."""
+    monkeypatch.setattr(C, "_ANNOUNCED", set())
+    _call(_prop(eager_options=EagerOptions()))
+    first = _announced(capsys)
+    assert len(first) == 1, first
+    assert "the AcousticSEM2D step for a 21x33 grid in float64 (with gradients)" in first[0]
+    assert "use_compile=False" in first[0]
+    _call(_prop(eager_options=EagerOptions()))
+    assert _announced(capsys) == [], "the same compile again: nothing new"
+    _call(_prop(eager_options=EagerOptions()), nshots=2)
+    two = _announced(capsys)
+    assert len(two) == 1, two
+    assert "the vmapped AcousticSEM2D step for 2 shots on a 21x33 grid in float64" in two[0]
+    assert "use_compile=False" not in two[0]
+    _call(_prop(eager_options=EagerOptions(use_compile=False)))
+    assert _announced(capsys) == []
+
+
+@pytest.mark.parametrize("nshots", [1, 2], ids=["loop", "vmapped"])
+def test_gradients_are_named_only_when_autograd_records(compiles, capsys, monkeypatch, nshots):
+    """The step reads the model's coefficients off the equation, not its arguments:
+    with grad mode on and a model without requires_grad it compiles no backward, and
+    the first step of a gradient call compiles one although its fields do not
+    require grad yet."""
+    monkeypatch.setattr(C, "_ANNOUNCED", set())
+    _call(_prop(eager_options=EagerOptions()), nshots, grad=False)
+    plain = _announced(capsys)
+    assert len(plain) == 1 and "with gradients" not in plain[0], plain
+    _call(_prop(eager_options=EagerOptions()), nshots)
+    grads = _announced(capsys)
+    assert len(grads) == 1 and "in float64 (with gradients)" in grads[0], grads
+
+
+def test_a_forward_that_records_nothing_is_one_compile(compiles, capsys, monkeypatch):
+    """Without gradients the step compiles the one graph without a backward, in grad
+    mode or not (Dynamo retraces it; Inductor's cache hits): one line."""
+    monkeypatch.setattr(C, "_ANNOUNCED", set())
+    _call(_prop(eager_options=EagerOptions(), memory=Ckpt(chunks=8)), grad=False)   # under no_grad
+    assert len(_announced(capsys)) == 1
+    _call(_prop(eager_options=EagerOptions()), grad=False)    # the full tape, in grad mode
+    assert _announced(capsys) == []
+
+
+def test_a_full_tape_after_ckpt_announces_its_own_compile(compiles, capsys, monkeypatch):
+    """Ckpt's backward compiles the step with its fields requiring grad; the first
+    steps of the full tape compile it with only the coefficients requiring grad --
+    other compiles, with a line of their own."""
+    monkeypatch.setattr(C, "_ANNOUNCED", set())
+    _call(_prop(eager_options=EagerOptions(), memory=Ckpt(chunks=8)))
+    assert any("(with gradients)" in ln for ln in _announced(capsys))
+    _call(_prop(eager_options=EagerOptions()))            # the suite's default: the full tape
+    full = _announced(capsys)
+    assert len(full) == 1 and "(with gradients)" in full[0], full
+    _call(_prop(eager_options=EagerOptions()))
+    assert _announced(capsys) == []
+
+
+def test_a_new_set_of_models_that_require_grad_is_announced(compiles, capsys, monkeypatch):
+    """Dynamo specializes the step on which of the coefficients it reads off the
+    equation require grad: inverting vp alone, then vp and vs, compiles twice."""
+    monkeypatch.setattr(C, "_ANNOUNCED", set())
+
+    def fwi(*grads):
+        p = PropSEM(ElasticVSSEM2DDeformed, shape=SHAPE, dh=10.0, dt=1e-3, n_order=4, abcn=8,
+                    free_surface=True, f_dominant=15.0, dev="cpu", dtype=torch.float64,
+                    source_type=["sxx", "szz"], receiver_type=["vx", "vz"], impl="eager",
+                    eager_options=EagerOptions())
+        w = torch.zeros(NT, dtype=torch.float64)
+        w[3] = 1.0
+        rec = np.stack([np.arange(2, 31, 4), np.full(8, 2.0)], 1)[None]
+        ms = [torch.full(SHAPE, v, dtype=torch.float64, requires_grad=g)
+              for v, g in zip((2000.0, 1100.0, 2000.0), grads)]
+        p(w, np.array([[16, 2.0]]), rec, models=ms).square().sum().backward()
+    fwi(True, False, False)
+    first = _announced(capsys)
+    assert len(first) == 1 and "(with gradients)" in first[0], first
+    fwi(True, True, False)
+    again = _announced(capsys)
+    assert len(again) == 1 and "(with gradients)" in again[0], again
+    fwi(True, True, False)
+    assert _announced(capsys) == []

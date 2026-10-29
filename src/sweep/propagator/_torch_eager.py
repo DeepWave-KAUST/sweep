@@ -1,5 +1,4 @@
 import types
-import sys
 import warnings
 import weakref
 
@@ -7,7 +6,8 @@ import torch
 from torch.utils.checkpoint import checkpoint as ckpt_torch
 
 
-from sweep._compile import compiler_failures as _compiler_failures, compiler_hint, failure_reason
+from sweep._compile import (compile_notice, compiler_failures as _compiler_failures,
+                            compiler_hint, failure_reason)
 from sweep.propagator.base import PropBase
 from sweep.propagator.options import EAGER_DEFAULTS
 from sweep.equations._cpml import StripLayout
@@ -20,14 +20,6 @@ from sweep.propagator._torch_eager_custom_grad import _CustomGradientMixin
 
 _DYNAMO_LIMIT_WARNED = False
 _NO_COMPILE_WARNED = False
-# Compiling the step takes seconds to minutes and prints nothing; say so once
-# per process, before the first compiled call, so a long first call does not
-# look like a hang.  stderr, not warnings: notebooks often silence warnings.
-_COMPILE_NOTICE_SHOWN = False
-_COMPILE_NOTICE = (
-    "sweep: compiling the eager time step with torch.compile; the first forward/backward "
-    "pass takes longer (seconds to a few minutes, once per grid size, cached on disk for "
-    "later runs). EagerOptions(use_compile=False) runs uncompiled instead.")
 
 # Compiling inside a checkpointed forward breaks its recompute before torch 2.5
 # (see _rollout_ckpt).
@@ -266,15 +258,21 @@ class _PropTorchEager(
         # C++ graph that gc cannot see, and a dropped propagator would keep its
         # workspace and boundary ring on the device for good.
         owner = weakref.ref(self)
+        # Compiling takes seconds to minutes and prints nothing: every new compile --
+        # a new grid size or shot count (the wavefields' shape), a new set of models
+        # that require grad -- is announced before it starts (sweep._compile). The
+        # models are arguments of the step, and _SettledSteps keeps one set of flags
+        # per rollout, so the notice repeats a line only for a new compile.
+        grid = "x".join(str(n) for n in self._shape_phys)
+        notice = compile_notice(f"the {type(self.equation).__name__} step",
+                                lambda shape: f"{shape[0]} shots on a {grid} grid"
+                                if shape and shape[0] > 1 else f"a {grid} grid")
 
         def step(*args, **kwargs):
-            global _COMPILE_NOTICE_SHOWN
             prop = owner()
             if prop is not None and not prop.use_compile:
                 return fn(*args, **kwargs)
-            if not _COMPILE_NOTICE_SHOWN:
-                _COMPILE_NOTICE_SHOWN = True
-                print(_COMPILE_NOTICE, file=sys.stderr, flush=True)
+            notice(args, kwargs)
             try:
                 return compiled(*args, **kwargs)
             except _compiler_failures() as exc:

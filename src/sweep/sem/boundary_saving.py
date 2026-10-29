@@ -528,7 +528,7 @@ def _bs_setup(eq, recv_idx):
 
 
 def run_boundary_saved(eq, source_spec, wavelet, rec_G, rec_W, dt, nt,
-                       *, compile_options=None, store_dtype=None,
+                       *, compile_options=None, compile_size=None, store_dtype=None,
                        frame_every=None, recv_idx=None):
     """Boundary-saved single-shot rollout for any SEM equation with BS hooks.
 
@@ -559,7 +559,7 @@ def run_boundary_saved(eq, source_spec, wavelet, rec_G, rec_W, dt, nt,
       reconstruction noise; int8 trades a little accuracy for the smallest tape.
     * ``compile_options`` — an ``EagerOptions`` to wrap ``eq.step`` in
       :func:`torch.compile` with (``None`` or ``use_compile=False``: run it as it
-      is). Because the
+      is; ``compile_size`` names the problem size in its compile notice). Because the
       reverse pass (``reverse_step``) and the per-step VJP (``bs_recompute``) both
       call ``self.step``, compiling that one method fuses the forward recompute,
       the reverse reconstruction *and* the adjoint recompute — ~2× faster on GPU
@@ -574,8 +574,8 @@ def run_boundary_saved(eq, source_spec, wavelet, rec_G, rec_W, dt, nt,
     (specs, grad_idx, recv_idx, n_src,
      device, dtype) = _bs_setup(eq, recv_idx)
     if compiles:
-        eq.step = compile_or_fallback(eq.step, device,
-                                      f"the {type(eq).__name__} step", compile_options)
+        eq.step = compile_or_fallback(eq.step, device, f"the {type(eq).__name__} step",
+                                      compile_options, size=compile_size)
 
     cpml_zero_idx, save_idx = cpml_node_masks(eq)
     elem_fields = list(getattr(eq, "bs_elem_ring_save", ()) or ())

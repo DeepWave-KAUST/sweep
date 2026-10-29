@@ -28,6 +28,21 @@ and this project adheres to
   round-off.
 
 ### Changed
+- **Every new compile of the eager step is announced, on PropTorch and PropSEM.**
+  The line saying that `torch.compile` is compiling used to print once per
+  process, so a later grid size, shot count or first gradient call compiled again
+  in silence -- seconds to minutes that looked like a hang. Now each new compile
+  prints one line on stderr before it starts, naming the step and the size
+  (`for 2 shots on a 201x401 grid`), the dtype when it is not float32, and
+  `(with gradients)` when autograd records the call -- grad mode on and a tensor
+  that requires grad; a forward in grad mode with no model that requires grad
+  compiles no backward and is not called one. Compiles are told apart as Dynamo
+  tells them apart: by the inputs' shape and dtype and, when the call records, by
+  which tensors require grad (the models, and on PropSEM the coefficients the
+  step reads off the equation), so inverting vp alone and then vp and vs is two
+  compiles, two lines. The first line of the process still says how long a
+  compile takes and how to turn compiling off. The check costs ~2 us of Python
+  per compiled step.
 - **`PropSEM` compiles its eager step by default and takes PropTorch's
   `eager_options=`.** `PropSEM(..., eager_options=EagerOptions(...))` (or its
   dict) replaces the call argument `compile_step`, which is gone (passing it
@@ -35,7 +50,7 @@ and this project adheres to
   `True`, as on PropTorch -- `compile_mode`, `compile_dynamic`, `compile_backend`
   and `compile_fullgraph` reach `torch.compile`, behind the FD eager path's guards
   (no `torch.compile`, torch 2.3's Inductor on CPU, Dynamo's recompile cap, the
-  once-per-process compile notice). As on PropTorch, `eager_options` with
+  compile notices). As on PropTorch, `eager_options` with
   `impl='c'` raises; `store_last_wavefield` and `cpml_strips` have no SEM
   counterpart and raise when set, and so do the CUDA-graph compile modes
   (`reduce-overhead`, `max-autotune`) together with `BoundarySaving()` or `Ckpt()`

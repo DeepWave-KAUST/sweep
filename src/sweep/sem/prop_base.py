@@ -1651,7 +1651,12 @@ class PropSEM:
                 receiver_xz=self._rec_row(acq.receivers, b),
                 receiver_type=self._recv_base,
                 pml_guard=pml_guard, **extra))
+            props[-1].grid_label = self._grid_label()
         return props
+
+    def _grid_label(self):
+        """How compile notices name this problem's size: the model grid."""
+        return "a " + "x".join(str(n) for n in self.shape) + " grid"
 
     def _forward_snapshots(self, props, acq, steps, *, compile_options=None):
         """``return_wavefield=True``: each shot's full-tape forward with its
@@ -1870,6 +1875,7 @@ class PropSEM:
         rec_G, rec_W = self._on_dev(*self._gather_rows(mesh, prop))
         out = run_boundary_saved(eq, source_spec, wav, rec_G, rec_W,
                                  self.dt, self.nt, compile_options=compile_options,
+                                 compile_size=self._grid_label(),
                                  store_dtype=store_dtype, recv_idx=recv_idxs)
         return torch.stack(out, -1).transpose(0, 1)
 
@@ -1930,7 +1936,8 @@ class PropSEM:
         vstep = torch.vmap(lambda fields, src: eq.step(fields, src, dt),
                            in_dims=(0, 0))
         vstep = compile_or_fallback(vstep, dev, f"the vmapped {type(eq).__name__} step",
-                                    compile_options)
+                                    compile_options, size=f"{B} shots on {self._grid_label()}",
+                                    captured=eq)
 
         ar = torch.arange(B, device=dev)[:, None, None]
 

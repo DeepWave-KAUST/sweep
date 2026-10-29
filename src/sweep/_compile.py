@@ -18,6 +18,109 @@ import torch
 # would trace the step and call the failing compiler again on every propagator build.
 _FAILED: dict = {}
 
+# The compiles torch.compile has been announced to make in this process, keyed on what
+# Dynamo specializes the step on (see compile_notice). Each new one -- a new grid size or
+# shot count, a new dtype, a new set of tensors that require grad -- takes seconds to
+# minutes and prints nothing.
+_ANNOUNCED: set = set()
+
+
+def compile_notice(what: str, size_of, captured=None, *, repeat=True):
+    """``notice(args, kwargs)``, for a compiled step to call with its arguments before
+    each call: says on stderr that torch.compile is about to compile ``what`` (e.g.
+    "the Acoustic step") for the size ``size_of(shape)`` names (e.g. "a 201x401
+    grid"), once per new compile in the process. The first line of the process also
+    says how long it takes and how to turn it off. stderr, not warnings: notebooks
+    often silence warnings, and a silent first call looks like a hang.
+
+    A compile is told apart by the first tensor argument's shape and dtype (the first
+    of a tuple or list of them) and, when autograd records the call, by which tensors
+    require grad -- the arguments, and the tensors ``captured`` holds (the object the
+    step reads its coefficients from; searched only in grad mode and when the
+    arguments' flags change): Dynamo builds a backward for each such set. The call
+    records when grad mode is on and one of those tensors requires grad, and its line
+    then says "with gradients"; grad mode alone is not enough, as a forward with
+    nothing that requires grad compiles no backward.
+
+    ``repeat=False`` prints each line once per notice, for a step built for one call
+    whose first steps each compile a graph while the fields pick up requires_grad."""
+    seen = [None]                     # the last call's (shape, dtype, grad mode, flags)
+    printed = set()
+
+    def notice(args, kwargs):
+        # Every step of a rollout comes here: ~2 us on the loop below.
+        lead, flags = None, 1         # a 1, then one bit per tensor: its requires_grad
+        for group in (args, kwargs.values()):
+            for a in group:
+                if isinstance(a, torch.Tensor):
+                    if lead is None:
+                        lead = a
+                    flags = flags << 1 | a.requires_grad
+                elif isinstance(a, (tuple, list)):
+                    for t in a:
+                        if isinstance(t, torch.Tensor):
+                            if lead is None:
+                                lead = t
+                            flags = flags << 1 | t.requires_grad
+        grad = torch.is_grad_enabled()
+        shape, dtype = (None, None) if lead is None else (lead.shape, lead.dtype)
+        if (shape, dtype, grad, flags) == seen[0]:
+            return
+        seen[0] = (shape, dtype, grad, flags)
+        held = _grad_flags(captured) if grad and captured is not None else ()
+        # flags & (flags - 1) is 0 when the leading 1 is the only bit set
+        records = grad and bool(flags & (flags - 1) or any(held))
+        size = size_of(shape)
+        # A call that records nothing compiles the one graph without a backward,
+        # whatever grad mode and the flags are (Dynamo retraces, Inductor's cache hits).
+        key = (what, size, shape, dtype) + ((flags, held) if records else ())
+        if key in _ANNOUNCED:
+            return
+        first = not _ANNOUNCED
+        _ANNOUNCED.add(key)
+        if dtype is not None and dtype != torch.float32:
+            size += f" in {str(dtype).replace('torch.', '')}"
+        line = f"sweep: torch.compile is compiling {what} for {size}"
+        if records:
+            line += " (with gradients)"
+        if not repeat and line in printed:
+            return
+        printed.add(line)
+        if first:
+            line += ("; the first call on each new grid size takes seconds to a few minutes "
+                     "(cached on disk for later runs). EagerOptions(use_compile=False) runs "
+                     "uncompiled instead.")
+        print(line, file=sys.stderr, flush=True)
+
+    return notice
+
+
+def _grad_flags(obj) -> tuple:
+    """The ``requires_grad`` of each tensor in ``obj`` -- at any depth of attributes,
+    tuples, lists and dicts, once per tensor, in the order of the walk of
+    ``sweep.sem.ckpt_rollout.swap_grad_tensors``."""
+    flags, seen = [], set()
+
+    def walk(x):
+        if id(x) in seen or isinstance(x, (str, bytes, int, float, complex, type(None), type,
+                                           torch.device, torch.dtype)):
+            return
+        seen.add(id(x))
+        if isinstance(x, torch.Tensor):
+            flags.append(x.requires_grad)
+        elif isinstance(x, (tuple, list)):
+            for y in x:
+                walk(y)
+        elif isinstance(x, dict):
+            for y in x.values():
+                walk(y)
+        elif hasattr(x, "__dict__") and not callable(x):
+            for y in vars(x).values():
+                walk(y)
+
+    walk(obj)
+    return tuple(flags)
+
 
 def _resolve_is_compiling():
     """The "is Dynamo tracing this?" probe: ``torch.compiler.is_compiling``, or on
@@ -71,15 +174,19 @@ def compiler_hint(device_type: str) -> str:
             "to let Inductor fetch one through conda.")
 
 
-def compile_or_fallback(fn, device, what: str, options):
+def compile_or_fallback(fn, device, what: str, options, size=None, captured=None):
     """``torch.compile(fn)`` with the compile settings of ``options`` (an
     :class:`~sweep.propagator.EagerOptions`), run as ``fn`` once the compiler fails.
 
     ``options=None`` or ``use_compile=False`` returns ``fn`` itself. The guards are the
     FD eager path's, read from ``sweep.propagator._torch_eager`` at call time: a torch
     without ``torch.compile``, or torch 2.3's Inductor on CPU, runs uncompiled after
-    one notice per process; Dynamo's recompile cap is raised; the first compiled call
-    in the process says that it compiles. The first compiler failure warns once,
+    one notice per process; Dynamo's recompile cap is raised. Every new compile -- new
+    input shapes or dtype, a new set of tensors that require grad -- is announced
+    before it starts (:func:`compile_notice`), for ``size`` (e.g. "a 201x401 grid";
+    the inputs' shape when ``None``); ``captured`` is the object ``fn`` reads its
+    coefficients from (a bound method's own object when ``None``). The first compiler
+    failure warns once,
     naming ``what`` (e.g. "the ElasticSEM2DDeformed step"), and is remembered per
     ``(device type, what)`` for the rest of the process, so later builds of the same
     step skip the attempt. Errors raised by the step itself propagate as before."""
@@ -108,12 +215,15 @@ def compile_or_fallback(fn, device, what: str, options):
     compiled = torch.compile(fd._with_own_code(fn) if fd.OWN_CODE_PER_COMPILE else fn,
                              **compile_kwargs)
     failures = compiler_failures()
+    # The steps compiled here are built per call (SEM): one line for the graphs its
+    # first steps compile.
+    notice = compile_notice(what, lambda shape: size or f"inputs of shape {tuple(shape or ())}",
+                            getattr(fn, "__self__", None) if captured is None else captured,
+                            repeat=False)
 
     def step(*args, **kwargs):
         if key not in _FAILED:
-            if not fd._COMPILE_NOTICE_SHOWN:
-                fd._COMPILE_NOTICE_SHOWN = True
-                print(fd._COMPILE_NOTICE, file=sys.stderr, flush=True)
+            notice(args, kwargs)
             try:
                 return compiled(*args, **kwargs)
             except failures as exc:

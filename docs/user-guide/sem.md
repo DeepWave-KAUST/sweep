@@ -82,7 +82,9 @@ Three things speed it up, and they combine:
   fuses the pointwise work, and when it compiles for CUDA the GLL
   reference-derivative contractions are written out as multiply-adds that it
   fuses with the gather before them and the pointwise work after them. The first
-  call compiles; later calls with the same shapes reuse it. On the CPU, Inductor
+  call compiles, and so does the first call with a new grid size, shot count,
+  dtype or set of models that require grad; each says so on stderr before it
+  starts, and later calls reuse it. On the CPU, Inductor
   builds C++ with `torch._inductor.config.cpp.cxx` (seeded from `$CXX`), which
   must accept `-std=c++20` (g++ 10 or newer); when the compiler fails, the call
   warns once and runs the step uncompiled. The vmapped multi-shot batch of
