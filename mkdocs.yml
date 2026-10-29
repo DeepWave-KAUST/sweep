@@ -104,6 +104,7 @@ nav:
       - Datasets: user-guide/datasets.md
       - Extending: user-guide/extending.md
       - CLI: user-guide/cli.md
+      - AI assistants (Agent Skills): user-guide/agent-skills.md
   - Developer:
       - CUDA driver skeletons: dev/cuda_drivers.md
       - Building the CUDA core: dev/building.md
