@@ -7,9 +7,10 @@ plausible, and the thing you asked for never happened.
   On the other six it was stored and never read, so a caller believed the run
   was reconstructing the wavefield from a boundary tape -- and was quietly
   paying full-tape memory instead.
-* ``memory=Ckpt(...)`` (the old ``checkpoint_chunk``) only reaches
-  ``_run_batched``. The ``nshots == 1`` branch returns before that, so a
-  single-shot call dropped it.
+* ``memory=Ckpt(...)`` (the old ``checkpoint_chunk``) only reached
+  ``_run_batched``. The ``nshots == 1`` branch returned before that, so a
+  single-shot call dropped it; it was refused there, and now runs the
+  checkpointed rollout (``sweep.sem.ckpt_rollout``).
 * ``SEMGraphGradRunner`` never looked at ``receiver_type``; it returned the
   equation's own field order, so a selection or a re-ordering was ignored.
 
@@ -127,15 +128,23 @@ def _elastic(dt, **kw):
                    f_dominant=8.0, dev="cpu", impl="eager", **kw)
 
 
-def test_ckpt_is_rejected_for_a_single_shot():
-    """It only reaches the vmapped path, so a single shot silently dropped it."""
+def test_ckpt_reaches_a_single_shot(monkeypatch):
+    """A single shot used to drop it silently (it only reached the vmapped
+    path); now it runs the checkpointed rollout -- and does run it."""
+    import sweep.sem.ckpt_rollout as CR
+    calls = []
+    real = CR.run_checkpointed
+    monkeypatch.setattr(CR, "run_checkpointed", lambda *a, **k: calls.append(1) or real(*a, **k))
     nz = nx = 41
     dt = 0.30 * (0.172 * NO * 12.5) / 2880.0
     w, rec = _shot(nz, nx, 60, dt)
-    p = _elastic(dt, memory=Ckpt(chunks=20))
     models = [torch.full((nz, nx), v) for v in (2400.0, 1250.0, 2000.0)]
-    with pytest.raises(ValueError, match="Ckpt"):
-        p(w, np.array([[nx // 2, 3]]), rec, models=models)
+    with torch.no_grad():
+        a = _elastic(dt, memory=Ckpt(chunks=20))(w, np.array([[nx // 2, 3]]), rec, models=models)
+        b = _elastic(dt)(w, np.array([[nx // 2, 3]]), rec, models=models)
+    assert calls == [1]
+    rel = float((a - b).abs().max() / b.abs().max())
+    assert rel < 1e-6, f"the checkpointed single shot differs by {rel:.2e}"
 
 
 def test_ckpt_still_works_for_multiple_shots():

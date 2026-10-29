@@ -14,6 +14,8 @@ puts a cut right where the interface runs and compares the whole record.
 """
 from __future__ import annotations
 
+import gc
+
 import numpy as np
 import pytest
 import torch
@@ -439,6 +441,11 @@ def test_fs_dd_boundary_saving_saves_memory():
     seven node histories AND six element histories, which is what makes this
     the most expensive path to tape."""
     nz, nx, nt = 49, 97, 300
+    # what earlier tests in the process still hold (cuBLAS workspaces, caches) is in
+    # both peaks and would pull their ratio towards 1; count from here
+    gc.collect()
+    torch.cuda.empty_cache()
+    held = torch.cuda.memory_allocated()
 
     def build(memory=None):
         return S.PropSEM(AcousticElasticSEM2D, shape=(nz, nx), dh=DH, dt=DT,
@@ -473,7 +480,7 @@ def test_fs_dd_boundary_saving_saves_memory():
         out = ddp(wav, src, rec, models)
         (out ** 2).sum().backward()
         models[0].grad = None
-        return torch.cuda.max_memory_allocated()
+        return torch.cuda.max_memory_allocated() - held
 
     mem_tape, mem_ring = peak(), peak(BoundarySaving())
     assert mem_ring < 0.75 * mem_tape, (

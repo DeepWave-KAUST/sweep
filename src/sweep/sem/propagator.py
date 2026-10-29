@@ -1088,6 +1088,7 @@ class SEMPropagator:
         compile_step: bool = False,
         memory: str | None = None,
         bs_store_dtype=None,
+        checkpoint_chunk: int | None = None,
     ):
         """Run the time loop.
 
@@ -1103,6 +1104,12 @@ class SEMPropagator:
         wavefield reconstruction (peak memory ~flat in ``nt``) for any equation
         exposing the BS hooks (acoustic swap2nd / velocity-stress substep).
         Snapshots are unavailable in this mode (the forward state is discarded).
+
+        ``checkpoint_chunk=K`` (``PropSEM(memory=Ckpt(chunks=K))``) keeps one
+        state per ``K`` steps and rebuilds the tape chunk by chunk in the
+        backward pass, any equation, at one extra forward; on CUDA the chunks
+        are replayed as CUDA graphs (:mod:`sweep.sem.ckpt_rollout`). No
+        snapshots in this mode either.
 
         ``source_wavelet`` is ``(nt,)`` — one time function shared by every point
         source — or ``(P, nt)`` for the FD source-encoding mode: ``P = len(self.
@@ -1133,6 +1140,10 @@ class SEMPropagator:
         source_spec, like = self._source_term(per_source, device, dtype)
         step_fn = self._step_fn(compile_step)
 
+        if checkpoint_chunk:
+            return self._run_checkpointed(
+                source_spec, like, source_wavelet, rec_G, rec_W, recv, layouts,
+                snap_at is not None, memory, compile_step, checkpoint_chunk)
         if memory == "boundary":
             return self._run_boundary_saved(
                 source_spec, source_wavelet, rec_G, rec_W, recv,
@@ -1274,6 +1285,36 @@ class SEMPropagator:
                 self.eq.step, self._dev_dtype()[0],
                 f"the {type(self.eq).__name__} step")
         return self._compiled_step
+
+    def _run_checkpointed(self, source_spec, like, wavelet, rec_G, rec_W, recv,
+                          layouts, want_snapshots, memory, compile_step, chunk):
+        """The ``checkpoint_chunk`` route: one state kept per ``chunk`` steps,
+        the tape rebuilt chunk by chunk in backward -- see
+        :mod:`sweep.sem.ckpt_rollout`. ``recv`` IS the output order."""
+        from .ckpt_rollout import run_checkpointed
+        if memory is not None:
+            raise ValueError(f"checkpoint_chunk and memory={memory!r} are exclusive.")
+        if rec_G is None:
+            raise ValueError("checkpoint_chunk needs receivers.")
+        if want_snapshots:
+            raise ValueError(
+                "record_field_every / snapshot_times are not available with "
+                "checkpoint_chunk -- the rollout keeps one state per chunk.")
+        if int(chunk) < 1:
+            raise ValueError(f"checkpoint_chunk must be >= 1; got {chunk!r}.")
+        rec_GI = {i: rec_G if lay == "global" else
+                  receiver_gather(self.eq.mesh, self.receivers, lay)[0].to(rec_G.device)
+                  for i, lay in zip(recv, layouts)}
+        source = source_spec if like is None else (*source_spec, like)
+
+        def step_of(eq):
+            if not compile_step:
+                return eq.step
+            return compile_or_fallback(eq.step, rec_W.device,
+                                       f"the {type(eq).__name__} step")
+
+        return run_checkpointed(self.eq, step_of, source, wavelet, rec_GI, rec_W,
+                                recv, self.dt, self.nt, int(chunk))
 
     def _run_boundary_saved(self, source_spec, wavelet, rec_G, rec_W, recv,
                             want_snapshots, compile_step, store_dtype):

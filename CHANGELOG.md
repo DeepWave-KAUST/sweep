@@ -9,6 +9,24 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+- **`PropSEM(impl='eager', memory=Ckpt(chunks=K))` checkpoints single shots and
+  per-shot models**, which it used to refuse (`nshots=1`) or loop without
+  (per-shot models): `sweep.sem.ckpt_rollout` keeps one state per `K` steps and
+  rebuilds the tape chunk by chunk in the backward pass, for every equation --
+  Biot included, which has no boundary saving. Peak memory is `nt/K` states plus
+  one chunk's tape. On CUDA each chunk is captured once as a CUDA graph and
+  replayed `nt/K` times, so the time loop does no host work per kernel: with
+  `compile_step=True`, the 2-D equations at 201x401 run 3.5-9x faster forward
+  and 2.7-6.4x forward+backward than the compiled full tape (A100, H100, RTX
+  6000 Ada). A step that cannot be
+  captured (a host sync inside it) runs the same chunks without graphs after one
+  warning; `sweep.sem.ckpt_rollout.USE_CUDA_GRAPHS = False` turns graphs off, and
+  on CPU it is plain checkpointing. First derivatives only (`create_graph=True`
+  raises); an `nt` that `K` does not divide is padded with zero-wavelet steps
+  whose records are dropped. Records equal the full tape's; gradients agree to
+  round-off.
+
 ### Changed
 - **The compiled SEM eager step is faster on GPU: 1.05-1.75x forward,
   1.07-1.57x forward+backward (H100), most on 3-D and large 2-D** (A100,

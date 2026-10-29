@@ -481,9 +481,8 @@ def _reject_unsupported(self, kwargs, *, compile_step, adj,
                 "-- the forward state is discarded and reconstructed.")
         if self._ckpt_chunk:
             raise ValueError(
-                "return_wavefield runs the shots one by one, where Ckpt (a "
-                "knob of the vmapped multi-shot path) would be silently "
-                "ignored.")
+                "return_wavefield is not available with memory=Ckpt() -- the "
+                "checkpointed rollout keeps one state per chunk, not per step.")
     elif snapshot_times is not None or snapshot_interval is not None:
         # PropTorch ignores these without return_wavefield; here they are
         # refused, since a caller who passed them expects snapshots back
@@ -1677,16 +1676,17 @@ class PropSEM:
                                     vmapped rollout closure-captures ONE
                                     equation's coefficients)
                                     shared model, nshots>1 -> ``_forward_bs_batched``
-        memory=None/'full'          single shot -> ``props[0].forward`` (no vmap
+        memory=None/'full'/Ckpt     single shot -> ``props[0].forward`` (no vmap
                                     overhead)
                                     per-shot models -> that, looped
                                     shared model, nshots>1 -> ``_run_batched``
-                                    (vmapped; ``checkpoint_chunk`` chunks its tape)
+                                    (vmapped)
         ==========================  ================================================
 
-        ``checkpoint_chunk`` reaches exactly one of them, so the other two
-        full-tape branches REJECT it rather than accept and drop it. The two
-        rejections keep their historical (and differing) exception types.
+        ``checkpoint_chunk`` (``Ckpt(chunks=...)``) reaches all three full-tape
+        branches: ``props[b].forward`` runs the checkpointed rollout of
+        :mod:`sweep.sem.ckpt_rollout` (CUDA graphs on CUDA), ``_run_batched``
+        checkpoints its vmapped chunks with ``torch.utils.checkpoint``.
         """
         compile_step = bool(compile_step)
         recv_idxs = self._recv_idxs(eq)
@@ -1708,27 +1708,17 @@ class PropSEM:
                                             store_dtype=store_dtype)
 
         if nshots == 1:                              # single shot: no vmap overhead
-            if checkpoint_chunk:
-                # It only reaches _run_batched, which this branch never calls,
-                # so it used to be accepted and dropped. Say so rather than let
-                # a caller believe the tape is being chunked.
-                raise ValueError(
-                    "Ckpt only applies to the multi-shot (vmapped) path; this "
-                    "call has nshots=1, where it would be a no-op. Use "
-                    "memory=BoundarySaving() to bound single-shot memory.")
-            # (nt, nrec, ncomp) from the low level -> (1, nt, nrec, ncomp)
-            return props[0].forward(acq.wav_per_shot[0],
-                                    compile_step=compile_step).unsqueeze(0)
+            # (nt, nrec, ncomp) from the low level -> (1, nt, nrec, ncomp);
+            # Ckpt runs the checkpointed rollout (sweep.sem.ckpt_rollout)
+            return props[0].forward(acq.wav_per_shot[0], compile_step=compile_step,
+                                    checkpoint_chunk=checkpoint_chunk).unsqueeze(0)
         if pershot_eqs is not None:
             # per-shot models: vmap's mapped-step closure captures ONE
             # equation's coefficient tensors, so run the shots as a loop. A
             # broadcast (shared) model still reaches the vmapped path below.
-            if checkpoint_chunk:
-                raise NotImplementedError(
-                    "Ckpt applies to the vmapped shared-model path; per-shot "
-                    "models run as a loop, where it would be silently ignored.")
             return torch.stack([props[b].forward(acq.wav_per_shot[b],
-                                                 compile_step=compile_step)
+                                                 compile_step=compile_step,
+                                                 checkpoint_chunk=checkpoint_chunk)
                                 for b in range(nshots)], 0)
         return self._run_batched(eq, props, acq.wav_per_shot, recv_idxs,
                                  chunk_size=checkpoint_chunk,
