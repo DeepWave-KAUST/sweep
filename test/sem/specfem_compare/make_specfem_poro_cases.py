@@ -5,8 +5,9 @@
   the 0.25 s record), from ``poroelastic_semi_infinite_homogeneous``: ``force_z`` (a vertical
   point force), ``aniso_k`` (an anisotropic permeability), ``visc`` and ``visc_atten`` (the
   viscous drag, then with ``ATTENUATION_PORO_FLUID_PART``) -- the source 600 m deep, two of
-  the four receivers on its grid lines --, ``pe_layers`` (porous rock over a dry elastic one)
-  and ``ape_layers`` (water, porous rock, elastic rock);
+  the four receivers on its grid lines --, ``pe_layers`` (porous rock over a dry elastic one),
+  ``pp_layers`` (the porous rock over a more porous sand, the same pore fluid) and
+  ``ape_layers`` (water, porous rock, elastic rock);
 * ``pa_example``: the ``poroelastic_acoustic`` example as it is, serial and without images,
   and ``pa_example_fine`` on elements half as large.
 
@@ -26,6 +27,8 @@ XS, ZS = 1000.0, 1000.0                      # z up from the bottom: 600 m deep
 RECS = [(1100.0, 1100.0), (1100.0, 1000.0), (1000.0, 1100.0), (1150.0, 950.0)]
 ROCK = dict(rho_s=2650.0, rho_f=880.0, phi=0.1, tort=2.0, k_s=12.2e9, k_f=1.985e9,
             k_fr=9.6e9, mu_fr=5.1e9)
+SAND = dict(rho_s=2650.0, rho_f=880.0, phi=0.3, tort=1.8, k_s=36.0e9, k_f=1.985e9,
+            k_fr=4.0e9, mu_fr=3.5e9)
 SHALE = "1 2500.d0 4000.d0 2300.d0 0 0 9999 9999 0 0 0 0 0 0"      # rho vp vs
 WATER = "1 1020.d0 1500.d0 0.d0 0 0 9999 9999 0 0 0 0 0 0"
 
@@ -40,6 +43,8 @@ FEATURES = {
 #        receivers (x, z up), steps of 1e-4 s); the porous rock with eta = 1e-3
 LAYERS = {
     "pe_layers": (["rock", 800.0, SHALE, 800.0], 2, (1000.0, 1000.0),
+                  [(1100.0, 1100.0), (1100.0, 850.0), (1050.0, 750.0), (1150.0, 650.0)], 2500),
+    "pp_layers": (["rock", 800.0, "sand", 800.0], 2, (1000.0, 1000.0),
                   [(1100.0, 1100.0), (1100.0, 850.0), (1050.0, 750.0), (1150.0, 650.0)], 2500),
     "ape_layers": ([WATER, 300.0, "rock", 500.0, SHALE, 800.0], 1, (1000.0, 1450.0),
                    [(1100.0, 1400.0), (1100.0, 1250.0), (1050.0, 1000.0), (1150.0, 700.0)],
@@ -60,8 +65,7 @@ def quiet(par):
     return par
 
 
-def rock(eta, k=(1e-9, 0.0, 1e-9)):
-    r = ROCK
+def rock(eta, k=(1e-9, 0.0, 1e-9), r=ROCK):
     line = (f"3 {r['rho_s']}d0 {r['rho_f']}d0 {r['phi']}d0 {r['tort']} {k[0]:.6e} {k[1]:.6e} "
             f"{k[2]:.6e} {r['k_s']:.6e} {r['k_f']:.6e} {r['k_fr']:.6e} {eta:.6e} {r['mu_fr']:.6e} "
             f"9999999999")
@@ -108,7 +112,8 @@ for name, (stype, ang, eta, k, atten) in FEATURES.items():
     write(name, par, src)
 
 for name, (layers, stype, (xs, zs), recs, nstep) in LAYERS.items():
-    mats = [rock(1e-3) if m == "rock" else m for m in layers[::2]]
+    porous = {"rock": rock(1e-3), "sand": rock(1e-3, (5e-10, 0.0, 5e-10), SAND)}
+    mats = [porous.get(m, m) for m in layers[::2]]
     par = setp(box(par0, recs), "NSTEP", nstep)
     par = setp(par, "ATTENUATION_PORO_FLUID_PART", ".false.")
     par = setp(par, "nbmodels", len(mats))

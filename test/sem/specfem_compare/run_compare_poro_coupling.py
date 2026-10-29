@@ -1,12 +1,16 @@
-"""BiotVSSEM2DDeformed with fluid and dry elastic media against SPECFEM2D:
+"""BiotVSSEM2DDeformed with fluid and dry elastic media, and across a porosity jump, against
+SPECFEM2D:
 
 * ``pa_example``: SPECFEM2D's ``poroelastic_acoustic`` example (Morency & Tromp 2008, Fig. 8)
   -- water over an inviscid porous half-space, a pressure source in the water --, and
   ``pa_example_fine``, the same on elements half as large;
 * ``pe_layers``: a viscous porous rock over a dry elastic one, an explosion in the rock;
+* ``pp_layers``: the porous rock over a more porous sand (porosity 0.1 over 0.3, the same
+  pore fluid; SPECFEM2D shares the nodes of both, so its relative displacement is
+  continuous there, where our pore pressure is), an explosion in the rock;
 * ``ape_layers``: water, the porous rock, the elastic rock; a pressure source in the water,
 
-the last two on the box of ``run_compare_poro_features.py`` (cases from
+the last three on the box of ``run_compare_poro_features.py`` (cases from
 ``make_specfem_poro_cases.py``). Velocities only (SPECFEM2D's ``seismotype = 2``): in the water
 the fluid's, our ``q``; elsewhere the solid's, our ``v``. The source time function is
 SPECFEM2D's own (``plot_source_time_function.txt``).
@@ -36,6 +40,8 @@ ROCK = biot_from_rock(k_s=12.2e9, rho_s=2650.0, k_f=1.985e9, rho_f=880.0, eta=1e
                       mu=5.1e9, phi=0.1, kappa=1e-9, tortuosity=2.0)
 PA_ROCK = biot_from_rock(k_s=16.0554e9, rho_s=2500.0, k_f=2.295e9, rho_f=1020.0, eta=0.0,
                          k_d=10.0e9, mu=9.63342e9, phi=0.4, kappa=1e-9, tortuosity=2.0)
+SAND = biot_from_rock(k_s=36.0e9, rho_s=2650.0, k_f=1.985e9, rho_f=880.0, eta=1e-3, k_d=4.0e9,
+                      mu=3.5e9, phi=0.3, kappa=5e-10, tortuosity=1.8)
 WATER = biot_fluid(1020.0 * 1500.0**2, 1020.0)
 SHALE = biot_elastic(4000.0, 2300.0, 2500.0)
 
@@ -51,6 +57,9 @@ CASES = {
                         [(WATER, 2400.0), (PA_ROCK, 2400.0)], "pressure", (1600.0, 2900.0),
                         [(2000.0, 2934.0), (2000.0, 1867.0)]),
     "pe_layers": ((2000.0, 1600.0, 5.0), 30.0, 1e-4, 2500, [(ROCK, 800.0), (SHALE, 800.0)],
+                  "explosion", (1000.0, 1000.0),
+                  [(1100.0, 1100.0), (1100.0, 850.0), (1050.0, 750.0), (1150.0, 650.0)]),
+    "pp_layers": ((2000.0, 1600.0, 5.0), 30.0, 1e-4, 2500, [(ROCK, 800.0), (SAND, 800.0)],
                   "explosion", (1000.0, 1000.0),
                   [(1100.0, 1100.0), (1100.0, 850.0), (1050.0, 750.0), (1150.0, 650.0)]),
     "ape_layers": ((2000.0, 1600.0, 5.0), 30.0, 1e-4, 5000,
