@@ -50,6 +50,7 @@ class ElasticVTISEM2DDeformed(ElasticVSSEM2DDeformed):
         *,
         free_top: bool = False,
         cpml: Optional[SimpleElasticCPMLProfile] = None,
+        band_split: Optional[bool] = None,
     ) -> "ElasticVTISEM2DDeformed":
         """Build a VTI equation. ``vp_e`` / ``vs_e`` are the *vertical* P / S
         velocities; ``epsilon_e`` / ``delta_e`` are the Thomsen parameters
@@ -58,7 +59,7 @@ class ElasticVTISEM2DDeformed(ElasticVSSEM2DDeformed):
         # Reuse the isotropic build for mass, geometry, free-surface tangents
         # and the CPML wiring, then recast to VTI and attach the cij.
         eq = ElasticVSSEM2DDeformed.build(
-            mesh, vp_e, vs_e, rho_e, free_top=free_top, cpml=cpml)
+            mesh, vp_e, vs_e, rho_e, free_top=free_top, cpml=cpml, band_split=band_split)
         eq.__class__ = cls
         c11, c13, c33, c55 = thomsen_to_vti_cij(
             vp_e, vs_e, epsilon_e, delta_e, rho_e)
@@ -66,8 +67,10 @@ class ElasticVTISEM2DDeformed(ElasticVSSEM2DDeformed):
         eq.epsilon_e, eq.delta_e = epsilon_e, delta_e
         return eq
 
-    def _stress_increment(self, d_vx_dx, d_vx_dz, d_vz_dx, d_vz_dz, dt):
-        inc_xx = dt * (self._c11 * d_vx_dx + self._c13 * d_vz_dz)
-        inc_zz = dt * (self._c13 * d_vx_dx + self._c33 * d_vz_dz)
-        inc_xz = dt * self._c55 * (d_vx_dz + d_vz_dx)
+    def _stress_increment(self, d_vx_dx, d_vx_dz, d_vz_dx, d_vz_dz, dt, rows=None):
+        pick = (lambda t: t) if rows is None else (lambda t: t[rows])
+        c11, c13, c33, c55 = pick(self._c11), pick(self._c13), pick(self._c33), pick(self._c55)
+        inc_xx = dt * (c11 * d_vx_dx + c13 * d_vz_dz)
+        inc_zz = dt * (c13 * d_vx_dx + c33 * d_vz_dz)
+        inc_xz = dt * c55 * (d_vx_dz + d_vz_dx)
         return inc_xx, inc_zz, inc_xz

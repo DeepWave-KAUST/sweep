@@ -35,10 +35,38 @@ from typing import ClassVar, Optional
 import torch
 
 from .._assembly import assemble, contract, phys_grads
+from ..cpml.band import active_elements, element_split
 from ..cpml.elastic import ElasticCPMLProfile, build_elastic_cpml
 from ..fields import DerivedInitState, FieldSpec, check_element_arrays
 from ..mesh.domains import DomainMask, masked_inv_mass
 from ..mesh.quad9 import Quad9Mesh
+
+
+_S_NAMES = ("Sx0", "Sx1", "Sx2", "Sz0", "Sz1", "Sz2", "La1", "La2", "La3", "La4")
+_TRIPLES = ("zx1", "zx2", "xz1", "xz2", "l1", "l2")
+
+
+def _band_split(mesh, cp, mask_e, split):
+    """The C-PML band split of ``cp`` (see :mod:`sweep.sem.cpml.band`): the
+    dataclass fields ``band_elements``, ``interior_elements``, ``_band`` (the
+    geometry and every C-PML coefficient on the band) and ``_inner`` (the
+    geometry on the interior). Unsplit, ``_band`` holds the full arrays."""
+    E = mesh.n_elements
+    coefs = ([(getattr(cp, n), 1.0 if n in ("Sx0", "Sz0") else 0.0) for n in _S_NAMES]
+             + [(t, 0.0) for n in _TRIPLES for t in getattr(cp, n)])
+    band, inner = element_split(active_elements(coefs, E), split)
+    geom = {"ibool": mesh.ibool, "w_J": mesh.w_jac,
+            "ixx": mesh.inv_J[..., 0, 0], "ixz": mesh.inv_J[..., 0, 1],
+            "iex": mesh.inv_J[..., 1, 0], "iez": mesh.inv_J[..., 1, 1], "mask": mask_e}
+    every = inner.numel() == 0
+    take = lambda rows: {k: (v if v is None or every else v[rows]) for k, v in geom.items()}
+    pick = (lambda t: t) if every else (lambda t: t[band])
+    on_band = take(band)
+    on_band.update({n: pick(getattr(cp, n)) for n in _S_NAMES})
+    on_band.update({n: tuple(pick(t) for t in getattr(cp, n)) for n in _TRIPLES})
+    return dict(band_elements=band, interior_elements=inner, _band=on_band,
+                _inner=None if every else {k: (None if v is None else v[inner])
+                                           for k, v in geom.items()})
 
 
 @dataclass
@@ -48,7 +76,8 @@ class ElasticSEM2DDeformed(DerivedInitState):
     # ---- Field specification: the positional state layout (see fields.py) ---- #
     # Memory layout: 4 displacement levels + 4 strain-memory + 2 displ-memory.
     # The 6 memory fields each carry the two SPECFEM convolution branches in a
-    # trailing length-2 axis; they stay zero when ``cpml is None``.
+    # trailing length-2 axis, on the C-PML band elements only (``band2``: they
+    # are identically zero everywhere else); none without a ``cpml``.
     field_specs: ClassVar[list] = [
         FieldSpec("u_x", supports_source=True, supports_receiver=True,
                   seis_key="seis_x", snap_key="snapshots_x"),
@@ -56,12 +85,12 @@ class ElasticSEM2DDeformed(DerivedInitState):
                   seis_key="seis_z", snap_key="snapshots_z"),
         FieldSpec("u_x_prev", internal=True),
         FieldSpec("u_z_prev", internal=True),
-        FieldSpec("r_dux_dx", internal=True, boundary_related=True, layout="element2"),
-        FieldSpec("r_dux_dz", internal=True, boundary_related=True, layout="element2"),
-        FieldSpec("r_duz_dx", internal=True, boundary_related=True, layout="element2"),
-        FieldSpec("r_duz_dz", internal=True, boundary_related=True, layout="element2"),
-        FieldSpec("r_displ_x", internal=True, boundary_related=True, layout="element2"),
-        FieldSpec("r_displ_z", internal=True, boundary_related=True, layout="element2"),
+        FieldSpec("r_dux_dx", internal=True, boundary_related=True, layout="band2"),
+        FieldSpec("r_dux_dz", internal=True, boundary_related=True, layout="band2"),
+        FieldSpec("r_duz_dx", internal=True, boundary_related=True, layout="band2"),
+        FieldSpec("r_duz_dz", internal=True, boundary_related=True, layout="band2"),
+        FieldSpec("r_displ_x", internal=True, boundary_related=True, layout="band2"),
+        FieldSpec("r_displ_z", internal=True, boundary_related=True, layout="band2"),
     ]
 
     # FD-aligned receiver components: particle velocity from the displacement trace: v = u_dot.
@@ -95,6 +124,16 @@ class ElasticSEM2DDeformed(DerivedInitState):
     _mask_e: Optional[torch.Tensor] = None    # (E, 1, 1) 0/1
     _alive: Optional[torch.Tensor] = None     # (n_global,) bool
 
+    # The C-PML band split (with a ``cpml``; see sweep.sem.cpml.band): the
+    # elements any C-PML coefficient reaches, ascending -- the rows of the six
+    # band2 memory fields -- and the interior ones, with the geometry and C-PML
+    # coefficients the step needs on each. The model arrays are taken in the
+    # step instead, so autograd (and every swap of them for leaves) sees them.
+    band_elements: Optional[torch.Tensor] = None
+    interior_elements: Optional[torch.Tensor] = None
+    _band: Optional[dict] = None
+    _inner: Optional[dict] = None
+
     @classmethod
     def build(
         cls,
@@ -105,10 +144,14 @@ class ElasticSEM2DDeformed(DerivedInitState):
         *,
         cpml: Optional[ElasticCPMLProfile] = None,
         domain: Optional[DomainMask] = None,
+        band_split: Optional[bool] = None,
     ) -> "ElasticSEM2DDeformed":
         """``domain`` restricts the solid to its elastic elements (fluid–solid
         coupling): the operators are assembled over those only and **u** outside
-        them is a dead DOF pinned to exactly 0. ``None`` = the whole mesh."""
+        them is a dead DOF pinned to exactly 0. ``None`` = the whole mesh.
+        ``band_split`` runs the C-PML terms on the absorbing band elements only
+        (``None``: when the mesh is large enough to pay; see
+        :mod:`sweep.sem.cpml.band`)."""
         check_element_arrays(mesh, vp_e=vp_e, vs_e=vs_e, rho_e=rho_e)
         device, dtype = vp_e.device, vp_e.dtype
 
@@ -144,6 +187,7 @@ class ElasticSEM2DDeformed(DerivedInitState):
             _w_J=mesh.w_jac, _w_rho_J=m_e,
             _ixx=mesh.inv_J[..., 0, 0], _ixz=mesh.inv_J[..., 0, 1],
             _iex=mesh.inv_J[..., 1, 0], _iez=mesh.inv_J[..., 1, 1],
+            **(_band_split(mesh, cpml, mask_e, band_split) if cpml is not None else {}),
         )
 
     # ------------------------------------------------------------------ #
@@ -176,19 +220,35 @@ class ElasticSEM2DDeformed(DerivedInitState):
         and ``accel_z`` of ``[σ_xz (x-flux), σ_zz (z-flux)]`` — matching the
         SPECFEM2D PML convention; for symmetric σ pass ``σ_zx = σ_xz``.
         """
-        w_J = self._w_J
-        F_x_beta  = w_J * (sigma_xx * self._ixx + sigma_zx * self._ixz)
-        F_x_alpha = w_J * (sigma_xx * self._iex + sigma_zx * self._iez)
-        F_z_beta  = w_J * (sigma_xz * self._ixx + sigma_zz * self._ixz)
-        F_z_alpha = w_J * (sigma_xz * self._iex + sigma_zz * self._iez)
+        g = {"w_J": self._w_J, "ixx": self._ixx, "ixz": self._ixz,
+             "iex": self._iex, "iez": self._iez, "mask": self._mask_e}
+        return assemble(self._divergence_e(sigma_xx, sigma_zz, sigma_xz, sigma_zx, g),
+                        self.mesh.ibool, like_x)
+
+    def _divergence_e(self, sigma_xx, sigma_zz, sigma_xz, sigma_zx, g):
+        """The element-local weak-form divergence ``(E_s, ngll, ngll, 2)`` of
+        :meth:`_assemble_stress` on the elements whose geometry is ``g``."""
+        w_J, ixx, ixz, iex, iez = g["w_J"], g["ixx"], g["ixz"], g["iex"], g["iez"]
+        F_x_beta  = w_J * (sigma_xx * ixx + sigma_zx * ixz)
+        F_x_alpha = w_J * (sigma_xx * iex + sigma_zx * iez)
+        F_z_beta  = w_J * (sigma_xz * ixx + sigma_zz * ixz)
+        F_z_alpha = w_J * (sigma_xz * iex + sigma_zz * iez)
         # batched D^T contraction (2 einsums vs 4) + single scatter for R_x,R_z.
         F_beta  = torch.stack([F_x_beta, F_z_beta], dim=-1)        # (E,ngll,ngll,2)
         F_alpha = torch.stack([F_x_alpha, F_z_alpha], dim=-1)
         R_e = (contract("db,eadk->eabk", self._D, F_beta)
                + contract("ga,egbk->eabk", self._D, F_alpha))  # (E,ngll,ngll,2)
-        if self._mask_e is not None:            # domain restriction (see build)
-            R_e = R_e * self._mask_e.unsqueeze(-1)
-        return assemble(R_e, self.mesh.ibool, like_x)
+        if g["mask"] is not None:               # domain restriction (see build)
+            R_e = R_e * g["mask"].unsqueeze(-1)
+        return R_e
+
+    def _grads(self, U_e, g):
+        """``(∂/∂x, ∂/∂z)`` of the element-gathered fields ``U_e``
+        ``(E_s, ngll, ngll, K)`` on the elements whose geometry is ``g``."""
+        dU_dxi  = contract("bg,eagk->eabk", self._D, U_e)
+        dU_deta = contract("ag,egbk->eabk", self._D, U_e)
+        ixx, ixz, iex, iez = (g[k].unsqueeze(-1) for k in ("ixx", "ixz", "iex", "iez"))
+        return ixx * dU_dxi + iex * dU_deta, ixz * dU_dxi + iez * dU_deta
 
     # ================================================================== #
     # SPECFEM2D-style 2nd-order elastic CPML step.
@@ -209,20 +269,58 @@ class ElasticSEM2DDeformed(DerivedInitState):
     def _step_cpml(self, u_x_now, u_z_now, u_x_prev, u_z_prev,
                    r_dux_dx, r_dux_dz, r_duz_dx, r_duz_dz,
                    r_displ_x, r_displ_z, b_x, b_z, dt):
-        cp = self.cpml
-        dt2, inv_M, ib = dt * dt, self._inv_M, self.mesh.ibool
+        """One C-PML step, split by element (see :mod:`sweep.sem.cpml.band`): the
+        bare stiffness on the interior, SPECFEM2D's C-PML formulation on the band.
+
+        The six memories are this equation's ``band2`` fields, on the band rows.
+        A caller that keeps them on every element (``AcousticElasticSEM2D``)
+        passes those and gets them back with the band rows updated."""
+        mem = (r_dux_dx, r_dux_dz, r_duz_dx, r_duz_dz, r_displ_x, r_displ_z)
+        eb = self.band_elements
+        every = mem[0].shape[0] != eb.numel()
+        R_b, new = self._band_residual(u_x_now, u_z_now, u_x_prev, u_z_prev,
+                                       tuple(m[eb] for m in mem) if every else mem, dt)
+        acc = torch.zeros_like(u_x_now).unsqueeze(-1).repeat(1, 2)
+        if self._inner is not None:                    # split: the interior's bare share
+            R_i = self._interior_residual(u_x_now, u_z_now)
+            acc = acc.index_add(0, self._inner["ibool"].reshape(-1), R_i.reshape(-1, 2))
+        acc = acc.index_add(0, self._band["ibool"].reshape(-1), R_b.reshape(-1, 2))
+        R_x, R_z = acc.unbind(-1)
+
+        # leap-frog update (κ = 1 ⇒ raw mass; R carries the PML accel term too).
+        dt2, inv_M = dt * dt, self._inv_M
+        u_x_next = 2.0 * u_x_now - u_x_prev + dt2 * inv_M * (-R_x + b_x)
+        u_z_next = 2.0 * u_z_now - u_z_prev + dt2 * inv_M * (-R_z + b_z)
+        if every:
+            new = tuple(m.index_copy(0, eb, n) for m, n in zip(mem, new))
+        return (u_x_next, u_z_next, *new)
+
+    def _interior_residual(self, u_x, u_z):
+        """``K u`` on the interior elements, element-local ``(E_i, ngll, ngll, 2)``:
+        every C-PML coefficient is a no-op there, so this is the bare stiffness."""
+        g, ei = self._inner, self.interior_elements
+        dU_dx, dU_dz = self._grads(torch.stack([u_x, u_z], dim=-1)[g["ibool"]], g)
+        dux_dx, duz_dx = dU_dx[..., 0], dU_dx[..., 1]
+        dux_dz, duz_dz = dU_dz[..., 0], dU_dz[..., 1]
+        lam, mu, lam2mu = self._lam[ei], self._mu[ei], self._lam2mu[ei]
+        sig_xx = lam2mu * dux_dx + lam * duz_dz
+        sig_zz = lam * dux_dx + lam2mu * duz_dz
+        sig_xz = mu * (dux_dz + duz_dx)
+        return self._divergence_e(sig_xx, sig_zz, sig_xz, sig_xz, g)
+
+    def _band_residual(self, u_x_now, u_z_now, u_x_prev, u_z_prev, mem, dt):
+        """The C-PML step on the band elements: ``(R, memories)``, ``R`` element-local
+        ``(E_b, ngll, ngll, 2)`` with the PML acceleration term included."""
+        cp, eb = self._band, self.band_elements
+        pick = (lambda t: t) if self._inner is None else (lambda t: t[eb])
+        r_dux_dx, r_dux_dz, r_duz_dx, r_duz_dz, r_displ_x, r_displ_z = mem
 
         # 1) strains now & at the previous step (element-local, physical).
         #    Gather all four displacement fields once and take their ξ/η
-        #    reference derivatives in two batched einsums (vs 4 gathers + 8
-        #    einsums); the raw gathered values are reused for the acceleration
-        #    term in step 6 (no second gather).
-        ixx, ixz, iex, iez = self._ixx, self._ixz, self._iex, self._iez
-        U_e = torch.stack([u_x_now, u_z_now, u_x_prev, u_z_prev], dim=-1)[ib]
-        dU_dxi  = contract("bg,eagk->eabk", self._D, U_e)   # (E,ngll,ngll,4)
-        dU_deta = contract("ag,egbk->eabk", self._D, U_e)
-        dU_dx = ixx.unsqueeze(-1) * dU_dxi + iex.unsqueeze(-1) * dU_deta
-        dU_dz = ixz.unsqueeze(-1) * dU_dxi + iez.unsqueeze(-1) * dU_deta
+        #    reference derivatives in two batched contractions; the raw gathered
+        #    values are reused for the acceleration term in step 6.
+        U_e = torch.stack([u_x_now, u_z_now, u_x_prev, u_z_prev], dim=-1)[cp["ibool"]]
+        dU_dx, dU_dz = self._grads(U_e, cp)
         dux_dx,   duz_dx   = dU_dx[..., 0], dU_dx[..., 1]
         dux_dz,   duz_dz   = dU_dz[..., 0], dU_dz[..., 1]
         dux_dx_o, duz_dx_o = dU_dx[..., 2], dU_dx[..., 3]
@@ -232,45 +330,42 @@ class ElasticSEM2DDeformed(DerivedInitState):
 
         # 2) strain-memory recursion. x-derivatives use the zx coefficient set,
         #    z-derivatives use the xz set (SPECFEM pml_compute_memory_variables).
-        r_dux_dx = self._conv_update(r_dux_dx, cp.zx1, cp.zx2, dux_dx, dux_dx_o)
-        r_duz_dx = self._conv_update(r_duz_dx, cp.zx1, cp.zx2, duz_dx, duz_dx_o)
-        r_dux_dz = self._conv_update(r_dux_dz, cp.xz1, cp.xz2, dux_dz, dux_dz_o)
-        r_duz_dz = self._conv_update(r_duz_dz, cp.xz1, cp.xz2, duz_dz, duz_dz_o)
+        r_dux_dx = self._conv_update(r_dux_dx, cp["zx1"], cp["zx2"], dux_dx, dux_dx_o)
+        r_duz_dx = self._conv_update(r_duz_dx, cp["zx1"], cp["zx2"], duz_dx, duz_dx_o)
+        r_dux_dz = self._conv_update(r_dux_dz, cp["xz1"], cp["xz2"], dux_dz, dux_dz_o)
+        r_duz_dz = self._conv_update(r_duz_dz, cp["xz1"], cp["xz2"], duz_dz, duz_dz_o)
 
         # 3) asymmetrically stretched derivatives  d̃ = S0·d + S1·r1 + S2·r2.
-        dux_dx_s = cp.Sx0 * dux_dx + cp.Sx1 * r_dux_dx[..., 0] + cp.Sx2 * r_dux_dx[..., 1]
-        duz_dx_s = cp.Sx0 * duz_dx + cp.Sx1 * r_duz_dx[..., 0] + cp.Sx2 * r_duz_dx[..., 1]
-        dux_dz_s = cp.Sz0 * dux_dz + cp.Sz1 * r_dux_dz[..., 0] + cp.Sz2 * r_dux_dz[..., 1]
-        duz_dz_s = cp.Sz0 * duz_dz + cp.Sz1 * r_duz_dz[..., 0] + cp.Sz2 * r_duz_dz[..., 1]
+        Sx0, Sx1, Sx2, Sz0, Sz1, Sz2 = (cp[k] for k in ("Sx0", "Sx1", "Sx2",
+                                                        "Sz0", "Sz1", "Sz2"))
+        dux_dx_s = Sx0 * dux_dx + Sx1 * r_dux_dx[..., 0] + Sx2 * r_dux_dx[..., 1]
+        duz_dx_s = Sx0 * duz_dx + Sx1 * r_duz_dx[..., 0] + Sx2 * r_duz_dx[..., 1]
+        dux_dz_s = Sz0 * dux_dz + Sz1 * r_dux_dz[..., 0] + Sz2 * r_dux_dz[..., 1]
+        duz_dz_s = Sz0 * duz_dz + Sz1 * r_duz_dz[..., 0] + Sz2 * r_duz_dz[..., 1]
 
         # 4) non-symmetric PML stress (raw = unstretched gradient).
-        sig_xx = self._lam2mu * dux_dx_s + self._lam * duz_dz
-        sig_zz = self._lam2mu * duz_dz_s + self._lam * dux_dx
-        sig_zx = self._mu * (duz_dx   + dux_dz_s)     # -> accel_x
-        sig_xz = self._mu * (dux_dz   + duz_dx_s)     # -> accel_z
+        lam, mu, lam2mu = pick(self._lam), pick(self._mu), pick(self._lam2mu)
+        sig_xx = lam2mu * dux_dx_s + lam * duz_dz
+        sig_zz = lam2mu * duz_dz_s + lam * dux_dx
+        sig_zx = mu * (duz_dx   + dux_dz_s)     # -> accel_x
+        sig_xz = mu * (dux_dz   + duz_dx_s)     # -> accel_z
 
         # 5) non-symmetric weak-form divergence.
-        R_x, R_z = self._assemble_stress(sig_xx, sig_zz, sig_xz, sig_zx, u_x_now)
+        R = self._divergence_e(sig_xx, sig_zz, sig_xz, sig_zx, cp)
 
-        # 6) acceleration / mass contribution (element-local, then assembled).
-        #    ux_e, uz_e, ux_e_o, uz_e_o were gathered once in step 1.
-        r_displ_x = self._conv_update(r_displ_x, cp.l1, cp.l2, ux_e, ux_e_o)
-        r_displ_z = self._conv_update(r_displ_z, cp.l1, cp.l2, uz_e, uz_e_o)
+        # 6) acceleration / mass contribution (element-local).
+        r_displ_x = self._conv_update(r_displ_x, cp["l1"], cp["l2"], ux_e, ux_e_o)
+        r_displ_z = self._conv_update(r_displ_z, cp["l1"], cp["l2"], uz_e, uz_e_o)
         v_x_e = (ux_e - ux_e_o) / dt
         v_z_e = (uz_e - uz_e_o) / dt
-        wrhoJ = self._w_rho_J
-        aPML_x_e = wrhoJ * (cp.La1 * v_x_e + cp.La2 * ux_e
-                            + cp.La3 * r_displ_x[..., 0] + cp.La4 * r_displ_x[..., 1])
-        aPML_z_e = wrhoJ * (cp.La1 * v_z_e + cp.La2 * uz_e
-                            + cp.La3 * r_displ_z[..., 0] + cp.La4 * r_displ_z[..., 1])
-        aPML_x, aPML_z = assemble(
-            torch.stack([aPML_x_e, aPML_z_e], dim=-1), ib, u_x_now)
-
-        # 7) leap-frog update (κ = 1 ⇒ raw mass; subtract stiffness + PML accel).
-        u_x_next = 2.0 * u_x_now - u_x_prev + dt2 * inv_M * (-R_x - aPML_x + b_x)
-        u_z_next = 2.0 * u_z_now - u_z_prev + dt2 * inv_M * (-R_z - aPML_z + b_z)
-        return (u_x_next, u_z_next,
-                r_dux_dx, r_dux_dz, r_duz_dx, r_duz_dz, r_displ_x, r_displ_z)
+        wrhoJ = pick(self._w_rho_J)
+        La1, La2, La3, La4 = (cp[k] for k in ("La1", "La2", "La3", "La4"))
+        aPML_x_e = wrhoJ * (La1 * v_x_e + La2 * ux_e
+                            + La3 * r_displ_x[..., 0] + La4 * r_displ_x[..., 1])
+        aPML_z_e = wrhoJ * (La1 * v_z_e + La2 * uz_e
+                            + La3 * r_displ_z[..., 0] + La4 * r_displ_z[..., 1])
+        R = R + torch.stack([aPML_x_e, aPML_z_e], dim=-1)
+        return R, (r_dux_dx, r_dux_dz, r_duz_dx, r_duz_dz, r_displ_x, r_displ_z)
 
     # ================================================================== #
     # SEMPropagator interface: positional init_state + step.

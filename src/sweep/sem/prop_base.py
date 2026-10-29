@@ -1221,7 +1221,10 @@ class PropSEM:
         # for them, so the builder branches are only reached where they exist.
         import inspect as _inspect
         kw = {}
-        if "dirichlet" in _inspect.signature(self.equation.build).parameters:
+        params = _inspect.signature(self.equation.build).parameters
+        if self._use_c and "band_split" in params and "band_split" not in self._eq_options:
+            kw["band_split"] = False      # the CUDA kernels split on their own; the eager one is unused
+        if "dirichlet" in params:
             # the fluid-solid form carries a pressure-release surface on its
             # FLUID side; route the same free_surface the acoustic branch uses
             kw["dirichlet"] = self.free_surface

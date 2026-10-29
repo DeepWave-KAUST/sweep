@@ -45,6 +45,7 @@ import torch
 
 from .._compile import compile_or_fallback
 from ._assembly import scatter_point_sources
+from .fields import BAND_LAYOUTS
 
 
 # Per-step source assembly shared by the BS forward / reverse / VJP. ``wav`` is
@@ -578,8 +579,13 @@ def run_boundary_saved(eq, source_spec, wavelet, rec_G, rec_W, dt, nt,
     elem_fields = list(getattr(eq, "bs_elem_ring_save", ()) or ())
     elem_idx = elem_trail = None
     if elem_fields:
-        elem_idx = cpml_band_elements(eq)
-        elem_trail = tuple(eq.init_state(dt, device, dtype)[elem_fields[0]].shape[1:])
+        state0 = eq.init_state(dt, device, dtype)
+        if all(specs[f].layout in BAND_LAYOUTS for f in elem_fields):
+            # the fields ARE the band rows (sweep.sem.cpml.band): ring them whole
+            elem_idx = torch.arange(state0[elem_fields[0]].shape[0], device=device)
+        else:
+            elem_idx = cpml_band_elements(eq)
+        elem_trail = tuple(state0[elem_fields[0]].shape[1:])
     recon = SEMReconState(nt, eq.bs_ring_save, save_idx, cpml_zero_idx,
                           device, dtype, store_dtype=store_dtype,
                           elem_fields=elem_fields, elem_idx=elem_idx,

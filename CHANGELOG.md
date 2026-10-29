@@ -42,6 +42,22 @@ and this project adheres to
   still bound by its per-step host work, which caps the gain there. Records and
   gradients agree with the uncompiled step to fp32 round-off for every equation
   family.
+- **The eager elastic C-PML steps can run the C-PML on the absorbing band only.**
+  `ElasticSEM2DDeformed`, `ElasticVSSEM2DDeformed` (and `ElasticVTISEM2DDeformed`)
+  and `ElasticVSSEM3D` (and `ElasticVSSEM3DDeformed`) run the bare operators on
+  the interior elements and the C-PML terms on the band elements, as the CUDA
+  kernels do, and keep their memory fields on the band rows only: new field
+  layouts `band` / `band2`, whose rows are `eq.band_elements` (none without a
+  C-PML). The split costs a second element pipeline per step, so it is on where
+  it pays: by default on meshes with at least 40000 interior elements (801x1601
+  has 80000), compiled or not, and wherever `build(..., band_split=True)` (also
+  through `equation_options`) asks for it. On smaller meshes it costs more than
+  it saves, compiled too, and on the velocity-stress forms even replayed as CUDA
+  graphs. Unsplit, every element is on the band and the step is the full-mesh
+  one. Same arithmetic (fp64: records and gradients agree to 1e-15). 2-D elastic
+  at 801x1601 (A100), forward | forward+backward: uncompiled 2.6x | 2.0x faster,
+  compiled 2.2x | 1.3x on top of the unrolled contractions. A memory field is
+  indexed by band row, not by element id.
 
 ### Removed
 - Stale examples and repo-root leftovers: `examples/FWI/` and
