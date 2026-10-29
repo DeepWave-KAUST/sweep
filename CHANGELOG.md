@@ -17,7 +17,7 @@ and this project adheres to
   Biot included, which has no boundary saving. Peak memory is `nt/K` states plus
   one chunk's tape. On CUDA each chunk is captured once as a CUDA graph and
   replayed `nt/K` times, so the time loop does no host work per kernel: with
-  `compile_step=True`, the 2-D equations at 201x401 run 3.5-9x faster forward
+  the step compiled, the 2-D equations at 201x401 run 3.5-9x faster forward
   and 2.7-6.4x forward+backward than the compiled full tape (A100, H100, RTX
   6000 Ada). A step that cannot be
   captured (a host sync inside it) runs the same chunks without graphs after one
@@ -28,6 +28,22 @@ and this project adheres to
   round-off.
 
 ### Changed
+- **`PropSEM` compiles its eager step by default and takes PropTorch's
+  `eager_options=`.** `PropSEM(..., eager_options=EagerOptions(...))` (or its
+  dict) replaces the call argument `compile_step`, which is gone (passing it
+  raises a `TypeError` that names the replacement): `use_compile` -- default
+  `True`, as on PropTorch -- `compile_mode`, `compile_dynamic`, `compile_backend`
+  and `compile_fullgraph` reach `torch.compile`, behind the FD eager path's guards
+  (no `torch.compile`, torch 2.3's Inductor on CPU, Dynamo's recompile cap, the
+  once-per-process compile notice). As on PropTorch, `eager_options` with
+  `impl='c'` raises; `store_last_wavefield` and `cpml_strips` have no SEM
+  counterpart and raise when set, and so do the CUDA-graph compile modes
+  (`reduce-overhead`, `max-autotune`) together with `BoundarySaving()` or `Ckpt()`
+  on CUDA, whose rollouts step again from kept states that those graphs overwrite. The low-level `SEMPropagator.forward` takes
+  `compile_options=` (an `EagerOptions`; `None` runs the step as it is) instead of
+  `compile_step`. Compiled, the step is ~3x faster on GPU and CPU, at a one-time
+  compile per grid size (seconds on a GPU, ~40 s on a CPU);
+  `EagerOptions(use_compile=False)` gives the uncompiled step, unchanged.
 - **The compiled SEM eager step is faster on GPU: 1.05-1.75x forward,
   1.07-1.57x forward+backward (H100), most on 3-D and large 2-D** (A100,
   forward | forward+backward: 1.4x | 1.35x for 2-D elastic at 801x1601, 1.4x |
@@ -73,8 +89,8 @@ and this project adheres to
   `15_wavefield_topography.gif` are no longer tracked.
 
 ### Fixed
-- `PropSEM(impl='eager')` with `compile_step=True` no longer fails when
-  `torch.compile` cannot build the step, e.g. on CPU with g++ older than 10
+- `PropSEM(impl='eager')` compiling its step no longer fails when
+  `torch.compile` cannot build it, e.g. on CPU with g++ older than 10
   (`InductorError: CppCompileError`, `-std=c++20` rejected). As on the FD eager
   path, the step runs uncompiled -- single-shot loop, boundary saving and the
   vmapped multi-shot step alike -- with one `RuntimeWarning` that quotes the

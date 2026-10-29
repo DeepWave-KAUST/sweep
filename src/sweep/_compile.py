@@ -9,6 +9,7 @@ is plain PyTorch and gives the same result uncompiled.
 from __future__ import annotations
 
 import importlib
+import sys
 import warnings
 
 import torch
@@ -70,21 +71,49 @@ def compiler_hint(device_type: str) -> str:
             "to let Inductor fetch one through conda.")
 
 
-def compile_or_fallback(fn, device, what: str):
-    """``torch.compile(fn)``, run as ``fn`` once the compiler fails.
+def compile_or_fallback(fn, device, what: str, options):
+    """``torch.compile(fn)`` with the compile settings of ``options`` (an
+    :class:`~sweep.propagator.EagerOptions`), run as ``fn`` once the compiler fails.
 
-    The first failure warns once, naming ``what`` (e.g. "the ElasticSEM2DDeformed
-    step"), and is remembered per ``(device type, what)`` for the rest of the
-    process, so later builds of the same step skip the attempt. Errors raised by
-    the step itself propagate as before."""
+    ``options=None`` or ``use_compile=False`` returns ``fn`` itself. The guards are the
+    FD eager path's, read from ``sweep.propagator._torch_eager`` at call time: a torch
+    without ``torch.compile``, or torch 2.3's Inductor on CPU, runs uncompiled after
+    one notice per process; Dynamo's recompile cap is raised; the first compiled call
+    in the process says that it compiles. The first compiler failure warns once,
+    naming ``what`` (e.g. "the ElasticSEM2DDeformed step"), and is remembered per
+    ``(device type, what)`` for the rest of the process, so later builds of the same
+    step skip the attempt. Errors raised by the step itself propagate as before."""
+    if options is None or not options.use_compile:
+        return fn
+    from sweep.propagator import _torch_eager as fd
     key = (torch.device(device).type, what)
     if key in _FAILED:
         return fn
-    compiled = torch.compile(fn)
+    inductor = options.compile_backend in (None, "inductor")
+    if not hasattr(torch, "compile"):
+        _no_compile(fd, f"torch {torch.__version__} has no torch.compile (it needs torch >= 2.0)")
+        return fn
+    if fd.INDUCTOR_23 and inductor and key[0] != "cuda":
+        _no_compile(fd, f"torch {torch.__version__}'s Inductor miscompiles the step on CPU "
+                        "(fixed in torch 2.4)")
+        return fn
+    fd._raise_dynamo_recompile_limit()
+    compile_kwargs = {"mode": options.compile_mode, "dynamic": options.compile_dynamic,
+                      "fullgraph": options.compile_fullgraph}
+    if options.compile_backend is not None:
+        compile_kwargs["backend"] = options.compile_backend
+    if fd.INDUCTOR_23 and inductor:
+        compile_kwargs["options"] = fd._no_buffer_reuse(compile_kwargs.pop("mode"),
+                                                        options.compile_dynamic)
+    compiled = torch.compile(fd._with_own_code(fn) if fd.OWN_CODE_PER_COMPILE else fn,
+                             **compile_kwargs)
     failures = compiler_failures()
 
     def step(*args, **kwargs):
         if key not in _FAILED:
+            if not fd._COMPILE_NOTICE_SHOWN:
+                fd._COMPILE_NOTICE_SHOWN = True
+                print(fd._COMPILE_NOTICE, file=sys.stderr, flush=True)
             try:
                 return compiled(*args, **kwargs)
             except failures as exc:
@@ -92,9 +121,21 @@ def compile_or_fallback(fn, device, what: str):
                 warnings.warn(
                     f"torch.compile could not build {what} on {key[0]} "
                     f"({type(exc).__name__}: {failure_reason(exc)}); it runs uncompiled from now "
-                    f"on, which is slower but gives the same result."
-                    f"{compiler_hint(key[0])} Pass compile_step=False to skip the attempt.",
+                    f"on, which is slower but gives the same result.{compiler_hint(key[0])} "
+                    "Pass eager_options=EagerOptions(use_compile=False) to skip the attempt.",
                     RuntimeWarning, stacklevel=2)
         return fn(*args, **kwargs)
 
     return step
+
+
+def _no_compile(fd, why):
+    """This torch cannot compile the step (``why``): say so once per process, on the
+    flag the FD eager path uses for the same notice."""
+    if not fd._NO_COMPILE_WARNED:
+        fd._NO_COMPILE_WARNED = True
+        warnings.warn(
+            f"{why}: the eager propagator runs uncompiled, which gives the same result but "
+            "is several times slower (3-6x measured on GPU). Pass "
+            "eager_options=EagerOptions(use_compile=False) to skip this notice.",
+            RuntimeWarning, stacklevel=3)

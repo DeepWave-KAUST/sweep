@@ -1,6 +1,7 @@
 """Guards for two previously-untested SEM paths:
 
-1. ``compile_step=True`` (torch.compile of the per-step graph, used by the FWI
+1. the compiled step (``eager_options=EagerOptions(use_compile=True)``, the default:
+   torch.compile of the per-step graph, used by the FWI
    notebook and the multi-shot loop) must reproduce the eager seismograms AND
    model gradient.
 2. Boundary-saving for the **deformed** acoustic equation
@@ -13,7 +14,7 @@ import math
 import pytest
 import torch
 
-from sweep.propagator import BoundarySaving
+from sweep.propagator import BoundarySaving, EagerOptions
 from sweep.sem import (
     PropSEM, AcousticSEM2DDeformed, build_axis_aligned_quad9,
 )
@@ -38,8 +39,8 @@ def _cos(x, y):
 
 
 @pytest.mark.skipif(DEV != "cuda", reason="torch.compile speedup path is CUDA")
-def test_compile_step_matches_eager():
-    """PropSEM acoustic: compile_step=True == eager (seismograms + vp gradient)."""
+def test_compiled_step_matches_eager():
+    """PropSEM acoustic: the compiled step == uncompiled (seismograms + vp gradient)."""
     nz, nx, nt, dh, dt = 61, 81, 300, 10.0, 5.0e-4
     f0 = 12.0
     wav = _ricker(nt, dt, f0=f0, t0=0.08, scale=1.0, dtype=torch.float32)
@@ -47,13 +48,13 @@ def test_compile_step_matches_eager():
     rec_x = torch.arange(2, nx - 2, 3)
     receivers = torch.stack([rec_x, torch.full_like(rec_x, 3)], 1)[None]
 
-    def run(compile_step):
+    def run(compile):
         prop = PropSEM(AcousticSEM2D, shape=(nz, nx), dh=dh, dt=dt, nt=nt,
                        n_order=4, free_surface=True, abcn=8 * 4,
                        f_dominant=f0, dev=DEV, dtype=torch.float32,
-                       impl="eager")
+                       impl="eager", eager_options=EagerOptions(use_compile=compile))
         vp = torch.full((nz, nx), 2000.0, device=DEV, requires_grad=True)
-        out = prop(wav, sources, receivers, models=[vp], compile_step=compile_step)
+        out = prop(wav, sources, receivers, models=[vp])
         out.pow(2).sum().backward()
         return out.detach(), vp.grad.detach()
 
@@ -66,8 +67,8 @@ def test_compile_step_matches_eager():
 
 
 @pytest.mark.skipif(DEV != "cuda", reason="torch.compile speedup path is CUDA")
-def test_compile_step_multishot_matches_eager_vmap():
-    """Multi-shot compile_step (compile(vmap(step))) == eager vmap batch."""
+def test_compiled_multishot_matches_eager_vmap():
+    """Multi-shot compiled step (compile(vmap(step))) == uncompiled vmap batch."""
     nz, nx, nt, dh, dt = 61, 81, 250, 10.0, 5.0e-4
     f0 = 12.0
     wav = _ricker(nt, dt, f0=f0, t0=0.08, scale=1.0, dtype=torch.float32)
@@ -76,13 +77,13 @@ def test_compile_step_multishot_matches_eager_vmap():
     rec_x = torch.arange(2, nx - 2, 4)
     receivers = torch.stack([rec_x, torch.full_like(rec_x, 3)], 1)[None]
 
-    def run(compile_step):
+    def run(compile):
         prop = PropSEM(AcousticSEM2D, shape=(nz, nx), dh=dh, dt=dt, nt=nt,
                        n_order=4, free_surface=True, abcn=8 * 4,
                        f_dominant=f0, dev=DEV, dtype=torch.float32,
-                       impl="eager")
+                       impl="eager", eager_options=EagerOptions(use_compile=compile))
         vp = torch.full((nz, nx), 2000.0, device=DEV, requires_grad=True)
-        out = prop(wav, sources, receivers, models=[vp], compile_step=compile_step)
+        out = prop(wav, sources, receivers, models=[vp])
         out.pow(2).sum().backward()
         return out.detach(), vp.grad.detach()
 

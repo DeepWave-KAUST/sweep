@@ -1,4 +1,5 @@
-"""``compile_step=True`` against the uncompiled step, equation by equation (CUDA).
+"""The compiled step (``EagerOptions(use_compile=True)``) against the uncompiled one,
+equation by equation (CUDA).
 
 Compiling for a GPU changes the arithmetic: the reference-derivative contractions
 are unrolled into multiply-adds (``sweep.sem._assembly.contract``) and Inductor
@@ -11,6 +12,7 @@ import numpy as np
 import pytest
 import torch
 
+from sweep.propagator import EagerOptions
 from sweep.sem import (PropSEM, AcousticSEM2DDeformed, ElasticSEM2DDeformed, ElasticVSSEM2DDeformed,
                        BiotVSSEM2DDeformed, AcousticSEM3D, ElasticVSSEM3D)
 
@@ -38,11 +40,11 @@ CASES = {
 }
 
 
-def _run(name, compile_step, nt=80):
+def _run(name, compile, nt=80):
     eq, shape, dt, vals, st, rt, topo, abcn = CASES[name]
     vals = _biot() if vals is None else vals
     kw = dict(shape=shape, dh=10.0, dt=dt, n_order=4, free_surface=True, f_dominant=12.0, dev=DEV,
-              dtype=F32, impl="eager")
+              dtype=F32, impl="eager", eager_options=EagerOptions(use_compile=compile))
     if st:
         kw.update(source_type=st, receiver_type=rt)
     if abcn:
@@ -63,7 +65,7 @@ def _run(name, compile_step, nt=80):
     a = (math.pi * 12.0 * t) ** 2
     wav = (1 - 2 * a) * torch.exp(-a)
     ms = [torch.full(shape, v, device=DEV, dtype=F32, requires_grad=True) for v in vals]
-    out = prop(wav, src, rec, models=ms, compile_step=compile_step)
+    out = prop(wav, src, rec, models=ms)
     scale = 1.0 / float(out.detach().abs().max())          # keep the fp32 gradients away from underflow
     (out * scale).square().sum().backward()
     return out.detach(), [m.grad for m in ms]

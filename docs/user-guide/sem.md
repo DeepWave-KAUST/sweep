@@ -42,6 +42,11 @@ The options PropTorch has mean what they mean there:
   [Boundary saving](#boundary-saving));
 - `impl` — `None` runs the CUDA kernels where the equation has them and the
   device is CUDA, eager otherwise; `'eager'` / `'c'` choose;
+- `eager_options` — `EagerOptions(...)` from `sweep.propagator` (or its dict),
+  for `impl='eager'`: the step is compiled with `torch.compile` unless
+  `use_compile=False`, with its `compile_mode`, `compile_dynamic`,
+  `compile_backend` and `compile_fullgraph` (see
+  [Speed and memory](#speed-and-memory-on-impleager));
 - `nt` is optional — the wavelet's length; checked when given — and `device`
   may be spelled `dev`.
 
@@ -68,14 +73,18 @@ C-PML equations, so on a GPU its time at small and medium sizes goes to the host
 work of issuing them, and at large sizes to the memory traffic between them.
 Three things speed it up, and they combine:
 
-- **`compile_step=True`** (a call argument) compiles the step with
-  `torch.compile`. Inductor fuses the pointwise work, and when it compiles for
-  CUDA the GLL reference-derivative contractions are written out as
-  multiply-adds that it fuses with the gather before them and the pointwise work
-  after them. The first call compiles; later calls with the same shapes reuse
-  it. On the CPU, Inductor builds C++ with `torch._inductor.config.cpp.cxx`
-  (seeded from `$CXX`), which must accept `-std=c++20` (g++ 10 or newer); when
-  the compiler fails, the call warns once and runs the step uncompiled.
+- **Compiling the step.** By default the step is compiled with `torch.compile`,
+  as on PropTorch; `eager_options=EagerOptions(use_compile=False)` runs it as it
+  is, and the other `compile_*` options of `EagerOptions` pass through. Inductor
+  fuses the pointwise work, and when it compiles for CUDA the GLL
+  reference-derivative contractions are written out as multiply-adds that it
+  fuses with the gather before them and the pointwise work after them. The first
+  call compiles; later calls with the same shapes reuse it. On the CPU, Inductor
+  builds C++ with `torch._inductor.config.cpp.cxx` (seeded from `$CXX`), which
+  must accept `-std=c++20` (g++ 10 or newer); when the compiler fails, the call
+  warns once and runs the step uncompiled. The vmapped multi-shot batch of
+  boundary saving runs uncompiled, and the CUDA-graph modes (`reduce-overhead`,
+  `max-autotune`) go with `Full()` only.
 - **`memory=Ckpt(chunks=K)`** checkpoints a single shot, or each shot of a
   per-shot model batch: the forward pass keeps one state every `K` steps, and
   the backward pass recomputes each chunk under autograd. Peak memory is `nt/K`
@@ -101,10 +110,10 @@ forward + backward call in GB:
 | --- | --- | --- | --- |
 | `impl='c'`, `Full()` | 0.025 / 0.060 (3.2) | 0.24 / 0.89 (20.4) | 0.30 / 0.83 (20.9) |
 | `impl='c'`, `BoundarySaving()` | 0.025 / 0.12 (1.2) | 0.24 / 1.39 (3.4) | — |
-| eager | 1.92 / 7.98 (8.3) | 2.65 / 11.33 (37.8) | 2.38 / 9.37 (35.7) |
-| eager, `compile_step=True` | 0.59 / 1.85 (6.8) | 0.67 / 2.65 (21.7) | 0.66 / 2.41 (16.3) |
-| eager, `Ckpt(chunks=8)` | 0.41 / 1.47 (1.3) | 1.48 / 5.65 (3.9) | 0.80 / 3.36 (7.9) |
-| eager, `compile_step=True`, `Ckpt(chunks=8)` | 0.072 / 0.33 (1.2) | 0.48 / 2.17 (3.5) | 0.42 / 1.53 (7.7) |
+| eager, `use_compile=False` | 1.92 / 7.98 (8.3) | 2.65 / 11.33 (37.8) | 2.38 / 9.37 (35.7) |
+| eager (compiled, the default) | 0.59 / 1.85 (6.8) | 0.67 / 2.65 (21.7) | 0.66 / 2.41 (16.3) |
+| eager, `use_compile=False`, `Ckpt(chunks=8)` | 0.41 / 1.47 (1.3) | 1.48 / 5.65 (3.9) | 0.80 / 3.36 (7.9) |
+| eager, `Ckpt(chunks=8)` | 0.072 / 0.33 (1.2) | 0.48 / 2.17 (3.5) | 0.42 / 1.53 (7.7) |
 
 Where the equation has CUDA kernels (the `impl="c"` column of the
 [equation table](equations.md#sem-family-spectral-elements)), `impl='c'` is the
@@ -115,13 +124,13 @@ runs everything else: the equations without CUDA kernels
 (`AcousticSEM2DDeformed`, `ElasticVSSEM2DDeformed`, `ElasticVTISEM2DDeformed`,
 `ElasticVSSEM3DDeformed` and the Biot forms), the CPU, fp64,
 [wavefield snapshots](#wavefield-snapshots) and second derivatives
-(`create_graph=True` with `Full()`). On a GPU, `compile_step=True` with
-`Ckpt(chunks=8)` is its fastest configuration for single shots, at about the
-memory of `impl='c'` with `BoundarySaving()`; `chunks` from 8 to 32 run about as
-fast. On large 3-D meshes the step is bound by the GPU rather than by issuing
-kernels, the graphs save little, and the recomputation can make `Ckpt` slower
-than compiled `Full()` (1.35× for 3-D acoustic at 81³ on an H100), which is the
-faster choice there where its tape fits in memory.
+(`create_graph=True` with `Full()`). On a GPU, the compiled step (the default)
+with `Ckpt(chunks=8)` is its fastest configuration for single shots, at about
+the memory of `impl='c'` with `BoundarySaving()`; `chunks` from 8 to 32 run
+about as fast. On large 3-D meshes the step is bound by the GPU rather than by
+issuing kernels, the graphs save little, and the recomputation can make `Ckpt`
+slower than compiled `Full()` (1.35× for 3-D acoustic at 81³ on an H100), which
+is the faster choice there where its tape fits in memory.
 
 ## Shot batching on `impl='c'`
 

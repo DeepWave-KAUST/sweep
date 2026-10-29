@@ -19,7 +19,7 @@ import pytest
 import torch
 
 import sweep.sem.ckpt_rollout as CR
-from sweep.propagator import Ckpt, Full
+from sweep.propagator import Ckpt, EagerOptions, Full
 from sweep.sem import (PropSEM, AcousticSEM2D, ElasticSEM2DDeformed, BiotVSSEM2DDeformed,
                        AcousticSEM3D)
 
@@ -51,11 +51,12 @@ def _wavelet(nt, dt, dtype, device, n=None):
     return torch.stack([(-1) ** k * torch.roll(w, 3 * k) for k in range(n)])
 
 
-def _setup(name, memory, dtype=torch.float64, device="cpu", nt=NT):
+def _setup(name, memory, dtype=torch.float64, device="cpu", nt=NT, compile=False):
     eq, shape, vals, st, rt, topo, dt = CASES[name]
     vals = _biot() if vals is None else vals
     kw = dict(shape=shape, dh=10.0, dt=dt, n_order=4, abcn=8, free_surface=True, f_dominant=F0,
-              dev=device, dtype=dtype, impl="eager", memory=memory)
+              dev=device, dtype=dtype, impl="eager", memory=memory,
+              eager_options=EagerOptions(use_compile=compile))
     if st:
         kw.update(source_type=st, receiver_type=rt)
     if topo:
@@ -75,12 +76,12 @@ def _setup(name, memory, dtype=torch.float64, device="cpu", nt=NT):
     return prop, src, rec, models, dt
 
 
-def _run(name, memory, *, grad=True, wav_grad=False, compile_step=False, **kw):
-    prop, src, rec, models, dt = _setup(name, memory, **kw)
+def _run(name, memory, *, grad=True, wav_grad=False, compile=False, **kw):
+    prop, src, rec, models, dt = _setup(name, memory, compile=compile, **kw)
     ms = [m.clone().requires_grad_(grad) for m in models]
     w = _wavelet(NT, dt, models[0].dtype, models[0].device).requires_grad_(wav_grad)
     with torch.set_grad_enabled(grad):
-        out = prop(w, src, rec, models=ms, compile_step=compile_step)
+        out = prop(w, src, rec, models=ms)
     if not grad:
         return out, None, None
     scale = 1.0 / float(out.detach().abs().max())
@@ -192,7 +193,7 @@ def test_graphs_with_the_compiled_step():
     kw = dict(dtype=torch.float32, device="cuda")
     torch._dynamo.reset()
     r0, g0, _ = _run("elastic2d_deformed", Full(), **kw)
-    r1, g1, _ = _run("elastic2d_deformed", Ckpt(chunks=8), compile_step=True, **kw)
+    r1, g1, _ = _run("elastic2d_deformed", Ckpt(chunks=8), compile=True, **kw)
     assert _rel(r1, r0) < 1e-5
     for a, b in zip(g1, g0):
         assert _rel(a, b) < 1e-4

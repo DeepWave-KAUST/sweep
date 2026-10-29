@@ -529,7 +529,7 @@ def _bs_setup(eq, recv_idx):
 
 
 def run_boundary_saved(eq, source_spec, wavelet, rec_G, rec_W, dt, nt,
-                       *, compile_step=False, store_dtype=None,
+                       *, compile_options=None, store_dtype=None,
                        frame_every=None, recv_idx=None):
     """Boundary-saved single-shot rollout for any SEM equation with BS hooks.
 
@@ -558,7 +558,9 @@ def run_boundary_saved(eq, source_spec, wavelet, rec_G, rec_W, dt, nt,
       ``None`` (compute dtype), ``torch.bfloat16`` / ``torch.float16`` (½), or
       ``torch.int8`` (¼, per-step quantized). bf16 keeps the gradient within
       reconstruction noise; int8 trades a little accuracy for the smallest tape.
-    * ``compile_step`` — wrap ``eq.step`` in :func:`torch.compile`. Because the
+    * ``compile_options`` — an ``EagerOptions`` to wrap ``eq.step`` in
+      :func:`torch.compile` with (``None`` or ``use_compile=False``: run it as it
+      is). Because the
       reverse pass (``reverse_step``) and the per-step VJP (``bs_recompute``) both
       call ``self.step``, compiling that one method fuses the forward recompute,
       the reverse reconstruction *and* the adjoint recompute — ~2× faster on GPU
@@ -567,13 +569,14 @@ def run_boundary_saved(eq, source_spec, wavelet, rec_G, rec_W, dt, nt,
       ``ctx`` until backward, so the compiled kernel is still in place then.)
     * returns ``{receiver_field_index: seis (nrec, nt)}``.
     """
-    if compile_step:
+    compiles = compile_options is not None and compile_options.use_compile
+    if compiles:
         eq = copy.copy(eq)                          # isolate the step monkeypatch
     (specs, grad_idx, recv_idx, n_src,
      device, dtype) = _bs_setup(eq, recv_idx)
-    if compile_step:
+    if compiles:
         eq.step = compile_or_fallback(eq.step, device,
-                                      f"the {type(eq).__name__} step")
+                                      f"the {type(eq).__name__} step", compile_options)
 
     cpml_zero_idx, save_idx = cpml_node_masks(eq)
     elem_fields = list(getattr(eq, "bs_elem_ring_save", ()) or ())
@@ -707,8 +710,8 @@ def run_boundary_saved_batched(eq, src_patterns, wavelet, rec_G, rec_W, dt, nt,
       in ``recv_idx`` order.
 
     Bit-identical to looping :func:`run_boundary_saved`; the model gradient sums
-    over shots (the leaves are shared). ``compile_step`` is intentionally not
-    offered here — ``compile(vmap)`` of the BS step is a separate lever.
+    over shots (the leaves are shared). Compiling is intentionally not offered
+    here — ``compile(vmap)`` of the BS step is a separate lever.
     """
     if getattr(eq, "bs_elem_ring_save", None):
         raise NotImplementedError(

@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 import torch
 
-from sweep.propagator import BoundarySaving, Ckpt, Full
+from sweep.propagator import BoundarySaving, Ckpt, EagerOptions, Full
 from sweep.sem import (PropSEM, ElasticSEM2DDeformed, ElasticVSSEM2DDeformed,
                        ElasticVTISEM2DDeformed, ElasticVSSEM3D, ElasticVSSEM3DDeformed)
 from sweep.sem._assembly import assemble
@@ -353,7 +353,7 @@ def test_vs3d_equals_the_full_mesh_step(eq, oracle, memory, topo, split):
         assert _rel(a, b) < 1e-12
 
 
-def _split_hints(monkeypatch, compile_step, memory, dev="cpu", nshots=1, per_shot=False, **kw):
+def _split_hints(monkeypatch, compile, memory, dev="cpu", nshots=1, per_shot=False, **kw):
     """The ``band_split`` PropSEM passes to every ``build`` of one call."""
     import functools
     seen = []
@@ -368,6 +368,8 @@ def _split_hints(monkeypatch, compile_step, memory, dev="cpu", nshots=1, per_sho
     monkeypatch.setattr(torch, "compile", lambda fn, **kw: fn)
     dtype = torch.float64 if dev == "cpu" else torch.float32
     kw.setdefault("impl", "eager")
+    if kw["impl"] == "eager":
+        kw.setdefault("eager_options", EagerOptions(use_compile=compile))
     p = PropSEM(ElasticSEM2DDeformed, shape=SHAPE, dh=10.0, dt=DT, n_order=4, abcn=8,
                 f_dominant=15.0, dev=dev, dtype=dtype, source_type=["sxx", "szz"],
                 receiver_type=["vx", "vz"], free_surface=True, memory=memory, **kw)
@@ -379,19 +381,18 @@ def _split_hints(monkeypatch, compile_step, memory, dev="cpu", nshots=1, per_sho
         p(w, np.array([[12 + 8 * b, 5.0] for b in range(nshots)]),
           np.stack([rx, np.full_like(rx, 4)], 1)[None],
           models=[torch.full(lead + SHAPE, v, dtype=dtype, device=dev)
-                  for v in (2400.0, 1300.0, 2000.0)],
-          compile_step=compile_step)
+                  for v in (2400.0, 1300.0, 2000.0)])
     assert seen
     return set(seen)
 
 
-@pytest.mark.parametrize("compile_step, memory", [
+@pytest.mark.parametrize("compile, memory", [
     (False, Full()), (True, Full()), (False, Ckpt(chunks=8))], ids=["plain", "compiled", "ckpt"])
-def test_propsem_leaves_the_split_to_the_equation(monkeypatch, compile_step, memory):
+def test_propsem_leaves_the_split_to_the_equation(monkeypatch, compile, memory):
     """However the eager step runs, the split is the equation's choice by mesh
     size: compiled it costs at medium sizes too, and replayed as CUDA graphs it
     loses on the velocity-stress forms (sweep.sem.cpml.band)."""
-    assert _split_hints(monkeypatch, compile_step, memory) == {"absent"}
+    assert _split_hints(monkeypatch, compile, memory) == {"absent"}
 
 
 def test_propsem_passes_a_requested_split(monkeypatch):

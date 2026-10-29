@@ -1,9 +1,9 @@
 """A compiler that cannot build the SEM step costs speed, not the run.
 
-``compile_step=True`` on CPU goes through Inductor, which calls g++ with
+The compiled step on CPU goes through Inductor, which calls g++ with
 ``-std=c++20``; g++ 9 (Ubuntu 20.04) rejects it and every compiled step raised
 ``InductorError: CppCompileError``. As on the FD eager path, the step now runs
-uncompiled, warns once, and returns exactly what ``compile_step=False`` does --
+uncompiled, warns once, and returns exactly what ``use_compile=False`` does --
 for the single-shot loop, boundary saving and the vmapped multi-shot path.
 """
 import warnings
@@ -14,7 +14,8 @@ import torch
 CppCompileError = pytest.importorskip("torch._inductor.exc").CppCompileError
 
 import sweep._compile as C
-from sweep.propagator import BoundarySaving
+import sweep.propagator._torch_eager as TE
+from sweep.propagator import BoundarySaving, EagerOptions
 from sweep.sem import PropSEM, AcousticSEM2D
 
 SHAPE, NT = (21, 33), 60
@@ -29,14 +30,14 @@ def _wavelet():
     return (1 - 2 * a) * torch.exp(-a)
 
 
-def _run(compile_step, memory=None, sources=SRC1):
+def _run(compile, memory=None, sources=SRC1):
     kw = {} if memory is None else {"memory": memory}
     prop = PropSEM(AcousticSEM2D, shape=SHAPE, dh=10.0, dt=1e-3, n_order=4, abcn=8,
                    free_surface=True, f_dominant=15.0, dev="cpu", dtype=torch.float64,
-                   impl="eager", **kw)
+                   impl="eager", eager_options=EagerOptions(use_compile=compile), **kw)
     vp = torch.full(SHAPE, 2000.0, dtype=torch.float64, requires_grad=True)
     rec = REC.expand(sources.shape[0], -1, -1)
-    out = prop(_wavelet(), sources, rec, models=[vp], compile_step=compile_step)
+    out = prop(_wavelet(), sources, rec, models=[vp])
     out.square().sum().backward()
     return out.detach(), vp.grad
 
@@ -62,6 +63,7 @@ def compiler_cannot_build(monkeypatch):
         return compiled
 
     monkeypatch.setattr(C, "_FAILED", {})
+    monkeypatch.setattr(TE, "INDUCTOR_23", False)   # torch 2.3 would not try on CPU
     monkeypatch.setattr(torch, "compile", fake_compile)
     return calls
 
@@ -86,6 +88,7 @@ def test_falls_back_to_the_uncompiled_step(compiler_cannot_build, memory, source
 def test_step_errors_still_propagate(monkeypatch):
     """Only compiler failures fall back: an error of the step itself is the caller's."""
     monkeypatch.setattr(C, "_FAILED", {})
+    monkeypatch.setattr(TE, "INDUCTOR_23", False)
 
     def fake_compile(fn, **kwargs):
         def compiled(*args, **kw):

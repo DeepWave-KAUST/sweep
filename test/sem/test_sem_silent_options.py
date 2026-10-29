@@ -23,7 +23,7 @@ import numpy as np
 import pytest
 import torch
 
-from sweep.propagator import Ckpt
+from sweep.propagator import Ckpt, EagerOptions
 from sweep.sem import (PropSEM, AcousticSEM3D, ElasticSEM2DDeformed,
                        ElasticSEM3D, build_axis_aligned_quad9)
 from sweep.sem.cpml.acoustic import build_cpml
@@ -272,12 +272,15 @@ def test_unknown_forward_options_are_rejected():
 
 @cuda
 def test_eager_only_options_are_rejected_on_impl_c():
-    """compile_step and Ckpt act on the eager tape; the CUDA backend has
-    neither, and used to accept both silently."""
+    """eager_options and Ckpt act on the eager tape; the CUDA backend has
+    neither, and used to accept both silently (the compile switch was a call
+    argument then)."""
     w, src, rec, models = _tiny_shot()
     p = _tiny(impl="c", dev="cuda")
     w, models = w.cuda(), [models[0].cuda()]
-    with pytest.raises(NotImplementedError, match="compile_step"):
+    with pytest.raises(ValueError, match="eager_options can only be used with impl='eager'"):
+        _tiny(impl="c", dev="cuda", eager_options=EagerOptions(use_compile=False))
+    with pytest.raises(TypeError, match="compile_step"):
         p(w, src, rec, models=models, compile_step=True)
     with pytest.raises(NotImplementedError, match="Ckpt"):
         _tiny(impl="c", dev="cuda", memory=Ckpt(chunks=8))
