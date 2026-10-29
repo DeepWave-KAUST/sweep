@@ -31,7 +31,7 @@ from typing import ClassVar, Optional
 
 import torch
 
-from .._assembly import assemble, assemble_each
+from .._assembly import assemble, assemble_each, contract
 from ..cpml.acoustic3d import CPML3DProfile
 from ..mesh.boundaries import free_surface_node_idx
 from ..mesh.nodes import node_field
@@ -41,12 +41,12 @@ from ..mesh.hex8 import boundary_element_faces
 
 
 # reference-derivative + transpose einsums on (E, kz, ky, kx) tensors
-def _dxi(D, f):   return torch.einsum("xX,ezyX->ezyx", D, f)   # ∂/∂ξ (x-axis)
-def _deta(D, f):  return torch.einsum("yY,ezYx->ezyx", D, f)   # ∂/∂η (y-axis)
-def _dgam(D, f):  return torch.einsum("zZ,eZyx->ezyx", D, f)   # ∂/∂γ (z-axis)
-def _DTxi(D, F):  return torch.einsum("Xx,ezyX->ezyx", D, F)
-def _DTeta(D, F): return torch.einsum("Yy,ezYx->ezyx", D, F)
-def _DTgam(D, F): return torch.einsum("Zz,eZyx->ezyx", D, F)
+def _dxi(D, f):   return contract("xX,ezyX->ezyx", D, f)   # ∂/∂ξ (x-axis)
+def _deta(D, f):  return contract("yY,ezYx->ezyx", D, f)   # ∂/∂η (y-axis)
+def _dgam(D, f):  return contract("zZ,eZyx->ezyx", D, f)   # ∂/∂γ (z-axis)
+def _DTxi(D, F):  return contract("Xx,ezyX->ezyx", D, F)
+def _DTeta(D, F): return contract("Yy,ezYx->ezyx", D, F)
+def _DTgam(D, F): return contract("Zz,eZyx->ezyx", D, F)
 
 
 @dataclass
@@ -139,9 +139,9 @@ class AcousticSEM3DDeformed(DerivedInitState, DirichletNodes):
         D = self._D
         ibool = self.mesh.ibool
         wJ = self._w_J
-        ex = lambda F: torch.einsum("xX,ezyX->ezyx", D, F)
-        ey = lambda F: torch.einsum("yY,ezYx->ezyx", D, F)
-        ez = lambda F: torch.einsum("zZ,eZyx->ezyx", D, F)
+        ex = lambda F: contract("xX,ezyX->ezyx", D, F)
+        ey = lambda F: contract("yY,ezYx->ezyx", D, F)
+        ez = lambda F: contract("zZ,eZyx->ezyx", D, F)
         u_e = u_global[ibool]
         du_dx, du_dy, du_dz = self._phys_grad_from_ref(ex(u_e), ey(u_e), ez(u_e))
         gx_e = wJ * du_dx; gy_e = wJ * du_dy; gz_e = wJ * du_dz

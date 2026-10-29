@@ -31,7 +31,7 @@ from typing import ClassVar, Optional
 
 import torch
 
-from .._assembly import assemble_each
+from .._assembly import assemble_each, contract
 from ..cpml.elastic_vs3d import (SimpleElasticCPML3DProfile,
                                  build_simple_elastic_cpml_3d)
 from ..fields import DerivedInitState, FieldSpec, check_element_arrays
@@ -158,9 +158,9 @@ class ElasticVSSEM3D(DerivedInitState):
         ib = self.mesh.ibool
         vx_e, vy_e, vz_e = vx_g[ib], vy_g[ib], vz_g[ib]
         dx, dy, dz = self._inv_half_dx, self._inv_half_dy, self._inv_half_dz
-        ex = lambda F: torch.einsum("xX,ezyX->ezyx", D, F)
-        ey = lambda F: torch.einsum("yY,ezYx->ezyx", D, F)
-        ez = lambda F: torch.einsum("zZ,eZyx->ezyx", D, F)
+        ex = lambda F: contract("xX,ezyX->ezyx", D, F)
+        ey = lambda F: contract("yY,ezYx->ezyx", D, F)
+        ez = lambda F: contract("zZ,eZyx->ezyx", D, F)
         return (ex(vx_e) * dx, ey(vy_e) * dy, ez(vz_e) * dz,   # gvx_x, gvy_y, gvz_z
                 ex(vy_e) * dx, ey(vx_e) * dy, ex(vz_e) * dx,   # gvy_x, gvx_y, gvz_x
                 ez(vx_e) * dz, ey(vz_e) * dy, ez(vy_e) * dz)   # gvx_z, gvz_y, gvy_z
@@ -174,9 +174,9 @@ class ElasticVSSEM3D(DerivedInitState):
                                    sxy_x, syy_y, syz_z,
                                    sxz_x, syz_y, szz_z):
         D = self._D
-        dtx = lambda F: torch.einsum("Xx,ezyX->ezyx", D, F)
-        dty = lambda F: torch.einsum("Yy,ezYx->ezyx", D, F)
-        dtz = lambda F: torch.einsum("Zz,eZyx->ezyx", D, F)
+        dtx = lambda F: contract("Xx,ezyX->ezyx", D, F)
+        dty = lambda F: contract("Yy,ezYx->ezyx", D, F)
+        dtz = lambda F: contract("Zz,eZyx->ezyx", D, F)
         wHx, wHy, wHz = self._wHx, self._wHy, self._wHz
         R_x = dtx(wHx * sxx_x) + dty(wHy * sxy_y) + dtz(wHz * sxz_z)
         R_y = dtx(wHx * sxy_x) + dty(wHy * syy_y) + dtz(wHz * syz_z)

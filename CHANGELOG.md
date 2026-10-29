@@ -9,6 +9,22 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Changed
+- **The compiled SEM eager step is faster on GPU: 1.05-1.75x forward,
+  1.07-1.57x forward+backward (H100), most on 3-D and large 2-D** (A100,
+  forward | forward+backward: 1.4x | 1.35x for 2-D elastic at 801x1601, 1.4x |
+  1.2x for 3-D elastic at 49^3). Every GLL reference-derivative contraction now
+  goes through
+  `sweep.sem._assembly.contract`: the einsum it was, except while
+  `torch.compile` traces for CUDA, where it is written as `n` broadcast
+  multiply-adds that Inductor fuses with the gather before it and the pointwise
+  work after it (an einsum lowers to a batched GEMM on `n x n` blocks that
+  nothing fuses with). Uncompiled runs and CPU compiles keep the einsum, which is
+  faster there (unchanged within 3%). At medium 2-D sizes the compiled step is
+  still bound by its per-step host work, which caps the gain there. Records and
+  gradients agree with the uncompiled step to fp32 round-off for every equation
+  family.
+
 ### Removed
 - Stale examples and repo-root leftovers: `examples/FWI/` and
   `examples/LSRTM/` (unlinked scripts, covered by the notebooks; their

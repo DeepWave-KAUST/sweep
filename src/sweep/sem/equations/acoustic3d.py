@@ -32,7 +32,7 @@ from typing import ClassVar, Optional
 
 import torch
 
-from .._assembly import assemble, assemble_each
+from .._assembly import assemble, assemble_each, contract
 from ..cpml.acoustic3d import CPML3DProfile
 from ..mesh.boundaries import free_surface_node_idx
 from ..mesh.nodes import node_field
@@ -132,13 +132,13 @@ class AcousticSEM3D(DerivedInitState, DirichletNodes):
         """``(K u)_global = Σ_e ∫ ∇v · ∇u dΩ`` assembled to global nodes."""
         D = self._D
         u_e = u_global[self.mesh.ibool]                       # (E,kz,ky,kx)
-        du_dxi   = torch.einsum("xX,ezyX->ezyx", D, u_e)      # ∂/∂x (last axis)
-        du_deta  = torch.einsum("yY,ezYx->ezyx", D, u_e)      # ∂/∂y
-        du_dzeta = torch.einsum("zZ,eZyx->ezyx", D, u_e)      # ∂/∂z
+        du_dxi   = contract("xX,ezyX->ezyx", D, u_e)      # ∂/∂x (last axis)
+        du_deta  = contract("yY,ezYx->ezyx", D, u_e)      # ∂/∂y
+        du_dzeta = contract("zZ,eZyx->ezyx", D, u_e)      # ∂/∂z
         r_e = (
-            torch.einsum("Xx,ezyX->ezyx", D, self._w_jx_noc2 * du_dxi)
-            + torch.einsum("Yy,ezYx->ezyx", D, self._w_jy_noc2 * du_deta)
-            + torch.einsum("Zz,eZyx->ezyx", D, self._w_jz_noc2 * du_dzeta)
+            contract("Xx,ezyX->ezyx", D, self._w_jx_noc2 * du_dxi)
+            + contract("Yy,ezYx->ezyx", D, self._w_jy_noc2 * du_deta)
+            + contract("Zz,eZyx->ezyx", D, self._w_jz_noc2 * du_dzeta)
         )
         return assemble(r_e, self.mesh.ibool, u_global)
 
@@ -161,20 +161,20 @@ class AcousticSEM3D(DerivedInitState, DirichletNodes):
         D = self._D
         ibool = self.mesh.ibool
         u_e = u_global[ibool]                                   # (E,kz,ky,kx)
-        du_dxi   = torch.einsum("xX,ezyX->ezyx", D, u_e)
-        du_deta  = torch.einsum("yY,ezYx->ezyx", D, u_e)
-        du_dzeta = torch.einsum("zZ,eZyx->ezyx", D, u_e)
+        du_dxi   = contract("xX,ezyX->ezyx", D, u_e)
+        du_deta  = contract("yY,ezYx->ezyx", D, u_e)
+        du_dzeta = contract("zZ,eZyx->ezyx", D, u_e)
         gx_e = self._w_jac * (du_dxi   * self._inv_half_dx)
         gy_e = self._w_jac * (du_deta  * self._inv_half_dy)
         gz_e = self._w_jac * (du_dzeta * self._inv_half_dz)
-        kx_e = torch.einsum("Xx,ezyX->ezyx", D, self._w_jx_noc2 * du_dxi)
-        ky_e = torch.einsum("Yy,ezYx->ezyx", D, self._w_jy_noc2 * du_deta)
-        kz_e = torch.einsum("Zz,eZyx->ezyx", D, self._w_jz_noc2 * du_dzeta)
-        gax_e = self._w_jac * (torch.einsum("xX,ezyX->ezyx", D, apsi_x[ibool])
+        kx_e = contract("Xx,ezyX->ezyx", D, self._w_jx_noc2 * du_dxi)
+        ky_e = contract("Yy,ezYx->ezyx", D, self._w_jy_noc2 * du_deta)
+        kz_e = contract("Zz,eZyx->ezyx", D, self._w_jz_noc2 * du_dzeta)
+        gax_e = self._w_jac * (contract("xX,ezyX->ezyx", D, apsi_x[ibool])
                                * self._inv_half_dx)
-        gay_e = self._w_jac * (torch.einsum("yY,ezYx->ezyx", D, apsi_y[ibool])
+        gay_e = self._w_jac * (contract("yY,ezYx->ezyx", D, apsi_y[ibool])
                                * self._inv_half_dy)
-        gaz_e = self._w_jac * (torch.einsum("zZ,eZyx->ezyx", D, apsi_z[ibool])
+        gaz_e = self._w_jac * (contract("zZ,eZyx->ezyx", D, apsi_z[ibool])
                                * self._inv_half_dz)
         return assemble_each(                           # nine (n_global,)
             [gx_e, gy_e, gz_e, kx_e, ky_e, kz_e, gax_e, gay_e, gaz_e],

@@ -8,6 +8,7 @@ is plain PyTorch and gives the same result uncompiled.
 """
 from __future__ import annotations
 
+import importlib
 import warnings
 
 import torch
@@ -15,6 +16,22 @@ import torch
 # (device type, what) pairs whose compile already failed in this process. A retry
 # would trace the step and call the failing compiler again on every propagator build.
 _FAILED: dict = {}
+
+
+def _resolve_is_compiling():
+    """The "is Dynamo tracing this?" probe: ``torch.compiler.is_compiling``, or on
+    older 2.x (2.1 has ``torch.compiler`` without it) ``torch._dynamo``'s (the same
+    resolution as ``sweep.operators.torch``)."""
+    fn = getattr(getattr(torch, "compiler", None), "is_compiling", None)
+    if fn is None:
+        try:
+            fn = getattr(importlib.import_module("torch._dynamo"), "is_compiling", None)
+        except ImportError:
+            fn = None
+    return fn or (lambda: False)
+
+
+is_compiling = _resolve_is_compiling()
 
 
 def compiler_failures() -> tuple:

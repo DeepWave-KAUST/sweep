@@ -38,7 +38,7 @@ from typing import ClassVar, Optional
 
 import torch
 
-from .._assembly import assemble
+from .._assembly import assemble, contract
 from ..cpml.acoustic import CPMLProfile
 from ..mesh.boundaries import free_surface_node_idx
 from ..mesh.nodes import node_field
@@ -137,11 +137,11 @@ class AcousticSEM2D(DerivedInitState, DirichletNodes):
     def stiffness_apply(self, u_global: torch.Tensor) -> torch.Tensor:
         """``(K u)_global = Σ_e ∫ ∇v · ∇u dΩ`` assembled to global nodes."""
         u_e = u_global[self.mesh.ibool]
-        du_dxi  = torch.einsum("bg,eag->eab", self._D, u_e)
-        du_deta = torch.einsum("ag,egb->eab", self._D, u_e)
+        du_dxi  = contract("bg,eag->eab", self._D, u_e)
+        du_deta = contract("ag,egb->eab", self._D, u_e)
         r_e = (
-            torch.einsum("db,ead->eab", self._D, self._w_jx_noc2 * du_dxi)
-          + torch.einsum("ga,egb->eab", self._D, self._w_jz_noc2 * du_deta)
+            contract("db,ead->eab", self._D, self._w_jx_noc2 * du_dxi)
+          + contract("ga,egb->eab", self._D, self._w_jz_noc2 * du_deta)
         )
         return assemble(r_e, self.mesh.ibool, u_global)
 
@@ -165,13 +165,13 @@ class AcousticSEM2D(DerivedInitState, DirichletNodes):
         ibool = self.mesh.ibool
         F = torch.stack([u_global, apsi_x, apsi_z], dim=-1)        # (n_global, 3)
         F_e = F[ibool]                                            # (E,ngll,ngll,3)
-        dF_dxi  = torch.einsum("bg,eagk->eabk", self._D, F_e)
-        dF_deta = torch.einsum("ag,egbk->eabk", self._D, F_e)
+        dF_dxi  = contract("bg,eagk->eabk", self._D, F_e)
+        dF_deta = contract("ag,egbk->eabk", self._D, F_e)
         du_dxi, du_deta = dF_dxi[..., 0], dF_deta[..., 0]
         gx_e  = self._w_jac * (du_dxi * self._inv_half_dx)
         gz_e  = self._w_jac * (du_deta * self._inv_half_dz)
-        kx_e  = torch.einsum("db,ead->eab", self._D, self._w_jx_noc2 * du_dxi)
-        kz_e  = torch.einsum("ga,egb->eab", self._D, self._w_jz_noc2 * du_deta)
+        kx_e  = contract("db,ead->eab", self._D, self._w_jx_noc2 * du_dxi)
+        kz_e  = contract("ga,egb->eab", self._D, self._w_jz_noc2 * du_deta)
         gax_e = self._w_jac * (dF_dxi[..., 1] * self._inv_half_dx)
         gaz_e = self._w_jac * (dF_deta[..., 2] * self._inv_half_dz)
         stk = torch.stack([gx_e, gz_e, kx_e, kz_e, gax_e, gaz_e], dim=-1)

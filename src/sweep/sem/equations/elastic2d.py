@@ -65,6 +65,7 @@ from typing import ClassVar
 
 import torch
 
+from .._assembly import contract
 from ..fields import DerivedInitState, FieldSpec, check_element_arrays
 from ..mesh.quad4 import Quad4Mesh
 
@@ -159,10 +160,10 @@ class ElasticSEM2D(DerivedInitState):
         u_x_e = u_x_global[self.mesh.ibool]
         u_z_e = u_z_global[self.mesh.ibool]
 
-        d_ux_dxi  = torch.einsum("bg,eag->eab", self._D, u_x_e)
-        d_ux_deta = torch.einsum("ag,egb->eab", self._D, u_x_e)
-        d_uz_dxi  = torch.einsum("bg,eag->eab", self._D, u_z_e)
-        d_uz_deta = torch.einsum("ag,egb->eab", self._D, u_z_e)
+        d_ux_dxi  = contract("bg,eag->eab", self._D, u_x_e)
+        d_ux_deta = contract("ag,egb->eab", self._D, u_x_e)
+        d_uz_dxi  = contract("bg,eag->eab", self._D, u_z_e)
+        d_uz_deta = contract("ag,egb->eab", self._D, u_z_e)
 
         # See module docstring for the prefactor table.
         F_xx      = self._w_lam2mu_Jx * d_ux_dxi  + self._w_lam       * d_uz_deta
@@ -170,10 +171,10 @@ class ElasticSEM2D(DerivedInitState):
         F_xz_to_x = self._w_mu_Jz     * d_ux_deta + self._w_mu        * d_uz_dxi
         F_xz_to_z = self._w_mu        * d_ux_deta + self._w_mu_Jx     * d_uz_dxi
 
-        R_x_e = (torch.einsum("db,ead->eab", self._D, F_xx)
-                 + torch.einsum("ga,egb->eab", self._D, F_xz_to_x))
-        R_z_e = (torch.einsum("db,ead->eab", self._D, F_xz_to_z)
-                 + torch.einsum("ga,egb->eab", self._D, F_zz))
+        R_x_e = (contract("db,ead->eab", self._D, F_xx)
+                 + contract("ga,egb->eab", self._D, F_xz_to_x))
+        R_z_e = (contract("db,ead->eab", self._D, F_xz_to_z)
+                 + contract("ga,egb->eab", self._D, F_zz))
 
         out_x = torch.zeros_like(u_x_global)
         out_z = torch.zeros_like(u_z_global)

@@ -34,7 +34,7 @@ from typing import ClassVar, Optional
 
 import torch
 
-from .._assembly import assemble, phys_grads
+from .._assembly import assemble, contract, phys_grads
 from ..cpml.elastic import ElasticCPMLProfile, build_elastic_cpml
 from ..fields import DerivedInitState, FieldSpec, check_element_arrays
 from ..mesh.domains import DomainMask, masked_inv_mass
@@ -184,8 +184,8 @@ class ElasticSEM2DDeformed(DerivedInitState):
         # batched D^T contraction (2 einsums vs 4) + single scatter for R_x,R_z.
         F_beta  = torch.stack([F_x_beta, F_z_beta], dim=-1)        # (E,ngll,ngll,2)
         F_alpha = torch.stack([F_x_alpha, F_z_alpha], dim=-1)
-        R_e = (torch.einsum("db,eadk->eabk", self._D, F_beta)
-               + torch.einsum("ga,egbk->eabk", self._D, F_alpha))  # (E,ngll,ngll,2)
+        R_e = (contract("db,eadk->eabk", self._D, F_beta)
+               + contract("ga,egbk->eabk", self._D, F_alpha))  # (E,ngll,ngll,2)
         if self._mask_e is not None:            # domain restriction (see build)
             R_e = R_e * self._mask_e.unsqueeze(-1)
         return assemble(R_e, self.mesh.ibool, like_x)
@@ -219,8 +219,8 @@ class ElasticSEM2DDeformed(DerivedInitState):
         #    term in step 6 (no second gather).
         ixx, ixz, iex, iez = self._ixx, self._ixz, self._iex, self._iez
         U_e = torch.stack([u_x_now, u_z_now, u_x_prev, u_z_prev], dim=-1)[ib]
-        dU_dxi  = torch.einsum("bg,eagk->eabk", self._D, U_e)   # (E,ngll,ngll,4)
-        dU_deta = torch.einsum("ag,egbk->eabk", self._D, U_e)
+        dU_dxi  = contract("bg,eagk->eabk", self._D, U_e)   # (E,ngll,ngll,4)
+        dU_deta = contract("ag,egbk->eabk", self._D, U_e)
         dU_dx = ixx.unsqueeze(-1) * dU_dxi + iex.unsqueeze(-1) * dU_deta
         dU_dz = ixz.unsqueeze(-1) * dU_dxi + iez.unsqueeze(-1) * dU_deta
         dux_dx,   duz_dx   = dU_dx[..., 0], dU_dx[..., 1]

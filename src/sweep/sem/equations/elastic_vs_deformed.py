@@ -50,7 +50,7 @@ from typing import ClassVar, Optional
 
 import torch
 
-from .._assembly import assemble, phys_grads
+from .._assembly import assemble, contract, phys_grads
 from ..cpml.elastic_vs import SimpleElasticCPMLProfile, build_simple_elastic_cpml
 from ..fields import DerivedInitState, FieldSpec, check_element_arrays
 from ..mesh.quad9 import Quad9Mesh, boundary_element_edges
@@ -232,8 +232,8 @@ class ElasticVSSEM2DDeformed(DerivedInitState):
         # (2 einsums vs 4), then assemble R_x and R_z in one scatter.
         F_beta  = torch.stack([F_x_beta, F_z_beta], dim=-1)        # (E,ngll,ngll,2)
         F_alpha = torch.stack([F_x_alpha, F_z_alpha], dim=-1)
-        R_e = (torch.einsum("db,eadk->eabk", self._D, F_beta)
-               + torch.einsum("ga,egbk->eabk", self._D, F_alpha))  # (E,ngll,ngll,2)
+        R_e = (contract("db,eadk->eabk", self._D, F_beta)
+               + contract("ga,egbk->eabk", self._D, F_alpha))  # (E,ngll,ngll,2)
         like = sigma_xx_xpart.new_zeros(self.mesh.n_global)
         return assemble(R_e, self.mesh.ibool, like)
 

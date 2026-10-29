@@ -58,7 +58,7 @@ from typing import ClassVar
 
 import torch
 
-from .._assembly import assemble_each
+from .._assembly import assemble_each, contract
 from ..fields import DerivedInitState, FieldSpec, check_element_arrays
 from ..mesh.hex8 import Hex8Mesh
 
@@ -152,9 +152,9 @@ class ElasticSEM3D(DerivedInitState):
         # — ~1.2-1.35x faster on the GPU (a narrow einsum beats a fat one here;
         # see the acoustic3d._cpml_grads note). g_{p,a}: p=component, a=axis.
         ux_e, uy_e, uz_e = ux_g[ibool], uy_g[ibool], uz_g[ibool]
-        ex = lambda F: torch.einsum("xX,ezyX->ezyx", D, F)
-        ey = lambda F: torch.einsum("yY,ezYx->ezyx", D, F)
-        ez = lambda F: torch.einsum("zZ,eZyx->ezyx", D, F)
+        ex = lambda F: contract("xX,ezyX->ezyx", D, F)
+        ey = lambda F: contract("yY,ezYx->ezyx", D, F)
+        ez = lambda F: contract("zZ,eZyx->ezyx", D, F)
         gxx, gyx, gzx = ex(ux_e), ex(uy_e), ex(uz_e)          # ∂_x of u_{x,y,z}
         gxy, gyy, gzy = ey(ux_e), ey(uy_e), ey(uz_e)          # ∂_y
         gxz, gyz, gzz = ez(ux_e), ez(uy_e), ez(uz_e)          # ∂_z
@@ -175,9 +175,9 @@ class ElasticSEM3D(DerivedInitState):
         F_yz = w3 * mu * (Gzz * gyz + Gyz * gzy)   # σ_yz → R_y (∂_z)
         F_zy = w3 * mu * (Gyz * gyz + Gyy * gzy)   # σ_yz → R_z (∂_y)
 
-        dtx = lambda F: torch.einsum("Xx,ezyX->ezyx", D, F)   # D_x^T
-        dty = lambda F: torch.einsum("Yy,ezYx->ezyx", D, F)   # D_y^T
-        dtz = lambda F: torch.einsum("Zz,eZyx->ezyx", D, F)   # D_z^T
+        dtx = lambda F: contract("Xx,ezyX->ezyx", D, F)   # D_x^T
+        dty = lambda F: contract("Yy,ezYx->ezyx", D, F)   # D_y^T
+        dtz = lambda F: contract("Zz,eZyx->ezyx", D, F)   # D_z^T
         R_x = dtx(F_xx) + dty(F_xy) + dtz(F_xz)
         R_y = dtx(F_yx) + dty(F_yy) + dtz(F_yz)
         R_z = dtx(F_zx) + dty(F_zy) + dtz(F_zz)
