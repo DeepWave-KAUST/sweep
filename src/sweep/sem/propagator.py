@@ -42,7 +42,7 @@ from .mesh.quad9 import Quad9Mesh
 from .mesh.hex8 import Hex8Mesh
 from .mesh.hex27 import Hex27Mesh
 from .basis.quad9 import q2_basis_at, q2_basis_deriv_at
-from .._compile import compile_or_fallback
+from .._compile import SettledSteps, compile_or_fallback
 from ._assembly import element_mean, scatter_point_sources
 from .fields import resolve_field_types
 
@@ -1171,13 +1171,17 @@ class SEMPropagator:
         seis = {i: torch.zeros(n_rec, self.nt, dtype=dtype, device=device)
                 for i in recv}
         snaps = {i: [] for i in recv}
+        # The first steps run uncompiled while the fields pick up requires_grad
+        # (SettledSteps): compiled, each would compile a graph of its own.
+        settled = SettledSteps()
         for n in range(self.nt):
             if per_source:
                 src = scatter_point_sources(*source_spec, source_wavelet[:, n], like)
             else:
                 s_val = source_wavelet[n]
                 src = [p * s_val for p in source_spec]
-            state = step_fn(state, src, self.dt)
+            step = step_fn if settled.compiled(n, state) else self.eq.step
+            state = step(state, src, self.dt)
 
             if n_rec > 0:
                 for i in recv:

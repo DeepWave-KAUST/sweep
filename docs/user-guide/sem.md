@@ -84,7 +84,9 @@ Three things speed it up, and they combine:
   fuses with the gather before them and the pointwise work after them. The first
   call compiles, and so does the first call with a new grid size, shot count,
   dtype or set of models that require grad; each says so on stderr before it
-  starts, and later calls reuse it. On the CPU, Inductor
+  starts, and later calls reuse it. With gradients, the first steps of a rollout
+  run uncompiled until the fields' `requires_grad` flags stop changing, as on
+  PropTorch, so that a rollout compiles one graph. On the CPU, Inductor
   builds C++ with `torch._inductor.config.cpp.cxx` (seeded from `$CXX`), which
   must accept `-std=c++20` (g++ 10 or newer); when the compiler fails, the call
   warns once and runs the step uncompiled. The vmapped multi-shot batch of

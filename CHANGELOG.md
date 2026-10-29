@@ -43,6 +43,19 @@ and this project adheres to
   compiles, two lines. The first line of the process still says how long a
   compile takes and how to turn compiling off. The check costs ~2 us of Python
   per compiled step.
+- **`PropSEM(impl='eager')` compiles one graph per rollout with gradients on its
+  full tape and vmapped shot batch, as PropTorch's eager rollouts do.** Dynamo
+  guards on each input's `requires_grad`, and the fields pick it up over the
+  first steps of a rollout that differentiates the models: compiled, each of
+  those steps built a graph of its own, three per rollout. They now run
+  uncompiled until the flags stop changing (`sweep._compile.SettledSteps`, the
+  class PropTorch's eager path already used). On an A100 at 201x401 (nt=1000,
+  fresh compile cache) the first FWI call takes 16 s instead of 24 s (elastic,
+  one shot, or four shots under `Ckpt(chunks=8)`) and 9 s instead of 15 s
+  (acoustic); later calls take as long as before (within 0.7%), and records and
+  gradients agree with the uncompiled step as before (FP32: records 1.5-2.8e-6,
+  gradients 2-5e-7 relative). Single-shot `Ckpt()` and boundary saving are
+  unchanged.
 - **`PropSEM` compiles its eager step by default and takes PropTorch's
   `eager_options=`.** `PropSEM(..., eager_options=EagerOptions(...))` (or its
   dict) replaces the call argument `compile_step`, which is gone (passing it

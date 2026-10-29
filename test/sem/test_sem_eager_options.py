@@ -15,6 +15,8 @@ import sweep.sem.prop_base as PB
 from sweep.propagator import BoundarySaving, Ckpt, EagerOptions
 from sweep.sem import PropSEM, AcousticSEM2D, ElasticVSSEM2DDeformed
 
+from conftest import requires_compile
+
 SHAPE, NT = (21, 33), 40
 
 
@@ -232,3 +234,32 @@ def test_a_new_set_of_models_that_require_grad_is_announced(compiles, capsys, mo
     assert len(again) == 1 and "(with gradients)" in again[0], again
     fwi(True, True, False)
     assert _announced(capsys) == []
+
+
+@requires_compile
+@pytest.mark.parametrize("memory, nshots", [(None, 1), (None, 2), (Ckpt(chunks=8), 2)],
+                         ids=["loop", "vmapped", "vmapped_ckpt"])
+def test_a_gradient_rollout_compiles_one_graph(memory, nshots):
+    """Dynamo guards on each input's requires_grad, and the fields pick it up over
+    the first steps. Those steps run uncompiled (SettledSteps) -- compiled, each
+    built a graph of its own -- so a rollout with gradients compiles one graph,
+    and gives the uncompiled record and gradient; the checkpointed chunks'
+    recompute takes the same steps' paths."""
+    from torch._dynamo.backends.registry import lookup_backend
+    aot_eager = lookup_backend("aot_eager")
+    graphs = []
+
+    def count(gm, example_inputs):
+        graphs.append(gm)
+        return aot_eager(gm, example_inputs)
+
+    kw = {} if memory is None else {"memory": memory}
+    torch._dynamo.reset()
+    try:
+        out, grad = _call(_prop(eager_options=EagerOptions(compile_backend=count), **kw), nshots)
+    finally:
+        torch._dynamo.reset()
+    assert len(graphs) == 1, f"{len(graphs)} graphs compiled for one rollout"
+    ref_out, ref_grad = _call(_prop(eager_options=EagerOptions(use_compile=False), **kw), nshots)
+    torch.testing.assert_close(out, ref_out, rtol=1e-12, atol=1e-12 * ref_out.abs().max().item())
+    torch.testing.assert_close(grad, ref_grad, rtol=1e-12, atol=1e-12 * ref_grad.abs().max().item())

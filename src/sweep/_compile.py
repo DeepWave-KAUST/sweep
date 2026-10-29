@@ -25,7 +25,7 @@ _FAILED: dict = {}
 _ANNOUNCED: set = set()
 
 
-def compile_notice(what: str, size_of, captured=None, *, repeat=True):
+def compile_notice(what: str, size_of, captured=None):
     """``notice(args, kwargs)``, for a compiled step to call with its arguments before
     each call: says on stderr that torch.compile is about to compile ``what`` (e.g.
     "the Acoustic step") for the size ``size_of(shape)`` names (e.g. "a 201x401
@@ -40,12 +40,8 @@ def compile_notice(what: str, size_of, captured=None, *, repeat=True):
     arguments' flags change): Dynamo builds a backward for each such set. The call
     records when grad mode is on and one of those tensors requires grad, and its line
     then says "with gradients"; grad mode alone is not enough, as a forward with
-    nothing that requires grad compiles no backward.
-
-    ``repeat=False`` prints each line once per notice, for a step built for one call
-    whose first steps each compile a graph while the fields pick up requires_grad."""
+    nothing that requires grad compiles no backward."""
     seen = [None]                     # the last call's (shape, dtype, grad mode, flags)
-    printed = set()
 
     def notice(args, kwargs):
         # Every step of a rollout comes here: ~2 us on the loop below.
@@ -83,9 +79,6 @@ def compile_notice(what: str, size_of, captured=None, *, repeat=True):
         line = f"sweep: torch.compile is compiling {what} for {size}"
         if records:
             line += " (with gradients)"
-        if not repeat and line in printed:
-            return
-        printed.add(line)
         if first:
             line += ("; the first call on each new grid size takes seconds to a few minutes "
                      "(cached on disk for later runs). EagerOptions(use_compile=False) runs "
@@ -120,6 +113,43 @@ def _grad_flags(obj) -> tuple:
 
     walk(obj)
     return tuple(flags)
+
+
+class SettledSteps:
+    """Which steps of one rollout take the compiled step.
+
+    Dynamo guards on every input's ``requires_grad``.  In a rollout that
+    differentiates the models those flags change over the first steps: the
+    fields start as zeros and pick up ``requires_grad`` as the models reach
+    them.  Each change compiled a graph that then served one step: two of the
+    three graphs an FD rollout compiled, two or three of the three or four of a
+    SEM full tape.  So steps run uncompiled until their inputs' flags repeat
+    from one step to the next.  A step's flags follow from the previous step's
+    alone, so they stay put from there, and the first compiled step is the only
+    one that compiles.  Without gradients the flags never change and only step
+    0 runs uncompiled.
+
+    The answer for a step never changes once given: a checkpoint's recompute
+    replays its steps and has to take the path the forward took.
+    """
+
+    def __init__(self):
+        self.first = None           # the first compiled step
+        self._flags = None
+        self._plain = set()
+
+    def compiled(self, step, fields):
+        if self.first is not None:
+            return step >= self.first
+        if step in self._plain:
+            return False
+        flags = tuple(w.requires_grad for w in fields)
+        if flags == self._flags:
+            self.first = step
+            return True
+        self._flags = flags
+        self._plain.add(step)
+        return False
 
 
 def _resolve_is_compiling():
@@ -215,11 +245,8 @@ def compile_or_fallback(fn, device, what: str, options, size=None, captured=None
     compiled = torch.compile(fd._with_own_code(fn) if fd.OWN_CODE_PER_COMPILE else fn,
                              **compile_kwargs)
     failures = compiler_failures()
-    # The steps compiled here are built per call (SEM): one line for the graphs its
-    # first steps compile.
     notice = compile_notice(what, lambda shape: size or f"inputs of shape {tuple(shape or ())}",
-                            getattr(fn, "__self__", None) if captured is None else captured,
-                            repeat=False)
+                            getattr(fn, "__self__", None) if captured is None else captured)
 
     def step(*args, **kwargs):
         if key not in _FAILED:

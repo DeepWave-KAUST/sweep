@@ -75,7 +75,7 @@ import numbers
 import torch
 import torch.utils.checkpoint
 
-from .._compile import compile_or_fallback
+from .._compile import SettledSteps, compile_or_fallback
 from .mesh import MESH_BUILDERS
 from .mesh.hex8 import hex8_layout
 from .cpml.acoustic import build_cpml
@@ -1933,11 +1933,15 @@ class PropSEM:
 
         st0 = eq.init_state(dt, dev, dtype)                      # tuple
         dyn = tuple(f.unsqueeze(0).repeat(B, *([1] * f.dim())) for f in st0)
-        vstep = torch.vmap(lambda fields, src: eq.step(fields, src, dt),
-                           in_dims=(0, 0))
-        vstep = compile_or_fallback(vstep, dev, f"the vmapped {type(eq).__name__} step",
+        vstep_plain = torch.vmap(lambda fields, src: eq.step(fields, src, dt),
+                                 in_dims=(0, 0))
+        vstep = compile_or_fallback(vstep_plain, dev, f"the vmapped {type(eq).__name__} step",
                                     compile_options, size=f"{B} shots on {self._grid_label()}",
                                     captured=eq)
+        # The first steps run uncompiled while the fields pick up requires_grad,
+        # and a checkpointed chunk's recompute takes the path its forward took
+        # (SettledSteps, keyed on the step index).
+        settled = SettledSteps()
 
         ar = torch.arange(B, device=dev)[:, None, None]
 
@@ -1947,7 +1951,7 @@ class PropSEM:
             for j in range(k):
                 sval = wav_B[:, n0 + j]
                 src = [pat * sval[:, None] for pat in patterns]
-                d = vstep(d, src)
+                d = (vstep if settled.compiled(n0 + j, d) else vstep_plain)(d, src)
                 comps = [(d[ri].reshape(B, -1)[ar, rec_GI[ri]] * rec_W).sum(-1)
                          for ri in recv_idxs]
                 chunk.append(torch.stack(comps, -1))           # (B, nrec, ncomp)

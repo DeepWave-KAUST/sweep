@@ -6,8 +6,8 @@ import torch
 from torch.utils.checkpoint import checkpoint as ckpt_torch
 
 
-from sweep._compile import (compile_notice, compiler_failures as _compiler_failures,
-                            compiler_hint, failure_reason)
+from sweep._compile import (SettledSteps as _SettledSteps, compile_notice,
+                            compiler_failures as _compiler_failures, compiler_hint, failure_reason)
 from sweep.propagator.base import PropBase
 from sweep.propagator.options import EAGER_DEFAULTS
 from sweep.equations._cpml import StripLayout
@@ -99,42 +99,6 @@ def _raise_dynamo_recompile_limit(target=32):
     for name in names:
         if getattr(cfg, name) < target:
             setattr(cfg, name, target)
-
-
-class _SettledSteps:
-    """Which steps of one rollout take the compiled step.
-
-    Dynamo guards on every input's ``requires_grad``.  In a rollout that
-    differentiates the models those flags change over the first steps: the
-    wavefields start as zeros and pick up ``requires_grad`` as the models
-    reach them.  Each change compiled a graph that then served one step, two
-    of the three graphs a rollout compiled.  So steps run uncompiled until
-    their inputs' flags repeat from one step to the next.  A step's flags
-    follow from the previous step's alone, so they stay put from there, and the
-    first compiled step is the only one that compiles.  Without gradients the
-    flags never change and only step 0 runs uncompiled.
-
-    The answer for a step never changes once given: a checkpoint's recompute
-    replays its steps and has to take the path the forward took.
-    """
-
-    def __init__(self):
-        self.first = None           # the first compiled step
-        self._flags = None
-        self._plain = set()
-
-    def compiled(self, step, wavefield):
-        if self.first is not None:
-            return step >= self.first
-        if step in self._plain:
-            return False
-        flags = tuple(w.requires_grad for w in wavefield)
-        if flags == self._flags:
-            self.first = step
-            return True
-        self._flags = flags
-        self._plain.add(step)
-        return False
 
 
 class _PropTorchEager(
