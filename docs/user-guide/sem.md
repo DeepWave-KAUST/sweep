@@ -869,9 +869,50 @@ nodes of the two media, so its relative displacement is continuous in both
 components there, whereas the open-pore conditions constrain only its normal
 component.
 
-2-D and `impl='eager'` only. Boundary saving is refused because the viscous
+`impl='eager'` only. Boundary saving is refused because the viscous
 drag is dissipative everywhere, so the field cannot be stepped back; use
 `Full()` or `Ckpt(chunks=...)`.
+
+### In 3-D
+
+`BiotVSSEM3DDeformed` is the 3-D class, on the Hex27 mesh of
+`ElasticVSSEM3DDeformed` (flat, or under a topography). It has the same eight
+coefficients, the same placement (`v` and `p` continuous, `q` and the
+stresses element-local) and the same exact drag at every node, with the
+open-pore surface, the C-PML and `viscous_q`:
+
+```python
+from sweep.sem import BiotVSSEM3DDeformed, PropSEM
+
+solver = PropSEM(BiotVSSEM3DDeformed, shape=(nz, ny, nx), dh=4.0, dt=2e-4,
+                 free_surface=True, f_dominant=30.0, source_type=["p"],
+                 receiver_type=["vx", "vy", "vz", "p"])
+seis = solver(wavelet, sources, receivers, models=[H, mu, C, M, rho, rho_f, m, b])
+```
+
+The flux copies at a node, one per element that shares it (1, 2, 4 or 8), are
+grouped by their number, and the drag's exponentials are stored per group:
+about 2.7 kB per element in float32 at `n_order=4`. A compiled step costs about
+2.5 times one of `ElasticVSSEM3DDeformed` on the same mesh and 1.4 times its
+memory (7.4 against 2.9 ms on 27k elements, float32, RTX 6000 Ada). Three things of the 2-D
+class are missing. Fluid elements (`rho = 0`) are refused, because the
+fluid-solid interface is 2-D; a porous-dry interface needs nothing, as in
+2-D. The drag is isotropic. The sources are the forces `fx`, `fy` and `fz`
+(on both equations), the velocities and fluxes `vx` ... `qz`, and the
+pore-pressure injection `p`, the default; a 3-D mesh has no moment-tensor
+stamp, so `sxx` and the other stress sources are refused.
+
+`test/sem/test_biot_sem3d.py` checks that a dry solid is
+`ElasticVSSEM3DDeformed` to round-off and the undrained limit to 3e-3 on 40 m
+elements (the continuous pore pressure averages div v at the nodes, as in 2-D). It also
+checks the drag's operators node by node in a medium that changes from
+element to element, the flux divergence as the transpose of the pressure
+gradient on a curved mesh, the three axes against each other, the gradient in
+`mu`, `M`, `m` and `b` against central differences (with `viscous_q` and the
+open-pore surface), shots and checkpointing. On CUDA it compares a point
+pore-pressure injection in Dai's medium with the analytic solution (the fast
+and the slow P wave): the solid velocity and the pressure agree to 0.3-0.8%,
+inviscid and with a propagating but attenuated slow wave.
 
 ## Wavefield snapshots
 
