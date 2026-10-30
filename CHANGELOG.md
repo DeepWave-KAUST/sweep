@@ -162,6 +162,18 @@ and this project adheres to
   compiler's error and names `torch._inductor.config.cpp.cxx` / `$CXX`; later
   calls skip the attempt. Results are the same; errors of the step itself
   still propagate.
+- **The velocity-stress SEMs' C-PML no longer grows at late times.** Its outer edge was left
+  traction-free, and from about 2.5 s on a record rose 2 to 300 times every 1.25 s, in 2-D and
+  3-D, with or without a free surface (`ElasticVSSEM2DDeformed` and the VTI class built on it,
+  `ElasticVSSEM3D`, `ElasticVSSEM3DDeformed`, `BiotVSSEM2DDeformed` with its
+  anisotropic-drag class). The outer edge is now pinned at zero velocity, the rigid wall the
+  displacement form's C-PML has (`sweep.sem.cpml.elastic_vs.pin_outer_edge`), on both
+  backends and in the boundary-saving recompute: over 10 s the records decay to 1e-6 of the
+  direct wave or below, and the absorption is unchanged (`test/sem/test_sem_absorption_gates.py`).
+  A C-PML side between two free faces -- free top, left and right over an absorbing bottom, or
+  free top and bottom with absorbing sides -- still grows, since the solid between the faces is
+  a plate whose backward-propagating Lamb modes any PML amplifies, and `PropSEM` refuses it on
+  these classes (`ValueError`; `test/sem/test_sem_cpml_outer_edge.py`).
 
 ## [0.3.6] - 2026-10-29
 

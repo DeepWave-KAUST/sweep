@@ -114,7 +114,8 @@ import torch
 
 from .._assembly import assemble, contract, phys_grads
 from ..coupling import FluidSolidInterface, assert_no_corner_pml_on_interface
-from ..cpml.elastic_vs import SimpleElasticCPMLProfile, build_simple_elastic_cpml
+from ..cpml.elastic_vs import (SimpleElasticCPMLProfile, build_simple_elastic_cpml,
+                               pin_outer_edge)
 from ..fields import FieldSpec, check_element_arrays, init_state_from_specs
 from ..mesh.boundaries import free_surface_node_idx
 from ..mesh.domains import DomainMask, masked_inv_mass
@@ -377,7 +378,8 @@ class BiotVSSEM2DDeformed:
             dirichlet=tuple(dirichlet),
             dirichlet_idx=free_surface_node_idx(mesh, dirichlet, device),
             viscous_q=None if viscous_q is None else tuple(float(v) for v in viscous_q),
-            mass_rho=mass_rho, _inv_M=masked_inv_mass(mass_rho, v_alive),
+            mass_rho=mass_rho,
+            _inv_M=pin_outer_edge(masked_inv_mass(mass_rho, v_alive), mesh, cpml),
             _inv_Mm=masked_inv_mass(lump(m_e), p_alive),
             _inv_Mp=masked_inv_mass(lump(inv_M_e), p_alive), _inv_M1=inv_M1,
             _lam_d=H_e - 2.0 * mu_e - alpha * C_e, _alpha=alpha,
@@ -394,6 +396,13 @@ class BiotVSSEM2DDeformed:
 
     # The C-PML builder ``cpml=`` expects, and the speed PropSEM designs it for.
     cpml_builder: ClassVar[object] = staticmethod(build_simple_elastic_cpml)
+
+    @property
+    def free_plate_unstable(self) -> bool:
+        """A solid between two free faces of a C-PML band grows, and PropSEM refuses it
+        (:func:`~sweep.sem.cpml.elastic_vs.refuse_free_waveguide`); a fluid alone has no
+        backward modes."""
+        return bool(self._solid_e.any())
 
     @staticmethod
     def pml_speed(models) -> float:

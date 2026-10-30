@@ -33,6 +33,7 @@ import torch
 
 from .._assembly import assemble_each, contract
 from ..cpml.band import active_elements, element_split
+from ..cpml.elastic_vs import pin_outer_edge
 from ..cpml.elastic_vs3d import (SimpleElasticCPML3DProfile,
                                  build_simple_elastic_cpml_3d)
 from ..fields import DerivedInitState, FieldSpec, check_element_arrays
@@ -102,6 +103,9 @@ class ElasticVSSEM3D(DerivedInitState):
     # The C-PML builder this equation's ``cpml=`` argument expects -- same
     # declaration the 2-D equations carry, so PropSEM's routing is uniform.
     cpml_builder = staticmethod(build_simple_elastic_cpml_3d)
+    # a C-PML side between two free faces grows: PropSEM refuses it
+    # (sweep.sem.cpml.elastic_vs.refuse_free_waveguide)
+    free_plate_unstable: ClassVar[bool] = True
     # divergence weights w₃·|J|·(2/d_j)
     _wHx: torch.Tensor
     _wHy: torch.Tensor
@@ -152,7 +156,7 @@ class ElasticVSSEM3D(DerivedInitState):
         wHz = w3 * (jac * 2.0 / mesh.dz_e)
         return cls(
             mesh=mesh, vp_e=vp_e, vs_e=vs_e, rho_e=rho_e,
-            mass_rho=mass_rho, _inv_M=1.0 / mass_rho, cpml=cpml,
+            mass_rho=mass_rho, _inv_M=pin_outer_edge(1.0 / mass_rho, mesh, cpml), cpml=cpml,
             _D=mesh.deriv, _lam=lam, _mu=mu, _lam2mu=lam2mu, _w3=w3,
             _wHx=wHx, _wHy=wHy, _wHz=wHz,
             _inv_half_dx=2.0 / mesh.dx_e,
@@ -377,7 +381,9 @@ class ElasticVSSEM3D(DerivedInitState):
         saved_inv = self._inv_M
         for a in self.bs_model_attrs:
             setattr(self, a, leaves[a])
-        self._inv_M = 1.0 / leaves["mass_rho"]
+        # the C-PML's rigid outer edge (pin_outer_edge) stays pinned
+        self._inv_M = torch.where(saved_inv == 0, torch.zeros_like(saved_inv),
+                                  1.0 / leaves["mass_rho"])
         try:
             return self.step(fields, src, dt)
         finally:

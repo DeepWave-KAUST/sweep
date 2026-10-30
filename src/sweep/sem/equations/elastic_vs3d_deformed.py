@@ -40,6 +40,7 @@ import torch
 from ..fields import check_element_arrays
 
 from .._assembly import phys_grads3, stress_divergence3
+from ..cpml.elastic_vs import pin_outer_edge
 from ..cpml.elastic_vs3d import SimpleElasticCPML3DProfile
 from ..mesh.hex27 import Hex27Mesh
 from .elastic_vs3d import ElasticVSSEM3D
@@ -85,7 +86,7 @@ class ElasticVSSEM3DDeformed(ElasticVSSEM3D):
 
         return cls(
             mesh=mesh, vp_e=vp_e, vs_e=vs_e, rho_e=rho_e,
-            mass_rho=mass_rho, _inv_M=1.0 / mass_rho, cpml=cpml,
+            mass_rho=mass_rho, _inv_M=pin_outer_edge(1.0 / mass_rho, mesh, cpml), cpml=cpml,
             _D=mesh.deriv, _lam=lam, _mu=mu, _lam2mu=lam2mu, _w3=w3,
             # the axis-aligned shortcuts are unused on this path; keep the
             # dataclass fields well-formed rather than leaving them None

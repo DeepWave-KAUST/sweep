@@ -52,7 +52,8 @@ import torch
 
 from .._assembly import assemble, contract, phys_grads
 from ..cpml.band import active_elements, element_split
-from ..cpml.elastic_vs import SimpleElasticCPMLProfile, build_simple_elastic_cpml
+from ..cpml.elastic_vs import (SimpleElasticCPMLProfile, build_simple_elastic_cpml,
+                               pin_outer_edge)
 from ..fields import DerivedInitState, FieldSpec, check_element_arrays
 from ..mesh.quad9 import Quad9Mesh, boundary_element_edges
 
@@ -205,7 +206,7 @@ class ElasticVSSEM2DDeformed(DerivedInitState):
 
         return cls(
             mesh=mesh, vp_e=vp_e, vs_e=vs_e, rho_e=rho_e,
-            mass_rho=mass_rho, _inv_M=1.0 / mass_rho, cpml=cpml,
+            mass_rho=mass_rho, _inv_M=pin_outer_edge(1.0 / mass_rho, mesh, cpml), cpml=cpml,
             free_top=free_top, top_elem_ids=top_elem_ids,
             _tx_top=tx_top, _tz_top=tz_top,
             _D=mesh.deriv,
@@ -467,6 +468,9 @@ class ElasticVSSEM2DDeformed(DerivedInitState):
     # propagator: the profile dataclasses are NOT interchangeable, and
     # the equation is what knows which one it takes.
     cpml_builder: ClassVar[object] = staticmethod(build_simple_elastic_cpml)
+    # a C-PML side between two free faces grows: PropSEM refuses it
+    # (sweep.sem.cpml.elastic_vs.refuse_free_waveguide)
+    free_plate_unstable: ClassVar[bool] = True
 
     bs_ring_save: ClassVar[list] = [0, 1]
     bs_ring_restore: ClassVar[list] = [(0, 0, 0), (1, 1, 0)]   # (field, slot, offset)
@@ -512,7 +516,9 @@ class ElasticVSSEM2DDeformed(DerivedInitState):
         saved_inv = self._inv_M
         for a in self.bs_model_attrs:
             setattr(self, a, leaves[a])
-        self._inv_M = 1.0 / leaves["mass_rho"]
+        # the C-PML's rigid outer edge (pin_outer_edge) stays pinned
+        self._inv_M = torch.where(saved_inv == 0, torch.zeros_like(saved_inv),
+                                  1.0 / leaves["mass_rho"])
         try:
             return self.step(fields, src, dt)
         finally:
