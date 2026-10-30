@@ -289,11 +289,12 @@ def test_dd_elastic_low_precision_ring(store):
     because a single band amax is far too coarse there.
 
     The bars differ by dtype on purpose, and the difference is the finding
-    (measured when written): bf16 lands at ~5e-4, int8 only at a few
-    percent, so **bf16 is the
+    (measured on an RTX 6000 Ada, worst of the three gradients): bf16 lands
+    at ~2.6e-4, int8 ~8x above it at ~2.0e-3 (bars 1e-3 / 1e-2, 4-5x
+    headroom), so **bf16 is the
     low-precision setting to reach for on this path**. Bisecting the ring
-    families puts the whole int8 cost in the two u NODE rings (2.5e-2) with
-    all six ELEMENT rings together at 3.6e-4 -- and the element rings are
+    families puts the whole int8 cost in the two u NODE rings (2.0e-3) with
+    all six ELEMENT rings together at 2.3e-4 -- and the element rings are
     82% of the ring memory, so a per-family dtype would be the fix if this
     ever needs to be cheap. See docs/user-guide/sem.md, "Ring precision".
 
@@ -354,7 +355,7 @@ def test_dd_elastic_low_precision_ring(store):
     assert all(torch.isfinite(g).all() for g in gq)
     # the ring is read only in the backward: the record must not move
     assert float((sq - s32).abs().max() / s32.abs().max()) < 1e-3
-    bar = 5e-3 if store == "bf16" else 8e-2
+    bar = 1e-3 if store == "bf16" else 1e-2
     for nm, a, b in zip(("vp", "vs", "rho"), g32, gq):
         assert _cos(a, b) > 0.998, f"{store}/{nm}: cos {_cos(a, b)}"
         l2 = float((b - a).norm() / a.norm())
@@ -367,7 +368,7 @@ def test_dd_elastic_per_family_store_dtype():
 
     This exists because of where the int8 cost actually sits. Bisecting the
     ring families put the whole of it in the two u NODE rings, while the six
-    ELEMENT rings -- 82% of the ring memory -- quantise ~70x better. Splitting
+    ELEMENT rings -- 82% of the ring memory -- quantise ~9x better. Splitting
     the dtype therefore buys most of the memory at the cheap error, and this
     test pins that ordering rather than absolute numbers, so it keeps meaning
     if the reconstruction itself changes:
@@ -376,9 +377,14 @@ def test_dd_elastic_per_family_store_dtype():
         elems-int8 is no worse    than all-bf16
         peak(nodes bf16 / elems int8) < peak(all bf16)
 
-    Measured when written (peak MB / vp L2): fp32 266/-, all-bf16 140/4.4e-4,
-    all-int8 89/2.5e-2, nodes-fp32+elems-int8 123/3.6e-4, and the setting to
-    reach for, nodes-bf16+elems-int8, 100/5.6e-4."""
+    Measured on an RTX 6000 Ada (peak MB / worst-of-three L2): fp32 411/-,
+    all-bf16 224/2.6e-4, all-int8 143/2.0e-3, nodes-fp32+elems-int8
+    194/2.3e-4, and the setting to reach for, nodes-bf16+elems-int8,
+    160/3.4e-4. all-int8 / elems-int8 was 8.9-9.0x over eight runs, hence
+    the 4x bar. It read ~120x (bar 20x) while the gradient still covered the
+    C-PML band: most of the node rings' int8 error lands on the band's own
+    gradient, which the model gradient leaves out since the absorbing layer
+    is added outside the model."""
     prop, models, wav, src, rec = _ring_setup()
 
     def run(store, store_e=None, want_peak=False):
@@ -405,7 +411,7 @@ def test_dd_elastic_per_family_store_dtype():
 
     e_i8, e_bf16 = l2(g_i8, ref), l2(g_bf16, ref)
     e_elem, e_mix = l2(g_elem, ref), l2(g_mix, ref)
-    assert e_i8 > 20 * e_elem, (
+    assert e_i8 > 4 * e_elem, (
         f"element-only int8 ({e_elem:.2e}) should be far better than "
         f"all-int8 ({e_i8:.2e}) -- that is the whole point of the split")
     assert e_elem <= 2 * e_bf16, (
