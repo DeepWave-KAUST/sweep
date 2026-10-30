@@ -60,8 +60,10 @@ def run_sem(g, visco, device):
     full = lambda v: torch.full((nz, nx), float(v), device=device)
     models = [full(g["vp"]), full(g["vs"]), full(g["rho"])]
     if visco:
+        # SPECFEM2D fits its mechanisms over f0 / 10 .. 10 f0 (compute_attenuation_coeffs)
         prop = PropSEM(ViscoElasticVSSEM2DDeformed, equation_options={
-            "f_ref": g["f0"], "n_sls": g["n_sls"]}, **kw)
+            "f_ref": g["f0"], "f_band": (g["f0"] / 10.0, g["f0"] * 10.0),
+            "n_sls": g["n_sls"]}, **kw)
         models += [full(g["q"][0]), full(g["q"][1])]
     else:
         prop = PropSEM(ElasticVSSEM2DDeformed, **kw)

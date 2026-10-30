@@ -57,10 +57,11 @@ def gsls_memory_specs(n_sls):
 
 
 def gsls_setup(Qp_e, Qs_e, f_ref, f_band, n_sls, who):
-    """The GSLS of ``n_sls`` mechanisms over ``f_band`` (default: SPECFEM's factor-12 band
-    around ``f_ref``) for the quality factors ``Qp_e``, ``Qs_e``: a namespace of the band,
-    the relaxation times, the fit's ``q_min`` (``Q`` below it is refused, naming ``who``),
-    the strengths ``tp``, ``ts`` and the factors ``(s_U, s_R)`` of
+    """The GSLS of ``n_sls`` mechanisms over ``f_band`` (default: a factor 12 around
+    ``f_ref``, see :func:`~sweep.equations.visco_elastic.gsls_band`) for the quality
+    factors ``Qp_e``, ``Qs_e``: a namespace of the band, the relaxation times, the fit's
+    ``q_min`` (``Q`` below it is refused, naming ``who``), the strengths ``tp``, ``ts`` and
+    the factors ``(s_U, s_R)`` of
     :func:`~sweep.equations.visco_elastic.gsls_moduli_factors` for each."""
     if not 1 <= int(n_sls) <= MAX_SLS:
         raise ValueError(f"n_sls must be in [1, {MAX_SLS}], got {n_sls}")
@@ -143,8 +144,9 @@ class ViscoElasticVSSEM2DDeformed(ElasticVSSEM2DDeformed):
     ) -> "ViscoElasticVSSEM2DDeformed":
         """Build the equation. ``vp_e`` / ``vs_e`` are the phase velocities at ``f_ref``
         (Hz), ``Qp_e`` / ``Qs_e`` the quality factors of the P and shear moduli, fitted
-        constant over ``f_band = (f_min, f_max)`` (default: SPECFEM's factor-12 band around
-        ``f_ref``) with ``n_sls`` mechanisms (SPECFEM's default 3; 1 to 4)."""
+        constant over ``f_band = (f_min, f_max)`` (default: a factor 12 around ``f_ref``, see
+        :func:`~sweep.equations.visco_elastic.gsls_band`) with ``n_sls`` mechanisms
+        (SPECFEM's default 3; 1 to 4)."""
         check_element_arrays(mesh, Qp_e=Qp_e, Qs_e=Qs_e)
         g = gsls_setup(Qp_e, Qs_e, f_ref, f_band, n_sls, cls.__name__)
         (sU_p, sR_p), (sU_s, sR_s) = g.p, g.s

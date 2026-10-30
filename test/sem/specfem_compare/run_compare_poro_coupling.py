@@ -85,7 +85,10 @@ def in_water(case, z_up):
     return media[0][0] is WATER and lz - z_up < media[0][1]
 
 
-def run_sem(case, stf, device, dtype, n_order=4):
+def run_sem(case, stf, device, dtype, n_order=4, equation=BiotVSSEM2DDeformed,
+            equation_options=None, q=()):
+    """``(t, traces)`` of ``case`` with SPECFEM2D's source time function ``stf``; ``q``
+    appends constant models to the media's (the frame's ``Qp, Qs`` of a visco ``equation``)."""
     (lx, lz, h), f0, dt, nt, media, kind, (xs, zs), recs = CASES[case]
     dh = h / n_order
     nz, nx = int(round(lz / dh)) + 1, int(round(lx / dh)) + 1
@@ -100,9 +103,10 @@ def run_sem(case, stf, device, dtype, n_order=4):
         calls = ((["p"], -rate),)
     out, models = 0.0, None
     for names, w in calls:
-        prop = PropSEM(BiotVSSEM2DDeformed, source_type=names, **kw)
+        prop = PropSEM(equation, source_type=names, equation_options=equation_options, **kw)
         if models is None:
             models = layered(prop.mesh, media, dtype)
+            models += [torch.full_like(models[0], float(v)) for v in q]
         with torch.no_grad():
             out = out + prop(torch.from_numpy(w).to(dtype), src, rec,
                              models=models)[0].double().cpu().numpy()

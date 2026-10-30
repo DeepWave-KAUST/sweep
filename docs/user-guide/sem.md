@@ -651,8 +651,10 @@ lopsided. A force needs none of this; its stamp has no derivative.
 `ViscoElasticVSSEM2DDeformed` adds attenuation to `ElasticVSSEM2DDeformed` with the
 rheology of the FD `sweep.equations.ViscoElastic`, which is also SPECFEM2D's: `n_sls`
 standard linear solids whose relaxation times are fixed over the band `f_band`, with
-strengths fitted for a constant `Qp` and `Qs` over that band. The models are `vp`, `vs`,
-`rho`, `Qp` and `Qs`, where `vp` and `vs` are the phase velocities at `f_ref`:
+strengths fitted for a constant `Qp` and `Qs` over that band. The default band, a factor 12
+around `f_ref`, is that of SPECFEM2D's original fit; its current fit spans `f_ref / 10` to
+`10 f_ref`. The models are `vp`, `vs`, `rho`, `Qp` and `Qs`, where `vp` and `vs` are the
+phase velocities at `f_ref`:
 
 ```python
 from sweep.sem import PropSEM, ViscoElasticVSSEM2DDeformed
@@ -677,10 +679,11 @@ saving is refused because the attenuation is dissipative; use `Full()` or
 rollouts, and the gradients in `vp`, `Qp` and `Qs` against central differences.
 `test/sem/specfem_compare/run_compare_visco.py` compares the class with SPECFEM2D's
 `ATTENUATION_VISCOELASTIC` on a homogeneous half-space with Q = 30 (velocities at 12 Hz,
-three mechanisms). The visco-elastic records agree to 1.4% in relative L2, against 1.7%
-for the elastic records on the same meshes, and the visco/elastic spectral ratios of the
-two codes agree to 0.3% in amplitude and 4 mrad in phase (medians over 4-25 Hz, offsets up
-to 200 m), and to 0.8-1.5% and 12-15 mrad at offsets of 200-450 m.
+three mechanisms over SPECFEM2D's band). The visco-elastic records agree to 1.2% in
+relative L2, against 1.7% for the elastic records on the same meshes, and the
+visco/elastic spectral ratios of the two codes agree to 0.1% in amplitude and 3 mrad in
+phase (medians over 4-25 Hz, offsets up to 200 m), and to 0.3-1.1% and 7-13 mrad at offsets
+of 200-450 m.
 
 ## Poroelastic waves (Biot)
 
@@ -782,6 +785,19 @@ part of the total stress only. In a dry solid (`M = 0`) the class gives the reco
 `BiotVSSEM2DDeformed` bit for bit (`test/sem/test_sem_visco_biot.py`, with the gradients
 in `Qp` and `Qs` against central differences).
 
+`test/sem/specfem_compare/run_compare_visco_biot.py` compares the frame attenuation with
+SPECFEM2D's on its `poroelastic_acoustic` example with `ATTENUATION_VISCOELASTIC`
+(SPECFEM2D attenuates a porous frame only next to a fluid region). SPECFEM2D attenuates the
+shear modulus only, so there `Qp` makes the drained P modulus relax as `mu` does.
+SPECFEM2D 8.1.0 updates its poroelastic memory variables four times per step and drops the
+previous step's term from their recursive convolution, so its frame Q is about 115 where
+50 is requested; its fluid routine also has `mu` for `lambda` in the attenuated stress.
+With those three fixed and SPECFEM2D's own mechanisms, the attenuation changes the records
+by 7.1% in both codes, and its effect agrees to 0.5% in relative L2. Our fit over the same
+band gives an effect 8% larger, because SPECFEM2D's poroelastic routine scales its
+memories by the relaxed shear modulus where its elastic routine uses the unrelaxed one,
+which raises its Q by about 10%.
+
 ### Fluid and dry elastic regions
 
 An element without a solid frame (`rho = 0`) is a fluid, one without a pore
@@ -843,7 +859,15 @@ ours by the same to 3-15% of that); `run_compare_poro_coupling.py` its
 layers (0.01-0.08% in the source band; the example 0.07-0.85% on its own
 mesh, where its inviscid slow wave has about one element per wavelength,
 and 0.003-0.013% with both on elements half as large). SPECFEM2D computes
-no pressure in poroelastic media, so these compare velocities.
+no pressure in poroelastic media, so these compare velocities. Across a
+porosity jump (porous rock over a more porous sand, `pp_layers`), the two
+codes differ by 2-3% in the waves transmitted below the interface, on 5 m and
+on 2.5 m elements alike, whereas each layer alone agrees to 0.01-0.07%. The FD
+`Biot` on a 1.25 m grid, an independent discretisation of the same open-pore
+conditions, agrees with the SEM to 0.3% there. SPECFEM2D shares the interface
+nodes of the two media, so its relative displacement is continuous in both
+components there, whereas the open-pore conditions constrain only its normal
+component.
 
 2-D and `impl='eager'` only. Boundary saving is refused because the viscous
 drag is dissipative everywhere, so the field cannot be stepped back; use

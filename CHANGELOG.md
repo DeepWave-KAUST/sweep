@@ -31,16 +31,24 @@ and this project adheres to
   SPECFEM2D's: models `vp, vs, rho, Qp, Qs` (velocities at `f_ref`), `f_ref`, `f_band` and
   `n_sls` through `equation_options`, element-local memory variables advanced with the
   trapezoidal rule, all five models differentiable, `Q = inf` the elastic step bit for bit.
-  Against SPECFEM2D's `ATTENUATION_VISCOELASTIC` (Q = 30, half-space) the records agree to
-  1.4% in relative L2 (1.7% for the elastic pair) and the visco/elastic spectral ratios to
-  0.3-1.5% in amplitude (`test/sem/specfem_compare/run_compare_visco.py`). Eager, 2-D; no
-  boundary saving (dissipative). The band and the moduli factors of the fit are shared with
-  the FD class (`sweep.equations.visco_elastic.gsls_band`, `gsls_moduli_factors`).
+  Against SPECFEM2D's `ATTENUATION_VISCOELASTIC` (Q = 30, half-space, its band
+  `f0 / 10 .. 10 f0`) the records agree to 1.2% in relative L2 (1.7% for the elastic pair)
+  and the visco/elastic spectral ratios to 0.1-1.1% in amplitude
+  (`test/sem/specfem_compare/run_compare_visco.py`). Eager, 2-D; no boundary saving
+  (dissipative). The band and the moduli factors of the fit are shared with the FD class
+  (`sweep.equations.visco_elastic.gsls_band`, `gsls_moduli_factors`); the default band, a
+  factor 12, is that of SPECFEM2D's original fit, not of its current one.
 - **`ViscoBiotVSSEM2DDeformed`: Biot with an attenuating frame.** The models of
   `BiotVSSEM2DDeformed` and the frame's `Qp` (drained P modulus) and `Qs` (shear), the GSLS
   of the visco-elastic class on the frame part of the total stress; the pore fluid's share
   of `H` does not relax and `viscous_q` works as before. A dry solid gives the visco-elastic
-  class's records to round-off, `Q = inf` Biot's bit for bit.
+  class's records to round-off, `Q = inf` Biot's bit for bit. Against SPECFEM2D's
+  attenuating poroelastic frame (its `poroelastic_acoustic` example, `Qmu = 50`) the
+  attenuation's effect agrees to 0.5% once three SPECFEM2D 8.1.0 bugs are fixed (memory
+  variables updated four times per step, the previous step's term of their convolution
+  zero, `mu` for `lambda` in the fluid routine's attenuated stress; as released its frame Q
+  is about 115 for 50) and the frame takes SPECFEM2D's mechanisms
+  (`test/sem/specfem_compare/run_compare_visco_biot.py`).
 - **`PropSEM(impl='eager', memory=Ckpt(chunks=K))` checkpoints single shots and
   per-shot models**, which it used to refuse (`nshots=1`) or loop without
   (per-shot models): `sweep.sem.ckpt_rollout` keeps one state per `K` steps and

@@ -3,7 +3,8 @@
 
 * on a 2000 m x 1600 m box of 5 m Quad9 elements (free top, Stacey elsewhere, echoes after
   the 0.25 s record), from ``poroelastic_semi_infinite_homogeneous``: ``force_z`` (a vertical
-  point force), ``aniso_k`` (an anisotropic permeability), ``visc`` and ``visc_atten`` (the
+  point force), ``aniso_k`` (an anisotropic permeability), ``aniso_diag`` (one with its
+  principal axes along x and z, for the FD ``BiotAnisoPerm``), ``visc`` and ``visc_atten`` (the
   viscous drag, then with ``ATTENUATION_PORO_FLUID_PART``) -- the source 600 m deep, two of
   the four receivers on its grid lines --, ``pe_layers`` (porous rock over a dry elastic one),
   ``pp_layers`` (the porous rock over a more porous sand, the same pore fluid) and
@@ -36,6 +37,7 @@ WATER = "1 1020.d0 1500.d0 0.d0 0 0 9999 9999 0 0 0 0 0 0"
 FEATURES = {
     "force_z": (1, 0.0, 0.0, (1e-9, 0.0, 1e-9), None),
     "aniso_k": (2, None, 1e-3, (2e-9, 5e-10, 5e-10), None),
+    "aniso_diag": (2, None, 1e-3, (2e-9, 0.0, 5e-10), None),
     "visc": (2, None, 1e-3, (1e-9, 0.0, 1e-9), None),
     "visc_atten": (2, None, 1e-3, (1e-9, 0.0, 1e-9), (5.0, 30.0)),
 }

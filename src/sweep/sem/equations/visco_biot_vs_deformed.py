@@ -58,7 +58,8 @@ class ViscoBiotVSSEM2DDeformed(BiotVSSEM2DDeformed):
     ) -> "ViscoBiotVSSEM2DDeformed":
         """Build from the eight Biot coefficients (``H`` and ``mu`` at ``f_ref``, Hz) and the
         frame's quality factors ``Qp_e`` (drained P modulus) and ``Qs_e`` (shear), fitted
-        constant over ``f_band`` (default: SPECFEM's factor-12 band around ``f_ref``) with
+        constant over ``f_band`` (default: a factor 12 around ``f_ref``, see
+        :func:`~sweep.equations.visco_elastic.gsls_band`) with
         ``n_sls`` mechanisms; ``dirichlet``, ``cpml`` and ``viscous_q`` as on Biot."""
         check_element_arrays(mesh, Qp_e=Qp_e, Qs_e=Qs_e)
         g = gsls_setup(Qp_e, Qs_e, f_ref, f_band, n_sls, cls.__name__)

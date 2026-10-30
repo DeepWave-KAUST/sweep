@@ -47,8 +47,9 @@ def gsls_relaxation_times(n_sls, f_min, f_max):
 
 
 def gsls_band(f_ref, f_band=None):
-    """``f_band`` as ``(f_min, f_max)``, or by default SPECFEM's band: a factor 12
-    centred (geometrically) on ``f_ref``."""
+    """``f_band`` as ``(f_min, f_max)``, or by default a factor 12 centred (geometrically)
+    on ``f_ref``: the band of SPECFEM2D's original fit (its current least-squares fit spans
+    ``f_ref / 10`` to ``10 f_ref``)."""
     if f_band is None:
         r = np.sqrt(12.0)
         f_band = (f_ref / r, f_ref * r)
@@ -340,8 +341,9 @@ class ViscoElastic(FirstOrderEquation):
             backend: ``'torch'`` only.
             f_ref: Reference frequency (Hz) at which ``vp`` / ``vs`` are given.
             f_band: ``(f_min, f_max)`` over which Q is fitted constant. Defaults
-                to SPECFEM's band: a factor 12 centred (geometrically) on f_ref.
-                For FWI set it to the inverted band.
+                to a factor 12 centred (geometrically) on f_ref, the band of
+                SPECFEM2D's original fit (its current one spans f_ref / 10 to
+                10 f_ref). For FWI set it to the inverted band.
             n_sls: Number of standard linear solids (SPECFEM default 3).
         """
         if backend != 'torch':
