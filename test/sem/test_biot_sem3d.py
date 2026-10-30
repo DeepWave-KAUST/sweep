@@ -60,11 +60,13 @@ def _gll(mesh, coef):
 # limits
 # ------------------------------------------------------------------------------------------ #
 @pytest.mark.parametrize("source, elastic_source, hill", [
-    (["fx"], ["vx"], False), (["vz"], ["vz"], False), (["fx"], ["vx"], True)])
+    (["fx"], ["vx"], False), (["vz"], ["vz"], False), (["fx"], ["vx"], True),
+    (["sxx", "syy", "szz"], ["sxx", "syy", "szz"], True)])
 def test_a_dry_solid_is_the_elastic_sem(source, elastic_source, hill):
     # no pore fluid (M = 0): v and the stress obey ElasticVSSEM3DDeformed, C-PML, free surface
     # (flat or a hill) and all, and the pressure and the flux stay zero; a force on both
-    # equations (fx) and a velocity source (vz) are the elastic force
+    # equations (fx) and a velocity source (vz) are the elastic force, the moment tensor
+    # the elastic one
     shape, dh, dt, nt = (17, 17, 17), 10.0, 5e-4, 160
     yy, xx = np.meshgrid(np.arange(17.0), np.arange(17.0), indexing="ij")
     rows = 1.0 + np.exp(-((yy - 8.0) ** 2 + (xx - 9.0) ** 2) / 16.0) if hill else None
@@ -117,13 +119,15 @@ def test_no_relative_flow_limit_is_the_undrained_elastic(source, elastic_source)
 # ------------------------------------------------------------------------------------------ #
 # the analytic point injection
 # ------------------------------------------------------------------------------------------ #
-def analytic_point_injection(models, t, x, y, z, s_time, b_of_w=None):
-    """``(v (3, nt), p (nt,))`` at ``(x, y, z)`` from a pore-pressure injection ``dp/dt = s
-    delta`` (``s = dS/dt``, ``S = s_time``) in a homogeneous Biot medium, exp(+i w t). The
-    potentials ``Phi`` of ``u`` and ``w`` obey ``K lap Phi + w^2 R Phi = (0, S) delta``,
-    ``R_22 = m - i b / w``; mode ``j`` of ``K^-1 R E = E diag(s^2)`` is ``psi_j = -a_j
-    exp(-i k_j r) / (4 pi r)``, ``a = (K E)^-1 (0, S)``, ``k_j = w s_j``; ``u = grad Phi_u`` and
-    ``p = -C div u - M div w``."""
+def analytic_point_source(models, t, x, y, z, s_time, force, b_of_w=None):
+    """``(v (3, nt), p (nt,))`` at ``(x, y, z)`` from a point source in a homogeneous Biot
+    medium, the 3-D :func:`test_biot_sem.analytic_line_source`: forces ``force = (total,
+    relative) * grad Phi``, ``Phi = S delta`` (``S = s_time``), exp(+i w t) -- ``(1, 0)`` the
+    explosion ``["sxx", "syy", "szz"]`` with the moment ``S``, ``(0, -1)`` the injection ``dp/dt
+    = dS/dt delta``. The potentials ``Phi`` of ``u`` and ``w`` obey ``K lap Phi + w^2 R Phi =
+    -F S delta``, ``R_22 = m - i b / w``; mode ``j`` of ``K^-1 R E = E diag(s^2)`` is ``psi_j =
+    -a_j exp(-i k_j r) / (4 pi r)``, ``a = -(K E)^-1 F S``, ``k_j = w s_j``; ``u = grad Phi_u``
+    and ``p = -C div u - M div w``."""
     h, mu, c, biot_m, rho, rho_f, m, b = (float(v) for v in models)
     dt, nt = t[1] - t[0], len(t)
     n = 16 * nt
@@ -141,7 +145,7 @@ def analytic_point_injection(models, t, x, y, z, s_time, b_of_w=None):
             K, np.array([[rho, rho_f], [rho_f, m - 1j * bw / w[i]]])))
         s = np.sqrt(s2)
         s = np.where(s.real < 0, -s, s)
-        a = np.linalg.solve(K @ E, np.array([0.0, s_hat[i]]))
+        a = np.linalg.solve(K @ E, -np.asarray(force, dtype=complex) * s_hat[i])
         k = w[i] * s
         g = np.exp(-1j * k * r) / (4 * math.pi * r)
         u_r = np.sum(E[0] * a * (1j * k + 1.0 / r) * g)
@@ -178,8 +182,44 @@ def test_point_injection_matches_analytic(b_dai, viscous_q):
         b = float(models[7])
         b_of_w = lambda w: b * (1 + 1j * w * tau_e) / (1 + 1j * w * tau_s)
     x, y, z = (o * dh for o in off)
-    v, _ = analytic_point_injection(models, t, x, y, z, lambda tt: gauss(tt + dt), b_of_w)
-    _, p = analytic_point_injection(models, t, x, y, z, lambda tt: gauss(tt + 1.5 * dt), b_of_w)
+    v, _ = analytic_point_source(models, t, x, y, z, lambda tt: gauss(tt + dt), (0.0, -1.0),
+                                 b_of_w)
+    _, p = analytic_point_source(models, t, x, y, z, lambda tt: gauss(tt + 1.5 * dt),
+                                 (0.0, -1.0), b_of_w)
+    for k, ref in enumerate((*v, p)):
+        assert _rel(num[:, k], ref) < 0.01, (("vx", "vy", "vz", "p")[k], _rel(num[:, k], ref))
+
+
+@cuda
+@pytest.mark.parametrize("b_dai", [0.0, 7e4, 9e8])
+def test_split_source_matches_analytic(b_dai):
+    # the 2-D tests' split source in 3-D: the explosion on the total stress and qpart / phi
+    # of it in the relative flow, from inviscid to the Darcy limit; the explosion drives the
+    # solid, so the slow wave's unresolved residue near the source (see above) is a small
+    # part of it. The fast P wave's echo from the C-PML is 2-3% of it, so the box is larger
+    # than the injection's and the record ends as the echo arrives, after the slow wave:
+    # 33k elements. (Alone, the injection's far field vanishes towards the Darcy limit: at
+    # Dai's b = 9e8 it is 1e-6 of the explosion's, and the SEM's is the unresolved residue
+    # of a diffusion a few centimetres long, 16 times that.)
+    dh, dt, nt, f0, t0, qpart, phi = 4.0, 2e-4, 550, 30.0, 0.04, 0.1, 0.3
+    shape, src, off = (81, 81, 81), (40, 40, 40), (10, 8, 5)
+    models = biot_from_biot_constants(**DAI1, b=b_dai, phi=phi)
+    coef = [torch.full(shape, float(c), dtype=F64) for c in models]
+    gauss = _gauss(f0, t0)
+    t = np.arange(nt) * dt
+    rate = torch.from_numpy(np.gradient(gauss(t), t))
+    rec = np.array([[[s + o for s, o in zip(src, off)]]])
+    num = 0.0
+    for names, scale in ((["sxx", "syy", "szz"], 1.0), (["p"], -qpart / phi)):
+        prop = _prop(shape, dh, dt, names, ["vx", "vy", "vz", "p"], f0=f0, dev="cuda",
+                     abcn=24, free_surface=False)
+        with torch.no_grad():
+            num = num + prop(rate * scale, np.array([src]), rec,
+                             models=coef)[0, :, 0].cpu().numpy()
+    x, y, z = (o * dh for o in off)
+    force = (1.0, qpart / phi)
+    v, _ = analytic_point_source(models, t, x, y, z, lambda tt: gauss(tt + dt), force)
+    _, p = analytic_point_source(models, t, x, y, z, lambda tt: gauss(tt + 1.5 * dt), force)
     for k, ref in enumerate((*v, p)):
         assert _rel(num[:, k], ref) < 0.01, (("vx", "vy", "vz", "p")[k], _rel(num[:, k], ref))
 
@@ -345,9 +385,9 @@ def _small(src=None, rec=None, **kw):
                   for c in biot_from_biot_constants(**DAI1, b=3e3, phi=0.3)]
 
 
-def test_defaults_are_an_injection_and_the_solid_velocity():
+def test_defaults_are_an_explosion_and_the_solid_velocity():
     prop, _ = _small()
-    assert prop.source_type == ["p"]
+    assert prop.source_type == ["sxx", "syy", "szz"]
     assert prop.receiver_type == ["v_x", "v_y", "v_z"]
 
 
@@ -369,11 +409,6 @@ def test_the_open_pore_surface_holds_no_pressure():
     with torch.no_grad():
         d = prop(_ricker(60, 5e-4, 15.0, 0.02), np.array([[4.0, 4.0, 3.0]]), rec, models=coef)
     assert not d[0, :, :2].any() and d[0, :, 2].abs().max() > 0
-
-
-def test_stress_sources_are_refused():
-    with pytest.raises(NotImplementedError, match="no moment-tensor source"):
-        _small(["sxx"], ["vx"])
 
 
 def test_a_fluid_element_is_refused():

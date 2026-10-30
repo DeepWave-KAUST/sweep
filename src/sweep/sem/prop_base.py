@@ -271,9 +271,11 @@ def _c_shared_wavelet(w):
 _FD_FORCE = {2: ("vx", "vz"), 3: ("vx", "vy", "vz")}
 _FD_STRESS = {2: ("sxx", "szz", "sxz"),
               3: ("sxx", "syy", "szz", "sxy", "sxz", "syz")}
-# 2-D (Mxx, Mzz, Mxz) slot of each stress name, the order moment_tensor_stamp
-# takes; sxz drives Mxz = Mzx, the one shear component
-_MOMENT_SLOT = {"sxx": 0, "szz": 1, "sxz": 2}
+# The slot of each stress name in the moment tensor, in the order
+# moment_tensor_stamp takes it: 2-D (Mxx, Mzz, Mxz), 3-D (Mxx, Myy, Mzz, Mxy,
+# Mxz, Myz); a shear name drives both of its symmetric components
+_MOMENT_SLOT = {2: {"sxx": 0, "szz": 1, "sxz": 2},
+                3: {"sxx": 0, "syy": 1, "szz": 2, "sxy": 3, "sxz": 4, "syz": 5}}
 
 
 def _pressure_to_potential_wavelet(wavelet, dt):
@@ -303,13 +305,15 @@ def _resolve_vector_source(equation, source_type, ndim):
     * the equation's own source fields (``u_z``, ``v_x``, ...) and the FD
       velocity names (``vx``, ``vz``, ``vy``): a body force, one unit component
       per name -- so ``["vx", "vz"]`` is a diagonal force, not an explosion;
-    * the FD stress names (``sxx``, ``szz``, ``sxz``; 2-D only): the moment
-      tensor with a unit entry per name -- ``["sxx", "szz"]`` is FD's explosion.
+    * the FD stress names (``sxx``, ``szz``, ``sxz``; 3-D also ``syy``,
+      ``sxy``, ``syz``): the moment tensor with a unit entry per name --
+      ``["sxx", "szz"]`` is FD's 2-D explosion, ``["sxx", "syy", "szz"]`` the 3-D one.
 
     Returns the validated names, the force axes (``None`` for a moment
-    source) and ``(Mxx, Mzz, Mxz)`` (``None`` for a force). A force and a
-    moment cannot be mixed: they take the wavelet differently (see
-    :class:`_Acq`), and one call drives one time function.
+    source) and the moment tensor (``(Mxx, Mzz, Mxz)`` / ``(Mxx, Myy, Mzz, Mxy,
+    Mxz, Myz)``; ``None`` for a force). A force and a moment cannot be mixed:
+    they take the wavelet differently (see :class:`_Acq`), and one call drives
+    one time function.
     """
     own = [s.name for s in equation.field_specs if s.supports_source]
     if not source_type:
@@ -317,7 +321,7 @@ def _resolve_vector_source(equation, source_type, ndim):
         return names, frozenset(own.index(n) for n in names), None
     fd_force, fd_stress = _FD_FORCE[ndim], _FD_STRESS[ndim]
     name = equation.__name__
-    out, axes, moment = [], {}, [0.0, 0.0, 0.0]
+    out, axes, moment = [], {}, [0.0] * len(_MOMENT_SLOT[ndim])
     for want in source_type:
         if want in out:
             raise ValueError(f"duplicate source_type entry '{want}'")
@@ -329,19 +333,14 @@ def _resolve_vector_source(equation, source_type, ndim):
                     f"same force component on {name}")
             axes[ax] = want
         elif want in fd_stress:
-            if ndim == 3:
-                raise NotImplementedError(
-                    f"stress (moment-tensor) source_type '{want}' is 2-D only: "
-                    f"the 3-D point stamp carries no basis derivatives yet. "
-                    f"Use a force ({', '.join(own)} or {', '.join(fd_force)}).")
-            moment[_MOMENT_SLOT[want]] = 1.0
+            moment[_MOMENT_SLOT[ndim][want]] = 1.0
         else:
             avail = [s for s in equation.field_specs if s.supports_source]
             raise ValueError(
                 f"Unknown source_type entry '{want}' for {name}. Available "
                 f"source_type values:\n{format_field_specs(avail)}"
                 f"\nFD names: {', '.join(fd_force)} (force), "
-                f"{', '.join(fd_stress)} (stress, 2-D)")
+                f"{', '.join(fd_stress)} (stress)")
         out.append(want)
     if axes and any(moment):
         raise ValueError(

@@ -30,12 +30,17 @@ and this project adheres to
   `BiotVSSEM2DDeformed` on the Hex27 mesh of `ElasticVSSEM3DDeformed` (flat or under a
   topography): the same coefficients, placement and exact per-node drag, the open-pore
   surface, the C-PML and `viscous_q`. Porous and dry elements (fluid elements are refused),
-  an isotropic drag, and force, velocity, flux and pore-pressure sources (a 3-D mesh has no
-  moment-tensor stamp). The drag's exponentials are stored per number of element copies at a
-  node (1, 2, 4, 8), about 2.7 kB per element. A dry solid is `ElasticVSSEM3DDeformed` to
-  round-off; a point pore-pressure injection matches the analytic fast and slow P waves to
-  0.3-0.8% (`test/sem/test_biot_sem3d.py`). Eager. `sweep.sem._assembly.vector_divergence3`
-  is the weak divergence of an element-local vector.
+  an isotropic drag, and the 2-D class's sources with `y` (the explosion the default). The
+  drag's exponentials are stored per number of element copies at a node (1, 2, 4, 8), about
+  2.7 kB per element. A dry solid is `ElasticVSSEM3DDeformed` to round-off; a point
+  pore-pressure injection and the split source match the analytic fast and slow P waves to
+  1% (`test/sem/test_biot_sem3d.py`). Eager. `sweep.sem._assembly.vector_divergence3` is the
+  weak divergence of an element-local vector.
+- **Moment-tensor sources in 3-D.** `PropSEM`'s stress source names (`sxx`, `syy`, `szz`,
+  `sxy`, `sxz`, `syz`) on the 3-D elastic equations, which refused them: the point stamp
+  `-M : grad(phi)` on Hex8 and Hex27 meshes (`PointStamp3D.moment_tensor_stamp`), shared on a
+  face, an edge or a corner among the elements there by the solid angle each holds. On both
+  backends, as in 2-D (the kernels see the assembled patterns).
 - **`ViscoElasticVSSEM2DDeformed`: visco-elastic attenuation on the SEM.** The velocity-stress
   elastic SEM with the generalized standard linear solid of the FD `ViscoElastic`, which is
   SPECFEM2D's: models `vp, vs, rho, Qp, Qs` (velocities at `f_ref`), `f_ref`, `f_band` and

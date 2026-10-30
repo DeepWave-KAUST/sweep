@@ -618,6 +618,7 @@ the equation's own source fields, and means the same source:
 | `["vx", "vz"]` | a force at 45°, not an explosion | the force |
 | `["sxx", "szz"]` | an explosion: moment tensor `Mxx = Mzz = 1` | the moment rate |
 | `["sxz"]` | a shear moment, `Mxz = Mzx = 1` | the moment rate |
+| 3-D: `["sxx", "syy", "szz"]`, `["sxy"]`, ... | the explosion, the shear moments (`syy`, `sxy`, `syz` too) | the moment rate |
 
 ```python
 solver = PropSEM(ElasticVSSEM2DDeformed, ..., source_type=["sxx", "szz"],
@@ -635,8 +636,8 @@ scales still differ between the backends.
 
 The default stays a unit vertical force (FD's elastic default is the
 explosion). A force and a stress cannot be mixed in one call (they take the
-wavelet differently); the stress names are 2-D only for now, and a per-call
-`source_vector` only applies to a force. Both backends carry every source
+wavelet differently), and a per-call `source_vector` only applies to a
+force. Both backends carry every source
 type: the kernels only ever see the assembled per-field patterns.
 
 A stress source on an element edge -- every `n_order`-th grid index lands on
@@ -644,7 +645,12 @@ one -- is stamped in every element that meets there, each taking the share of
 a small disk it holds (half a side on an edge, the corner angles at a
 corner): the moment tensor differentiates the basis, whose gradient jumps
 across the edge, and stamped in one element the explosion came out 1-2%
-lopsided. A force needs none of this; its stamp has no derivative.
+lopsided. In 3-D the disk is a ball: a face gives each side half, an edge or a
+corner of an axis-aligned mesh a quarter or an eighth, and a curved mesh the
+solid angles there. A force needs none of this; its stamp has no derivative.
+`test/sem/test_sem_moment3d.py` checks the 3-D stamp against differences of
+the point load, the shares, the mirror symmetry of an explosion on a corner and
+Hex27 against Hex8.
 
 ## Visco-elastic attenuation
 
@@ -894,13 +900,16 @@ The flux copies at a node, one per element that shares it (1, 2, 4 or 8), are
 grouped by their number, and the drag's exponentials are stored per group:
 about 2.7 kB per element in float32 at `n_order=4`. A compiled step costs about
 2.5 times one of `ElasticVSSEM3DDeformed` on the same mesh and 1.4 times its
-memory (7.4 against 2.9 ms on 27k elements, float32, RTX 6000 Ada). Three things of the 2-D
-class are missing. Fluid elements (`rho = 0`) are refused, because the
-fluid-solid interface is 2-D; a porous-dry interface needs nothing, as in
-2-D. The drag is isotropic. The sources are the forces `fx`, `fy` and `fz`
-(on both equations), the velocities and fluxes `vx` ... `qz`, and the
-pore-pressure injection `p`, the default; a 3-D mesh has no moment-tensor
-stamp, so `sxx` and the other stress sources are refused.
+memory (7.4 against 2.9 ms on 27k elements, float32, RTX 6000 Ada).
+
+The sources are the 2-D class's with `y`: the moment tensor `sxx` ... `syz` on
+the total stress (`["sxx", "syy", "szz"]`, the explosion, is the default), the
+forces `fx`, `fy` and `fz` on both equations, the velocities and fluxes `vx`
+... `qz`, and the pore-pressure injection `p`. What the 2-D classes have and
+this one does not: fluid elements (`rho = 0`) are refused, because the
+fluid-solid interface is 2-D (a porous-dry interface needs nothing, as in
+2-D); the drag is isotropic; and the frame does not attenuate
+(`ViscoBiotVSSEM2DDeformed` is 2-D).
 
 `test/sem/test_biot_sem3d.py` checks that a dry solid is
 `ElasticVSSEM3DDeformed` to round-off and the undrained limit to 3e-3 on 40 m

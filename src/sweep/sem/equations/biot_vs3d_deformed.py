@@ -18,10 +18,10 @@ the equations and the discretisation. What differs:
 * Porous and dry elastic elements only. A fluid element (``rho = 0``) is refused, because the
   fluid-solid interface is 2-D; a porous--dry interface needs nothing (sealed pores, as in
   2-D). The drag is isotropic (``b``).
-* Sources: ``vx`` / ``vy`` / ``vz`` and ``qx`` / ``qy`` / ``qz`` (``source_mode``
-  ``"velocity"``), ``fx`` / ``fy`` / ``fz`` (the force on both equations, ``"load"``), and the
-  pore-pressure injection ``p``, the default, an isotropic volume source. 3-D meshes have no
-  moment-tensor stamp, so the stress sources are refused.
+* Sources as in 2-D, with ``y``: the moment tensor ``sxx`` ... ``syz`` on the total stress
+  (``["sxx", "syy", "szz"]``, the explosion, is the default), ``vx`` / ``vy`` / ``vz`` and
+  ``qx`` / ``qy`` / ``qz`` (``source_mode`` ``"velocity"``), ``fx`` / ``fy`` / ``fz`` (the
+  force on both equations, ``"load"``) and the pore-pressure injection ``p``.
 * The C-PML memories -- nine for the stress divergence, three for the flux divergence, three
   for the pressure gradient and nine for the velocity gradients -- live on every element.
 
@@ -54,8 +54,6 @@ _MEMORIES = ("m_sxx_x", "m_sxy_y", "m_sxz_z", "m_sxy_x", "m_syy_y", "m_syz_z",
              "m_px", "m_py", "m_pz",                                # pressure gradient
              "m_vx_x", "m_vx_y", "m_vx_z", "m_vy_x", "m_vy_y", "m_vy_z",
              "m_vz_x", "m_vz_y", "m_vz_z")                          # velocity gradients
-_REFUSED_STRESS = ("3-D meshes have no moment-tensor source; inject the pore pressure ('p', "
-                   "an isotropic volume source) or use a force ('fx', 'fy', 'fz')")
 
 
 def _flux_blocks(ibool, n_global):
@@ -98,7 +96,8 @@ class BiotVSSEM3DDeformed:
         **{f"q{c}": (f"q_{c}", None) for c in "xyz"},
         **{f"s{c}": (f"sigma_{c}", None) for c in _COMPONENTS}}
 
-    # PropSEM's source names over (v_x, v_y, v_z, p, q_x, q_y, q_z): see the 2-D class
+    # PropSEM's source names over (v_x, v_y, v_z, p, q_x, q_y, q_z), or the moment
+    # (Mxx, Myy, Mzz, Mxy, Mxz, Myz): see the 2-D class
     propsem_source_names: ClassVar[dict] = {
         **{f"{name}{c}": ("velocity", tuple(float(j == i + off) for j in range(7)))
            for name, off in (("v", 0), ("v_", 0), ("q", 4), ("q_", 4))
@@ -106,9 +105,10 @@ class BiotVSSEM3DDeformed:
         **{f"f{c}": ("force", tuple(float(j in (i, i + 4)) for j in range(7)))
            for i, c in enumerate("xyz")},
         "p": ("injection", (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)),
+        **{f"s{c}": ("moment", tuple(float(j == i) for j in range(6)))
+           for i, c in enumerate(_COMPONENTS)},
     }
-    propsem_source_refused: ClassVar[dict] = {f"s{c}": _REFUSED_STRESS for c in _COMPONENTS}
-    default_source_type: ClassVar[tuple] = ("p",)
+    default_source_type: ClassVar[tuple] = ("sxx", "syy", "szz")
     default_receiver_type: ClassVar[tuple] = ("v_x", "v_y", "v_z")
     bs_refusal: ClassVar[str] = BiotVSSEM2DDeformed.bs_refusal
 
