@@ -95,6 +95,7 @@ Swap `Acoustic` for `Elastic`, `AcousticVTI`, `ElasticTTI`, ... — the surround
 - **Hello SWEEP** — forward / backward / 5-line FWI loop: [`docs/notebooks/00_hello_fwi.ipynb`](docs/notebooks/00_hello_fwi.ipynb)
 - **FWI on Marmousi** (acoustic / elastic / multiscale): see [`docs/notebooks/01_*`–`03_*`](docs/notebooks/)
 - **Wavefields, DAS, anisotropic, RTM**: [`docs/notebooks/04_*`–`08_*`](docs/notebooks/)
+- **AI coding assistants**: `sweep skill install` installs the [Agent Skill](https://sweepx.deepwave.group/solver/user-guide/agent-skills/) ([`skills/sweep-solver/`](skills/sweep-solver/)) so Claude Code or Codex write `sweep` code with the real API; `sweep skill zip` makes the zip for Claude.ai
 - **Production scripts** (multi-GPU shot parallelism and domain decomposition, topography demos): under [`examples/`](examples/)
 
 ## Citing
