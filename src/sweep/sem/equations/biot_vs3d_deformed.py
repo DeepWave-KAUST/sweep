@@ -15,9 +15,12 @@ the equations and the discretisation. What differs:
   element at ``n_order = 4``, where padding every node to eight copies would take
   ``2 x 64 x 64``. The copies are a permutation of the element-local nodes, so moving a
   field between the two layouts is one gather.
-* Porous and dry elastic elements only. A fluid element (``rho = 0``) is refused, because the
-  fluid-solid interface is 2-D; a porous--dry interface needs nothing (sealed pores, as in
-  2-D). The drag is isotropic (``b``).
+* Porous, dry elastic and fluid elements, as in 2-D, the solid-fluid faces through
+  :class:`~sweep.sem.coupling.FluidSolidInterface3D`. An interface may cross a C-PML band
+  that does not stretch its normal direction (a sea floor crosses the x-y corner columns),
+  or one that stretches only that direction, but not a region that stretches both
+  (:func:`~sweep.sem.coupling.assert_no_normal_pml_corner_on_interface`). The drag is
+  isotropic (``b``).
 * Sources as in 2-D, with ``y``: the moment tensor ``sxx`` ... ``syz`` on the total stress
   (``["sxx", "syy", "szz"]``, the explosion, is the default), ``vx`` / ``vy`` / ``vz`` and
   ``qx`` / ``qy`` / ``qz`` (``source_mode`` ``"velocity"``), ``fx`` / ``fy`` / ``fz`` (the
@@ -40,6 +43,7 @@ import torch
 
 from .._assembly import assemble, phys_grads3, stress_divergence3, vector_divergence3
 from ..cpml.elastic_vs3d import SimpleElasticCPML3DProfile, build_simple_elastic_cpml_3d
+from ..coupling import FluidSolidInterface3D, assert_no_normal_pml_corner_on_interface
 from ..fields import FieldSpec, check_element_arrays, init_state_from_specs
 from ..mesh.boundaries import free_surface_node_idx
 from ..mesh.domains import masked_inv_mass
@@ -126,15 +130,16 @@ class BiotVSSEM3DDeformed:
     viscous_q: Optional[tuple]
 
     mass_rho: torch.Tensor             # (n_global,) A(w rho)
-    _inv_M: torch.Tensor               # 1 / mass_rho
-    _inv_Mm: torch.Tensor              # 1 / A(w m) over the pore fluid: a flux injected at a point
+    _inv_M: torch.Tensor               # 1 / mass_rho, 0 off the solid
+    _inv_Mm: torch.Tensor              # 1 / A(w m) over the fluid: a flux injected at a point
     _inv_Mp: torch.Tensor              # 1 / A(w / M), the pressure's lumped compliance
-    _inv_M1: torch.Tensor              # 1 / A(w) over the pore fluid: a pressure injected
+    _inv_M1: torch.Tensor              # 1 / A(w) over the fluid: a pressure injected
     _lam_d: torch.Tensor               # drained lambda, H - 2 mu - C^2 / M
     _alpha: torch.Tensor               # C / M (0 in a dry solid)
-    _solid_e: torch.Tensor             # (E,) bool, every element here
-    _fluid_e: torch.Tensor             # (E,) bool, the porous ones
+    _solid_e: torch.Tensor             # (E,) bool, the elements with a solid frame
+    _fluid_e: torch.Tensor             # (E,) bool, the fluid-filled ones (porous or fluid)
     _qmask: torch.Tensor               # (E, 1, 1, 1) the flux mask
+    ifc: FluidSolidInterface3D         # the faces between fluid and solid elements
     _tau: tuple                        # (tau_e, tau_s), equal without viscous_q
     # the flux copies: the permutation of the flattened element-local nodes, its inverse, the
     # inverse of the node order the groups list them in, and per group (k, nodes, w m,
@@ -178,11 +183,6 @@ class BiotVSSEM3DDeformed:
             raise ValueError("the drag eta / kappa must be >= 0")
         solid, fluid = _media(H_e, mu_e, C_e, M_e, rho_e, rho_f_e, m_e,
                               (b_e, torch.zeros_like(b_e), b_e), False)
-        if bool((fluid & ~solid).any()):
-            raise NotImplementedError(
-                f"{cls.__name__}: element {int((fluid & ~solid).nonzero()[0])} is a fluid "
-                f"(rho = 0), and the fluid-solid interface is 2-D only "
-                f"(BiotVSSEM2DDeformed); here every element has a solid frame")
         tau = (1.0, 1.0) if viscous_q is None else viscous_relaxation_times(*viscous_q)
         device = H_e.device
         w = mesh.w_jac
@@ -192,13 +192,19 @@ class BiotVSSEM3DDeformed:
         def lump(c):
             return assemble(w * c, ibool, like)
 
-        p_alive = torch.zeros(mesh.n_global, dtype=torch.bool, device=device).index_fill(
-            0, ibool[fluid].reshape(-1), True)
+        def alive(elements):
+            out = torch.zeros(mesh.n_global, dtype=torch.bool, device=device)
+            return out.index_fill(0, ibool[elements].reshape(-1), True)
+
+        v_alive, p_alive = alive(solid), alive(fluid)
         fl = fluid.view(-1, 1, 1, 1)
         qmask = fl.to(H_e.dtype)
-        # the coefficients a dry solid does not have are zero (checked above); through the
-        # mask their gradient is zero too, so an update keeps them so
-        C_e, rho_f_e, m_e, b_e = C_e * qmask, rho_f_e * qmask, m_e * qmask, b_e * qmask
+        # the coefficients a medium does not have are zero (checked above); through the masks
+        # their gradient is zero too, so an update keeps them so (see the 2-D class)
+        sm = solid.view(-1, 1, 1, 1).to(H_e.dtype)
+        pm = sm * qmask
+        H_e, mu_e, rho_e, C_e, rho_f_e = H_e * sm, mu_e * sm, rho_e * sm, C_e * pm, rho_f_e * pm
+        m_e, b_e = m_e * qmask, b_e * pm
         inv_M_e = torch.where(fl, 1.0 / torch.where(fl, M_e, torch.ones_like(M_e)), 0.0)
         mass_rho = lump(rho_e)
         inv_M1 = masked_inv_mass(lump(qmask.expand_as(M_e)), p_alive)
@@ -220,17 +226,22 @@ class BiotVSSEM3DDeformed:
                 to_blocks(w * rho_f_e), to_blocks(w * b_e * unrelax),
                 to_blocks(w * qmask)))
         node_order = torch.cat([nodes for _, nodes in groups])
+        ifc = FluidSolidInterface3D.detect(mesh, ~solid)
+        if cpml is not None and ifc.n_face:
+            assert_no_normal_pml_corner_on_interface(ifc, *(
+                like.index_copy(0, ibool.reshape(-1), getattr(cpml, k).reshape(-1))
+                for k in ("b_x", "b_y", "b_z")))
         return cls(
             mesh=mesh, H_e=H_e, mu_e=mu_e, C_e=C_e, M_e=M_e, rho_e=rho_e,
             rho_f_e=rho_f_e, m_e=m_e, b_e=b_e,
             dirichlet=tuple(dirichlet),
             dirichlet_idx=free_surface_node_idx(mesh, dirichlet, device),
             viscous_q=None if viscous_q is None else tuple(float(v) for v in viscous_q),
-            mass_rho=mass_rho, _inv_M=1.0 / mass_rho,
+            mass_rho=mass_rho, _inv_M=masked_inv_mass(mass_rho, v_alive),
             _inv_Mm=masked_inv_mass(lump(m_e), p_alive),
             _inv_Mp=masked_inv_mass(lump(inv_M_e), p_alive), _inv_M1=inv_M1,
             _lam_d=H_e - 2.0 * mu_e - alpha * C_e, _alpha=alpha,
-            _solid_e=solid, _fluid_e=fluid, _qmask=qmask, _tau=tau,
+            _solid_e=solid, _fluid_e=fluid, _qmask=qmask, ifc=ifc, _tau=tau,
             _perm=perm, _inv_perm=torch.argsort(perm), _node_inv=torch.argsort(node_order),
             _blocks=blocks,
             cpml=cpml, _D=mesh.deriv, _w_J=w, _inv_J=mesh.inv_J,
@@ -254,7 +265,7 @@ class BiotVSSEM3DDeformed:
         by ``q <- E q + Psi r`` over a step of frozen forces ``r`` (all three components
         alike): from ``A dq/dt + W_B q = r``, ``A = diag(w m) - w rho_f (w rho_f)^T /
         M_rho``, the exponential of the 2-D class, in float64. ``chunk`` nodes at a time."""
-        inv_rho = 1.0 / self.mass_rho.double()
+        inv_rho = masked_inv_mass(self.mass_rho.double(), self._inv_M != 0)
         dtype = self.mass_rho.dtype
         Es, Psis = [], []
         for blk in self._blocks:
@@ -358,6 +369,10 @@ class BiotVSSEM3DDeformed:
         else:
             sig = (s_xx, s_xy, s_xz, s_xy, s_yy, s_yz, s_xz, s_yz, s_zz)
         f = [-r for r in stress_divergence3(D, ibool, inv_J, w, sig, like)]
+        ifc = self.ifc
+        if ifc.n_face:
+            # a fluid's pressure on the solid: -∮ p n φ, n out of the solid
+            f = [fc + sc for fc, sc in zip(f, ifc.apply_el(p, p))]
         if mode == "load":
             f = [f[c] + src[c] for c in range(3)]
 
@@ -420,6 +435,8 @@ class BiotVSSEM3DDeformed:
         div_v = vx_x + vy_y + vz_z
         alpha = self._alpha
         rhs = div_q - assemble(w * alpha * div_v, ibool, like)
+        if ifc.n_face:
+            rhs = rhs - ifc.apply_ac(v_x, v_y, v_z, p)     # +∮ ψ v·n, n out of the solid
         dp_free = self._pin(dt * self._inv_Mp * rhs)
         p = p + dp_free
         dsig_p = alpha * dp_free[ibool]                    # sigma = sigma' - alpha p

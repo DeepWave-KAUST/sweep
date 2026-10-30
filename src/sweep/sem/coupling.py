@@ -279,3 +279,116 @@ def assert_no_corner_pml_on_interface(ifc: "FluidSolidInterface", ac_profile):
             "CORNER absorbing region (both x and z stretched). This is "
             "unsupported (SPECFEM2D makes it a fatal error too): shrink the "
             "PML bands, move the interface, or drop the offending side.")
+
+
+# --------------------------------------------------------------------------- #
+# 3-D: Hex27 faces
+# --------------------------------------------------------------------------- #
+def _hex_face(mesh, elems, m, s):
+    """``(node_idx, weight, normal)`` of the face ``ξ_m = s`` (``m``: 0 ξ / x, 1 η / y,
+    2 γ / z; ``s = ±1``) of the Hex27 elements ``elems``, each ``(n_e, ngll**2)`` (the normal
+    ``(n_e, ngll**2, 3)``). Nanson: the area element is ``|J| |∇ξ_m| dξ_a dξ_b`` and the
+    outward normal ``s ∇ξ_m / |∇ξ_m|`` (``|J| > 0``), so the weight is ``w_a w_b |J| |∇ξ_m|``."""
+    ng = mesh.ngll
+    k = 0 if s < 0 else ng - 1
+    face = [slice(None)] * 3
+    face[2 - m] = k                       # ibool / metric axes are (γ, η, ξ)
+    sel = (elems,) + tuple(face)
+    node = mesh.ibool[sel].reshape(len(elems), -1)
+    grad = mesh.inv_J[sel + (m,)].reshape(len(elems), -1, 3)       # ∂ξ_m/∂x_d
+    norm = torch.linalg.vector_norm(grad, dim=-1)
+    w2 = (mesh.w_ref[:, None] * mesh.w_ref[None, :]).reshape(1, -1)
+    weight = w2 * mesh.det_J[sel].reshape(len(elems), -1) * norm
+    return node, weight, s * grad / norm[..., None]
+
+
+@dataclass(frozen=True)
+class FluidSolidInterface3D:
+    """:class:`FluidSolidInterface` on a Hex27 mesh: per GLL node of every fluid-solid face
+    (``(n_face, ngll**2)``) the global node, the surface quadrature weight and the unit normal
+    outward from the fluid, on the fluid element's metric, so that :meth:`apply_ac` and
+    :meth:`apply_el` are exact transposes."""
+    node_idx: torch.Tensor
+    weight: torch.Tensor
+    nx: torch.Tensor
+    ny: torch.Tensor
+    nz: torch.Tensor
+    n_global: int
+
+    @classmethod
+    def detect(cls, mesh, fluid) -> "FluidSolidInterface3D":
+        """Every face between a fluid element (``fluid``, ``(E,)`` bool) and a solid one,
+        from the structured ``(nez, ney, nex)`` element grid; the two sides must see the
+        same global nodes in the same order."""
+        dev = mesh.ibool.device
+        ids = torch.arange(mesh.n_elements, device=dev).reshape(mesh.nez, mesh.ney, mesh.nex)
+        fl = fluid.reshape(mesh.nez, mesh.ney, mesh.nex)
+        cen = torch.stack([c.flatten(1).mean(1) for c in (mesh.x_e, mesh.y_e, mesh.z_e)], -1)
+        idx, w, n = [], [], []
+        for axis in range(3):                              # grid axis (z, y, x)
+            lo, hi = [slice(None)] * 3, [slice(None)] * 3
+            lo[axis], hi[axis] = slice(None, -1), slice(1, None)
+            a, b = ids[tuple(lo)].reshape(-1), ids[tuple(hi)].reshape(-1)  # b past a
+            fa, fb = fl[tuple(lo)].reshape(-1), fl[tuple(hi)].reshape(-1)
+            ch = fa != fb
+            for f, sol, s in ((a[ch & fa], b[ch & fa], 1), (b[ch & fb], a[ch & fb], -1)):
+                if f.numel() == 0:
+                    continue
+                node, weight, normal = _hex_face(mesh, f, 2 - axis, s)
+                if not torch.equal(node, _hex_face(mesh, sol, 2 - axis, -s)[0]):
+                    raise ValueError("fluid/solid faces do not pair node-for-node")
+                toward = ((cen[sol] - cen[f])[:, None, :] * normal).sum(-1)
+                if bool((toward <= 0).any()):
+                    raise ValueError("a fluid-solid face normal does not point from the "
+                                     "fluid toward the solid (inverted element?)")
+                idx.append(node)
+                w.append(weight)
+                n.append(normal)
+        if not idx:
+            empty = torch.zeros((0, mesh.ngll ** 2), dtype=torch.long, device=dev)
+            z = torch.zeros((0, mesh.ngll ** 2), dtype=mesh.x_e.dtype, device=dev)
+            return cls(empty, z, z, z, z, mesh.n_global)
+        n = torch.cat(n)
+        return cls(torch.cat(idx), torch.cat(w), n[..., 0], n[..., 1], n[..., 2],
+                   mesh.n_global)
+
+    @property
+    def n_face(self) -> int:
+        return int(self.node_idx.shape[0])
+
+    def _scatter(self, vals, like):
+        return torch.zeros_like(like).index_add(
+            0, self.node_idx.reshape(-1), vals.reshape(-1))
+
+    def apply_ac(self, u_x, u_y, u_z, like):
+        """``∮_Γ (u_s · n) φ_i dΓ`` -> ``(n_global,)``, for the fluid."""
+        g = self.node_idx
+        return self._scatter(self.weight * (self.nx * u_x[g] + self.ny * u_y[g]
+                                            + self.nz * u_z[g]), like)
+
+    def apply_el(self, p, like):
+        """``∮_Γ p n φ_i dΓ`` -> ``(S_x, S_y, S_z)``, for the solid: the exact transpose of
+        :meth:`apply_ac`."""
+        pw = self.weight * p[self.node_idx]
+        return tuple(self._scatter(pw * c, like) for c in (self.nx, self.ny, self.nz))
+
+
+def assert_no_normal_pml_corner_on_interface(ifc: "FluidSolidInterface3D", b_x, b_y, b_z):
+    """:func:`assert_no_corner_pml_on_interface` in 3-D, on the nodal damping ``b_x``,
+    ``b_y``, ``b_z``. The plain coupling term is the boundary integral of the derivative
+    along the interface's normal, so a band that stretches only other directions leaves it
+    exact -- a sea floor crosses the x-y corner columns of the C-PML that way -- and a band
+    of the normal direction alone is SPECFEM2D's single band. Refused, as SPECFEM2D's corner:
+    a node where the normal's direction and another one are both stretched."""
+    if ifc.n_face == 0:
+        return
+    g = ifc.node_idx.reshape(-1)
+    normal = torch.stack([ifc.nx, ifc.ny, ifc.nz], -1).reshape(-1, 3).abs().argmax(-1)
+    st = torch.stack([b_x[g] != 0, b_y[g] != 0, b_z[g] != 0], -1)
+    bad = st.gather(1, normal[:, None])[:, 0] & (st.sum(-1) >= 2)
+    if bool(bad.any()):
+        raise ValueError(
+            f"{int(bad.sum())} fluid-solid interface node(s) fall where the C-PML stretches "
+            "the interface's normal direction and another one (an edge or corner region of "
+            "the absorbing layer across the interface), which the plain coupling does not "
+            "support: shrink the PML bands, move the interface, or drop the offending side.")

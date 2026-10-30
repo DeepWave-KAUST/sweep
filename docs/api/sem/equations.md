@@ -198,3 +198,10 @@ and the same source and receiver names. See
       members: [build]
       inherited_members: true
       show_if_no_docstring: true
+
+::: sweep.sem.BiotVSSEM3DDeformed
+    options:
+      heading_level: 3
+      members: [build]
+      inherited_members: true
+      show_if_no_docstring: true

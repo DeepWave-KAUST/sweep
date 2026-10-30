@@ -1,6 +1,7 @@
 """BiotVSSEM3DDeformed (3-D velocity-stress Biot SEM): the dry and undrained limits against
-ElasticVSSEM3DDeformed, the analytic point injection (CUDA), the flux copies and their drag,
-the transposed flux and pressure operators on a curved mesh, the symmetry of the three axes,
+ElasticVSSEM3DDeformed, the analytic point injection and split source (CUDA), the flux copies
+and their drag, the transposed flux and pressure operators on a curved mesh, the symmetry of
+the three axes, the fluid-solid interfaces (reciprocity, transposes, the C-PML rule),
 gradient, sources and refusals.
 
 Time levels as in the 2-D tests (test_biot_sem.py): a velocity sample ``n`` is
@@ -411,15 +412,116 @@ def test_the_open_pore_surface_holds_no_pressure():
     assert not d[0, :, :2].any() and d[0, :, 2].abs().max() > 0
 
 
-def test_a_fluid_element_is_refused():
-    prop, _ = _small(["p"], ["vx"])
-    coef = _gll(prop.mesh, [float(c) for c in biot_from_biot_constants(**DAI1, b=3e3, phi=0.3)])
-    for k, c in enumerate(biot_fluid(2.25e9, 1000.0)):
-        coef[k][0] = float(c)                            # element 0 is water
-    with pytest.raises(NotImplementedError, match="fluid-solid interface is 2-D"):
-        BiotVSSEM3DDeformed.build(prop.mesh, *coef)
-
-
 def test_boundary_saving_is_refused():
     with pytest.raises(NotImplementedError, match="boundary saving"):
         _small(["p"], ["vx"], memory=BoundarySaving())
+
+
+# ------------------------------------------------------------------------------------------ #
+# fluid elements
+# ------------------------------------------------------------------------------------------ #
+WATER = (2.25e9, 1000.0)                      # k_f, rho_f
+SHALE = (3000.0, 1600.0, 2200.0)              # vp, vs, rho
+
+
+def _three_media(mesh, b=0.0, tops=(0.0, 20.0, 60.0)):
+    """GLL-native water over Dai's porous rock (drag ``b``) over a dry shale, an element
+    wholly one medium (as in the 2-D tests)."""
+    zc = mesh.z_e.mean((1, 2, 3))
+    k = torch.bucketize(zc, torch.tensor(tops[1:], dtype=zc.dtype))
+    media = [biot_fluid(*WATER), biot_from_biot_constants(**DAI1, b=b, phi=0.3),
+             biot_elastic(*(torch.tensor(v, dtype=F64) for v in SHALE))]
+    return [torch.stack([torch.as_tensor(m[i], dtype=F64) for m in media])[k]
+            .view(-1, 1, 1, 1).expand(mesh.z_e.shape).contiguous() for i in range(8)]
+
+
+def _node3(mesh, ez, ey, ex, gll=(2, 2, 2)):
+    return int(mesh.ibool[(ez * mesh.ney + ey) * mesh.nex + ex][gll])
+
+
+def _green3(eq, dt, nt, field, src_node, rec_field, rec_node, w):
+    """:func:`test_biot_sem._green` in 3-D: a unit load ``w[n]`` at ``src_node`` on the
+    momentum (``field`` 0-2), or a fluid volume on the pressure equation (``field`` 3), ``p``
+    and the total stress by ``-alpha dp``; ``rec_field`` at ``rec_node`` after each step."""
+    state = eq.init_state(dt, "cpu", F64)
+    zero = torch.zeros(eq.mesh.n_global, dtype=F64)
+    ibool = eq.mesh.ibool
+    out = []
+    for n in range(nt):
+        src = [zero] * 7
+        if field == 3:
+            dp = zero.clone()
+            dp[src_node] = dt * w[n] * eq._inv_Mp[src_node]
+            state = list(state)
+            state[3] = state[3] + dp
+            for k in (7, 8, 9):                                 # sigma_xx, sigma_yy, sigma_zz
+                state[k] = state[k] - eq._alpha * dp[ibool]
+        else:
+            src[field] = zero.index_fill(0, torch.tensor([src_node]), 1.0) * w[n]
+        state = eq.step(tuple(state), src, dt)
+        out.append(state[rec_field][rec_node])
+    return torch.stack(out)
+
+
+@pytest.mark.parametrize("b", [0.0, 7e5])
+def test_the_interfaces_are_reciprocal(b):
+    # the interface integrals are exact transposes and the sealed interface the natural one,
+    # so the Green's functions are symmetric across every interface, with the drag too:
+    # pressure-pressure water <-> rock and sea floor <-> rock, velocity-velocity rock (y) <->
+    # shale (z) and sea floor (x) <-> shale (z)
+    shape, dh, dt, nt = (17, 13, 13), 5.0, 2e-4, 250
+    prop = _prop(shape, dh, dt, None, None, f0=40.0, abcn=0, free_surface=True)
+    mesh = prop.mesh
+    eq = prop._build_eq(_three_media(mesh, b))
+    assert eq.ifc.n_face == mesh.nex * mesh.ney
+    w = _ricker(nt, dt, 40.0, 0.03)
+    a, c = _node3(mesh, 0, 1, 1), _node3(mesh, 2, 1, 2, (1, 3, 2))
+    g = _node3(mesh, 1, 2, 1, (0, 2, 2))                     # on the sea floor
+    d, e = _node3(mesh, 1, 0, 2, (2, 3, 1)), _node3(mesh, 3, 2, 1, (2, 1, 3))
+    f = _node3(mesh, 1, 2, 0, (0, 2, 3))
+    for fw, bw in (((3, a, 3, c), (3, c, 3, a)), ((3, g, 3, c), (3, c, 3, g)),
+                   ((1, d, 2, e), (2, e, 1, d)), ((0, f, 2, e), (2, e, 0, f))):
+        x, y = _green3(eq, dt, nt, *fw, w), _green3(eq, dt, nt, *bw, w)
+        assert float(x.abs().max()) > 0
+        torch.testing.assert_close(x, y, rtol=0, atol=1e-10 * float(x.abs().max()))
+
+
+def test_the_interface_integrals_are_transposes_on_a_curved_mesh():
+    from sweep.sem.coupling import FluidSolidInterface3D
+    topo = lambda x, y: 40.0 + 30.0 * torch.sin(2 * math.pi * x / 300.0) * torch.cos(
+        2 * math.pi * y / 300.0)
+    mesh = build_topography_hex27(nex=3, ney=3, nez=3, x_max=300.0, y_max=300.0,
+                                  z_bottom=300.0, z_top_fn=topo, n_order=NO, dtype=F64)
+    fluid = torch.zeros(mesh.n_elements, dtype=torch.bool)
+    fluid[:9] = True                                         # the top layer
+    fluid[13] = True                                         # and a pocket in the middle
+    ifc = FluidSolidInterface3D.detect(mesh, fluid)
+    assert ifc.n_face == 8 + 5          # the layer's 9 less the one over the pocket, the pocket's 5
+    g = torch.Generator().manual_seed(2)
+    p = torch.randn(mesh.n_global, dtype=F64, generator=g)
+    v = [torch.randn(mesh.n_global, dtype=F64, generator=g) for _ in range(3)]
+    lhs = float((ifc.apply_ac(*v, p) * p).sum())
+    rhs = float(sum((s * vc).sum() for s, vc in zip(ifc.apply_el(p, p), v)))
+    assert lhs == pytest.approx(rhs, rel=1e-13)
+    # the normals are unit vectors, the sea floor's tilted with the topography
+    n = torch.stack([ifc.nx, ifc.ny, ifc.nz], -1)
+    assert torch.allclose(n.norm(dim=-1), torch.ones_like(ifc.nx))
+    assert float(n[:8, :, :2].abs().max()) > 0.05
+
+
+@pytest.mark.parametrize("z_floor, refused", [(50.0, False), (150.0, True)])
+def test_an_interface_where_the_cpml_stretches_its_normal_and_more_is_refused(z_floor, refused):
+    # a sea floor in the box crosses the x-y corner columns of the layer, where its normal is
+    # not stretched and the plain coupling is exact; one inside the bottom band meets its x-z
+    # and y-z edges, where the normal and another direction are both stretched
+    prop = _prop((13, 9, 9), 10.0, 5e-4, ["p"], ["p"], abcn=8, free_surface=True)
+    mesh = prop.mesh
+    water = (mesh.z_e.mean((1, 2, 3)) < z_floor).view(-1, 1, 1, 1)
+    coef = [torch.where(water, torch.tensor(float(a), dtype=F64), torch.tensor(float(r), dtype=F64))
+            .expand(mesh.z_e.shape).contiguous()
+            for a, r in zip(biot_fluid(*WATER), biot_from_biot_constants(**DAI1, b=7e4, phi=0.3))]
+    if refused:
+        with pytest.raises(ValueError, match="normal direction and another"):
+            prop._build_eq(coef)
+    else:
+        assert prop._build_eq(coef).ifc.n_face == mesh.nex * mesh.ney

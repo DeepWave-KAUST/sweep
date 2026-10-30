@@ -905,10 +905,14 @@ memory (7.4 against 2.9 ms on 27k elements, float32, RTX 6000 Ada).
 The sources are the 2-D class's with `y`: the moment tensor `sxx` ... `syz` on
 the total stress (`["sxx", "syy", "szz"]`, the explosion, is the default), the
 forces `fx`, `fy` and `fz` on both equations, the velocities and fluxes `vx`
-... `qz`, and the pore-pressure injection `p`. What the 2-D classes have and
-this one does not: fluid elements (`rho = 0`) are refused, because the
-fluid-solid interface is 2-D (a porous-dry interface needs nothing, as in
-2-D); the drag is isotropic; and the frame does not attenuate
+... `qz`, and the pore-pressure injection `p`. Fluid and dry elastic elements
+work as in 2-D, the fluid-solid faces through `FluidSolidInterface3D` (the
+same two integrals on the faces of the Hex27 elements, exact transposes). An
+interface may cross a C-PML band that does not stretch its normal direction
+-- a sea floor crosses the x-y corner columns of the layer -- or one that
+stretches only that direction, but not a region that stretches both, the 3-D
+form of SPECFEM2D's corner rule. What the 2-D classes have and this one does
+not: an anisotropic drag, and an attenuating frame
 (`ViscoBiotVSSEM2DDeformed` is 2-D).
 
 `test/sem/test_biot_sem3d.py` checks that a dry solid is

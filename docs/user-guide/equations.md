@@ -110,6 +110,7 @@ only, and the C-PML is required wherever the ring IS the C-PML band.
 | `BiotVSSEM2DDeformed` | `['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']` | quad9 | 2D | [Biot poroelastic](sem.md#poroelastic-waves-biot) velocity–stress with Darcy flux, the FD `Biot`'s equations and names (pore pressure continuous, flux element-local): topography + C-PML, open-pore surface, fluid (`rho = 0`) and dry elastic (`M = 0`) regions, viscous attenuation (`viscous_q`), records `vx, vz, p, qx, qz, sxx, szz, sxz` | ❌ | ❌ (dissipative) |
 | `BiotAnisoPermSEM2DDeformed` | `['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b_xx', 'b_xz', 'b_zz']` | quad9 | 2D | `BiotVSSEM2DDeformed` with an [anisotropic permeability](sem.md#anisotropic-permeability-and-viscous-attenuation) (drag tensor) | ❌ | ❌ (dissipative) |
 | `ViscoBiotVSSEM2DDeformed` | `['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b', 'Qp', 'Qs']` | quad9 | 2D | `BiotVSSEM2DDeformed` with a [GSLS frame](sem.md#frame-attenuation): `Qp` on the drained P modulus, `Qs` on the shear modulus | ❌ | ❌ (dissipative) |
+| `BiotVSSEM3DDeformed` | `['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']` | hex27 | 3D | `BiotVSSEM2DDeformed` [in 3-D](sem.md#in-3-d): topography + C-PML, open-pore surface, fluid and dry elastic regions, viscous attenuation (`viscous_q`), an isotropic drag; moment-tensor sources `sxx` ... `syz` | ❌ | ❌ (dissipative) |
 
 For the authoritative list of equations exported by your installation,
 with their models and compiled-binding support, use the CLI:
