@@ -118,12 +118,20 @@ class ModelParallelMesh:
         collective (a multi-band VRZ cascade on field data, 2026-09-08, entering
         the finest stage).  Read it back off the default group so the two agree by
         construction; ``None`` means "torch's default", i.e. today's behaviour.
+
+        Every backend of the group is built with that timeout, so ask the CPU
+        one, and the CUDA one only when there is none (``nccl``, or no backend
+        named on a GPU host).  Asking CUDA whenever torch saw a GPU initialised
+        CUDA in every rank of a gloo (CPU) run, and lost the timeout outright for
+        a ``cpu:gloo`` group, which has no CUDA backend.
         """
         try:
             pg = dist.distributed_c10d._get_default_group()
-            dev = (torch.device("cuda", torch.cuda.current_device())
-                   if torch.cuda.is_available() else torch.device("cpu"))
-            return pg._get_backend(dev).options._timeout
+            try:
+                backend = pg._get_backend(torch.device("cpu"))
+            except RuntimeError:      # no CPU backend in the group
+                backend = pg._get_backend(torch.device("cuda"))
+            return backend.options._timeout
         except Exception:
             return None
 

@@ -10,6 +10,12 @@ and this project adheres to
 ## [Unreleased]
 
 ### Fixed
+- The process-group timeout that `ModelParallel`'s sub-groups inherit is read
+  off the default group's CPU backend (the CUDA one only for an NCCL-only
+  group). It used to ask the CUDA backend whenever torch saw a GPU: under gloo
+  that initialised CUDA in every rank on a GPU host, and with
+  `init_process_group("cpu:gloo", timeout=...)` the lookup failed, so the DD
+  collectives ran on torch's 30-minute gloo default instead.
 - **Eager chunk checkpointing no longer slows calls down for nothing.** A
   solver built with `Ckpt(mode="chunk")` cut every rollout into chunks, also
   a call autograd does not record, and every chunk prepared the models again
