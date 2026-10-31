@@ -10,6 +10,30 @@ and this project adheres to
 ## [Unreleased]
 
 ### Fixed
+- **Lossy boundary storage (`storage_dtype='int8'` / `'fp16'`) no longer mixes
+  the shots of a batch.**  The saved boundary band is quantized in blocks of
+  256 cells, one FP32 scale each, and the blocks were cut out of a timestep's
+  band for the whole batch: where a shot's band on a face is not a multiple of
+  256 cells (most grids), one block held the end of one shot and the start of
+  the next, so a shot's gradient depended on the other shots in its batch,
+  most of all on a much louder one (2-D, int8: 2.5e-3 of the gradient's
+  maximum at equal amplitudes, about int8's own error, and 0.38 with the other
+  shot 1000x louder).  Each shot is now blocked on its own, on `impl='c'`
+  (2-D and 3-D, gpu / cpu / disk storage, DD tiles included) and on the eager
+  backend, and a shot's gradient is the same bit for bit alone or in any
+  batch.  Single-shot calls and grids whose bands are whole blocks give the
+  same bits as before.  `impl='c'` memory is unchanged (its scale buffers were
+  already sized per shot); the eager ring pads each shot to whole blocks, at
+  most 255 cells per shot and field per step.  JAX (where fp16 is a plain cast)
+  and SEM (one scale per field, step and shot) were not affected.
+- **A propagator runs a smaller batch after a larger one with lossy boundary
+  storage.**  Its boundary buffers keep the larger batch and are narrowed per
+  call, but the quantization took its cell count from the full, larger step:
+  3-D stopped with an error that blamed `tangent_pad`, and 2-D quantized the
+  staging of the shots the call no longer had, left over from the previous
+  call (up to 7.5e-3 of the gradient).  Only the call's own shots are
+  quantized now, and the saver checks each face's batch, cells per shot and
+  scale layout separately and names the one that disagrees.
 - The 2-D `AcousticVRZ` boundary-saving backward (`impl='c'`) reconstructs the
   row next to a domain-decomposition cut face. The reverse step skipped the
   outer row of the physical box on every face, but a cut face has no saved

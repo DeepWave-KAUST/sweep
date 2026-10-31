@@ -201,117 +201,96 @@ public:
 
     // Scaled-storage helpers: launch quantize / dequantize for one
     // timestep's worth of data per face.  ``step_idx`` is the index
-    // along the outermost dimension of the persistent payload buffer
-    // (already includes any multi-field offset).  We look up the
-    // per-step cell count from the saver's tensor stride.  The payload
+    // along the step axis of the persistent payload buffer (dim 0 in 3-D,
+    // already including any multi-field offset; dim 1 in 2-D).  The payload
     // is uint8 (INT8, *_q) or __half (FP16, *_h); the FP32 per-block
     // scale and the FP32 transient staging are shared by both.
-    // ``face_t`` is the face's persistent saver tensor, passed only so a DD cut
-    // face can be skipped: ``gpu_full_shapes`` drops such a face to numel 0
+    //
+    // The geometry comes from the saver's persistent payload / scale tensors:
+    // the step pitch is the step axis' stride, and the shots are the next
+    // axis.  The propagator allocates these buffers for its capacity batch and
+    // narrows them to the call's batch on that axis (_c.py
+    // _slice_boundary_buffers), so size() there is this call's shot count
+    // while the step pitch stays capacity-sized -- the quantization therefore
+    // covers this call's shots only, each blocked on its own
+    // (launch_quantize_*), and never reads the staging past them.
+    // allocate_int8_staging checks that the payload, its scale and the
+    // staging agree on that per-shot geometry.
+    //
+    // ``face_t`` is the face's persistent saver tensor, also used to skip a
+    // DD cut face: ``gpu_full_shapes`` drops such a face to numel 0
     // because the boundary kernels gate it on ctx.cut_* (nothing is ever
     // written there — its halo is reconstructed in the DD backward).  The test
-    // MUST be on numel, not on ``cells``: PyTorch clamps a 0-size dim's stride
+    // MUST be on numel, not on a stride: PyTorch clamps a 0-size dim's stride
     // to a nonzero value -- and Buf copies that stride verbatim rather than
-    // deriving it -- so the stride-derived ``cells`` would still drive a
+    // deriving it -- so a stride-derived cell count would still drive a
     // launch that writes into the empty buffer.  Guarding here covers the FP16
     // and INT8 payloads in one place.
     inline bool face_is_cut(const Buf& face_t) const
     {
         return face_t.numel() == 0;
     }
-    inline void quantize_face(const Buf& face_t,
+    inline void quantize_face(const Buf& face_t, const Buf& scale_t,
                               float* stage, uint8_t* q, __half* h, float* scale,
-                              BoundaryDtype dt, int64_t step_idx,
-                              int64_t cells, int64_t blocks)
+                              BoundaryDtype dt, int64_t step_idx)
     {
         if (face_is_cut(face_t)) return;
+        const int sd = saver_->dim == 3 ? 0 : 1;
+        const int64_t cells = face_t.stride(sd), blocks = scale_t.stride(sd);
+        const int64_t shots = face_t.size(sd + 1), per_shot = face_t.stride(sd + 1);
         if (dt == BoundaryDtype::FP16)
-            launch_quantize_fp16(stage, h + step_idx * cells, scale + step_idx * blocks, cells, compute_stream_);
+            launch_quantize_fp16(stage, h + step_idx * cells, scale + step_idx * blocks, shots, per_shot, compute_stream_);
         else
-            launch_quantize_int8(stage, q + step_idx * cells, scale + step_idx * blocks, cells, compute_stream_);
+            launch_quantize_int8(stage, q + step_idx * cells, scale + step_idx * blocks, shots, per_shot, compute_stream_);
     }
-    inline void dequantize_face(const Buf& face_t,
+    inline void dequantize_face(const Buf& face_t, const Buf& scale_t,
                                 float* stage, uint8_t* q, __half* h, float* scale,
-                                BoundaryDtype dt, int64_t step_idx,
-                                int64_t cells, int64_t blocks)
+                                BoundaryDtype dt, int64_t step_idx)
     {
         if (face_is_cut(face_t)) return;
+        const int sd = saver_->dim == 3 ? 0 : 1;
+        const int64_t cells = face_t.stride(sd), blocks = scale_t.stride(sd);
+        const int64_t shots = face_t.size(sd + 1), per_shot = face_t.stride(sd + 1);
         if (dt == BoundaryDtype::FP16)
-            launch_dequantize_fp16(h + step_idx * cells, scale + step_idx * blocks, stage, cells, compute_stream_);
+            launch_dequantize_fp16(h + step_idx * cells, scale + step_idx * blocks, stage, shots, per_shot, compute_stream_);
         else
-            launch_dequantize_int8(q + step_idx * cells, scale + step_idx * blocks, stage, cells, compute_stream_);
+            launch_dequantize_int8(q + step_idx * cells, scale + step_idx * blocks, stage, shots, per_shot, compute_stream_);
     }
     inline void quantize_step_2d(const GeneralBoundaryPointer& b, int64_t step_idx)
     {
-        int64_t c_top = saver_->top_t.stride(saver_->dim == 3 ? 0 : 1);
-        int64_t c_bot = saver_->bottom_t.stride(saver_->dim == 3 ? 0 : 1);
-        int64_t c_lef = saver_->left_t.stride(saver_->dim == 3 ? 0 : 1);
-        int64_t c_rig = saver_->right_t.stride(saver_->dim == 3 ? 0 : 1);
-        int64_t s_top = saver_->top_scale_t.stride(saver_->dim == 3 ? 0 : 1);
-        int64_t s_bot = saver_->bottom_scale_t.stride(saver_->dim == 3 ? 0 : 1);
-        int64_t s_lef = saver_->left_scale_t.stride(saver_->dim == 3 ? 0 : 1);
-        int64_t s_rig = saver_->right_scale_t.stride(saver_->dim == 3 ? 0 : 1);
-        quantize_face(saver_->top_t,    b.top,   b.top_q,   b.top_h,   b.top_scale,   b.dtype, step_idx, c_top, s_top);
-        quantize_face(saver_->bottom_t, b.bottom,b.bottom_q,b.bottom_h,b.bottom_scale,b.dtype, step_idx, c_bot, s_bot);
-        quantize_face(saver_->left_t,   b.left,  b.left_q,  b.left_h,  b.left_scale,  b.dtype, step_idx, c_lef, s_lef);
-        quantize_face(saver_->right_t,  b.right, b.right_q, b.right_h, b.right_scale, b.dtype, step_idx, c_rig, s_rig);
+        const auto* s = saver_;
+        quantize_face(s->top_t,    s->top_scale_t,    b.top,   b.top_q,   b.top_h,   b.top_scale,   b.dtype, step_idx);
+        quantize_face(s->bottom_t, s->bottom_scale_t, b.bottom,b.bottom_q,b.bottom_h,b.bottom_scale,b.dtype, step_idx);
+        quantize_face(s->left_t,   s->left_scale_t,   b.left,  b.left_q,  b.left_h,  b.left_scale,  b.dtype, step_idx);
+        quantize_face(s->right_t,  s->right_scale_t,  b.right, b.right_q, b.right_h, b.right_scale, b.dtype, step_idx);
     }
     inline void dequantize_step_2d(const GeneralBoundaryPointer& b, int64_t step_idx)
     {
-        int64_t c_top = saver_->top_t.stride(saver_->dim == 3 ? 0 : 1);
-        int64_t c_bot = saver_->bottom_t.stride(saver_->dim == 3 ? 0 : 1);
-        int64_t c_lef = saver_->left_t.stride(saver_->dim == 3 ? 0 : 1);
-        int64_t c_rig = saver_->right_t.stride(saver_->dim == 3 ? 0 : 1);
-        int64_t s_top = saver_->top_scale_t.stride(saver_->dim == 3 ? 0 : 1);
-        int64_t s_bot = saver_->bottom_scale_t.stride(saver_->dim == 3 ? 0 : 1);
-        int64_t s_lef = saver_->left_scale_t.stride(saver_->dim == 3 ? 0 : 1);
-        int64_t s_rig = saver_->right_scale_t.stride(saver_->dim == 3 ? 0 : 1);
-        dequantize_face(saver_->top_t,    b.top,   b.top_q,   b.top_h,   b.top_scale,   b.dtype, step_idx, c_top, s_top);
-        dequantize_face(saver_->bottom_t, b.bottom,b.bottom_q,b.bottom_h,b.bottom_scale,b.dtype, step_idx, c_bot, s_bot);
-        dequantize_face(saver_->left_t,   b.left,  b.left_q,  b.left_h,  b.left_scale,  b.dtype, step_idx, c_lef, s_lef);
-        dequantize_face(saver_->right_t,  b.right, b.right_q, b.right_h, b.right_scale, b.dtype, step_idx, c_rig, s_rig);
+        const auto* s = saver_;
+        dequantize_face(s->top_t,    s->top_scale_t,    b.top,   b.top_q,   b.top_h,   b.top_scale,   b.dtype, step_idx);
+        dequantize_face(s->bottom_t, s->bottom_scale_t, b.bottom,b.bottom_q,b.bottom_h,b.bottom_scale,b.dtype, step_idx);
+        dequantize_face(s->left_t,   s->left_scale_t,   b.left,  b.left_q,  b.left_h,  b.left_scale,  b.dtype, step_idx);
+        dequantize_face(s->right_t,  s->right_scale_t,  b.right, b.right_q, b.right_h, b.right_scale, b.dtype, step_idx);
     }
     inline void quantize_step_3d(const GeneralBoundaryPointer& b, int64_t step_idx)
     {
-        int64_t c_top = saver_->top_t.stride(0);
-        int64_t c_bot = saver_->bottom_t.stride(0);
-        int64_t c_fro = saver_->front_t.stride(0);
-        int64_t c_bac = saver_->back_t.stride(0);
-        int64_t c_lef = saver_->left_t.stride(0);
-        int64_t c_rig = saver_->right_t.stride(0);
-        int64_t s_top = saver_->top_scale_t.stride(0);
-        int64_t s_bot = saver_->bottom_scale_t.stride(0);
-        int64_t s_fro = saver_->front_scale_t.stride(0);
-        int64_t s_bac = saver_->back_scale_t.stride(0);
-        int64_t s_lef = saver_->left_scale_t.stride(0);
-        int64_t s_rig = saver_->right_scale_t.stride(0);
-        quantize_face(saver_->top_t,    b.top,   b.top_q,   b.top_h,   b.top_scale,   b.dtype, step_idx, c_top, s_top);
-        quantize_face(saver_->bottom_t, b.bottom,b.bottom_q,b.bottom_h,b.bottom_scale,b.dtype, step_idx, c_bot, s_bot);
-        quantize_face(saver_->front_t,  b.front, b.front_q, b.front_h, b.front_scale, b.dtype, step_idx, c_fro, s_fro);
-        quantize_face(saver_->back_t,   b.back,  b.back_q,  b.back_h,  b.back_scale,  b.dtype, step_idx, c_bac, s_bac);
-        quantize_face(saver_->left_t,   b.left,  b.left_q,  b.left_h,  b.left_scale,  b.dtype, step_idx, c_lef, s_lef);
-        quantize_face(saver_->right_t,  b.right, b.right_q, b.right_h, b.right_scale, b.dtype, step_idx, c_rig, s_rig);
+        const auto* s = saver_;
+        quantize_face(s->top_t,    s->top_scale_t,    b.top,   b.top_q,   b.top_h,   b.top_scale,   b.dtype, step_idx);
+        quantize_face(s->bottom_t, s->bottom_scale_t, b.bottom,b.bottom_q,b.bottom_h,b.bottom_scale,b.dtype, step_idx);
+        quantize_face(s->front_t,  s->front_scale_t,  b.front, b.front_q, b.front_h, b.front_scale, b.dtype, step_idx);
+        quantize_face(s->back_t,   s->back_scale_t,   b.back,  b.back_q,  b.back_h,  b.back_scale,  b.dtype, step_idx);
+        quantize_face(s->left_t,   s->left_scale_t,   b.left,  b.left_q,  b.left_h,  b.left_scale,  b.dtype, step_idx);
+        quantize_face(s->right_t,  s->right_scale_t,  b.right, b.right_q, b.right_h, b.right_scale, b.dtype, step_idx);
     }
     inline void dequantize_step_3d(const GeneralBoundaryPointer& b, int64_t step_idx)
     {
-        int64_t c_top = saver_->top_t.stride(0);
-        int64_t c_bot = saver_->bottom_t.stride(0);
-        int64_t c_fro = saver_->front_t.stride(0);
-        int64_t c_bac = saver_->back_t.stride(0);
-        int64_t c_lef = saver_->left_t.stride(0);
-        int64_t c_rig = saver_->right_t.stride(0);
-        int64_t s_top = saver_->top_scale_t.stride(0);
-        int64_t s_bot = saver_->bottom_scale_t.stride(0);
-        int64_t s_fro = saver_->front_scale_t.stride(0);
-        int64_t s_bac = saver_->back_scale_t.stride(0);
-        int64_t s_lef = saver_->left_scale_t.stride(0);
-        int64_t s_rig = saver_->right_scale_t.stride(0);
-        dequantize_face(saver_->top_t,    b.top,   b.top_q,   b.top_h,   b.top_scale,   b.dtype, step_idx, c_top, s_top);
-        dequantize_face(saver_->bottom_t, b.bottom,b.bottom_q,b.bottom_h,b.bottom_scale,b.dtype, step_idx, c_bot, s_bot);
-        dequantize_face(saver_->front_t,  b.front, b.front_q, b.front_h, b.front_scale, b.dtype, step_idx, c_fro, s_fro);
-        dequantize_face(saver_->back_t,   b.back,  b.back_q,  b.back_h,  b.back_scale,  b.dtype, step_idx, c_bac, s_bac);
-        dequantize_face(saver_->left_t,   b.left,  b.left_q,  b.left_h,  b.left_scale,  b.dtype, step_idx, c_lef, s_lef);
-        dequantize_face(saver_->right_t,  b.right, b.right_q, b.right_h, b.right_scale, b.dtype, step_idx, c_rig, s_rig);
+        const auto* s = saver_;
+        dequantize_face(s->top_t,    s->top_scale_t,    b.top,   b.top_q,   b.top_h,   b.top_scale,   b.dtype, step_idx);
+        dequantize_face(s->bottom_t, s->bottom_scale_t, b.bottom,b.bottom_q,b.bottom_h,b.bottom_scale,b.dtype, step_idx);
+        dequantize_face(s->front_t,  s->front_scale_t,  b.front, b.front_q, b.front_h, b.front_scale, b.dtype, step_idx);
+        dequantize_face(s->back_t,   s->back_scale_t,   b.back,  b.back_q,  b.back_h,  b.back_scale,  b.dtype, step_idx);
+        dequantize_face(s->left_t,   s->left_scale_t,   b.left,  b.left_q,  b.left_h,  b.left_scale,  b.dtype, step_idx);
+        dequantize_face(s->right_t,  s->right_scale_t,  b.right, b.right_q, b.right_h, b.right_scale, b.dtype, step_idx);
     }
 
     inline void wait_before_forward_save(const BoundaryChunk& chunk)

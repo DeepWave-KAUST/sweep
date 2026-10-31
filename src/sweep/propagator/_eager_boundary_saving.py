@@ -125,12 +125,12 @@ def _dequantize_fp16(codes, scale, n):
 
 
 # ---- Ring storage ---------------------------------------------------------
-# A step's saved ring -- the ring fields back to back -- is one row of a [T, n]
-# buffer per part: the values (fp32/bf16), or the codes and the FP32 block
-# scales (int8/fp16).  storage='gpu' keeps the rows on the compute device; 'cpu'
-# keeps them in page-locked host memory and 'disk' in files, both copied on a
-# side stream so the copies overlap the time steps, and fetched ahead of the
-# reverse pass.
+# A step's saved ring -- shot by shot, each shot's ring fields back to back -- is
+# one row of a [T, n] buffer per part: the values (fp32/bf16), or the codes and
+# the FP32 block scales (int8/fp16).  storage='gpu' keeps the rows on the compute
+# device; 'cpu' keeps them in page-locked host memory and 'disk' in files, both
+# copied on a side stream so the copies overlap the time steps, and fetched ahead
+# of the reverse pass.
 
 
 class _DeviceRows:
@@ -331,14 +331,16 @@ def _ring_rows(storage, T, parts, device, pinned_memory=None, disk_dir=None,
 
 
 def _ring_row(fields, rings, pad):
-    """One step's ring: the ``rings`` of each of ``fields`` back to back, each
-    field padded to the row's stride with ``pad`` (None: no padding)."""
+    """One step's ring as one row, shot by shot (the batch leads every field)
+    and, within a shot, field by field: one shot's ``rings`` of one field back
+    to back, padded to the row's stride with ``pad`` (None: no padding), so no
+    block's scale spans two shots or two fields."""
     runs = []
     for field in fields:
-        runs += [field[idx].reshape(-1) for idx in rings]
+        runs += [field[idx].reshape(field.shape[0], -1) for idx in rings]
         if pad is not None:
             runs.append(pad)
-    return torch.cat(runs)
+    return torch.cat(runs, dim=1).reshape(-1)
 
 
 def _encode(state, flat):
@@ -397,9 +399,10 @@ def restore_step(state, step, pos, field):
         # The reverse pass walks down in time and reads this step and the one above.
         state.decoded = {k: v for k, v in state.decoded.items() if k == step + 1}
         state.decoded[step] = flat
+    rows = flat.view(state.shots, -1)
     off = pos * state.stride
     for idx, shp, sz in zip(state.rings, state.ring_shapes, state.ring_sizes):
-        field[idx] = flat[off:off + sz].view(shp).to(field.dtype)
+        field[idx] = rows[:, off:off + sz].reshape(shp).to(field.dtype)
         off += sz
     return field
 
@@ -407,11 +410,12 @@ def restore_step(state, step, pos, field):
 def _put_ring(field, row, pos, stride, specs):
     """``field`` with field ``pos``'s ring from ``row`` put back, out of place
     (the k-step reconstruction is traced); ``specs`` lists each ring slab's
-    (index, shape, size)."""
+    (index, shape, size per shot)."""
     field = field.clone()
+    rows = row.view(field.shape[0], -1)               # shot by shot, as _ring_row
     off = pos * stride
     for idx, shp, sz in specs:
-        field[idx] = row[off:off + sz].view(shp).to(field.dtype)
+        field[idx] = rows[:, off:off + sz].reshape(shp).to(field.dtype)
         off += sz
     return field
 
@@ -460,7 +464,7 @@ class ReconState:
     reconstruction stay there wherever ``storage`` keeps the rows."""
 
     __slots__ = ("frame", "rings", "checked", "store_dtype", "ring_shapes",
-                 "ring_sizes", "stride", "pad", "rows", "decoded", "zero")
+                 "shots", "ring_sizes", "stride", "pad", "rows", "decoded", "zero")
 
     def __init__(self, nt, rings, shape, n_ring_fields, store_dtype, device,
                  storage="gpu", compute_dtype=torch.float32, field_shapes=None,
@@ -478,15 +482,20 @@ class ReconState:
         self.checked = False                         # one-time self-check latch
         self.store_dtype = store_dtype
         self.ring_shapes = [_ring_slice_shape(shape, idx) for idx in rings]
-        self.ring_sizes = [math.prod(s) for s in self.ring_shapes]
+        # The shot batch leads the field (and so every ring slice); a row holds
+        # the shots one after another (_ring_row), so the sizes are per shot.
+        self.shots = shape[0]
+        self.ring_sizes = [math.prod(s) // self.shots for s in self.ring_shapes]
         cells = sum(self.ring_sizes)
         # Scaled storage (int8, and fp16 sharing its layout -- see _quantize_fp16)
-        # pads each field to whole blocks, so no block's scale spans two fields.
+        # pads each shot's ring of each field to whole blocks, so no block's
+        # scale spans two shots or two fields: a shot's codes do not depend on
+        # the other shots in the batch, as with the CUDA quantize kernels.
         scaled = store_dtype in ("int8", "fp16")
         self.stride = -(-cells // _INT8_BLOCK) * _INT8_BLOCK if scaled else cells
-        self.pad = (torch.zeros(self.stride - cells, dtype=compute_dtype, device=device)
+        self.pad = (torch.zeros(self.shots, self.stride - cells, dtype=compute_dtype, device=device)
                     if self.stride > cells else None)
-        n = n_ring_fields * self.stride
+        n = n_ring_fields * self.shots * self.stride
         if scaled:
             payload = torch.int8 if store_dtype == "int8" else torch.float16
             parts = [(n, payload), (n // _INT8_BLOCK, torch.float32)]
