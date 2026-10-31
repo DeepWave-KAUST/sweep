@@ -131,7 +131,7 @@ def propsem_models(equation) -> list:
     exists so that callers pass ``models=[vp]`` and rho is a constant the
     adapter fills in. ``sweep show`` reads the same list.
     """
-    supplied = {"rho"} if issubclass(equation, AcousticPotentialSEM2D) else set()
+    supplied = {"rho"} if getattr(equation, "takes_density", False) else set()
     return [n for n in model_names(equation) if n not in supplied]
 
 
@@ -1452,12 +1452,12 @@ class PropSEM:
                                  pml_thickness_elements=self.abcn_elements,
                                  c_max=c_max, f_dominant=self.f_dominant),
                     sides, self.abcn_elements, c_max, self.f_dominant)
-            if issubclass(self.equation, AcousticPotentialSEM2D):  # vp + constant density
+            if getattr(self.equation, "takes_density", False):  # vp + constant density
                 rho = torch.full_like(grids[0], self._c_density)
                 return self.equation.build(
                     self.mesh, grids[0], rho, *grids[1:], dirichlet=dirichlet, cpml=cpml,
                     **self._eq_options)
-            return self.equation.build(self.mesh, grids[0],
+            return self.equation.build(self.mesh, *grids,
                                        dirichlet=dirichlet, cpml=cpml,
                                        **self._eq_options)
         # elastic: vp/vs/rho and a NATURAL free surface -- traction-free is what

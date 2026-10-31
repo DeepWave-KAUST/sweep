@@ -102,6 +102,7 @@ only, and the C-PML is required wherever the ring IS the C-PML band.
 | `ElasticSEM3D` | `['vp', 'vs', 'rho']` | hex8 | 3D | 3-D displacement elastic; **no C-PML** (3-D displacement C-PML is not modelled) | ✅ | eager |
 | `ElasticSEM3DDeformed` | `['vp', 'vs', 'rho']` | hex27 | 3D | 3-D displacement elastic with topography; **no C-PML** | ✅ | eager |
 | `ElasticVSSEM2DDeformed` | `['vp', 'vs', 'rho']` | quad9 | 2D | 1st-order velocity–stress elastic: topography + C-PML | ❌ | eager |
+| `ElasticSHSEM2DDeformed` | `['vs', 'rho']` | quad9 | 2D | [SH waves](sem.md#sh-waves) (`u_y`, SPECFEM2D's `P_SV = .false.`): the potential form's operators, traction-free surface, topography + C-PML; records `u_y`, `vy` | ❌ | eager |
 | `ElasticVSSEM3D` | `['vp', 'vs', 'rho']` | hex8 | 3D | 3-D velocity–stress elastic with C-PML, flat mesh | ✅ | eager |
 | `ElasticVSSEM3DDeformed` | `['vp', 'vs', 'rho']` | hex27 | 3D | 3-D elastic with **both** topography and absorbing boundaries (the velocity–stress family is where 3-D C-PML exists) | ❌ | eager |
 | `ElasticVTISEM2DDeformed` | `['vp', 'vs', 'rho', 'epsilon', 'delta']` | quad9 | 2D | VTI anisotropic velocity–stress: topography + C-PML | ❌ | eager |

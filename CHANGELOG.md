@@ -26,6 +26,12 @@ and this project adheres to
   skill.  The docs page *AI assistants (Agent Skills)* covers the install,
   and `test/test_skill_snippets.py` runs every code block of the skill so
   its examples cannot fall behind the API.
+- **`ElasticSHSEM2DDeformed`: SH waves on the SEM.** The out-of-plane displacement `u_y`
+  (SPECFEM2D's `P_SV = .false.`), as the potential form's scalar equation with `vp = vs` and
+  the density `1 / (rho vs^2)`: its operators, C-PML and exact boundary saving, a traction-free
+  surface, models `vs, rho`, a force along y and the receivers `u_y`, `vy`. Against SPECFEM2D:
+  1e-13 flat, 2e-12 under a hill. `PropSEM` reads whether an equation takes `density=` from its
+  `takes_density` flag.
 - **`ViscoAcousticPotentialSEM2D`: visco-acoustic attenuation on the SEM.** The potential
   form with SPECFEM2D's `ATTENUATION_VISCOACOUSTIC`: its weak form, node memories and Newmark
   update, models `vp, Qk` and `density=`, and the visco-elastic class's `f_ref`, `f_band`,

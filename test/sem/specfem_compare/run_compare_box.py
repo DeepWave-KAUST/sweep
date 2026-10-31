@@ -17,6 +17,8 @@ run per medium (``--equation`` picks among the isotropic ones):
   over the mechanisms (``SpecfemMemoryLine``: the mechanisms after the first convolve ``d^n``
   in place of ``d^(n-1)``);
 * water over rock: AcousticElasticSEM2D, the water pressure-free on its top and sides;
+* SH waves (SPECFEM2D's ``P_SV = .false.``): ElasticSHSEM2DDeformed, a force along y (its
+  force at 90 degrees) and the velocity ``vy`` (its BXY);
 * layers across curved interfaces: the mesh of ``PropSEM(interfaces=...)``, each layer's
   material per element (``layered_model``): AcousticElasticSEM2D under water, else
   ElasticVSSEM2DDeformed and ElasticSEM2DDeformed.
@@ -55,7 +57,8 @@ import numpy as np
 import torch
 
 from sweep.sem import (AcousticElasticSEM2D, AcousticPotentialSEM2D, AcousticSEM2D,
-                       ElasticSEM2D, ElasticSEM2DDeformed, ElasticTTISEM2DDeformed,
+                       ElasticSEM2D, ElasticSEM2DDeformed, ElasticSHSEM2DDeformed,
+                       ElasticTTISEM2DDeformed,
                        ElasticVSSEM2DDeformed, ElasticVTISEM2DDeformed, PropSEM,
                        ViscoAcousticPotentialSEM2D, ViscoElasticVSSEM2DDeformed,
                        thomsen_to_tti_cij)
@@ -86,7 +89,7 @@ class SpecfemMemoryLine(ViscoAcousticPotentialSEM2D):
 CASES = ("iso_force", "iso_explosion", "hill_explosion", "vti_force", "vti_explosion",
          "tti30_force", "tti30_explosion", "visco_explosion", "water_pressure",
          "water_visco_pressure", "sea_pressure",
-         "sea_curved_pressure", "layers_curved_explosion")
+         "sea_curved_pressure", "layers_curved_explosion", "sh_force", "sh_hill_force")
 ISOTROPIC = {"vs": ElasticVSSEM2DDeformed, "displacement": ElasticSEM2DDeformed,
              "quad4": ElasticSEM2D}
 HALF_STEP = (ElasticVSSEM2DDeformed, ElasticVTISEM2DDeformed, ElasticTTISEM2DDeformed,
@@ -163,6 +166,8 @@ def equations(g, picks):
         return [ViscoElasticVSSEM2DDeformed]
     if m["kind"] == "visco_acoustic":
         return [ViscoAcousticPotentialSEM2D, SpecfemMemoryLine]
+    if m["kind"] == "sh":
+        return [ElasticSHSEM2DDeformed]
     keys = picks or [k for k in ISOTROPIC if not (k == "quad4" and m["hill"])]
     return [ISOTROPIC[k] for k in keys]
 
@@ -171,7 +176,7 @@ def check_materials(g):
     """SPECFEM2D's material lines against sweep_medium.json; the TI models' values."""
     m, mats = g["medium"], g["materials"]
     iso = lambda med: [med["rho"], med["vp"], med.get("vs", 0.0)]
-    if m["kind"] in ("isotropic", "acoustic"):
+    if m["kind"] in ("isotropic", "acoustic", "sh"):
         assert mats == {1: (1, iso(m) + [0.0, 0.0, 9999.0, 9999.0])}, mats
     elif m["kind"] == "coupled":
         no_q = [0.0, 0.0, 9999.0, 9999.0]
@@ -238,6 +243,11 @@ def run_sem(g, eq, device, dtype, n_order=4):
         else:
             calls = [(None, w)]
         names = ["PRE"]
+    elif m["kind"] == "sh":
+        kw["receiver_type"] = ["vy"]
+        models = [full(m["vs"]), full(m["rho"])]
+        calls = [(None, math.sin(math.radians(g["angle"])) * w)]   # SPECFEM2D's SH load
+        names = ["BXY"]
     elif m["kind"] == "coupled" or wet(m):
         kw.update(free_surface={"top": True, "left": True, "right": True, "bottom": False},
                   receiver_type=["p", "vx", "vz"])

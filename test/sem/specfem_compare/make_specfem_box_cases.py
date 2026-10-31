@@ -28,6 +28,9 @@ Cases, a vertical point force (``*_force``) or an explosion (``*_explosion``, Mx
 * ``layers_curved_explosion``: the rock over a stiffer one across a sinusoidal interface
   (1500 m deep, 120 m amplitude, 1500 m wavelength), 150 rows in each, an explosion in the
   upper one;
+* ``sh_force`` and ``sh_hill_force``: SH waves (``P_SV = .false.``) in the rock, flat and
+  under the hill: a force along y (SPECFEM2D's force at 90 degrees: its SH load is
+  ``sin(angle)``);
 * ``hill_explosion``: the rock under a Gaussian hill (100 m high, sigma 200 m) on the top
   edge, Quad9 elements (``NGNOD = 9``) in 310 rows graded linearly between the flat bottom and
   the hill -- PropSEM's mesh of a 3100 m model with that topography --, the hill given at
@@ -56,6 +59,7 @@ WATER = dict(kind="acoustic", rho=1020.0, vp=1500.0)
 SEA = dict(kind="coupled", water=WATER, rock=ROCK, depth=600.0)
 VISCO = dict(ROCK, kind="visco", q=30.0, n_sls=3, f_ref=F0)
 VISCO_WATER = dict(WATER, kind="visco_acoustic", q=30.0, n_sls=3, f_ref=F0)
+SH_ROCK = dict(ROCK, kind="sh")
 STIFF = dict(kind="isotropic", rho=2500.0, vp=4000.0, vs=2300.0)
 SEAMOUNT = dict(shape="gauss", z0=L - 600.0, height=150.0, x0=1800.0, sigma=300.0)
 WAVY = dict(shape="sine", z0=L - 1500.0, height=120.0, x0=0.0, sigma=1500.0)
@@ -75,6 +79,8 @@ CASES = {"iso_force": (ROCK, "force", None),
          "water_visco_pressure": (VISCO_WATER, "pressure", None),
          "sea_pressure": (SEA, "pressure", None),
          "sea_curved_pressure": (CURVED_SEA, "pressure", None),
+         "sh_force": (SH_ROCK, "sh_force", None),
+         "sh_hill_force": (SH_ROCK, "sh_force", HILL),
          "layers_curved_explosion": (CURVED_LAYERS, "explosion", None)}
 
 
@@ -142,7 +148,7 @@ def isotropic(i, m):
 for name, (medium, source, hill) in CASES.items():
     nz = n if hill is None else int(round((L + hill["height"]) / H))   # element rows
     nw = int(round(medium["depth"] / H)) if medium["kind"] == "coupled" else 0
-    if medium["kind"] in ("isotropic", "acoustic", "visco", "visco_acoustic"):
+    if medium["kind"] in ("isotropic", "acoustic", "visco", "visco_acoustic", "sh"):
         mats, regions = [isotropic(1, medium)], [f"1 {n} 1 {nz} 1"]
     elif medium["kind"] == "coupled":            # rows count up from the bottom
         mats = [isotropic(1, medium["rock"]), isotropic(2, medium["water"])]
@@ -166,6 +172,8 @@ for name, (medium, source, hill) in CASES.items():
     par = setp(par, "nbregions", len(regions))
     if source == "pressure":
         par = setp(par, "seismotype", "2,4")
+    if medium["kind"] == "sh":
+        par = setp(par, "P_SV", ".false.")
     if medium["kind"] == "visco":
         for k, v in (("ATTENUATION_VISCOELASTIC", ".true."), ("N_SLS", medium["n_sls"]),
                      ("ATTENUATION_f0_REFERENCE", dble(medium["f_ref"])),
@@ -191,7 +199,8 @@ for name, (medium, source, hill) in CASES.items():
         zs = L - (11 + 0.5) * h if source == "pressure" else L - (50 + 0.5) * h
     src = src0
     for k, v in (("xs", dble(XS)), ("zs", dble(zs)), ("source_type", 2 if source == "explosion" else 1),
-                 ("time_function_type", 1), ("f0", F0), ("tshift", "0.d0"), ("anglesource", "0.d0"),
+                 ("time_function_type", 1), ("f0", F0), ("tshift", "0.d0"),
+                 ("anglesource", "90.d0" if source == "sh_force" else "0.d0"),
                  ("Mxx", "1.d0"), ("Mzz", "1.d0"), ("Mxz", "0.d0"), ("factor", dble(FACTOR))):
         src = setp(src, k, v)
     ring = [(XS + 500.0 * math.cos(math.radians(a)), zs + 500.0 * math.sin(math.radians(a)))

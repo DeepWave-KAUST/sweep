@@ -205,6 +205,7 @@ __call__(wavelet, sources, receivers, models=None, **kw)
 | `ElasticSEM2DDeformed` | `['vp', 'vs', 'rho']` |
 | `ElasticSEM3D` | `['vp', 'vs', 'rho']` |
 | `ElasticSEM3DDeformed` | `['vp', 'vs', 'rho']` |
+| `ElasticSHSEM2DDeformed` | `['vs', 'rho']` |
 | `ElasticTTISEM2DDeformed` | `['vp', 'vs', 'rho', 'epsilon', 'delta', 'theta']` |
 | `ElasticVSSEM2DDeformed` | `['vp', 'vs', 'rho']` |
 | `ElasticVSSEM3D` | `['vp', 'vs', 'rho']` |

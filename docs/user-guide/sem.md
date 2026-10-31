@@ -774,6 +774,28 @@ and halving the step divides the difference by four (4.2e-5 at 0.1 ms).
 Stacey sides, gives 1.2% for the visco-elastic records and 1.7% for the elastic ones; there the
 absorbing conditions of the two codes differ as well.
 
+## SH waves
+
+`ElasticSHSEM2DDeformed` solves for the out-of-plane displacement `u_y` of an elastic medium
+that does not vary along y, SPECFEM2D's `P_SV = .false.`:
+`rho u_y'' = d/dx (mu du_y/dx) + d/dz (mu du_y/dz) + f_y`. This is the scalar wave equation of
+the potential form, with its mass weight `1 / kappa` read as `rho` and its stiffness weight
+`1 / rho` as `mu`, so the class is `AcousticPotentialSEM2D` built with `vp = vs` and the density
+`1 / (rho vs^2)`. It shares that class's operators, its C-PML and its boundary saving, which is
+exact. Its surface is traction-free: a side without an absorbing layer is free, and there are
+no Dirichlet nodes. The models are `vs` and `rho`. The source is a force along y, and the
+receivers record `u_y` or its velocity `vy`:
+
+```python
+from sweep.sem import ElasticSHSEM2DDeformed, PropSEM
+
+solver = PropSEM(ElasticSHSEM2DDeformed, shape=(nz, nx), dh=5.0, dt=5e-4, free_surface=True,
+                 receiver_type=["vy"])
+seis = solver(wavelet, sources, receivers, models=[vs, rho])
+```
+
+It runs on eager, flat or under a `topography`, and takes `interfaces`.
+
 ## Visco-acoustic attenuation
 
 `ViscoAcousticPotentialSEM2D` is `AcousticPotentialSEM2D` with SPECFEM2D's
@@ -1474,6 +1496,7 @@ receivers):
 | `AcousticElasticSEM2D` | 600 m of water over the rock: hydrophones and geophones | 2e-12 |
 | `AcousticElasticSEM2D`, with `interfaces` | the same over a curved sea floor (a 150 m seamount) | 4e-12 |
 | `ElasticVSSEM2DDeformed`, `ElasticSEM2DDeformed`, with `interfaces` | the rock over a stiffer one across a sinusoidal interface | 2e-12 |
+| `ElasticSHSEM2DDeformed` | SH, a force along y, flat and under the hill | 1e-13, 2e-12 |
 | `ViscoElasticVSSEM2DDeformed` | the rock with Q = 30, SPECFEM2D's conventions | 2e-4 |
 | `ViscoAcousticPotentialSEM2D` | the water with Qkappa = 30, SPECFEM2D's conventions | 3e-2; 8e-13 with SPECFEM2D's memory-update line |
 

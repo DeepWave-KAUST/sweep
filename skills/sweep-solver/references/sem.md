@@ -71,6 +71,7 @@ the FD classes. `models=` per class: `api-signatures.md`.
 | `AcousticSEM3D` / `AcousticSEM3DDeformed` | hex8 / hex27 | `vp` | yes | yes | 3-D acoustic (with topography for Deformed) |
 | `ElasticSEM2DDeformed` | quad9 | `vp, vs, rho` | yes | yes | 2-D elastic with topography |
 | `ElasticVSSEM2DDeformed` | quad9 | `vp, vs, rho` | no | yes | velocity-stress |
+| `ElasticSHSEM2DDeformed` | quad9 | `vs, rho` | no | yes | SH waves (`u_y`, receivers `u_y`, `vy`) |
 | `ElasticSEM2D` | quad4 | `vp, vs, rho` | no | **no** (reflecting box, `abcn=0`) | |
 | `ElasticSEM3D` / `ElasticSEM3DDeformed` | hex8 / hex27 | `vp, vs, rho` | yes | **no** | |
 | `ElasticVSSEM3D` | hex8 | `vp, vs, rho` | yes | yes | 3-D elastic with absorbing boundary, flat |

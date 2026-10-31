@@ -55,6 +55,9 @@ from ..mesh.quad9 import Quad9Mesh
 class AcousticPotentialSEM2D(DerivedInitState, DirichletNodes):
     """SPECFEM-normalized variable-density acoustic (potential χ) on Quad9."""
 
+    # PropSEM fills ``rho`` from its ``density=`` and takes ``models=[vp, ...]``
+    takes_density: ClassVar[bool] = True
+
     field_specs: ClassVar[list] = [
         FieldSpec("chi", supports_source=True, supports_receiver=True,
                   seis_key="seis_chi", snap_key="snap_chi"),
