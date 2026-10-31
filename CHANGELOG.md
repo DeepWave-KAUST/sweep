@@ -10,6 +10,14 @@ and this project adheres to
 ## [Unreleased]
 
 ### Fixed
+- The 2-D `AcousticVRZ` boundary-saving backward (`impl='c'`) reconstructs the
+  row next to a domain-decomposition cut face. The reverse step skipped the
+  outer row of the physical box on every face, but a cut face has no saved
+  strip to restore that row from, so it kept a stale value and the gradient
+  came out 0.7-24% off the full-storage one, at every spatial order.
+  `ModelParallel` refuses the 2-D VRZ, so only a compiled call given
+  `cut_face_mask` directly reached it. The reconstruction box now stops at the
+  cut face, as `AcousticVRZ3D`'s does.
 - **`ElasticTTI2nd` boundary saving no longer reads outside its
   reconstruction buffers on a thin absorbing layer.**  The replay's stress
   kernel (`tti2nd_stress_kernel_nopml`) covered `[abcn + 1, n - abcn - 1)`,

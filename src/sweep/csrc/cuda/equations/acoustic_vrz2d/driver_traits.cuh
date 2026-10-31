@@ -603,7 +603,7 @@ struct Driver {
     // acoustic2d seed does, harmless for its offset-0 band) wiped exactly those
     // cells: bs vs full rel 3.5e-4 to 2.6e-3 whenever the wavefield still
     // reached the pad at the last step, ~3e-6 once it had left.  Nothing reads
-    // past the band -- the NOPML step updates [phys0 + 1, phys1 - 1) only and
+    // past the band -- the NOPML step updates vrz2d_recon_box only and
     // the physical cells' imaging reach stays inside it (BOUNDARY_BUFFER_REACH)
     // -- so the untouched pad values beyond it are never used.  The 3-D
     // sibling (Vrz3dBackwardBsRunner) never zeroed.

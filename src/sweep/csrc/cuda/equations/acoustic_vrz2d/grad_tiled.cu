@@ -17,11 +17,12 @@
 //
 // Fused reconstruction.  The boundary-saving reverse step forms
 //   U_{it-1} = 2 U_it - U_{it+1} + dt^2 rhs(U_it)   (+ the forward source)
-// on [phys0 + 1, phys1 - 1)^2 (acoustic_vrz2nd_nopml), and the gradient at it
-// reads U_{it-1} only at its own cell, in p_tt.  So the kernel forms U_{it-1}
-// from the p tile, adds the forward source, writes it and images with it in
-// one pass: u_now, vp, z and 1/z are read once instead of twice.  The strip
-// restore runs first; its cells (the physical box's outer row and the pad rows
+// on vrz2d_recon_box (acoustic_vrz2nd_nopml's box: the physical box less its
+// outer row on every face but a DD cut), and the gradient at it reads U_{it-1}
+// only at its own cell, in p_tt.  So the kernel forms U_{it-1} from the p
+// tile, adds the forward source, writes it and images with it in one pass:
+// u_now, vp, z and 1/z are read once instead of twice.  The strip restore runs
+// first; its cells (the outer row of every non-cut face and the pad rows
 // outside it) are disjoint from those the kernel writes, and the kernel reads
 // them back for p_tt there.  The sources of a block's tile are gathered into
 // shared memory once per block, so a shot with many sources costs a scan of
@@ -154,8 +155,8 @@ __global__ void __launch_bounds__(BX * BZ) vrz2d_grad_tiled(
         float* __restrict__ un_b = unext_all + off;
         const float pn = pnext_all[off + idx];             // U_{it+1}
         float un;
-        if (ix > solver.phys_x0() && ix < solver.phys_x1() - 1 &&
-            iz > solver.phys_z0() && iz < solver.phys_z1() - 1) {
+        const Vrz2dReconBox r = vrz2d_recon_box(solver);
+        if (ix >= r.x0 && ix < r.x1 && iz >= r.z0 && iz < r.z1) {
             // acoustic_vrz2nd_nopml, its taps of u_now read from the tile
             const float lap_x = LaplaceGPU<Order, 2, X>::eval(&sP[0][0], PW, 1, tx + R, 0, tz + R,
                                                               lap_ctx.dx, lap_ctx.dy, lap_ctx.dz);
