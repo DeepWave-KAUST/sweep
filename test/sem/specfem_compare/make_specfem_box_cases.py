@@ -14,6 +14,8 @@ Cases, a vertical point force (``*_force``) or an explosion (``*_explosion``, Mx
   c15 and c35 change sign in its z-up axes;
 * ``visco_explosion``: the rock with Qkappa = Qmu = 30 (our Qp = Qs = 30), SPECFEM2D's
   ``ATTENUATION_VISCOELASTIC`` with three mechanisms and the velocities read at 15 Hz;
+* ``visco_km_force``: the rock with Qkappa = 60 and Qmu = 20, the velocities read as the
+  unrelaxed ones (``READ_VELOCITIES_AT_f0`` off), a vertical force;
 * ``water_pressure``: water (vp 1500, rho 1020) filling the box, a pressure source (SPECFEM2D's
   force in an acoustic element); every edge of a fluid element is pressure-free there;
 * ``water_visco_pressure``: the water with Qkappa = 30, SPECFEM2D's
@@ -58,6 +60,7 @@ ROCK = dict(kind="isotropic", rho=2400.0, vp=3000.0, vs=1500.0)
 WATER = dict(kind="acoustic", rho=1020.0, vp=1500.0)
 SEA = dict(kind="coupled", water=WATER, rock=ROCK, depth=600.0)
 VISCO = dict(ROCK, kind="visco", q=30.0, n_sls=3, f_ref=F0)
+VISCO_KM = dict(VISCO, q=60.0, qmu=20.0, at_f0=False)          # q is Qkappa
 VISCO_WATER = dict(WATER, kind="visco_acoustic", q=30.0, n_sls=3, f_ref=F0)
 SH_ROCK = dict(ROCK, kind="sh")
 STIFF = dict(kind="isotropic", rho=2500.0, vp=4000.0, vs=2300.0)
@@ -75,6 +78,7 @@ CASES = {"iso_force": (ROCK, "force", None),
          "tti30_explosion": (dict(SHALE, theta_deg=30.0), "explosion", None),
          "hill_explosion": (ROCK, "explosion", HILL),
          "visco_explosion": (VISCO, "explosion", None),
+         "visco_km_force": (VISCO_KM, "force", None),
          "water_pressure": (WATER, "pressure", None),
          "water_visco_pressure": (VISCO_WATER, "pressure", None),
          "sea_pressure": (SEA, "pressure", None),
@@ -140,9 +144,10 @@ for k, v in (("NPROC", 1), ("NSTEP", NSTEP), ("DT", dble(DT)), ("seismotype", 2)
     par0 = setp(par0, k, v)
 
 def isotropic(i, m):
-    q = dble(m["q"]) if "q" in m else "9999"
+    qk = dble(m["q"]) if "q" in m else "9999"
+    qmu = dble(m.get("qmu", m["q"])) if "q" in m else "9999"
     return (f"{i} 1 {dble(m['rho'])} {dble(m['vp'])} {dble(m.get('vs', 0.0))} 0 0 "
-            f"{q} {q} 0 0 0 0 0 0")
+            f"{qk} {qmu} 0 0 0 0 0 0")
 
 
 for name, (medium, source, hill) in CASES.items():
@@ -177,7 +182,8 @@ for name, (medium, source, hill) in CASES.items():
     if medium["kind"] == "visco":
         for k, v in (("ATTENUATION_VISCOELASTIC", ".true."), ("N_SLS", medium["n_sls"]),
                      ("ATTENUATION_f0_REFERENCE", dble(medium["f_ref"])),
-                     ("READ_VELOCITIES_AT_f0", ".true."), ("USE_SOLVOPT", ".false.")):
+                     ("READ_VELOCITIES_AT_f0", ".true." if medium.get("at_f0", True)
+                      else ".false."), ("USE_SOLVOPT", ".false.")):
             par = setp(par, k, v)
     if medium["kind"] == "visco_acoustic":
         for k, v in (("ATTENUATION_VISCOACOUSTIC", ".true."), ("N_SLS", medium["n_sls"]),

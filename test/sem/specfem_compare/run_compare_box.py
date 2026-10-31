@@ -8,7 +8,10 @@ run per medium (``--equation`` picks among the isotropic ones):
 * a TI shale: ElasticVTISEM2DDeformed, or ElasticTTISEM2DDeformed for a tilted axis;
 * an attenuating rock: ViscoElasticVSSEM2DDeformed with SPECFEM2D's conventions: its
   mechanisms (``n_sls`` over ``f_ref / 10 .. 10 f_ref``), its fit (``n_fit = 2 n_sls - 1``)
-  and its reading of the velocities at ``f_ref`` (``velocities="real_modulus"``);
+  and its reading of the velocities at ``f_ref`` (``velocities="real_modulus"``), and
+  ViscoElasticSEM2DDeformed, its displacement scheme (``Qkappa``, ``Qmu``; the velocities
+  ``"real_modulus"`` or, without ``READ_VELOCITIES_AT_f0``, ``"unrelaxed"``) -- the
+  velocity-stress class takes ``Qp = Qs``, so only ``Qkappa = Qmu``;
 * water: AcousticPotentialSEM2D and AcousticSEM2D, pressure-free on every edge as SPECFEM2D's
   fluid is wherever there is no absorbing condition; attenuating water:
   ViscoAcousticPotentialSEM2D with SPECFEM2D's mechanisms, fit and reading of the velocity
@@ -60,8 +63,8 @@ from sweep.sem import (AcousticElasticSEM2D, AcousticPotentialSEM2D, AcousticSEM
                        ElasticSEM2D, ElasticSEM2DDeformed, ElasticSHSEM2DDeformed,
                        ElasticTTISEM2DDeformed,
                        ElasticVSSEM2DDeformed, ElasticVTISEM2DDeformed, PropSEM,
-                       ViscoAcousticPotentialSEM2D, ViscoElasticVSSEM2DDeformed,
-                       thomsen_to_tti_cij)
+                       ViscoAcousticPotentialSEM2D, ViscoElasticSEM2DDeformed,
+                       ViscoElasticVSSEM2DDeformed, thomsen_to_tti_cij)
 
 class SpecfemMemoryLine(ViscoAcousticPotentialSEM2D):
     """ViscoAcousticPotentialSEM2D with SPECFEM2D 8.1.0's ``update_memory_var_acous_weak_form``
@@ -87,7 +90,8 @@ class SpecfemMemoryLine(ViscoAcousticPotentialSEM2D):
 
 
 CASES = ("iso_force", "iso_explosion", "hill_explosion", "vti_force", "vti_explosion",
-         "tti30_force", "tti30_explosion", "visco_explosion", "water_pressure",
+         "tti30_force", "tti30_explosion", "visco_explosion", "visco_km_force",
+         "water_pressure",
          "water_visco_pressure", "sea_pressure",
          "sea_curved_pressure", "layers_curved_explosion", "sh_force", "sh_hill_force")
 ISOTROPIC = {"vs": ElasticVSSEM2DDeformed, "displacement": ElasticSEM2DDeformed,
@@ -163,7 +167,8 @@ def equations(g, picks):
     if m["kind"] == "coupled":
         return [AcousticElasticSEM2D]
     if m["kind"] == "visco":
-        return [ViscoElasticVSSEM2DDeformed]
+        return ([ViscoElasticSEM2DDeformed] if "qmu" in m
+                else [ViscoElasticVSSEM2DDeformed, ViscoElasticSEM2DDeformed])
     if m["kind"] == "visco_acoustic":
         return [ViscoAcousticPotentialSEM2D, SpecfemMemoryLine]
     if m["kind"] == "sh":
@@ -182,8 +187,9 @@ def check_materials(g):
         no_q = [0.0, 0.0, 9999.0, 9999.0]
         assert mats == {1: (1, iso(m["rock"]) + no_q), 2: (1, iso(m["water"]) + no_q)}
     elif m["kind"] == "visco":
-        assert mats == {1: (1, iso(m) + [0.0, 0.0, m["q"], m["q"]])}, mats
-        return (m["vp"], m["vs"], m["rho"], m["q"], m["q"])
+        qmu = m.get("qmu", m["q"])
+        assert mats == {1: (1, iso(m) + [0.0, 0.0, m["q"], qmu])}, mats
+        return (m["vp"], m["vs"], m["rho"], m["q"], qmu)
     elif m["kind"] == "visco_acoustic":
         assert mats == {1: (1, iso(m) + [0.0, 0.0, m["q"], m["q"]])}, mats
     elif m["kind"] == "layered":                 # SPECFEM2D's materials count up from the bottom
@@ -273,7 +279,8 @@ def run_sem(g, eq, device, dtype, n_order=4):
             kw["equation_options"] = {"f_ref": m["f_ref"], "n_sls": m["n_sls"],
                                       "f_band": (m["f_ref"] / 10.0, 10.0 * m["f_ref"]),
                                       "n_fit": 2 * m["n_sls"] - 1,
-                                      "velocities": "real_modulus"}
+                                      "velocities": ("real_modulus" if m.get("at_f0", True)
+                                                     else "unrelaxed")}
         if g["stype"] == 1:
             th = math.radians(g["angle"])            # SPECFEM2D's (sin, -cos) z up = (sin, cos) down
             calls = [([n], c * w) for n, c in (("vx", math.sin(th)), ("vz", math.cos(th)))

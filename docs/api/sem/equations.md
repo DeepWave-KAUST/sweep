@@ -153,6 +153,11 @@ First-order in time; the source and receiver fields are `v_x`, `v_z` (and
       heading_level: 3
       members: [build, unrelaxed_velocities]
 
+::: sweep.sem.ViscoElasticSEM2DDeformed
+    options:
+      heading_level: 3
+      members: [build]
+
 ::: sweep.sem.ViscoAcousticPotentialSEM2D
     options:
       heading_level: 3

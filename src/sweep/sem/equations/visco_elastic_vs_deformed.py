@@ -109,7 +109,7 @@ def gsls_setup(Qp_e, Qs_e, f_ref, f_band, n_sls, who, *, n_fit=200, velocities="
     q_lo = float(torch.minimum(Qp_e.detach().min(), Qs_e.detach().min()))
     if not q_lo > q_min:
         raise ValueError(
-            f"{who}: min(Qp, Qs) = {q_lo:.3g} is below {q_min:.3g}, where the constant-Q fit "
+            f"{who}: min(Q) = {q_lo:.3g} is below {q_min:.3g}, where the constant-Q fit "
             f"yields a negative relaxation strength (n_sls={n_sls}, f_band={f_band}). Bound Q "
             "from below.")
     tp, ts = fit.tau(Qp_e), fit.tau(Qs_e)

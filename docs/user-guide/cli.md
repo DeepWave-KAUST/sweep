@@ -73,25 +73,31 @@ Finite difference (sweep.equations, run with PropTorch):
 
 Spectral element (sweep.sem, run with PropSEM):
 
-  Equation                    Mesh                   Models                                                              Torch Binding  Binding Ready
-  --------------------------  ---------------------  ------------------------------------------------------------------  -------------  -------------
-  AcousticElasticSEM2D        quad9 2-D, topography  ['vp', 'vs', 'rho']                                                 yes            yes
-  AcousticPotentialSEM2D      quad9 2-D, topography  ['vp']                                                              yes            yes
-  AcousticSEM2D               quad4 2-D              ['vp']                                                              no             no
-  AcousticSEM2DDeformed       quad9 2-D, topography  ['vp']                                                              no             no
-  AcousticSEM3D               hex8 3-D               ['vp']                                                              yes            yes
-  AcousticSEM3DDeformed       hex27 3-D, topography  ['vp']                                                              yes            yes
-  BiotAnisoPermSEM2DDeformed  quad9 2-D, topography  ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b_xx', 'b_xz', 'b_zz']  no             no
-  BiotVSSEM2DDeformed         quad9 2-D, topography  ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']                     no             no
-  ElasticSEM2D                quad4 2-D              ['vp', 'vs', 'rho']                                                 no             no
-  ElasticSEM2DDeformed        quad9 2-D, topography  ['vp', 'vs', 'rho']                                                 yes            yes
-  ElasticSEM3D                hex8 3-D               ['vp', 'vs', 'rho']                                                 yes            yes
-  ElasticSEM3DDeformed        hex27 3-D, topography  ['vp', 'vs', 'rho']                                                 yes            yes
-  ElasticTTISEM2DDeformed     quad9 2-D, topography  ['vp', 'vs', 'rho', 'epsilon', 'delta', 'theta']                    no             no
-  ElasticVSSEM2DDeformed      quad9 2-D, topography  ['vp', 'vs', 'rho']                                                 no             no
-  ElasticVSSEM3D              hex8 3-D               ['vp', 'vs', 'rho']                                                 yes            yes
-  ElasticVSSEM3DDeformed      hex27 3-D, topography  ['vp', 'vs', 'rho']                                                 no             no
-  ElasticVTISEM2DDeformed     quad9 2-D, topography  ['vp', 'vs', 'rho', 'epsilon', 'delta']                             no             no
+  Equation                     Mesh                   Models                                                              Torch Binding  Binding Ready
+  ---------------------------  ---------------------  ------------------------------------------------------------------  -------------  -------------
+  AcousticElasticSEM2D         quad9 2-D, topography  ['vp', 'vs', 'rho']                                                 yes            yes
+  AcousticPotentialSEM2D       quad9 2-D, topography  ['vp']                                                              yes            yes
+  AcousticSEM2D                quad4 2-D              ['vp']                                                              no             no
+  AcousticSEM2DDeformed        quad9 2-D, topography  ['vp']                                                              no             no
+  AcousticSEM3D                hex8 3-D               ['vp']                                                              yes            yes
+  AcousticSEM3DDeformed        hex27 3-D, topography  ['vp']                                                              yes            yes
+  BiotAnisoPermSEM2DDeformed   quad9 2-D, topography  ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b_xx', 'b_xz', 'b_zz']  no             no
+  BiotVSSEM2DDeformed          quad9 2-D, topography  ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']                     no             no
+  BiotVSSEM3DDeformed          hex27 3-D, topography  ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']                     no             no
+  ElasticSEM2D                 quad4 2-D              ['vp', 'vs', 'rho']                                                 no             no
+  ElasticSEM2DDeformed         quad9 2-D, topography  ['vp', 'vs', 'rho']                                                 yes            yes
+  ElasticSEM3D                 hex8 3-D               ['vp', 'vs', 'rho']                                                 yes            yes
+  ElasticSEM3DDeformed         hex27 3-D, topography  ['vp', 'vs', 'rho']                                                 yes            yes
+  ElasticSHSEM2DDeformed       quad9 2-D, topography  ['vs', 'rho']                                                       no             no
+  ElasticTTISEM2DDeformed      quad9 2-D, topography  ['vp', 'vs', 'rho', 'epsilon', 'delta', 'theta']                    no             no
+  ElasticVSSEM2DDeformed       quad9 2-D, topography  ['vp', 'vs', 'rho']                                                 no             no
+  ElasticVSSEM3D               hex8 3-D               ['vp', 'vs', 'rho']                                                 yes            yes
+  ElasticVSSEM3DDeformed       hex27 3-D, topography  ['vp', 'vs', 'rho']                                                 no             no
+  ElasticVTISEM2DDeformed      quad9 2-D, topography  ['vp', 'vs', 'rho', 'epsilon', 'delta']                             no             no
+  ViscoAcousticPotentialSEM2D  quad9 2-D, topography  ['vp', 'Qk']                                                        no             no
+  ViscoBiotVSSEM2DDeformed     quad9 2-D, topography  ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b', 'Qp', 'Qs']         no             no
+  ViscoElasticSEM2DDeformed    quad9 2-D, topography  ['vp', 'vs', 'rho', 'Qk', 'Qmu']                                    no             no
+  ViscoElasticVSSEM2DDeformed  quad9 2-D, topography  ['vp', 'vs', 'rho', 'Qp', 'Qs']                                     no             no
 ```
 
 The unified facades `DAS` (formerly `DASModeler`) and `AcousticAniso` are

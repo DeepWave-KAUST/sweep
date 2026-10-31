@@ -213,6 +213,7 @@ __call__(wavelet, sources, receivers, models=None, **kw)
 | `ElasticVTISEM2DDeformed` | `['vp', 'vs', 'rho', 'epsilon', 'delta']` |
 | `ViscoAcousticPotentialSEM2D` | `['vp', 'Qk']` |
 | `ViscoBiotVSSEM2DDeformed` | `['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b', 'Qp', 'Qs']` |
+| `ViscoElasticSEM2DDeformed` | `['vp', 'vs', 'rho', 'Qk', 'Qmu']` |
 | `ViscoElasticVSSEM2DDeformed` | `['vp', 'vs', 'rho', 'Qp', 'Qs']` |
 
 ## Signals, datasets, parallel

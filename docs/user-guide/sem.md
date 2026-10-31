@@ -774,6 +774,49 @@ and halving the step divides the difference by four (4.2e-5 at 0.1 ms).
 Stacey sides, gives 1.2% for the visco-elastic records and 1.7% for the elastic ones; there the
 absorbing conditions of the two codes differ as well.
 
+### SPECFEM2D's displacement scheme
+
+`ViscoElasticSEM2DDeformed` is the displacement class `ElasticSEM2DDeformed` with SPECFEM2D's
+`ATTENUATION_VISCOELASTIC` as its Newmark path runs it, and it agrees with SPECFEM2D to
+round-off. Its mechanisms relax the bulk modulus `kappa = lambda + mu` and the shear modulus,
+as SPECFEM2D's do, so the models are `vp`, `vs`, `rho`, `Qk` (SPECFEM2D's `Qkappa`) and `Qmu`:
+
+```python
+from sweep.sem import PropSEM, ViscoElasticSEM2DDeformed
+
+solver = PropSEM(ViscoElasticSEM2DDeformed, shape=(nz, nx), dh=5.0, dt=5e-4,
+                 free_surface=True, f_dominant=15.0, receiver_type=["vx", "vz"],
+                 equation_options={"f_ref": 15.0, "n_sls": 3})
+seis = solver(wavelet, sources, receivers, models=[vp, vs, rho, qk, qmu])
+```
+
+Each mechanism keeps three memories at every element GLL node. At every step each one takes
+`e = A^2 e + B (s + A s_old)`, with `A = exp(-dt / (2 tau_sigma))`, from a strain `s` and its
+value at the last step: the dilatation `theta` for `e1`, `dux/dx - theta / 2` for `e11` and
+the shear strain for `e13`. The stress gains `(lambda + mu)_U sum(e1) + 2 mu_U sum(e11)` (xx),
+`(lambda + mu)_U sum(e1) - 2 mu_U sum(e11)` (zz) and `mu_U sum(e13)` (xz).
+
+The defaults are SPECFEM2D's:
+
+- the band `f_ref / 10 .. 10 f_ref`;
+- the fit at `2 n_sls - 1` frequencies;
+- `vp` and `vs` read as the unrelaxed velocities (`velocities="unrelaxed"`), which is how
+  SPECFEM2D reads them without `READ_VELOCITIES_AT_f0`.
+
+`"real_modulus"` is that flag: `rho vs^2` and `rho (vp^2 - vs^2)` are then the real parts of
+the shear and the bulk modulus at `f_ref`. The phase reading of the velocity-stress class is not
+offered. Read as unrelaxed, `vp` and `vs` are the speeds at infinite frequency, so a finite Q
+makes the waves of the band slower than those of the elastic class.
+
+The absorbing layer runs without attenuation. The strengths are zero on its elements, as
+SPECFEM2D skips its memory update in its PML elements; it runs a visco-elastic C-PML there
+instead, which this class does not have. All five models are differentiable, and element
+arrays of `Q = inf` give `ElasticSEM2DDeformed` bit for bit. Boundary saving is refused because
+the attenuation is dissipative, and the class runs on eager only.
+`test/sem/test_sem_visco_elastic_displacement.py` checks the elastic limit, the decay with
+distance, that `Qmu` takes the shear wave down while `Qk` leaves it alone, the layer, the
+gradients and the two readings.
+
 ## SH waves
 
 `ElasticSHSEM2DDeformed` solves for the out-of-plane displacement `u_y` of an elastic medium
@@ -1498,6 +1541,7 @@ receivers):
 | `ElasticVSSEM2DDeformed`, `ElasticSEM2DDeformed`, with `interfaces` | the rock over a stiffer one across a sinusoidal interface | 2e-12 |
 | `ElasticSHSEM2DDeformed` | SH, a force along y, flat and under the hill | 1e-13, 2e-12 |
 | `ViscoElasticVSSEM2DDeformed` | the rock with Q = 30, SPECFEM2D's conventions | 2e-4 |
+| `ViscoElasticSEM2DDeformed` | the rock with Qkappa = Qmu = 30 read at 15 Hz, an explosion; with Qkappa = 60, Qmu = 20 read as unrelaxed, a force | 7e-14 |
 | `ViscoAcousticPotentialSEM2D` | the water with Qkappa = 30, SPECFEM2D's conventions | 3e-2; 8e-13 with SPECFEM2D's memory-update line |
 
 Matching the two codes takes these conventions on our side:
@@ -1515,7 +1559,7 @@ Matching the two codes takes these conventions on our side:
   the source instead would start it with a step, because SPECFEM2D's Ricker is not zero at
   its first sample.
 
-The remaining differences are round-off, except for the visco-elastic case:
+The remaining differences are round-off, except for two classes:
 
 - **Under the hill**, the receivers next to the curved surface reach 5e-11. That comes from
   locating them in curved elements: our Newton tolerance is about 4e-11 m there, where
@@ -1525,8 +1569,9 @@ The remaining differences are round-off, except for the visco-elastic case:
   them in the element of their closest GLL point, 1% and 0.3% outside it
   (`|gamma| = 1.010`, `1.003` in its log), and extrapolates that element's basis; ours
   interpolates in the element that holds the point. The table leaves those two out.
-- **The visco-elastic records** keep the time scheme of the memory variables (see
-  [Visco-elastic attenuation](#visco-elastic-attenuation)).
+- **The velocity-stress visco-elastic records** keep the time scheme of the memory variables
+  (see [Visco-elastic attenuation](#visco-elastic-attenuation)). The displacement class runs
+  SPECFEM2D's scheme and agrees to round-off.
 - **The visco-acoustic records** keep a line of SPECFEM2D's that we do not reproduce (see
   [Visco-acoustic attenuation](#visco-acoustic-attenuation)).
 

@@ -26,6 +26,17 @@ and this project adheres to
   skill.  The docs page *AI assistants (Agent Skills)* covers the install,
   and `test/test_skill_snippets.py` runs every code block of the skill so
   its examples cannot fall behind the API.
+- **`ViscoElasticSEM2DDeformed`: SPECFEM2D's visco-elastic displacement scheme on the SEM.**
+  `ElasticSEM2DDeformed` with SPECFEM2D's `ATTENUATION_VISCOELASTIC` as its Newmark path runs
+  it: mechanisms on the bulk and the shear modulus (models `vp, vs, rho, Qk, Qmu`), element
+  memories `e = A^2 e + B (s + A s_old)` of the dilatation, the deviatoric and the shear strain,
+  and SPECFEM2D's defaults: the band `f_ref / 10 .. 10 f_ref`, the fit at `2 n_sls - 1`
+  frequencies, and `vp`, `vs` read as unrelaxed (`"real_modulus"` is its
+  `READ_VELOCITIES_AT_f0`). The C-PML layer runs without attenuation. `Q = inf` is the elastic
+  step bit for bit, and all five models are differentiable. Against SPECFEM2D 8.1.0 the records
+  agree to 7e-14, with `Qkappa = Qmu = 30` read at 15 Hz and with `Qkappa = 60`, `Qmu = 20`
+  read as unrelaxed, where the velocity-stress class keeps 2e-4. Eager, 2-D; no boundary saving
+  (dissipative).
 - **`ElasticSHSEM2DDeformed`: SH waves on the SEM.** The out-of-plane displacement `u_y`
   (SPECFEM2D's `P_SV = .false.`), as the potential form's scalar equation with `vp = vs` and
   the density `1 / (rho vs^2)`: its operators, C-PML and exact boundary saving, a traction-free
