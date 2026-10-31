@@ -282,6 +282,13 @@ and this project adheres to
   used to reach the curved-mesh locator, which said only `could not locate
   (x=..., z=...) in any Quad9 element of column ex=..`. A point on the
   surface row (fractional rows and columns too) is accepted as before.
+- The acoustic C-PML's `db/dz` on a topography or interfaces mesh. The double-convolution
+  step takes the derivative of the recursion coefficient across the layer, which both
+  builders took with column 0's z axis for the whole mesh; such a mesh grades every column
+  differently, so `db/dz` came out off by the ratio of the column heights (1.4 under a 400 m
+  hill on a 1000 m model). Every grid line now takes its own coordinates, in 2-D and 3-D
+  (`sweep.sem.cpml._axis.gradient_along`); flat meshes are unchanged bit for bit
+  (`test/sem/test_sem_acoustic_cpml_profile.py`).
 
 ## [0.3.6] - 2026-10-29
 

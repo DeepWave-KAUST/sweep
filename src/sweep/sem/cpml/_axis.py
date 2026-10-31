@@ -17,6 +17,7 @@ one copy for a parameter soup.
 """
 from __future__ import annotations
 
+import numpy as np
 import torch
 
 
@@ -73,3 +74,22 @@ def vs_axis_profile(coord, lo, hi, *, side_low, side_high,
     a = torch.where(inside, a, torch.zeros_like(a))
     b = torch.where(inside, b, torch.zeros_like(b))
     return a.to(dtype=dtype), b.to(dtype=dtype)
+
+
+def gradient_along(f, x, axis):
+    """``df/dx`` along ``axis`` of the NumPy arrays ``f`` and ``x`` (same shape), each grid
+    line with its own coordinates: ``np.gradient(f_line, x_line)`` line by line, with its
+    arithmetic (the non-uniform branch: second order inside, first order at the ends). A
+    mesh graded column by column -- topography, internal interfaces -- has different
+    coordinates on every line, which ``np.gradient`` with one coordinate axis cannot take."""
+    f, x = np.moveaxis(f, axis, 0), np.moveaxis(x, axis, 0)
+    dx = np.diff(x, axis=0)
+    dx1, dx2 = dx[:-1], dx[1:]
+    a = -(dx2) / (dx1 * (dx1 + dx2))
+    b = (dx2 - dx1) / (dx1 * dx2)
+    c = dx1 / (dx2 * (dx1 + dx2))
+    out = np.empty_like(f)
+    out[1:-1] = a * f[:-2] + b * f[1:-1] + c * f[2:]
+    out[0] = (f[1] - f[0]) / dx[0]
+    out[-1] = (f[-1] - f[-2]) / dx[-1]
+    return np.moveaxis(out, 0, axis)

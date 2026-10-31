@@ -15,9 +15,10 @@ Inside the strip the standard Collino-Tsogka polynomial profile is used:
     α_max = π · f_dominant
 
 The spatial derivatives ``∂b/∂x``, ``∂b/∂y``, ``∂b/∂z`` (needed in the
-double-convolution wave step) are precomputed with ``np.gradient`` on the
-structured global mesh (row-major (z, y, x)), which handles the non-uniform
-GLL spacing exactly.
+double-convolution wave step) are precomputed by finite differences on the
+structured global mesh (row-major (z, y, x)), ``np.gradient``'s arithmetic along
+every grid line with its own coordinates (``_axis.gradient_along``), which takes
+the non-uniform GLL spacing and a topography mesh's graded columns.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ import numpy as np
 import torch
 
 from ._axis import damping_profile as _damping_profile
+from ._axis import gradient_along as _gradient_along
 
 from ..mesh.hex8 import Hex8Mesh
 
@@ -117,18 +119,17 @@ def build_cpml3d(
     a_y, b_y = _ab_coeffs(sigma_y, alpha_y, dt)
     a_z, b_z = _ab_coeffs(sigma_z, alpha_z, dt)
 
-    # ∂b/∂* via numerical gradient on the structured global mesh (row-major
-    # (z, y, x)). np.gradient handles non-uniform GLL spacing when given coords.
+    # ∂b/∂* by finite differences on the structured global mesh (row-major
+    # (z, y, x)), along every grid line with its own coordinates: a topography
+    # mesh grades each column differently (see the 2-D builder).
     nx_g = mesh.nex * mesh.n_order + 1
     ny_g = mesh.ney * mesh.n_order + 1
     nz_g = mesh.nez * mesh.n_order + 1
     shape3 = (nz_g, ny_g, nx_g)
-    x_axis = mesh.x_global.reshape(shape3)[0, 0, :].detach().cpu().numpy()
-    y_axis = mesh.y_global.reshape(shape3)[0, :, 0].detach().cpu().numpy()
-    z_axis = mesh.z_global.reshape(shape3)[:, 0, 0].detach().cpu().numpy()
-    dbx_dx = np.gradient(b_x.reshape(shape3).detach().cpu().numpy(), x_axis, axis=2)
-    dby_dy = np.gradient(b_y.reshape(shape3).detach().cpu().numpy(), y_axis, axis=1)
-    dbz_dz = np.gradient(b_z.reshape(shape3).detach().cpu().numpy(), z_axis, axis=0)
+    grid = lambda t: t.reshape(shape3).detach().cpu().numpy()
+    dbx_dx = _gradient_along(grid(b_x), grid(mesh.x_global), axis=2)
+    dby_dy = _gradient_along(grid(b_y), grid(mesh.y_global), axis=1)
+    dbz_dz = _gradient_along(grid(b_z), grid(mesh.z_global), axis=0)
     to_t = lambda arr: torch.as_tensor(arr.reshape(-1), dtype=dtype, device=device)
 
     return CPML3DProfile(
