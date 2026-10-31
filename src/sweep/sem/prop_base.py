@@ -1972,6 +1972,17 @@ class PropSEM:
                             return_wavefield=return_wavefield, models=models,
                             snapshot_times=snapshot_times,
                             snapshot_interval=snapshot_interval)
+        # A dual tensor (forward-mode AD): the compiled step, the default, drops
+        # its tangent (the record's came back as zero) and no SEM path is
+        # checked to carry one, so it is refused on every path.
+        from sweep.propagator._second_order import has_tangent, refuse_forward_ad
+        if has_tangent(wavelet, *(models or ())):
+            refuse_forward_ad(
+                "PropSEM", "no SEM path is checked to carry a tangent, and the compiled step "
+                "drops it (the tangent came back as zero)",
+                instead="Take J h from the finite-difference PropTorch(impl='eager') with "
+                        "memory=Full() and EagerOptions(use_compile=False), or as a central "
+                        "difference of two forwards.")
         self._set_nt(wavelet)
         snap_steps = _resolve_snapshot_steps(self.nt, return_wavefield,
                                              snapshot_times, snapshot_interval)

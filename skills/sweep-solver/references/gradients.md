@@ -120,6 +120,7 @@ assert all(cos(grads["full"], g) > 0.999 for g in grads.values())
 | `impl='c'` `ElasticBorn` | `dvp, dvs, drho` gradients only; background and wavelet refused |
 | `ModelParallel` (any) | models only; a wavelet requiring grad is refused |
 | `impl='c'`, second `backward()` on the same graph | `RuntimeError`; re-run the forward (eager keeps the graph) |
+| `create_graph=True` (double backward) | only eager with `use_compile=False` and `Full()`/`Ckpt()`; `impl='c'`, `BoundarySaving()`, compiled eager, `ModelParallel`, custom-gradient imaging conditions raise `RuntimeError` |
 
 ## 5. Finite-difference gradient checks (and the outer ring)
 
@@ -211,3 +212,41 @@ is read with `solver.imaging(wavelet, sources, receivers, models=..., observed=o
   `torch.backends.cudnn.allow_tf32 = False` (sweep warns once).
 - Boundary-saving `storage_dtype` other than `"fp32"` changes the gradient (int8 most).
 - The two backends agree to ~1e-6..1e-4 relative, not bit for bit.
+
+## 8. Second derivatives (Hessian-vector products)
+
+- Exact `H h` by double backward: `impl='eager'`, `memory=Full()` or `Ckpt()`,
+  `eager_options=EagerOptions(use_compile=False)`, TF32 off. Take `g` with
+  `create_graph=True`, then `torch.autograd.grad((g * h).sum(), m, retain_graph=True)`; the
+  tape is reused for further directions. It holds the whole forward and first backward
+  (gigabytes and minutes on a 100 x 200 x 1000-step model), so it is for small models.
+- Any size, any `impl` and memory strategy: `H h ~ (g(m + eps*h) - g(m - eps*h)) / (2*eps)`.
+  Scan `eps` against one reference: the error falls as 1/eps (fp32 round-off) and rises as
+  eps^2; the minimum was at `eps*max|h|` of about 0.5-2 % of the velocity.
+- Gauss-Newton `J^T J h`, exact: the Born record of `h` (`AcousticBorn` with
+  `mp = 2*h/vp`, receivers on `sh1`) as `grad_outputs` of a gradient of the plain forward.
+- Full `H h`, exact, first derivatives only (so `impl='c'` + `BoundarySaving()` and compiled
+  eager work): with `m` requiring grad, `s = born(models=[m, 2*h/m])`, `d = fwd(models=[m])`,
+  `psi = (d * s.detach()).sum() + (s * (d - d_obs).detach()).sum()`, then
+  `H h = autograd.grad(psi, m)`. Needs the Born equation's background-model gradient
+  (`AcousticBorn` impl='c' in Full/BoundarySaving; not `Ckpt`; `ElasticBorn` only on eager).
+  Matched the double backward to 1e-5..1e-4 at about the cost of two gradients.
+- J h from any eager equation, no Born equation, no tape: forward-mode AD.
+  `with torch.no_grad(), fwAD.dual_level(): d, jh = fwAD.unpack_dual(prop(w, src, rec,
+  models=[fwAD.make_dual(vp, h)]))` (`import torch.autograd.forward_ad as fwAD`). Only
+  `impl='eager'` + `Full()` + `EagerOptions(use_compile=False)`; compiled, `Ckpt`,
+  `BoundarySaving`, `impl='c'`, `ModelParallel`, `PropSEM` and qP 'adjoint'/'frozen'
+  raise. About 2x the forward's memory, 11-17x its time (uncompiled, V100). qP: J h with
+  `s_gradient='exact'` only; `ViscoAcoustic`'s Q tangent holds the fractional exponent
+  fixed, as its gradient does.
+  Without `no_grad` and with `vp.requires_grad_()`, `grad(<d,s.detach()> + <s,(d-d_obs).detach()>)`
+  is the exact H h (reverse over forward).
+- The qP equations (AcousticVTI/TTI and their Born pair) refuse a second derivative in every
+  `s_gradient` mode (off the tape / NaN / not a Hessian); 'exact' and 'frozen' still allow
+  `create_graph=True` for a derivative w.r.t. the residual (double-vjp J h); use differences.
+- Forward mode and differences differentiate the returned gradient; on the two outermost
+  model cells (cropped gradient) double backward differs -- compare routes with `h` off them.
+- 2-D `AcousticBorn` uses `Acoustic`'s CPML stencils on every device, so its record is J h of
+  `Acoustic` (eager). `impl='c'` 2-D Born still differs slightly in the CPML.
+- Keep `h` off the two outermost cells when checking against differences (Section 5).
+- Notebook `46_hessian_vector_product.ipynb` compares the routes and assembles a small full Hessian.

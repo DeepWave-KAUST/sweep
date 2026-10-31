@@ -39,3 +39,8 @@ class EdgePadding(torch.autograd.Function):
         grad_input = grad_output[tuple(slices)]
 
         return grad_input, None
+
+    @staticmethod
+    def jvp(ctx, tangent, pad):
+        # linear: a model perturbation is padded the way the model is
+        return F.pad(tangent.unsqueeze(0), pad=ctx.pad, mode='replicate').squeeze(0)

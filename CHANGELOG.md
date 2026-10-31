@@ -165,6 +165,34 @@ and this project adheres to
   two A100s the per-step cost of 2-D problems dropped by 40-60 % (3-D ones
   are compute-bound and gain a few per cent). Single-node CUDA tile groups
   only; it refuses, rather than falls back, where it cannot run.
+- **Forward-mode AD (Jacobian-vector products) through `impl='eager'`.** With
+  `memory=Full()` and `EagerOptions(use_compile=False)`, models passed as dual
+  tensors (`torch.autograd.forward_ad.make_dual(vp, h)`) give the record's
+  tangent J h -- the Born record of `h` -- for every eager equation, with no
+  Born equation and no autograd tape: `EdgePadding`, the receiver footprint
+  gather and the `ViscoElastic` GSLS strengths gained their `jvp`. On a
+  100 x 200 grid with 1000 steps (4 shots, V100) J h took 11 s and 32 MiB
+  (`Acoustic`; `Elastic` 14 s and 51 MiB), against 70 s and 7.8 GB (93 s and
+  18 GB) for reverse mode twice, the only eager route before. With the models
+  also requiring grad, the gradient of `<d, s.detach()> + <s, r.detach()>`
+  (s = J h, r the residual) is the exact Hessian-vector product from first
+  derivatives (`test/test_forward_mode_ad.py`). Like a difference of gradients,
+  forward mode differentiates the gradient the propagator returns; on the two
+  outermost model cells, whose gradient is the cropped one (`EdgePadding`),
+  double backward gives a different product, so keep a direction off them when
+  comparing the two. qP equations carry J h with `s_gradient='exact'`; with
+  `'adjoint'` and `'frozen'` (whose tangent would be the linearisation with S_n
+  held fixed) they refuse a dual tensor. `ViscoAcoustic`'s Q tangent holds the
+  fractional exponent fixed, as its gradient does.
+- **Notebook 46, Hessian-vector products**: the exact product by double
+  backward (eager, uncompiled), the difference of two `impl='c'` boundary-saving
+  gradients, the Gauss-Newton product from an `AcousticBorn` record, and the
+  exact product as a first-order gradient of the Born system, which runs with
+  `impl='c'` and boundary saving (and with the compiled eager step) at about the
+  cost of two gradients, against minutes and gigabytes for the double backward
+  on the same model. It also assembles the full Hessian of a small model with
+  that route. The user guide (*Propagators*, "Second derivatives") and the
+  Agent Skill describe the routes.
 - **Agent Skill for AI coding assistants** in `skills/sweep-solver/`
   ([agentskills.io](https://agentskills.io) format): a `SKILL.md` entry point
   plus on-demand references (equations, propagators, boundaries, gradients,
@@ -1219,6 +1247,54 @@ and this project adheres to
   slower in difference form on a V100.  Other forwards move by less than 2%;
   the backward is 3-7% faster for the 3-D acoustic and Born equations and up
   to 3% slower in 2-D (acoustic order 8, VRZ order 6).
+- **`create_graph=True` now raises on the paths without a second derivative**
+  instead of handing back a gradient off the autograd tape. `impl='c'`, eager
+  `BoundarySaving()`, `ModelParallel` and registered gradient-mode imaging
+  conditions raise a `RuntimeError` in the first backward that names what
+  works; before, the Hessian-vector product failed later with "element 0 of
+  tensors does not require grad", or -- with a regulariser on the tape --
+  silently returned the regulariser's Hessian alone. The compiled eager step
+  (`use_compile=True`, the default) raises in the first backward too, naming
+  `EagerOptions(use_compile=False)`; torch's own error only came at the second
+  derivative. The compiled steps' record blocks take their gradient contiguous
+  (`_CatSteps`): torch 2.15's backward prologue restrides a tangent in place,
+  which under `create_graph=True` failed with "a leaf Variable that requires
+  grad is being used in an in-place operation" before that error was reached.
+  The uncompiled eager step with `Full()` or `Ckpt()` is unchanged,
+  and `test/test_double_backward.py` checks its product against a difference of
+  gradients.
+- **The qP equations (`AcousticVTI`, `AcousticTTI`, `AcousticVTIBorn`,
+  `AcousticTTIBorn`) refuse a second derivative in every `s_gradient` mode.**
+  It was off the tape (`'adjoint'`: the qP Born pair returned a
+  Hessian-vector product 100 % off without a word, `AcousticVTI` failed with
+  "element 0 of tensors does not require grad"), NaN (`'exact'`: the second
+  derivative of S_n = N / (D + 1e-26) overflows float32 where the wavefield
+  is quiet) or not a Hessian (`'frozen'`). `'adjoint'` refuses
+  `create_graph=True`; `'exact'` and `'frozen'` keep their `create_graph=True`
+  gradient for Jacobian-vector products by a derivative with respect to the
+  residual (a Gauss-Newton solver's double vjp) and refuse only a second
+  derivative with respect to the models or the wavelet. Equations declare
+  this through `second_derivative_refusal()`; first derivatives are
+  unchanged. Every eager refusal is raised on the input side of the rollout,
+  where a backward ends, so a script that catches it exits normally.
+- **Forward-mode AD no longer loses its tangent.** A dual tensor
+  (`torch.autograd.forward_ad`) through the compiled eager step came back with
+  a tangent of zero, and through `ModelParallel` with the tangent dropped, both
+  without a word, and so did `PropSEM`'s compiled step (its default). The
+  paths that cannot carry a tangent -- the compiled step, `Ckpt()`, eager
+  `BoundarySaving()`, `impl='c'`, `ModelParallel`, `PropSEM`, registered
+  gradient-mode imaging conditions and the qP `'adjoint'` and `'frozen'` modes
+  -- now raise a `RuntimeError` that names the uncompiled `Full()` path.
+- **2-D `AcousticBorn` is the exact linearisation of 2-D `Acoustic`.**
+  `Acoustic` takes spatial-order first-derivative kernels in its CPML and
+  `AcousticBorn` took `torch.gradient` (second order), so the scattered
+  record differed from J h of `Acoustic` by about 1e-2 with a thin PML, and the
+  Born routes to Gauss-Newton and Hessian products inherited it. The Born pair
+  now builds the same kernels, on every device
+  (`test/test_born_linearization.py`). The eager `born2d` bit-exactness
+  baselines on CUDA move with it. `impl='c'` `acoustic_born2d` still differs
+  from `acoustic2d` in the CPML (product rule against a fused stencil for
+  d(a psi)), a separate change in the CUDA kernels.
 - `PropSEM(memory=BoundarySaving(storage_dtype='fp16'))` is refused on both
   backends. The eager ring stored a plain fp16 cast, which flushes the SEM's
   small field values to zero: 2-D elastic gradients came out 15% and 2-D

@@ -196,6 +196,7 @@ nav:
               - Elastic · radiation P-P/P-S/S-S: notebooks/21_radiation_elastic.ipynb
               - Poroelastic · traveltime kernels: notebooks/38_kernels_poroelastic.ipynb
               - Poroelastic · radiation (fast P → P, S): notebooks/39_radiation_poroelastic.ipynb
+              - Hessian-vector products: notebooks/46_hessian_vector_product.ipynb
       - Scripts:
           - Multi-GPU DDP: examples/multi_gpu_dist.md
           - SEM · multi-GPU domain decomposition: examples/sem_dd.md

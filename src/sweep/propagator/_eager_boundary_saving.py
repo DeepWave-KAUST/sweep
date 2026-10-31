@@ -50,6 +50,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import torch
 
+from sweep.propagator._second_order import refuse_forward_ad
+
 # Ring geometry is backend-agnostic and shared with the JAX boundary-saving
 # path; re-exported here so existing imports keep working.
 from sweep.propagator._ring_geometry import (  # noqa: F401
@@ -700,7 +702,16 @@ class _BoundarySaveStep(torch.autograd.Function):
         return tuple(S_out)
 
     @staticmethod
+    def jvp(ctx, *tangents):
+        refuse_forward_ad("impl='eager' with memory=BoundarySaving()",
+                          "the backward reconstructs the forward off the tape")
+
+    @staticmethod
     def backward(ctx, *grad_out):
+        # create_graph=True is refused on the input side of the rollout
+        # (_PropTorchEager._guard_create_graph), not here: raising in this
+        # per-step node left the rest of the backward queued and the
+        # interpreter aborted at exit
         cfg = ctx.cfg
         if cfg is None:
             raise RuntimeError(

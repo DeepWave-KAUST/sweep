@@ -18,26 +18,29 @@ def step(u_now, u_pre, psix, psiz, zetax, zetaz,
          grad_op,
          src=None,
          ssrc=None,
+         grad_kernels=None,
          invariants=None,
          ):
     
     az, bz, dbzdz, ax, bx, dbxdx = pml
 
-    # Calcualte gradients based on 2nd order central finite difference
-    dudz = grad_op(u_now, h, -2)
-    dudx = grad_op(u_now, h, -1)
-    dsudz = grad_op(su_now, h, -2)
-    dsudx = grad_op(su_now, h, -1)
+    # The CPML's first derivatives, with Acoustic's stencils (spatial_order
+    # kernels on CUDA, torch.gradient otherwise), so that the scattered field
+    # is the exact linearisation of Acoustic on every device.
+    dudz = grad_op(u_now, h, -2, kernels=grad_kernels)
+    dudx = grad_op(u_now, h, -1, kernels=grad_kernels)
+    dsudz = grad_op(su_now, h, -2, kernels=grad_kernels)
+    dsudx = grad_op(su_now, h, -1, kernels=grad_kernels)
 
     # Background wavefield
     w_sum = 0.
     # ``psiyn`` is the Z memory variable -- historical name, correct slot.
     contrib_z, psiyn, zetaz = cpml_axis_update(
-        lap_uz, dudz, psiz, zetaz, az, bz, dbzdz, h, -2, grad_op, src=src)
+        lap_uz, dudz, psiz, zetaz, az, bz, dbzdz, h, -2, grad_op, grad_kernels, src)
     w_sum += contrib_z
 
     contrib_x, psixn, zetax = cpml_axis_update(
-        lap_ux, dudx, psix, zetax, ax, bx, dbxdx, h, -1, grad_op, src=src)
+        lap_ux, dudx, psix, zetax, ax, bx, dbxdx, h, -1, grad_op, grad_kernels, src)
     w_sum += contrib_x
 
     u_next = 2 * u_now - u_pre + once(invariants, "vp2dt2", lambda: vp**2 * dt**2) * w_sum
@@ -45,11 +48,11 @@ def step(u_now, u_pre, psix, psiz, zetax, zetaz,
     # Scatter wavefield
     w_sum_s = 0.
     contrib_sz, spsiyn, szetaz = cpml_axis_update(
-        lap_suz, dsudz, spsiz, szetaz, az, bz, dbzdz, h, -2, grad_op, src=ssrc)
+        lap_suz, dsudz, spsiz, szetaz, az, bz, dbzdz, h, -2, grad_op, grad_kernels, ssrc)
     w_sum_s += contrib_sz
 
     contrib_sx, spsixn, szetax = cpml_axis_update(
-        lap_sux, dsudx, spsix, szetax, ax, bx, dbxdx, h, -1, grad_op, src=ssrc)
+        lap_sux, dsudx, spsix, szetax, ax, bx, dbxdx, h, -1, grad_op, grad_kernels, ssrc)
     w_sum_s += contrib_sx
     su_next = (2 * su_now - su_pre + once(invariants, "vp2dt2", lambda: vp**2 * dt**2) * w_sum_s
                + once(invariants, "ref*vp2dt2", lambda: ref * vp**2 * dt**2) * w_sum)
@@ -190,6 +193,11 @@ class AcousticBorn(SecondOrderEquation):
         """
         super().__init__(spatial_order, device, backend)
         super().init_separable_laplace()
+        # as Acoustic, on every device and backend: its CPML takes these
+        # stencils, and the Born pair must take the same ones to be its
+        # linearisation (with torch.gradient here the scattered record was
+        # ~1e-2 off J h in a thin PML)
+        super().init_grad_kernels()
     
     @property
     def default_source_fields(self):
@@ -205,7 +213,8 @@ class AcousticBorn(SecondOrderEquation):
         lap_suz, lap_sux = self.separable_d2_2d(wavefields[6], self.laplace_kernels, hz, hx)
         stencils = (self.laplace_kernels, (hz, hx))
         out = step(*wavefields, *models, dt, h, b, lap_ux, lap_uz, lap_sux, lap_suz, self.b, self.gradient,
-                   src=(wavefields[0], *stencils), ssrc=(wavefields[6], *stencils), invariants=invariants)
+                   src=(wavefields[0], *stencils), ssrc=(wavefields[6], *stencils),
+                   grad_kernels=self.grad_kernels, invariants=invariants)
         if getattr(self, "free_surface", False):
             out = zero_top_halo_fields(out, self.so // 2, axis=-2)
         return out

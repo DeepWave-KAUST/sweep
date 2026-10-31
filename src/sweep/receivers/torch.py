@@ -22,7 +22,18 @@ class _FootprintGather(torch.autograd.Function):
         for t in range(1, parts.shape[0]):
             out = out + parts[t]
         ctx.save_for_backward(index, weights)
+        ctx.save_for_forward(index, weights)
         ctx.numel = flat.numel()
+        return out
+
+    @staticmethod
+    def jvp(ctx, tangent, index_tangent, weights_tangent):
+        # linear in the field: the tangent is gathered by the same footprint
+        index, weights = ctx.saved_tensors
+        parts = tangent.index_select(0, index.reshape(-1)).view(index.shape) * weights
+        out = parts[0]
+        for t in range(1, parts.shape[0]):
+            out = out + parts[t]
         return out
 
     @staticmethod
