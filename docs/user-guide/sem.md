@@ -31,7 +31,13 @@ The options PropTorch has mean what they mean there:
 
 - `shape` is the model, and `abcn` grid cells of C-PML are added outside it on
   every side without a free surface; the model is edge-extended into them and
-  its gradient stops at the model edge (see [The model edge](#the-model-edge));
+  its gradient stops at the model edge (see [The model edge](#the-model-edge)).
+  On a half-space of 10 m elements under a 15 Hz force, the default ten-element
+  layer reflects 1.5e-4 of the record (relative L2) on the velocity-stress
+  classes and 1.6e-4 on the displacement ones, whose C-PML is SPECFEM2D's (the
+  records agree to 7e-7); SPECFEM2D's Stacey condition reflects 5.7e-2
+  (`test/sem/specfem_compare/run_compare_absorb.py`), and the SEM has no Stacey
+  condition;
 - `free_surface` — `True` (the top), edge names (`"top"`, `["top", "left"]`),
   a per-edge mask or an `{edge: bool}` dict; default `False`. On the
   velocity-stress solids (elastic and Biot) a C-PML side between two free

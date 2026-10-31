@@ -102,7 +102,7 @@ class ElasticSEM2DDeformed(DerivedInitState):
     rho_e: torch.Tensor
 
     mass: torch.Tensor                # (n_global,) — Σ_e ρ · w_α w_β · |J(ξ, η)|
-    _inv_M: torch.Tensor              # (n_global,) — 1 / mass
+    _inv_M: torch.Tensor              # (n_global,) — 1 / (mass + the C-PML's dt/2 term)
     cpml: Optional[ElasticCPMLProfile]  # SPECFEM-style elastic CPML, opt-in
 
     # Element-local Lamé and Jacobian-weight bundles precomputed once.
@@ -177,10 +177,19 @@ class ElasticSEM2DDeformed(DerivedInitState):
         m_e = mesh.w_jac * rho_e * mask_e
         mass = torch.zeros(mesh.n_global, dtype=dtype, device=device)
         mass.index_add_(0, mesh.ibool.reshape(-1), m_e.reshape(-1))
+        # SPECFEM2D's Newmark C-PML also puts dt/2 times the acceleration term's
+        # velocity coefficient (La1 = d_x + d_z) into the mass the step divides
+        # by: with the step's La1·v on the backward-difference velocity, the
+        # damping is centred in time -- second order, no CFL lost to the layer.
+        step_mass = mass
+        if cpml is not None:
+            pml = torch.zeros_like(mass).index_add_(
+                0, mesh.ibool.reshape(-1), (m_e * cpml.La1).reshape(-1))
+            step_mass = mass + 0.5 * cpml.dt * pml
 
         return cls(
             mesh=mesh, vp_e=vp_e, vs_e=vs_e, rho_e=rho_e,
-            mass=mass, _inv_M=masked_inv_mass(mass, alive), cpml=cpml,
+            mass=mass, _inv_M=masked_inv_mass(step_mass, alive), cpml=cpml,
             domain=domain, _mask_e=mask_e, _alive=alive,
             _D=mesh.deriv,
             _lam=lam, _mu=mu, _lam2mu=lam2mu,

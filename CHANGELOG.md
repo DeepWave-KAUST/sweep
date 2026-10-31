@@ -233,6 +233,14 @@ and this project adheres to
   at 801x1601 (A100), forward | forward+backward: uncompiled 2.6x | 2.0x faster,
   compiled 2.2x | 1.3x on top of the unrolled contractions. A memory field is
   indexed by band row, not by element id.
+- **The displacement-form elastic C-PML centres its damping in time, as SPECFEM2D's Newmark
+  scheme does** (`ElasticSEM2DDeformed` and the classes on it: `AcousticElasticSEM2D`'s solid,
+  `ViscoElasticSEM2DDeformed`). The mass the step divides by takes `dt/2` times the
+  acceleration term's velocity coefficient (`La1 = d_x + d_z`), so the damping no longer acts
+  on the backward-difference velocity alone. The records now agree with SPECFEM2D's C-PML to
+  7e-7 of the record on its half-space (2.5e-4 before), and the layer reflects 1.6e-4 there
+  (2.9e-4 before); a two-element layer 2.2e-3 instead of 6.4e-3
+  (`test/sem/test_sem_vs_cpml_absorption.py`). The profile keeps the `dt` it was built for.
 
 - **`PropSEM`'s wavelet is the pressure source on the potential forms too**
   (`AcousticPotentialSEM2D`, the water of `AcousticElasticSEM2D`). The
