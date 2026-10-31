@@ -11,7 +11,10 @@ run per medium (``--equation`` picks among the isotropic ones):
   and its reading of the velocities at ``f_ref`` (``velocities="real_modulus"``);
 * water: AcousticPotentialSEM2D and AcousticSEM2D, pressure-free on every edge as SPECFEM2D's
   fluid is wherever there is no absorbing condition;
-* water over rock: AcousticElasticSEM2D, the water pressure-free on its top and sides.
+* water over rock: AcousticElasticSEM2D, the water pressure-free on its top and sides;
+* layers across curved interfaces: the mesh of ``PropSEM(interfaces=...)``, each layer's
+  material per element (``layered_model``): AcousticElasticSEM2D under water, else
+  ElasticVSSEM2DDeformed and ElasticSEM2DDeformed.
 
 An absolute comparison: SPECFEM2D's own source time function (``plot_source_time_function.txt``,
 its sign and factor included), its time step, elements (``n_order = 4`` = its NGLLX = 5), source
@@ -52,7 +55,8 @@ from sweep.sem import (AcousticElasticSEM2D, AcousticPotentialSEM2D, AcousticSEM
                        ViscoElasticVSSEM2DDeformed, thomsen_to_tti_cij)
 
 CASES = ("iso_force", "iso_explosion", "hill_explosion", "vti_force", "vti_explosion",
-         "tti30_force", "tti30_explosion", "visco_explosion", "water_pressure", "sea_pressure")
+         "tti30_force", "tti30_explosion", "visco_explosion", "water_pressure", "sea_pressure",
+         "sea_curved_pressure", "layers_curved_explosion")
 ISOTROPIC = {"vs": ElasticVSSEM2DDeformed, "displacement": ElasticSEM2DDeformed,
              "quad4": ElasticSEM2D}
 HALF_STEP = (ElasticVSSEM2DDeformed, ElasticVTISEM2DDeformed, ElasticTTISEM2DDeformed,
@@ -101,8 +105,24 @@ def surface(g, x):
     return g["ztop"] - h["height"] + h["height"] * np.exp(-((x - h["x0"]) / h["sigma"]) ** 2)
 
 
+def interface(g, x, f):
+    """An internal interface, z up, as make_specfem_box_cases.py wrote it."""
+    if f["shape"] == "gauss":
+        return f["z0"] + f["height"] * np.exp(-((x - f["x0"]) / f["sigma"]) ** 2)
+    return f["z0"] + f["height"] * np.sin(2.0 * np.pi * (x - f["x0"]) / f["sigma"])
+
+
+def wet(m):
+    """A layered medium whose top layer is water."""
+    return m["kind"] == "layered" and m["layers"][0].get("vs", 0.0) == 0.0
+
+
 def equations(g, picks):
     m = g["medium"]
+    if wet(m):
+        return [AcousticElasticSEM2D]
+    if m["kind"] == "layered":
+        return [ISOTROPIC[k] for k in (picks or ["vs", "displacement"])]
     if m["kind"] == "ti":
         return [ElasticVTISEM2DDeformed if m["theta_deg"] == 0.0 else ElasticTTISEM2DDeformed]
     if m["kind"] == "acoustic":
@@ -127,6 +147,9 @@ def check_materials(g):
     elif m["kind"] == "visco":
         assert mats == {1: (1, iso(m) + [0.0, 0.0, m["q"], m["q"]])}, mats
         return (m["vp"], m["vs"], m["rho"], m["q"], m["q"])
+    elif m["kind"] == "layered":                 # SPECFEM2D's materials count up from the bottom
+        no_q = [0.0, 0.0, 9999.0, 9999.0]
+        assert mats == {i + 1: (1, iso(lay) + no_q) for i, lay in enumerate(m["layers"][::-1])}
     else:
         theta = math.radians(m["theta_deg"])
         ours = thomsen_to_tti_cij(*(torch.tensor(v, dtype=torch.float64) for v in
@@ -156,6 +179,14 @@ def run_sem(g, eq, device, dtype, n_order=4):
     if m["hill"]:
         kw["topography"] = (g["ztop"] - surface(g, np.arange(nx) * dh)) / dh
     layered = None
+    if m["kind"] == "layered":
+        kw["interfaces"] = [(g["ztop"] - interface(g, np.arange(nx) * dh, f)) / dh
+                            for f in m["interfaces"]]
+        kw["interface_elements"] = m["rows"]
+
+        def layered(prop):
+            return [prop.layered_model([lay.get(k, 0.0) for lay in m["layers"]])
+                    for k in ("vp", "vs", "rho")]
     if m["kind"] == "acoustic":
         kappa = m["rho"] * m["vp"] ** 2
         kw.update(free_surface=ALL_SIDES, receiver_type=["p"])
@@ -166,23 +197,27 @@ def run_sem(g, eq, device, dtype, n_order=4):
         else:
             calls = [(None, w)]
         names = ["PRE"]
-    elif m["kind"] == "coupled":
+    elif m["kind"] == "coupled" or wet(m):
         kw.update(free_surface={"top": True, "left": True, "right": True, "bottom": False},
                   receiver_type=["p", "vx", "vz"])
-        water, rock = m["water"], m["rock"]
+        water = m["water"] if m["kind"] == "coupled" else m["layers"][0]
         calls = [(["chi"], w / (water["rho"] * water["vp"] ** 2))]
         names = ["PRE", "BXX", "BXZ"]
+        if m["kind"] == "coupled":
+            rock = m["rock"]
 
-        def layered(mesh):
-            wet = mesh.z_e.mean((1, 2)) < (g["ztop"] - surface(g, np.zeros(1))[0]) + m["depth"]
-            E, n = mesh.n_elements, mesh.ngll
-            return [torch.where(wet, torch.tensor(water.get(k, 0.0), dtype=dtype),
-                                torch.tensor(rock[k], dtype=dtype)).to(mesh.z_e.device)
-                    .view(E, 1, 1).expand(E, n, n).contiguous() for k in ("vp", "vs", "rho")]
+            def layered(prop):
+                mesh = prop.mesh
+                wet_e = mesh.z_e.mean((1, 2)) < m["depth"]
+                E, n = mesh.n_elements, mesh.ngll
+                return [torch.where(wet_e, torch.tensor(water.get(k, 0.0), dtype=dtype),
+                                    torch.tensor(rock[k], dtype=dtype)).to(mesh.z_e.device)
+                        .view(E, 1, 1).expand(E, n, n).contiguous() for k in ("vp", "vs", "rho")]
         models = None
     else:
         kw["receiver_type"] = ["vx", "vz"]
-        models = [full(v) for v in (ti or (m["vp"], m["vs"], m["rho"]))]
+        models = (None if m["kind"] == "layered"
+                  else [full(v) for v in (ti or (m["vp"], m["vs"], m["rho"]))])
         if m["kind"] == "visco":
             kw["equation_options"] = {"f_ref": m["f_ref"], "n_sls": m["n_sls"],
                                       "f_band": (m["f_ref"] / 10.0, 10.0 * m["f_ref"]),
@@ -201,7 +236,7 @@ def run_sem(g, eq, device, dtype, n_order=4):
     for source_type, wav in calls:
         prop = PropSEM(eq, source_type=source_type, **kw)
         if layered is not None:
-            models = layered(prop.mesh)
+            models = layered(prop)
         with torch.no_grad():
             out = out + prop(torch.from_numpy(wav).to(dtype), src, rec,
                              models=models)[0].double().cpu().numpy()
@@ -232,6 +267,8 @@ def direct_window(g):
     if m["kind"] == "ti":
         _, mat = g["materials"][1]
         v = math.sqrt(max(mat[1], mat[4]) / mat[0])
+    elif m["kind"] == "layered":
+        v = max(lay["vp"] for lay in m["layers"])
     else:
         v = (m["rock"] if m["kind"] == "coupled" else m)["vp"]
     xs, zs = g["src"]
@@ -277,7 +314,7 @@ def main():
                      **{f"ref_{k}": v for k, v in ref.items()})
             # the components each group records: hydrophones the pressure, geophones the velocity
             comps = {True: list(sem), False: list(sem)}
-            if g["medium"]["kind"] == "coupled":
+            if g["medium"]["kind"] == "coupled" or wet(g["medium"]):
                 comps = {True: ["PRE"], False: ["BXX", "BXZ"]}
             print(f"{case}, {eq.__name__} ({args.dtype}): shift-free, scale-free", flush=True)
             allo, allr = [], []

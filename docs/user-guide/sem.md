@@ -74,6 +74,42 @@ next to the finite-difference ones, `sweep show <Equation>` prints one's
 fields, source and receiver types and the `models=` it takes (see
 [CLI](cli.md)), and the API is in the [SEM reference](../api/sem/index.md).
 
+## Curved interfaces
+
+A grid model is interpolated to the GLL nodes, so a material step that does not fall on
+element boundaries is smeared over the elements it crosses. With `interfaces`, the mesh follows
+internal interfaces instead, as SPECFEM2D's internal mesher follows those of its
+`interfaces.dat`.
+
+- **The interfaces.** Each is given like `topography`: its row in every column, `(nx,)`,
+  fractional rows allowed, top-down.
+- **The layers.** The surface (or the topography), the interfaces and the model's last row
+  bound the layers, and each layer gets whole element rows. `interface_elements` sets them,
+  top-down and summing to `(nz - 1) / n_order`; by default the layers share them by their mean
+  thicknesses. In every column of control nodes, a layer's rows are graded linearly between its
+  two interfaces.
+- **The absorbing pads** join the layers next to them, and the interfaces stay flat across the
+  lateral pads.
+
+This is 2-D only, on the Quad9 classes. `element_layer` gives each element's layer, and
+`layered_model(values)` gives a GLL-native model of one value per layer, which steps exactly at
+the interfaces:
+
+```python
+from sweep.sem import AcousticElasticSEM2D, PropSEM
+
+seafloor = (600.0 - 150.0 * np.exp(-((x - 1800.0) / 300.0) ** 2)) / dh   # rows, z down
+solver = PropSEM(AcousticElasticSEM2D, shape=(nz, nx), dh=dh, dt=dt, free_surface=True,
+                 interfaces=[seafloor], interface_elements=[60, 240],
+                 source_type=["chi"], receiver_type=["p", "vx", "vz"])
+models = [solver.layered_model(v)
+          for v in ([1500.0, 3000.0], [0.0, 1500.0], [1020.0, 2400.0])]     # vp, vs, rho
+seis = solver(wavelet, sources, receivers, models=models)
+```
+
+The values may be tensors that require gradients. Against SPECFEM2D's mesh of the same
+interfaces, see [Against SPECFEM2D](#against-specfem2d).
+
 ## Speed and memory on `impl='eager'`
 
 `impl='c'` advances a time step with a few fused CUDA kernels. `impl='eager'`
@@ -917,10 +953,18 @@ porosity jump (porous rock over a more porous sand, `pp_layers`), the two
 codes differ by 2-3% in the waves transmitted below the interface, on 5 m and
 on 2.5 m elements alike, whereas each layer alone agrees to 0.01-0.07%. The FD
 `Biot` on a 1.25 m grid, an independent discretisation of the same open-pore
-conditions, agrees with the SEM to 0.3% there. SPECFEM2D shares the interface
-nodes of the two media, so its relative displacement is continuous in both
-components there, whereas the open-pore conditions constrain only its normal
-component.
+conditions, agrees with the SEM to 0.3% there. The difference is the same at
+normal incidence and at 75° (a line of receivers below the interface), so it
+does not come from SPECFEM2D's continuity of the tangential relative
+displacement, which normal incidence leaves inactive. It comes with the jump in
+porosity and tortuosity alone. A jump in the frame moduli and the permeability,
+with the same porosity, tortuosity and densities on both sides, agrees to
+0.02-0.08%. A jump in porosity and tortuosity alone gives 0.8-1.5%.
+SPECFEM2D eliminates the solid-fluid inertia element by element, with each
+element's own `phi / T` and `rho_f / rho_bar` (its masses
+`rho_bar - phi rho_f / T` and `m - rho_f^2 / rho_bar`), and then assembles. On
+an interface node shared by elements whose ratios differ, that is not the
+assembled system.
 
 `impl='eager'` only. Boundary saving is refused because the viscous
 drag is dissipative everywhere, so the field cannot be stepped back; use
@@ -1392,6 +1436,8 @@ receivers):
 | `ElasticVTISEM2DDeformed`, `ElasticTTISEM2DDeformed` | a VTI shale with a vertical and a 30° axis, a force and an explosion | 1e-13 |
 | `AcousticPotentialSEM2D`, `AcousticSEM2D` | water, a pressure source, the pressure | 1e-12 |
 | `AcousticElasticSEM2D` | 600 m of water over the rock: hydrophones and geophones | 2e-12 |
+| `AcousticElasticSEM2D`, with `interfaces` | the same over a curved sea floor (a 150 m seamount) | 4e-12 |
+| `ElasticVSSEM2DDeformed`, `ElasticSEM2DDeformed`, with `interfaces` | the rock over a stiffer one across a sinusoidal interface | 2e-12 |
 | `ViscoElasticVSSEM2DDeformed` | the rock with Q = 30, SPECFEM2D's conventions | 2e-4 |
 
 Matching the two codes takes these conventions on our side:
@@ -1415,6 +1461,10 @@ The remaining differences are round-off, except for the visco-elastic case:
   locating them in curved elements: our Newton tolerance is about 4e-11 m there, where
   SPECFEM2D locates them to 1e-12 m.
 - **The pressure** is a second difference of the potential, which amplifies round-off.
+- **On the curved interfaces**, two receivers differ by 2e-7 and 4e-6. SPECFEM2D locates
+  them in the element of their closest GLL point, 1% and 0.3% outside it
+  (`|gamma| = 1.010`, `1.003` in its log), and extrapolates that element's basis; ours
+  interpolates in the element that holds the point. The table leaves those two out.
 - **The visco-elastic records** keep the time scheme of the memory variables (see
   [Visco-elastic attenuation](#visco-elastic-attenuation)).
 

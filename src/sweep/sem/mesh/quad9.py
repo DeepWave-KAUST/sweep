@@ -245,6 +245,53 @@ def build_topography_quad9(
                                     dtype=dtype, device=device)
 
 
+def build_layered_quad9(
+    nex: int, x_max: float, z_bottom: float,
+    surfaces: list[Callable[[torch.Tensor], torch.Tensor]], rows: list[int],
+    *,
+    n_order: int = 4,
+    dtype: torch.dtype = torch.float32,
+    device: torch.device | str = "cpu",
+) -> Quad9Mesh:
+    """Build a conforming Quad9 mesh of layers whose element rows follow curved
+    interfaces -- SPECFEM2D's internal mesher (``interfaces.dat``).
+
+    ``surfaces[0]`` is the top (``z_top_fn`` of :func:`build_topography_quad9`)
+    and ``surfaces[1:]`` the internal interfaces, top-down, each mapping a 1-D
+    tensor of x to the depth there (z down); the bottom is flat at
+    ``z_bottom``. Layer ``k`` lies between ``surfaces[k]`` and the next surface
+    (or the bottom) in ``rows[k]`` element rows, its control rows graded
+    linearly in each control column, as SPECFEM2D grades a layer between its
+    two interfaces. The control columns are uniform in x. A single layer is
+    :func:`build_topography_quad9`'s mesh.
+    """
+    if len(rows) != len(surfaces) or any(int(r) < 1 for r in rows):
+        raise ValueError(f"one positive row count per layer: {len(surfaces)} surfaces, "
+                         f"rows {list(rows)}")
+    nc_x = 2 * nex + 1
+    x_axis = torch.linspace(0.0, x_max, nc_x, dtype=dtype, device=device)
+    tops = [torch.as_tensor(f(x_axis), dtype=dtype, device=device) for f in surfaces]
+    tops.append(torch.full_like(x_axis, float(z_bottom)))
+    for k in range(len(rows)):
+        if not bool((tops[k + 1] > tops[k]).all()):
+            raise ValueError(f"layer {k} is not below the surface above it everywhere: the "
+                             "interfaces must not touch or cross")
+    z_rows = []
+    for k, n in enumerate(rows):
+        frac = torch.linspace(0.0, 1.0, 2 * int(n) + 1, dtype=dtype, device=device)
+        z = tops[k][None, :] + frac[:, None] * (tops[k + 1] - tops[k])[None, :]
+        z_rows.append(z if k == 0 else z[1:])          # the shared interface row once
+    z_grid = torch.cat(z_rows, 0)                     # (2 nez + 1, 2 nex + 1)
+    nez = sum(int(n) for n in rows)
+    x_grid = x_axis[None, :].expand_as(z_grid)
+    # control node (i, j) of element (ez, ex) is grid node (2 ez + i, 2 ex + j)
+    iz = 2 * torch.arange(nez, device=device)[:, None] + torch.arange(3, device=device)[None, :]
+    ix = 2 * torch.arange(nex, device=device)[:, None] + torch.arange(3, device=device)[None, :]
+    take = lambda g: g[iz[:, None, :, None], ix[None, :, None, :]]   # (nez, nex, 3, 3)
+    control = torch.stack([take(x_grid), take(z_grid)], -1)
+    return quad9_from_control_nodes(control, n_order=n_order, dtype=dtype, device=device)
+
+
 def boundary_element_edges(mesh: Quad9Mesh) -> BoundaryEdges:
     """Same convention as for Quad4: returns flat element indices on each side."""
     nex, nez = mesh.nex, mesh.nez

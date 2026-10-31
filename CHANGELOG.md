@@ -26,6 +26,16 @@ and this project adheres to
   skill.  The docs page *AI assistants (Agent Skills)* covers the install,
   and `test/test_skill_snippets.py` runs every code block of the skill so
   its examples cannot fall behind the API.
+- **Curved internal interfaces on the 2-D SEM mesh.** `PropSEM(interfaces=[...])` takes
+  internal interfaces like `topography`, one row per column and top-down, and its Quad9 mesh
+  follows them: each layer gets whole element rows (`interface_elements`, by default shared
+  by the layers' mean thicknesses), graded linearly between its two interfaces in every
+  column, as SPECFEM2D's internal mesher grades the layers of its `interfaces.dat`.
+  `element_layer` gives each element's layer and `layered_model(values)` a GLL-native model of
+  one value per layer, which steps at the interfaces instead of being interpolated across
+  them. The mesh is `sweep.sem.build_layered_quad9` (one layer is `build_topography_quad9`'s).
+  Against SPECFEM2D's mesh of the same interfaces (a curved sea floor under water, a
+  sinusoidal interface between two rocks) the records agree to 4e-12.
 - **The 2-D SEM against SPECFEM2D to round-off.** `test/sem/specfem_compare/run_compare_box.py`
   runs the 2-D classes against SPECFEM2D built in double precision on the cases of
   `make_specfem_box_cases.py`: homogeneous media in a box with all four sides free, a Ricker,

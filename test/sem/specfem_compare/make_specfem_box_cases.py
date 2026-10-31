@@ -18,6 +18,12 @@ Cases, a vertical point force (``*_force``) or an explosion (``*_explosion``, Mx
   force in an acoustic element); every edge of a fluid element is pressure-free there;
 * ``sea_pressure``: 600 m of that water over the rock, the pressure source 105 m deep,
   hydrophones 50 m deep and geophones 50 m below the sea floor;
+* ``sea_curved_pressure``: the water over the rock with a curved sea floor (a 150 m seamount,
+  sigma 300 m, on the 600 m deep floor), 60 rows of elements in the water and 240 in the rock,
+  each layer graded linearly between its interfaces as PropSEM's ``interfaces`` mesh is;
+* ``layers_curved_explosion``: the rock over a stiffer one across a sinusoidal interface
+  (1500 m deep, 120 m amplitude, 1500 m wavelength), 150 rows in each, an explosion in the
+  upper one;
 * ``hill_explosion``: the rock under a Gaussian hill (100 m high, sigma 200 m) on the top
   edge, Quad9 elements (``NGNOD = 9``) in 310 rows graded linearly between the flat bottom and
   the hill -- PropSEM's mesh of a 3100 m model with that topography --, the hill given at
@@ -45,6 +51,11 @@ ROCK = dict(kind="isotropic", rho=2400.0, vp=3000.0, vs=1500.0)
 WATER = dict(kind="acoustic", rho=1020.0, vp=1500.0)
 SEA = dict(kind="coupled", water=WATER, rock=ROCK, depth=600.0)
 VISCO = dict(ROCK, kind="visco", q=30.0, n_sls=3, f_ref=F0)
+STIFF = dict(kind="isotropic", rho=2500.0, vp=4000.0, vs=2300.0)
+SEAMOUNT = dict(shape="gauss", z0=L - 600.0, height=150.0, x0=1800.0, sigma=300.0)
+WAVY = dict(shape="sine", z0=L - 1500.0, height=120.0, x0=0.0, sigma=1500.0)
+CURVED_SEA = dict(kind="layered", layers=[WATER, ROCK], interfaces=[SEAMOUNT], rows=[60, 240])
+CURVED_LAYERS = dict(kind="layered", layers=[ROCK, STIFF], interfaces=[WAVY], rows=[150, 150])
 SHALE = dict(kind="ti", rho=2400.0, vp=3000.0, vs=1500.0, epsilon=0.25, delta=0.10)
 HILL = dict(height=100.0, x0=1500.0, sigma=200.0)
 CASES = {"iso_force": (ROCK, "force", None),
@@ -56,7 +67,16 @@ CASES = {"iso_force": (ROCK, "force", None),
          "hill_explosion": (ROCK, "explosion", HILL),
          "visco_explosion": (VISCO, "explosion", None),
          "water_pressure": (WATER, "pressure", None),
-         "sea_pressure": (SEA, "pressure", None)}
+         "sea_pressure": (SEA, "pressure", None),
+         "sea_curved_pressure": (CURVED_SEA, "pressure", None),
+         "layers_curved_explosion": (CURVED_LAYERS, "explosion", None)}
+
+
+def interface(x, f):
+    """An internal interface, z up: a Gaussian bump or a sine on the depth z0."""
+    if f["shape"] == "gauss":
+        return f["z0"] + f["height"] * math.exp(-((x - f["x0"]) / f["sigma"]) ** 2)
+    return f["z0"] + f["height"] * math.sin(2.0 * math.pi * (x - f["x0"]) / f["sigma"])
 
 
 def surface(x, hill):
@@ -121,13 +141,21 @@ for name, (medium, source, hill) in CASES.items():
     elif medium["kind"] == "coupled":            # rows count up from the bottom
         mats = [isotropic(1, medium["rock"]), isotropic(2, medium["water"])]
         regions = [f"1 {n} 1 {nz - nw} 1", f"1 {n} {nz - nw + 1} {nz} 2"]
+    elif medium["kind"] == "layered":            # top-down in the medium, bottom-up here
+        mats = [isotropic(i + 1, m) for i, m in enumerate(medium["layers"][::-1])]
+        regions, lo = [], 1
+        for i, r in enumerate(medium["rows"][::-1]):
+            regions.append(f"1 {n} {lo} {lo + r - 1} {i + 1}")
+            lo += r
+        assert lo - 1 == nz, name
     else:
         c11, c13, c15, c33, c35, c55 = cij_z_down(**medium)
         cij = (c11, c13, -c15, c33, -c35, c55)           # SPECFEM2D's z up
         mats = [f"1 2 {dble(medium['rho'])} " + " ".join(dble(c) for c in cij)
                 + " 0 0 0 0 9999 9999"]
         regions = [f"1 {n} 1 {nz} 1"]
-    par = setp(par0, "NGNOD", 4 if hill is None else 9)
+    curved = hill is not None or medium["kind"] == "layered"
+    par = setp(par0, "NGNOD", 9 if curved else 4)
     par = setp(par, "nbmodels", len(mats))
     par = setp(par, "nbregions", len(regions))
     if source == "pressure":
@@ -147,6 +175,9 @@ for name, (medium, source, hill) in CASES.items():
     zs = ZS if hill is None else (nz - 15 + 0.5) * surface(XS, hill) / nz
     if nw:
         zs = L - 105.0
+    if medium["kind"] == "layered":              # the centre of an element of the top layer
+        h = (L - interface(XS, medium["interfaces"][0])) / medium["rows"][0]
+        zs = L - (11 + 0.5) * h if source == "pressure" else L - (50 + 0.5) * h
     src = src0
     for k, v in (("xs", dble(XS)), ("zs", dble(zs)), ("source_type", 2 if source == "explosion" else 1),
                  ("time_function_type", 1), ("f0", F0), ("tshift", "0.d0"), ("anglesource", "0.d0"),
@@ -163,14 +194,29 @@ for name, (medium, source, hill) in CASES.items():
         line = [(XS + d, L - medium["depth"] - 50.0) for d in range(0, 1001, 125)]
         groups = [["hydrophones 50 m deep", len(ring)],
                   ["geophones 50 m below the sea floor", len(line)]]
+    if medium["kind"] == "layered" and source == "pressure":
+        sea = medium["interfaces"][0]
+        ring = [(XS + d, L - 50.0) for d in range(0, 1001, 125)]
+        line = [(XS + d, interface(XS + d, sea) - 50.0) for d in range(0, 1001, 125)]
+        groups = [["hydrophones 50 m deep", len(ring)],
+                  ["geophones 50 m below the sea floor", len(line)]]
     # the top at every control-node abscissa (half an element apart on Quad9)
     xs_top = [L * i / (2 * n) for i in range(2 * n + 1)] if hill is not None else [0.0, L]
     top = "".join(f" {x:.10f} {surface(x, hill):.10f}\n" for x in xs_top)
+    xs_ctl = [L * i / (2 * n) for i in range(2 * n + 1)]       # every control-node abscissa
     d = out / name / "DATA"
     d.mkdir(parents=True, exist_ok=True)
     (d / "Par_file").write_text(par)
     (d / "SOURCE").write_text(src)
-    if nw:
+    if medium["kind"] == "layered":
+        body = "".join(f"{len(xs_ctl)}\n" + "".join(f" {x:.10f} {interface(x, f):.10f}\n"
+                                                  for x in xs_ctl)
+                       for f in medium["interfaces"][::-1])
+        counts = "".join(f"{r}\n" for r in medium["rows"][::-1])
+        (d / "interfaces.dat").write_text(
+            f"{len(medium['layers']) + 1}\n2\n 0 0\n {L:.0f} 0\n{body}2\n 0 {L:.0f}\n {L:.0f} "
+            f"{L:.0f}\n{counts}")
+    elif nw:
         (d / "interfaces.dat").write_text(
             f"3\n2\n 0 0\n {L:.0f} 0\n2\n 0 {L - medium['depth']:.0f}\n {L:.0f} "
             f"{L - medium['depth']:.0f}\n2\n 0 {L:.0f}\n {L:.0f} {L:.0f}\n{nz - nw}\n{nw}\n")
