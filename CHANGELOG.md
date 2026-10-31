@@ -26,11 +26,113 @@ and this project adheres to
   skill.  The docs page *AI assistants (Agent Skills)* covers the install,
   and `test/test_skill_snippets.py` runs every code block of the skill so
   its examples cannot fall behind the API.
+- **`PropSEM(impl='eager', memory=Ckpt(chunks=K))` checkpoints single shots and
+  per-shot models**, which it used to refuse (`nshots=1`) or loop without
+  (per-shot models): `sweep.sem.ckpt_rollout` keeps one state per `K` steps and
+  rebuilds the tape chunk by chunk in the backward pass, for every equation --
+  Biot included, which has no boundary saving. Peak memory is `nt/K` states plus
+  one chunk's tape. On CUDA each chunk is captured once as a CUDA graph and
+  replayed `nt/K` times, so the time loop does no host work per kernel: with
+  the step compiled, the 2-D equations at 201x401 run 3.5-9x faster forward
+  and 2.7-6.4x forward+backward than the compiled full tape (A100, H100, RTX
+  6000 Ada). A step that cannot be
+  captured (a host sync inside it) runs the same chunks without graphs after one
+  warning; `sweep.sem.ckpt_rollout.USE_CUDA_GRAPHS = False` turns graphs off, and
+  on CPU it is plain checkpointing. First derivatives only (`create_graph=True`
+  raises); an `nt` that `K` does not divide is padded with zero-wavelet steps
+  whose records are dropped. Records equal the full tape's; gradients agree to
+  round-off.
 
 ### Changed
 - The CPU test workflow runs as four parallel jobs (`sem-biot`, `sem`,
   `rest`, `skill`), each with its own executed-test floor, instead of one
   job.
+- **Every new compile of the eager step is announced, on PropTorch and PropSEM.**
+  The line saying that `torch.compile` is compiling used to print once per
+  process, so a later grid size, shot count or first gradient call compiled again
+  in silence -- seconds to minutes that looked like a hang. Now each new compile
+  prints one line on stderr before it starts, naming the step and the size
+  (`for 2 shots on a 201x401 grid`), the dtype when it is not float32, and
+  `(with gradients)` when autograd records the call -- grad mode on and a tensor
+  that requires grad; a forward in grad mode with no model that requires grad
+  compiles no backward and is not called one. Compiles are told apart as Dynamo
+  tells them apart: by the inputs' shape and dtype and, when the call records, by
+  which tensors require grad (the models, and on PropSEM the coefficients the
+  step reads off the equation), so inverting vp alone and then vp and vs is two
+  compiles, two lines. The first line of the process still says how long a
+  compile takes and how to turn compiling off. The check costs ~2 us of Python
+  per compiled step.
+- **`PropSEM(impl='eager')` compiles one graph per rollout with gradients on its
+  full tape and vmapped shot batch, as PropTorch's eager rollouts do.** Dynamo
+  guards on each input's `requires_grad`, and the fields pick it up over the
+  first steps of a rollout that differentiates the models: compiled, each of
+  those steps built a graph of its own, three per rollout. They now run
+  uncompiled until the flags stop changing (`sweep._compile.SettledSteps`, the
+  class PropTorch's eager path already used). On an A100 at 201x401 (nt=1000,
+  fresh compile cache) the first FWI call takes 16 s instead of 24 s (elastic,
+  one shot, or four shots under `Ckpt(chunks=8)`) and 9 s instead of 15 s
+  (acoustic); later calls take as long as before (within 0.7%), and records and
+  gradients agree with the uncompiled step as before (FP32: records 1.5-2.8e-6,
+  gradients 2-5e-7 relative). Single-shot `Ckpt()` and boundary saving are
+  unchanged.
+- **`PropSEM` compiles its eager step by default and takes PropTorch's
+  `eager_options=`.** `PropSEM(..., eager_options=EagerOptions(...))` (or its
+  dict) replaces the call argument `compile_step`, which is gone (passing it
+  raises a `TypeError` that names the replacement): `use_compile` -- default
+  `True`, as on PropTorch -- `compile_mode`, `compile_dynamic`, `compile_backend`
+  and `compile_fullgraph` reach `torch.compile`, behind the FD eager path's guards
+  (no `torch.compile`, torch 2.3's Inductor on CPU, Dynamo's recompile cap, the
+  compile notices). As on PropTorch, `eager_options` with
+  `impl='c'` raises; `store_last_wavefield` and `cpml_strips` have no SEM
+  counterpart and raise when set, and so do the CUDA-graph compile modes
+  (`reduce-overhead`, `max-autotune`) together with `BoundarySaving()` or `Ckpt()`
+  on CUDA, whose rollouts step again from kept states that those graphs overwrite. The low-level `SEMPropagator.forward` takes
+  `compile_options=` (an `EagerOptions`; `None` runs the step as it is) instead of
+  `compile_step`. Compiled, the step is ~3x faster on GPU and CPU, at a one-time
+  compile per grid size (seconds on a GPU, ~40 s on a CPU);
+  `EagerOptions(use_compile=False)` gives the uncompiled step, unchanged.
+- **`PropSEM` takes PropTorch's default memory strategy.** Without `memory=`,
+  `impl='c'` now saves the boundary where its kernels run boundary saving (the
+  five C-PML paths; the full tape elsewhere) and eager checkpoints -- in chunks
+  of 8 steps rather than `Ckpt()`'s 100, since the CUDA-graph rollout rebuilds
+  its graphs per call at a cost that grows with the chunk (2-D elastic, one
+  forward+backward call on an A100: 201x401 with nt=1000, 0.51 / 0.81 s for
+  chunks of 8 / 100 and 1.24 s on the full tape; 801x1601 with nt=500, 1.27 /
+  2.16 s and 1.13 s). Both used to take the full tape. `memory_strategy` reports
+  `'full'` / `'boundary'` / `'ckpt'`, as on PropTorch. The default gives way to
+  the full tape for `return_wavefield=True` and for the CUDA-graph compile modes;
+  `create_graph=True` and a second backward (`retain_graph=True`) need an
+  explicit `memory=Full()`, and say so.
+- **The compiled SEM eager step is faster on GPU: 1.05-1.75x forward,
+  1.07-1.57x forward+backward (H100), most on 3-D and large 2-D** (A100,
+  forward | forward+backward: 1.4x | 1.35x for 2-D elastic at 801x1601, 1.4x |
+  1.2x for 3-D elastic at 49^3). Every GLL reference-derivative contraction now
+  goes through
+  `sweep.sem._assembly.contract`: the einsum it was, except while
+  `torch.compile` traces for CUDA, where it is written as `n` broadcast
+  multiply-adds that Inductor fuses with the gather before it and the pointwise
+  work after it (an einsum lowers to a batched GEMM on `n x n` blocks that
+  nothing fuses with). Uncompiled runs and CPU compiles keep the einsum, which is
+  faster there (unchanged within 3%). At medium 2-D sizes the compiled step is
+  still bound by its per-step host work, which caps the gain there. Records and
+  gradients agree with the uncompiled step to fp32 round-off for every equation
+  family.
+- **The eager elastic C-PML steps can run the C-PML on the absorbing band only.**
+  `ElasticSEM2DDeformed`, `ElasticVSSEM2DDeformed` (and `ElasticVTISEM2DDeformed`)
+  and `ElasticVSSEM3D` (and `ElasticVSSEM3DDeformed`) run the bare operators on
+  the interior elements and the C-PML terms on the band elements, as the CUDA
+  kernels do, and keep their memory fields on the band rows only: new field
+  layouts `band` / `band2`, whose rows are `eq.band_elements` (none without a
+  C-PML). The split costs a second element pipeline per step, so it is on where
+  it pays: by default on meshes with at least 40000 interior elements (801x1601
+  has 80000), compiled or not, and wherever `build(..., band_split=True)` (also
+  through `equation_options`) asks for it. On smaller meshes it costs more than
+  it saves, compiled too, and on the velocity-stress forms even replayed as CUDA
+  graphs. Unsplit, every element is on the band and the step is the full-mesh
+  one. Same arithmetic (fp64: records and gradients agree to 1e-15). 2-D elastic
+  at 801x1601 (A100), forward | forward+backward: uncompiled 2.6x | 2.0x faster,
+  compiled 2.2x | 1.3x on top of the unrolled contractions. A memory field is
+  indexed by band row, not by element id.
 
 ### Removed
 - Stale examples and repo-root leftovers: `examples/FWI/` and
@@ -44,6 +146,22 @@ and this project adheres to
   (replaced by the equation registry), and `gate/sync_to_ibex.sh` /
   `gate/run_reorder_checks.sh`.  Notebook outputs `fwi_ddp.py` and
   `15_wavefield_topography.gif` are no longer tracked.
+
+### Fixed
+- `PropSEM(memory=BoundarySaving(storage_dtype='fp16'))` is refused on both
+  backends. The eager ring stored a plain fp16 cast, which flushes the SEM's
+  small field values to zero: 2-D elastic gradients came out 15% and 2-D
+  acoustic 6% off the full tape (bf16 5e-5, int8 2e-4); `impl='c'` refused it
+  already, under an internal option's name. PropTorch's fp16 ring is
+  block-normalised; the SEM rings take fp32, bf16 and int8.
+- `PropSEM(impl='eager')` compiling its step no longer fails when
+  `torch.compile` cannot build it, e.g. on CPU with g++ older than 10
+  (`InductorError: CppCompileError`, `-std=c++20` rejected). As on the FD eager
+  path, the step runs uncompiled -- single-shot loop, boundary saving and the
+  vmapped multi-shot step alike -- with one `RuntimeWarning` that quotes the
+  compiler's error and names `torch._inductor.config.cpp.cxx` / `$CXX`; later
+  calls skip the attempt. Results are the same; errors of the step itself
+  still propagate.
 
 ## [0.3.6] - 2026-10-29
 

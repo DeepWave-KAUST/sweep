@@ -65,6 +65,7 @@ class ElasticVSSEM3DDeformed(ElasticVSSEM3D):
         rho_e: torch.Tensor,
         *,
         cpml: Optional[SimpleElasticCPML3DProfile] = None,
+        band_split: Optional[bool] = None,
     ) -> "ElasticVSSEM3DDeformed":
         check_element_arrays(mesh, vp_e=vp_e, vs_e=vs_e, rho_e=rho_e)
         device, dtype = vp_e.device, vp_e.dtype
@@ -91,7 +92,13 @@ class ElasticVSSEM3DDeformed(ElasticVSSEM3D):
             _wHx=w_jac, _wHy=w_jac, _wHz=w_jac,
             _inv_half_dx=1.0, _inv_half_dy=1.0, _inv_half_dz=1.0,
             _inv_J=mesh.inv_J, _w_jac=w_jac,
-        )
+        )._with_band_split(band_split)
+
+    def _part_geometry(self, rows):
+        """The divergence geometry on the elements ``rows`` (band split):
+        node ids, inverse Jacobian and weighted |J| per GLL node."""
+        return {"ibool": self.mesh.ibool[rows], "inv_J": self._inv_J[rows],
+                "w_jac": self._w_jac[rows]}
 
     # -- the two geometry-dependent operators, and nothing else ----------- #
     def velocity_gradients(self, vx_g, vy_g, vz_g):
@@ -104,9 +111,11 @@ class ElasticVSSEM3DDeformed(ElasticVSSEM3D):
 
     def assemble_stress_divergence(self, sxx_x, sxy_y, sxz_z,
                                    sxy_x, syy_y, syz_z,
-                                   sxz_x, syz_y, szz_z):
+                                   sxz_x, syz_y, szz_z, part=None):
         like = sxx_x.new_zeros(self.mesh.n_global)
+        g = ({"ibool": self.mesh.ibool, "inv_J": self._inv_J, "w_jac": self._w_jac}
+             if part is None else self._parts[part])
         return stress_divergence3(
-            self._D, self.mesh.ibool, self._inv_J, self._w_jac,
+            self._D, g["ibool"], g["inv_J"], g["w_jac"],
             (sxx_x, sxy_y, sxz_z, sxy_x, syy_y, syz_z, sxz_x, syz_y, szz_z),
             like)

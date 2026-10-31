@@ -208,9 +208,11 @@ def test_what_propsem_cannot_do_is_refused(memory, match):
         _prop(abcn=8, memory=memory)
 
 
-def test_ckpt_on_one_shot_is_refused():
-    with pytest.raises(ValueError, match="multi-shot"):
-        _prop(abcn=8, memory=Ckpt(chunks=30))(_wav(), SRC, REC, models=[_vp()])
+def test_ckpt_chunks_the_single_shot_tape():
+    r0, g0 = _record_and_grad(Full())
+    r1, g1 = _record_and_grad(Ckpt(chunks=30))
+    assert torch.equal(r0, r1)
+    assert float((g1 - g0).norm() / g0.norm()) < 1e-9
 
 
 def test_the_band_knobs_need_boundary_saving():

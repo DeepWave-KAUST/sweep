@@ -43,7 +43,9 @@ import copy
 
 import torch
 
+from .._compile import compile_or_fallback
 from ._assembly import scatter_point_sources
+from .fields import BAND_LAYOUTS
 
 
 # Per-step source assembly shared by the BS forward / reverse / VJP. ``wav`` is
@@ -251,25 +253,24 @@ def cpml_ring_masks(eq, save_idx):
 # --------------------------------------------------------------------------- #
 # Per-rollout reconstruction state (positional).
 # --------------------------------------------------------------------------- #
-# The spellings ``bs_store_dtype`` accepts on the EAGER ring. The C ring has
-# its own table (``prop_c._band_store``) because the two support different
-# sets -- the C kernels ring fp32/bf16/int8, the eager one also fp16 -- but
-# they must FAIL the same way, and they did not: the eager side passed the
-# argument straight to ``torch.zeros``, so "bf16", which the C path accepts,
-# came back as a TypeError from inside the ring allocator instead of a
-# ValueError naming the option.
-_STORE_DTYPES = {"fp32": torch.float32, "bf16": torch.bfloat16,
-                 "fp16": torch.float16, "int8": torch.int8}
+# The spellings ``bs_store_dtype`` accepts on the EAGER ring: the C ring's set
+# (``prop_c._band_store``), fp32/bf16/int8, and they must FAIL the same way --
+# the eager side used to pass the argument straight to ``torch.zeros``, so
+# "bf16", which the C path accepts, came back as a TypeError from inside the ring
+# allocator instead of a ValueError naming the option. fp16 is refused: the ring
+# was a plain fp16 cast, which flushes the SEM's small field values to zero (2-D
+# elastic gradients off by 15% with a unit source), where bf16 keeps fp32's range.
+_STORE_DTYPES = {"fp32": torch.float32, "bf16": torch.bfloat16, "int8": torch.int8}
 
 
 def _store_dtype(store):
     """``bs_store_dtype`` -> a torch dtype, or ``None`` for the compute dtype."""
-    if store is None or isinstance(store, torch.dtype):
+    if store is None or (isinstance(store, torch.dtype) and store is not torch.float16):
         return store
     if store in _STORE_DTYPES:
         return _STORE_DTYPES[store]
     raise ValueError(
-        "bs_store_dtype must be None, a torch dtype, or one of "
+        "bs_store_dtype must be None, a torch dtype other than float16, or one of "
         f"{sorted(_STORE_DTYPES)}; got {store!r}")
 
 
@@ -296,8 +297,8 @@ class SEMReconState:
                  elem_trail=None, field_idx=None, batch=None):
         """``store_dtype`` controls the ring's storage precision (the dominant BS
         memory, ``O(nt · |interface|)``): ``None`` keeps the compute ``dtype``;
-        ``torch.bfloat16`` / ``torch.float16`` halve it (cast on save, up-cast on
-        restore); ``torch.int8`` quarters it via per-(step, field) symmetric
+        ``torch.bfloat16`` halves it (cast on save, up-cast on restore; float16 is
+        refused, see ``_STORE_DTYPES``); ``torch.int8`` quarters it via per-(step, field) symmetric
         quantization (a small fp32 ``scale`` table is kept alongside).
 
         ``field_idx`` maps a field index to ITS ring index (see
@@ -527,7 +528,7 @@ def _bs_setup(eq, recv_idx):
 
 
 def run_boundary_saved(eq, source_spec, wavelet, rec_G, rec_W, dt, nt,
-                       *, compile_step=False, store_dtype=None,
+                       *, compile_options=None, compile_size=None, store_dtype=None,
                        frame_every=None, recv_idx=None):
     """Boundary-saved single-shot rollout for any SEM equation with BS hooks.
 
@@ -553,10 +554,12 @@ def run_boundary_saved(eq, source_spec, wavelet, rec_G, rec_W, dt, nt,
     * ``rec_G`` / ``rec_W`` — receiver gather matrices, sampled on every receiver
       field.
     * ``store_dtype`` — interface-ring storage precision (the dominant BS memory):
-      ``None`` (compute dtype), ``torch.bfloat16`` / ``torch.float16`` (½), or
+      ``None`` (compute dtype), ``torch.bfloat16`` (½), or
       ``torch.int8`` (¼, per-step quantized). bf16 keeps the gradient within
       reconstruction noise; int8 trades a little accuracy for the smallest tape.
-    * ``compile_step`` — wrap ``eq.step`` in :func:`torch.compile`. Because the
+    * ``compile_options`` — an ``EagerOptions`` to wrap ``eq.step`` in
+      :func:`torch.compile` with (``None`` or ``use_compile=False``: run it as it
+      is; ``compile_size`` names the problem size in its compile notice). Because the
       reverse pass (``reverse_step``) and the per-step VJP (``bs_recompute``) both
       call ``self.step``, compiling that one method fuses the forward recompute,
       the reverse reconstruction *and* the adjoint recompute — ~2× faster on GPU
@@ -565,18 +568,26 @@ def run_boundary_saved(eq, source_spec, wavelet, rec_G, rec_W, dt, nt,
       ``ctx`` until backward, so the compiled kernel is still in place then.)
     * returns ``{receiver_field_index: seis (nrec, nt)}``.
     """
-    if compile_step:
+    compiles = compile_options is not None and compile_options.use_compile
+    if compiles:
         eq = copy.copy(eq)                          # isolate the step monkeypatch
-        eq.step = torch.compile(eq.step)
     (specs, grad_idx, recv_idx, n_src,
      device, dtype) = _bs_setup(eq, recv_idx)
+    if compiles:
+        eq.step = compile_or_fallback(eq.step, device, f"the {type(eq).__name__} step",
+                                      compile_options, size=compile_size)
 
     cpml_zero_idx, save_idx = cpml_node_masks(eq)
     elem_fields = list(getattr(eq, "bs_elem_ring_save", ()) or ())
     elem_idx = elem_trail = None
     if elem_fields:
-        elem_idx = cpml_band_elements(eq)
-        elem_trail = tuple(eq.init_state(dt, device, dtype)[elem_fields[0]].shape[1:])
+        state0 = eq.init_state(dt, device, dtype)
+        if all(specs[f].layout in BAND_LAYOUTS for f in elem_fields):
+            # the fields ARE the band rows (sweep.sem.cpml.band): ring them whole
+            elem_idx = torch.arange(state0[elem_fields[0]].shape[0], device=device)
+        else:
+            elem_idx = cpml_band_elements(eq)
+        elem_trail = tuple(state0[elem_fields[0]].shape[1:])
     recon = SEMReconState(nt, eq.bs_ring_save, save_idx, cpml_zero_idx,
                           device, dtype, store_dtype=store_dtype,
                           elem_fields=elem_fields, elem_idx=elem_idx,
@@ -698,8 +709,8 @@ def run_boundary_saved_batched(eq, src_patterns, wavelet, rec_G, rec_W, dt, nt,
       in ``recv_idx`` order.
 
     Bit-identical to looping :func:`run_boundary_saved`; the model gradient sums
-    over shots (the leaves are shared). ``compile_step`` is intentionally not
-    offered here — ``compile(vmap)`` of the BS step is a separate lever.
+    over shots (the leaves are shared). Compiling is intentionally not offered
+    here — ``compile(vmap)`` of the BS step is a separate lever.
     """
     if getattr(eq, "bs_elem_ring_save", None):
         raise NotImplementedError(

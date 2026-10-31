@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import warnings
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import astuple, dataclass
 from typing import Optional, Protocol, runtime_checkable
 
 import numpy as np
@@ -42,8 +42,17 @@ from .mesh.quad9 import Quad9Mesh
 from .mesh.hex8 import Hex8Mesh
 from .mesh.hex27 import Hex27Mesh
 from .basis.quad9 import q2_basis_at, q2_basis_deriv_at
+from .._compile import SettledSteps, compile_or_fallback
 from ._assembly import element_mean, scatter_point_sources
 from .fields import resolve_field_types
+
+
+def _as_eager_options(options):
+    """``None``, an ``EagerOptions`` or its dict -> an ``EagerOptions`` or ``None``."""
+    if options is None:
+        return None
+    from sweep.propagator.options import EagerOptions, options_to_dict
+    return options if isinstance(options, EagerOptions) else EagerOptions(**options_to_dict(options))
 
 
 # --------------------------------------------------------------------------- #
@@ -946,6 +955,8 @@ class SEMPropagator:
     source_payloads: list
     receiver_type: list = None        # field names, in output-component order
     _compiled_step: object = None     # cached torch.compile(eq.step), lazy
+    _compiled_key: object = None      # the compile settings it was built with
+    grid_label: str | None = None     # names the size in compile notices ("a 201x401 grid")
 
     @classmethod
     def build(
@@ -1084,24 +1095,32 @@ class SEMPropagator:
         *,
         record_field_every: int | None = None,
         snapshot_times=None,
-        compile_step: bool = False,
+        compile_options=None,
         memory: str | None = None,
         bs_store_dtype=None,
+        checkpoint_chunk: int | None = None,
     ):
         """Run the time loop.
 
-        ``compile_step=True`` wraps ``eq.step`` in :func:`torch.compile`
-        (cached on the propagator across calls) — the per-timestep tensor
-        graph is fused, which on GPU is ~2× faster than eager for the
-        elastic step. The first call pays a one-time compilation cost. With
-        ``memory='boundary'`` it also fuses the reverse reconstruction and the
-        per-step adjoint recompute (both call ``eq.step``), ~2× on the BS
-        rollout with bit-identical gradients.
+        ``compile_options`` (an ``EagerOptions``, as ``PropSEM(eager_options=...)``
+        hands it down) wraps ``eq.step`` in :func:`torch.compile` with its
+        settings when ``use_compile`` is set (cached on the propagator across
+        calls); ``None`` runs the step as it is. The per-timestep tensor graph
+        is fused, which on GPU is ~3× faster than uncompiled; the first call pays
+        a one-time compilation cost. With ``memory='boundary'`` it also fuses the
+        reverse reconstruction and the per-step adjoint recompute (both call
+        ``eq.step``), ~2× on the BS rollout with bit-identical gradients.
 
         ``memory='boundary'`` runs the backward pass with boundary-saving
         wavefield reconstruction (peak memory ~flat in ``nt``) for any equation
         exposing the BS hooks (acoustic swap2nd / velocity-stress substep).
         Snapshots are unavailable in this mode (the forward state is discarded).
+
+        ``checkpoint_chunk=K`` (``PropSEM(memory=Ckpt(chunks=K))``) keeps one
+        state per ``K`` steps and rebuilds the tape chunk by chunk in the
+        backward pass, any equation, at one extra forward; on CUDA the chunks
+        are replayed as CUDA graphs (:mod:`sweep.sem.ckpt_rollout`). No
+        snapshots in this mode either.
 
         ``source_wavelet`` is ``(nt,)`` — one time function shared by every point
         source — or ``(P, nt)`` for the FD source-encoding mode: ``P = len(self.
@@ -1124,18 +1143,23 @@ class SEMPropagator:
         are exclusive.
         """
         per_source = self._check_wavelet(source_wavelet)
+        compile_options = _as_eager_options(compile_options)
         snap_at = self._snapshot_steps(record_field_every, snapshot_times)
         device, dtype = self._dev_dtype()
         recv = self._recv_components()
         rec_G, rec_W = self._receiver_gather(device, dtype)
         layouts = field_layouts(self.eq, recv)
         source_spec, like = self._source_term(per_source, device, dtype)
-        step_fn = self._step_fn(compile_step)
+        step_fn = self._step_fn(compile_options)
 
+        if checkpoint_chunk:
+            return self._run_checkpointed(
+                source_spec, like, source_wavelet, rec_G, rec_W, recv, layouts,
+                snap_at is not None, memory, compile_options, checkpoint_chunk)
         if memory == "boundary":
             return self._run_boundary_saved(
                 source_spec, source_wavelet, rec_G, rec_W, recv,
-                snap_at is not None, compile_step, bs_store_dtype)
+                snap_at is not None, compile_options, bs_store_dtype)
 
         n_rec = len(self.receivers)
         # an element-local field (Biot's flux, stresses) is gathered from its
@@ -1147,13 +1171,17 @@ class SEMPropagator:
         seis = {i: torch.zeros(n_rec, self.nt, dtype=dtype, device=device)
                 for i in recv}
         snaps = {i: [] for i in recv}
+        # The first steps run uncompiled while the fields pick up requires_grad
+        # (SettledSteps): compiled, each would compile a graph of its own.
+        settled = SettledSteps()
         for n in range(self.nt):
             if per_source:
                 src = scatter_point_sources(*source_spec, source_wavelet[:, n], like)
             else:
                 s_val = source_wavelet[n]
                 src = [p * s_val for p in source_spec]
-            state = step_fn(state, src, self.dt)
+            step = step_fn if settled.compiled(n, state) else self.eq.step
+            state = step(state, src, self.dt)
 
             if n_rec > 0:
                 for i in recv:
@@ -1261,17 +1289,52 @@ class SEMPropagator:
         return (self._build_per_source_patterns(device, dtype),
                 torch.zeros(self.eq.mesh.n_global, dtype=dtype, device=device))
 
-    def _step_fn(self, compile_step):
+    def _step_fn(self, compile_options):
         """``eq.step``, or its ``torch.compile`` wrapper cached on the
-        propagator so the compilation is paid once across calls."""
-        if not compile_step:
+        propagator (per compile settings) so the compilation is paid once
+        across calls. A compiler that cannot build the step (CPU with g++ < 10)
+        warns once and leaves it uncompiled -- see
+        :func:`sweep._compile.compile_or_fallback`."""
+        if compile_options is None or not compile_options.use_compile:
             return self.eq.step
-        if getattr(self, "_compiled_step", None) is None:
-            self._compiled_step = torch.compile(self.eq.step)
+        key = astuple(compile_options)
+        if getattr(self, "_compiled_step", None) is None or self._compiled_key != key:
+            self._compiled_step = compile_or_fallback(
+                self.eq.step, self._dev_dtype()[0],
+                f"the {type(self.eq).__name__} step", compile_options, size=self.grid_label)
+            self._compiled_key = key
         return self._compiled_step
 
+    def _run_checkpointed(self, source_spec, like, wavelet, rec_G, rec_W, recv,
+                          layouts, want_snapshots, memory, compile_options, chunk):
+        """The ``checkpoint_chunk`` route: one state kept per ``chunk`` steps,
+        the tape rebuilt chunk by chunk in backward -- see
+        :mod:`sweep.sem.ckpt_rollout`. ``recv`` IS the output order."""
+        from .ckpt_rollout import run_checkpointed
+        if memory is not None:
+            raise ValueError(f"checkpoint_chunk and memory={memory!r} are exclusive.")
+        if rec_G is None:
+            raise ValueError("checkpoint_chunk needs receivers.")
+        if want_snapshots:
+            raise ValueError(
+                "record_field_every / snapshot_times are not available with "
+                "checkpoint_chunk -- the rollout keeps one state per chunk.")
+        if int(chunk) < 1:
+            raise ValueError(f"checkpoint_chunk must be >= 1; got {chunk!r}.")
+        rec_GI = {i: rec_G if lay == "global" else
+                  receiver_gather(self.eq.mesh, self.receivers, lay)[0].to(rec_G.device)
+                  for i, lay in zip(recv, layouts)}
+        source = source_spec if like is None else (*source_spec, like)
+
+        def step_of(eq):
+            return compile_or_fallback(eq.step, rec_W.device, f"the {type(eq).__name__} step",
+                                       compile_options, size=self.grid_label)
+
+        return run_checkpointed(self.eq, step_of, source, wavelet, rec_GI, rec_W,
+                                recv, self.dt, self.nt, int(chunk))
+
     def _run_boundary_saved(self, source_spec, wavelet, rec_G, rec_W, recv,
-                            want_snapshots, compile_step, store_dtype):
+                            want_snapshots, compile_options, store_dtype):
         """The ``memory='boundary'`` route: peak memory flat in ``nt``, at one
         extra forward per step in the backward. ``recv`` IS the output order,
         so the gather already produces the components in it and nothing is
@@ -1286,5 +1349,6 @@ class SEMPropagator:
                 "reconstructed.")
         seis = run_boundary_saved(
             self.eq, source_spec, wavelet, rec_G, rec_W, self.dt, self.nt,
-            compile_step=compile_step, store_dtype=store_dtype, recv_idx=recv)
+            compile_options=compile_options, compile_size=self.grid_label,
+            store_dtype=store_dtype, recv_idx=recv)
         return torch.stack(seis, -1).transpose(0, 1)

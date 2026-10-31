@@ -253,3 +253,19 @@ def capture_both(prop):
 
     impl.backward_bs_func = bwd_wrapper
     return cap
+
+
+@pytest.fixture(autouse=True)
+def _propsem_test_defaults(monkeypatch):
+    """PropSEM compiles its eager step by default, as PropTorch does. A PropSEM a
+    test builds without ``eager_options=`` runs uncompiled here instead: compiling
+    every propagator of test/sem would take the CPU CI from minutes to hours. The
+    tests of the compiled step pass ``eager_options=EagerOptions(use_compile=True)``
+    themselves, and test_sem_eager_options checks the real default. (A conftest in
+    test/sem would shadow this module for the ``from conftest import ...`` lines.)"""
+    import sweep.sem.prop_base as prop_base
+    from sweep.propagator import EagerOptions, Full
+    monkeypatch.setattr(prop_base, "_DEFAULT_EAGER_OPTIONS", EagerOptions(use_compile=False))
+    # and, as when the SEM tests were written, memory=None is the full tape there
+    # (PropSEM's own default is PropTorch's strategy: test_sem_memory_api checks it)
+    monkeypatch.setattr(prop_base, "_DEFAULT_MEMORY", Full())

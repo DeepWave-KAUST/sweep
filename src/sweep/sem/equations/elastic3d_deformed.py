@@ -51,18 +51,18 @@ from typing import ClassVar
 
 import torch
 
-from .._assembly import assemble_each
+from .._assembly import assemble_each, contract
 from ..fields import DerivedInitState, FieldSpec, check_element_arrays
 from ..mesh.hex27 import Hex27Mesh
 
 
 # reference-derivative + transpose einsums on (E, kz, ky, kx) tensors
-def _dxi(D, f):   return torch.einsum("xX,ezyX->ezyx", D, f)   # ∂/∂ξ (x-axis)
-def _deta(D, f):  return torch.einsum("yY,ezYx->ezyx", D, f)   # ∂/∂η (y-axis)
-def _dgam(D, f):  return torch.einsum("zZ,eZyx->ezyx", D, f)   # ∂/∂γ (z-axis)
-def _DTxi(D, F):  return torch.einsum("Xx,ezyX->ezyx", D, F)
-def _DTeta(D, F): return torch.einsum("Yy,ezYx->ezyx", D, F)
-def _DTgam(D, F): return torch.einsum("Zz,eZyx->ezyx", D, F)
+def _dxi(D, f):   return contract("xX,ezyX->ezyx", D, f)   # ∂/∂ξ (x-axis)
+def _deta(D, f):  return contract("yY,ezYx->ezyx", D, f)   # ∂/∂η (y-axis)
+def _dgam(D, f):  return contract("zZ,eZyx->ezyx", D, f)   # ∂/∂γ (z-axis)
+def _DTxi(D, F):  return contract("Xx,ezyX->ezyx", D, F)
+def _DTeta(D, F): return contract("Yy,ezYx->ezyx", D, F)
+def _DTgam(D, F): return contract("Zz,eZyx->ezyx", D, F)
 
 
 @dataclass

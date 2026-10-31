@@ -33,24 +33,36 @@ class FieldSpec:
     #   "global"    (n_global,)             continuous-Galerkin nodal field
     #   "element"   (E, ngll**dim)          element-local / DG-style
     #   "element2"  (E, ngll**dim, 2)       element-local with a 2-vector per node
+    #   "band", "band2"  the same on the C-PML band elements only, (E_band, ...):
+    #               the rows are ``eq.band_elements`` -- a C-PML memory variable,
+    #               which is identically zero on every other element
     # Until now each equation hand-wrote init_state and the layouts survived only
     # as a comment above the return tuple -- a comment that can drift from the
     # tuple below it without anything noticing.
     layout: str = "global"
 
 
-LAYOUTS = ("global", "element", "element2")
+LAYOUTS = ("global", "element", "element2", "band", "band2")
+BAND_LAYOUTS = ("band", "band2")
 
 
-def zeros_for(spec: FieldSpec, mesh, *, device, dtype):
-    """The zero tensor for one field, from its declared ``layout``."""
+def zeros_for(spec: FieldSpec, mesh, *, device, dtype, n_band=None):
+    """The zero tensor for one field, from its declared ``layout``. A band
+    layout needs ``n_band``, the number of C-PML band elements."""
     if spec.layout == "global":
         return torch.zeros(mesh.n_global, dtype=dtype, device=device)
     dim = 3 if hasattr(mesh, "ney") else 2
-    shape = (mesh.n_elements,) + (mesh.ngll,) * dim
-    if spec.layout == "element":
+    if spec.layout in BAND_LAYOUTS:
+        if n_band is None:
+            raise ValueError(f"field {spec.name!r} lives on the C-PML band; "
+                             f"zeros_for needs n_band")
+        rows = int(n_band)
+    else:
+        rows = mesh.n_elements
+    shape = (rows,) + (mesh.ngll,) * dim
+    if spec.layout in ("element", "band"):
         return torch.zeros(shape, dtype=dtype, device=device)
-    if spec.layout == "element2":
+    if spec.layout in ("element2", "band2"):
         return torch.zeros(shape + (2,), dtype=dtype, device=device)
     raise ValueError(
         f"field {spec.name!r} has unknown layout {spec.layout!r}; "
@@ -63,9 +75,13 @@ def init_state_from_specs(eq, device, dtype) -> tuple:
     Equations that need nothing more than "one zero tensor per declared field"
     -- which is all of them today -- inherit this instead of repeating the
     allocation. The ORDER is ``field_specs`` order, which is already the
-    contract every other part of the package relies on.
+    contract every other part of the package relies on. Band-layout fields take
+    their rows from ``eq.band_elements``; without a C-PML (``None``) they have
+    none.
     """
-    return tuple(zeros_for(s, eq.mesh, device=device, dtype=dtype)
+    band = getattr(eq, "band_elements", None)
+    n_band = 0 if band is None else band.numel()
+    return tuple(zeros_for(s, eq.mesh, device=device, dtype=dtype, n_band=n_band)
                  for s in eq.field_specs)
 
 

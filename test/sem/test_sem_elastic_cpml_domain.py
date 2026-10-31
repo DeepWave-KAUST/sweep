@@ -78,13 +78,14 @@ def test_mixed_domain_freezes_fluid_memory():
                             f_dominant=14.0)
     eq = ElasticSEM2DDeformed.build(m, vp, vs, rho, cpml=cp, domain=dom)
     f = _run(eq, m, src_xz=(400.0, 450.0))                   # source in solid
-    fl = dom.is_acoustic
+    # the memory fields live on the C-PML band rows (band2): fluid flags of those
+    fl = dom.is_acoustic[eq.band_elements]
     # finite + the solid actually moved
     assert all(torch.isfinite(x).all() for x in f)
     assert f[0].abs().max() > 0
     # every element-local CPML memory field is EXACTLY zero on fluid elements
     for k in range(4, 10):
-        r = f[k]                                             # (E, ngll, ngll, 2)
+        r = f[k]                                             # (E_band, ngll, ngll, 2)
         assert bool((r[fl] == 0).all()), f"memory field {k} leaked into fluid"
     # ... and genuinely nonzero somewhere in the solid bands (mask didn't
     # kill the live recursions)

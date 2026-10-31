@@ -112,7 +112,7 @@ from typing import ClassVar, Optional
 
 import torch
 
-from .._assembly import assemble, phys_grads
+from .._assembly import assemble, contract, phys_grads
 from ..coupling import FluidSolidInterface, assert_no_corner_pml_on_interface
 from ..cpml.elastic_vs import SimpleElasticCPMLProfile, build_simple_elastic_cpml
 from ..fields import FieldSpec, check_element_arrays, init_state_from_specs
@@ -477,8 +477,8 @@ class BiotVSSEM2DDeformed:
         w_J, ixx, ixz, iex, iez = self._w_J, self._ixx, self._ixz, self._iex, self._iez
         F_beta = torch.stack([w_J * (X * ixx + Z * ixz) for X, Z in pairs], dim=-1)
         F_alpha = torch.stack([w_J * (X * iex + Z * iez) for X, Z in pairs], dim=-1)
-        R_e = (torch.einsum("db,eadk->eabk", self._D, F_beta)
-               + torch.einsum("ga,egbk->eabk", self._D, F_alpha))
+        R_e = (contract("db,eadk->eabk", self._D, F_beta)
+               + contract("ga,egbk->eabk", self._D, F_alpha))
         like = pairs[0][0].new_zeros(self.mesh.n_global)
         if len(pairs) == 1:
             return assemble(R_e[..., 0], self.mesh.ibool, like)

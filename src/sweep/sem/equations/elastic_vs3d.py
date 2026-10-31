@@ -31,7 +31,8 @@ from typing import ClassVar, Optional
 
 import torch
 
-from .._assembly import assemble_each
+from .._assembly import assemble_each, contract
+from ..cpml.band import active_elements, element_split
 from ..cpml.elastic_vs3d import (SimpleElasticCPML3DProfile,
                                  build_simple_elastic_cpml_3d)
 from ..fields import DerivedInitState, FieldSpec, check_element_arrays
@@ -43,7 +44,8 @@ class ElasticVSSEM3D(DerivedInitState):
     """1st-order velocity-stress elastic SEM on an axis-aligned Hex8 mesh."""
 
     # Positional state layout (see fields.py). 3 v + 6 σ + 9 σ-div memory
-    # + 9 v-grad memory = 27 fields. CPML memory stays zero when cpml is None.
+    # + 9 v-grad memory = 27 fields. The CPML memory lives on the C-PML band
+    # elements only (``band``: zero everywhere else); none when cpml is None.
     field_specs: ClassVar[list] = [
         FieldSpec("v_x", supports_source=True, supports_receiver=True,
                   seis_key="seis_vx", snap_key="snapshots_vx"),
@@ -58,25 +60,25 @@ class ElasticVSSEM3D(DerivedInitState):
         FieldSpec("sigma_xz", internal=True, layout="element"),
         FieldSpec("sigma_yz", internal=True, layout="element"),
         # stress-divergence CPML memory (9)
-        FieldSpec("m_sxx_x", internal=True, boundary_related=True, layout="element"),
-        FieldSpec("m_sxy_y", internal=True, boundary_related=True, layout="element"),
-        FieldSpec("m_sxz_z", internal=True, boundary_related=True, layout="element"),
-        FieldSpec("m_sxy_x", internal=True, boundary_related=True, layout="element"),
-        FieldSpec("m_syy_y", internal=True, boundary_related=True, layout="element"),
-        FieldSpec("m_syz_z", internal=True, boundary_related=True, layout="element"),
-        FieldSpec("m_sxz_x", internal=True, boundary_related=True, layout="element"),
-        FieldSpec("m_syz_y", internal=True, boundary_related=True, layout="element"),
-        FieldSpec("m_szz_z", internal=True, boundary_related=True, layout="element"),
+        FieldSpec("m_sxx_x", internal=True, boundary_related=True, layout="band"),
+        FieldSpec("m_sxy_y", internal=True, boundary_related=True, layout="band"),
+        FieldSpec("m_sxz_z", internal=True, boundary_related=True, layout="band"),
+        FieldSpec("m_sxy_x", internal=True, boundary_related=True, layout="band"),
+        FieldSpec("m_syy_y", internal=True, boundary_related=True, layout="band"),
+        FieldSpec("m_syz_z", internal=True, boundary_related=True, layout="band"),
+        FieldSpec("m_sxz_x", internal=True, boundary_related=True, layout="band"),
+        FieldSpec("m_syz_y", internal=True, boundary_related=True, layout="band"),
+        FieldSpec("m_szz_z", internal=True, boundary_related=True, layout="band"),
         # velocity-gradient CPML memory (9)
-        FieldSpec("m_vx_x", internal=True, boundary_related=True, layout="element"),
-        FieldSpec("m_vy_y", internal=True, boundary_related=True, layout="element"),
-        FieldSpec("m_vz_z", internal=True, boundary_related=True, layout="element"),
-        FieldSpec("m_vy_x", internal=True, boundary_related=True, layout="element"),
-        FieldSpec("m_vx_y", internal=True, boundary_related=True, layout="element"),
-        FieldSpec("m_vz_x", internal=True, boundary_related=True, layout="element"),
-        FieldSpec("m_vx_z", internal=True, boundary_related=True, layout="element"),
-        FieldSpec("m_vz_y", internal=True, boundary_related=True, layout="element"),
-        FieldSpec("m_vy_z", internal=True, boundary_related=True, layout="element"),
+        FieldSpec("m_vx_x", internal=True, boundary_related=True, layout="band"),
+        FieldSpec("m_vy_y", internal=True, boundary_related=True, layout="band"),
+        FieldSpec("m_vz_z", internal=True, boundary_related=True, layout="band"),
+        FieldSpec("m_vy_x", internal=True, boundary_related=True, layout="band"),
+        FieldSpec("m_vx_y", internal=True, boundary_related=True, layout="band"),
+        FieldSpec("m_vz_x", internal=True, boundary_related=True, layout="band"),
+        FieldSpec("m_vx_z", internal=True, boundary_related=True, layout="band"),
+        FieldSpec("m_vz_y", internal=True, boundary_related=True, layout="band"),
+        FieldSpec("m_vy_z", internal=True, boundary_related=True, layout="band"),
     ]
 
     # FD-aligned receiver components: velocity-stress evolves velocities natively: FD-name aliases only.
@@ -108,6 +110,15 @@ class ElasticVSSEM3D(DerivedInitState):
     _inv_half_dy: float
     _inv_half_dz: float
 
+    # The C-PML band split (with a ``cpml``; see sweep.sem.cpml.band): the
+    # elements a C-PML coefficient reaches, ascending -- the rows of the 18 band
+    # memory fields -- and the interior ones; the a/b coefficients on the band,
+    # and each part's divergence geometry (see _part_geometry).
+    band_elements: Optional[torch.Tensor] = None
+    interior_elements: Optional[torch.Tensor] = None
+    _band: Optional[dict] = None
+    _parts: Optional[dict] = None
+
     @classmethod
     def build(
         cls,
@@ -117,7 +128,11 @@ class ElasticVSSEM3D(DerivedInitState):
         rho_e: torch.Tensor,
         *,
         cpml: Optional[SimpleElasticCPML3DProfile] = None,
+        band_split: Optional[bool] = None,
     ) -> "ElasticVSSEM3D":
+        """``band_split`` runs the C-PML terms on the absorbing band elements only
+        (``None``: when the mesh is large enough to pay; see
+        :mod:`sweep.sem.cpml.band`)."""
         check_element_arrays(mesh, vp_e=vp_e, vs_e=vs_e, rho_e=rho_e)
         device, dtype = vp_e.device, vp_e.dtype
         w = mesh.w_ref
@@ -143,7 +158,33 @@ class ElasticVSSEM3D(DerivedInitState):
             _inv_half_dx=2.0 / mesh.dx_e,
             _inv_half_dy=2.0 / mesh.dy_e,
             _inv_half_dz=2.0 / mesh.dz_e,
-        )
+        )._with_band_split(band_split)
+
+    # ------------------------------------------------------------------ #
+    # The C-PML band split (sweep.sem.cpml.band).
+    # ------------------------------------------------------------------ #
+    def _with_band_split(self, split=None):
+        """Set the band split fields from ``self.cpml`` (none without one).
+        Unsplit, the band is every element and ``_parts`` is ``None``."""
+        cp = self.cpml
+        if cp is None:
+            return self
+        names = ("a_x", "b_x", "a_y", "b_y", "a_z", "b_z")
+        band, inner = element_split(active_elements(
+            [(getattr(cp, n), 0.0) for n in names], self.mesh.n_elements), split)
+        self.band_elements, self.interior_elements = band, inner
+        if inner.numel() == 0:
+            self._band = {n: getattr(cp, n) for n in names}
+            self._parts = None
+            return self
+        self._band = {n: getattr(cp, n)[band] for n in names}
+        self._parts = {"band": self._part_geometry(band), "inner": self._part_geometry(inner)}
+        return self
+
+    def _part_geometry(self, rows):
+        """What :meth:`assemble_stress_divergence` needs on the elements ``rows``:
+        their node ids (the weights are per-node constants on this mesh)."""
+        return {"ibool": self.mesh.ibool[rows]}
 
     # ------------------------------------------------------------------ #
     # Strong-form velocity gradients (element-local) — for the σ update.
@@ -158,9 +199,9 @@ class ElasticVSSEM3D(DerivedInitState):
         ib = self.mesh.ibool
         vx_e, vy_e, vz_e = vx_g[ib], vy_g[ib], vz_g[ib]
         dx, dy, dz = self._inv_half_dx, self._inv_half_dy, self._inv_half_dz
-        ex = lambda F: torch.einsum("xX,ezyX->ezyx", D, F)
-        ey = lambda F: torch.einsum("yY,ezYx->ezyx", D, F)
-        ez = lambda F: torch.einsum("zZ,eZyx->ezyx", D, F)
+        ex = lambda F: contract("xX,ezyX->ezyx", D, F)
+        ey = lambda F: contract("yY,ezYx->ezyx", D, F)
+        ez = lambda F: contract("zZ,eZyx->ezyx", D, F)
         return (ex(vx_e) * dx, ey(vy_e) * dy, ez(vz_e) * dz,   # gvx_x, gvy_y, gvz_z
                 ex(vy_e) * dx, ey(vx_e) * dy, ex(vz_e) * dx,   # gvy_x, gvx_y, gvz_x
                 ez(vx_e) * dz, ey(vz_e) * dy, ez(vy_e) * dz)   # gvx_z, gvz_y, gvy_z
@@ -172,23 +213,30 @@ class ElasticVSSEM3D(DerivedInitState):
     # ------------------------------------------------------------------ #
     def assemble_stress_divergence(self, sxx_x, sxy_y, sxz_z,
                                    sxy_x, syy_y, syz_z,
-                                   sxz_x, syz_y, szz_z):
+                                   sxz_x, syz_y, szz_z, part=None):
+        """``part`` (``"band"`` / ``"inner"``): the stresses are on those
+        elements only (the band split), and so is the assembly."""
         D = self._D
-        dtx = lambda F: torch.einsum("Xx,ezyX->ezyx", D, F)
-        dty = lambda F: torch.einsum("Yy,ezYx->ezyx", D, F)
-        dtz = lambda F: torch.einsum("Zz,eZyx->ezyx", D, F)
+        dtx = lambda F: contract("Xx,ezyX->ezyx", D, F)
+        dty = lambda F: contract("Yy,ezYx->ezyx", D, F)
+        dtz = lambda F: contract("Zz,eZyx->ezyx", D, F)
         wHx, wHy, wHz = self._wHx, self._wHy, self._wHz
         R_x = dtx(wHx * sxx_x) + dty(wHy * sxy_y) + dtz(wHz * sxz_z)
         R_y = dtx(wHx * sxy_x) + dty(wHy * syy_y) + dtz(wHz * syz_z)
         R_z = dtx(wHx * sxz_x) + dty(wHy * syz_y) + dtz(wHz * szz_z)
         like = sxx_x.new_zeros(self.mesh.n_global)
-        return assemble_each([R_x, R_y, R_z], self.mesh.ibool, like)
+        ibool = self.mesh.ibool if part is None else self._parts[part]["ibool"]
+        return assemble_each([R_x, R_y, R_z], ibool, like)
 
-    def _stress_increment(self, g, dt):
+    def _stress_increment(self, g, dt, rows=None):
         """``dσ = dt·C:∇v`` (isotropic). ``g`` = the 9-tuple from
-        :meth:`velocity_gradients` (already CPML-stretched by the caller)."""
+        :meth:`velocity_gradients` (already CPML-stretched by the caller), or
+        on the elements ``rows`` only -- the band memories' share, which the
+        step adds to the bare increment (this is linear in ``g``)."""
         gvx_x, gvy_y, gvz_z, gvy_x, gvx_y, gvz_x, gvx_z, gvz_y, gvy_z = g
         l, m, l2 = self._lam, self._mu, self._lam2mu
+        if rows is not None:
+            l, m, l2 = l[rows], m[rows], l2[rows]
         inc_xx = dt * (l2 * gvx_x + l * (gvy_y + gvz_z))
         inc_yy = dt * (l2 * gvy_y + l * (gvx_x + gvz_z))
         inc_zz = dt * (l2 * gvz_z + l * (gvx_x + gvy_y))
@@ -213,49 +261,76 @@ class ElasticVSSEM3D(DerivedInitState):
         b_x, b_y, b_z = src[0], src[1], src[2]
 
         # ----- velocity update from current σ (σ-field CPML) -----
+        # The memories live on the band rows (sweep.sem.cpml.band): the band
+        # elements take the stretched stress, the interior the bare one.
         if use_cpml:
-            ax, bx, ay, by, az, bz = cp.a_x, cp.b_x, cp.a_y, cp.b_y, cp.a_z, cp.b_z
+            cb, eb, ei = self._band, self.band_elements, self.interior_elements
+            split = self._parts is not None
+            pick = (lambda t: t[eb]) if split else (lambda t: t)
+            ax, bx, ay, by, az, bz = (cb[n] for n in ("a_x", "b_x", "a_y", "b_y", "a_z", "b_z"))
             # m = a*m + b*s fused via addcmul (mul + fused-multiply-add = 2 kernels
             # vs 3) — ~1.08x on the full elastic step, the recurrence block alone
             # ~1.25x; memory-bound elementwise dominates the 27-field step.
             ac = torch.addcmul
-            m_sxx_x = ac(ax * m_sxx_x, bx, sxx); sxx_x = sxx + m_sxx_x
-            m_sxy_y = ac(ay * m_sxy_y, by, sxy); sxy_y = sxy + m_sxy_y
-            m_sxz_z = ac(az * m_sxz_z, bz, sxz); sxz_z = sxz + m_sxz_z
-            m_sxy_x = ac(ax * m_sxy_x, bx, sxy); sxy_x = sxy + m_sxy_x
-            m_syy_y = ac(ay * m_syy_y, by, syy); syy_y = syy + m_syy_y
-            m_syz_z = ac(az * m_syz_z, bz, syz); syz_z = syz + m_syz_z
-            m_sxz_x = ac(ax * m_sxz_x, bx, sxz); sxz_x = sxz + m_sxz_x
-            m_syz_y = ac(ay * m_syz_y, by, syz); syz_y = syz + m_syz_y
-            m_szz_z = ac(az * m_szz_z, bz, szz); szz_z = szz + m_szz_z
+            sb = [pick(t) for t in (sxx, syy, szz, sxy, sxz, syz)]
+            sxx_b, syy_b, szz_b, sxy_b, sxz_b, syz_b = sb
+            m_sxx_x = ac(ax * m_sxx_x, bx, sxx_b)
+            m_sxy_y = ac(ay * m_sxy_y, by, sxy_b)
+            m_sxz_z = ac(az * m_sxz_z, bz, sxz_b)
+            m_sxy_x = ac(ax * m_sxy_x, bx, sxy_b)
+            m_syy_y = ac(ay * m_syy_y, by, syy_b)
+            m_syz_z = ac(az * m_syz_z, bz, syz_b)
+            m_sxz_x = ac(ax * m_sxz_x, bx, sxz_b)
+            m_syz_y = ac(ay * m_syz_y, by, syz_b)
+            m_szz_z = ac(az * m_szz_z, bz, szz_b)
+            R_b = self.assemble_stress_divergence(
+                sxx_b + m_sxx_x, sxy_b + m_sxy_y, sxz_b + m_sxz_z,
+                sxy_b + m_sxy_x, syy_b + m_syy_y, syz_b + m_syz_z,
+                sxz_b + m_sxz_x, syz_b + m_syz_y, szz_b + m_szz_z,
+                part="band" if split else None)
+            if split:
+                si = [t[ei] for t in (sxx, syy, szz, sxy, sxz, syz)]
+                sxx_i, syy_i, szz_i, sxy_i, sxz_i, syz_i = si
+                R_i = self.assemble_stress_divergence(
+                    sxx_i, sxy_i, sxz_i, sxy_i, syy_i, syz_i, sxz_i, syz_i, szz_i,
+                    part="inner")
+                R_x, R_y, R_z = (a + b for a, b in zip(R_i, R_b))
+            else:
+                R_x, R_y, R_z = R_b
         else:
-            sxx_x = sxx; sxy_y = sxy; sxz_z = sxz
-            sxy_x = sxy; syy_y = syy; syz_z = syz
-            sxz_x = sxz; syz_y = syz; szz_z = szz
-
-        R_x, R_y, R_z = self.assemble_stress_divergence(
-            sxx_x, sxy_y, sxz_z, sxy_x, syy_y, syz_z, sxz_x, syz_y, szz_z)
+            R_x, R_y, R_z = self.assemble_stress_divergence(
+                sxx, sxy, sxz, sxy, syy, syz, sxz, syz, szz)
         vx = vx + dt * inv_M * (-R_x + b_x)
         vy = vy + dt * inv_M * (-R_y + b_y)
         vz = vz + dt * inv_M * (-R_z + b_z)
 
         # ----- stress update from new v (velocity-gradient CPML) -----
-        gvx_x, gvy_y, gvz_z, gvy_x, gvx_y, gvz_x, gvx_z, gvz_y, gvy_z = \
-            self.velocity_gradients(vx, vy, vz)
+        # Split: the bare increment on every element, plus -- the update being
+        # linear in ∇v -- the memories' share on the band rows. Unsplit: the
+        # stretched gradients everywhere, as before the split.
+        g = self.velocity_gradients(vx, vy, vz)
         if use_cpml:
-            m_vx_x = ac(ax * m_vx_x, bx, gvx_x); gvx_x = gvx_x + m_vx_x
-            m_vy_y = ac(ay * m_vy_y, by, gvy_y); gvy_y = gvy_y + m_vy_y
-            m_vz_z = ac(az * m_vz_z, bz, gvz_z); gvz_z = gvz_z + m_vz_z
-            m_vy_x = ac(ax * m_vy_x, bx, gvy_x); gvy_x = gvy_x + m_vy_x
-            m_vx_y = ac(ay * m_vx_y, by, gvx_y); gvx_y = gvx_y + m_vx_y
-            m_vz_x = ac(ax * m_vz_x, bx, gvz_x); gvz_x = gvz_x + m_vz_x
-            m_vx_z = ac(az * m_vx_z, bz, gvx_z); gvx_z = gvx_z + m_vx_z
-            m_vz_y = ac(ay * m_vz_y, by, gvz_y); gvz_y = gvz_y + m_vz_y
-            m_vy_z = ac(az * m_vy_z, bz, gvy_z); gvy_z = gvy_z + m_vy_z
-        g = (gvx_x, gvy_y, gvz_z, gvy_x, gvx_y, gvz_x, gvx_z, gvz_y, gvy_z)
+            gvx_x, gvy_y, gvz_z, gvy_x, gvx_y, gvz_x, gvx_z, gvz_y, gvy_z = (pick(t) for t in g)
+            m_vx_x = ac(ax * m_vx_x, bx, gvx_x)
+            m_vy_y = ac(ay * m_vy_y, by, gvy_y)
+            m_vz_z = ac(az * m_vz_z, bz, gvz_z)
+            m_vy_x = ac(ax * m_vy_x, bx, gvy_x)
+            m_vx_y = ac(ay * m_vx_y, by, gvx_y)
+            m_vz_x = ac(ax * m_vz_x, bx, gvz_x)
+            m_vx_z = ac(az * m_vx_z, bz, gvx_z)
+            m_vz_y = ac(ay * m_vz_y, by, gvz_y)
+            m_vy_z = ac(az * m_vy_z, bz, gvy_z)
+            mv = (m_vx_x, m_vy_y, m_vz_z, m_vy_x, m_vx_y, m_vz_x, m_vx_z, m_vz_y, m_vy_z)
+            if not split:
+                g = tuple(a + b for a, b in zip(g, mv))
         inc = self._stress_increment(g, dt)
         sxx = sxx + inc[0]; syy = syy + inc[1]; szz = szz + inc[2]
         sxy = sxy + inc[3]; sxz = sxz + inc[4]; syz = syz + inc[5]
+        if use_cpml and split:
+            c = self._stress_increment(mv, dt, rows=eb)
+            sxx = sxx.index_add(0, eb, c[0]); syy = syy.index_add(0, eb, c[1])
+            szz = szz.index_add(0, eb, c[2]); sxy = sxy.index_add(0, eb, c[3])
+            sxz = sxz.index_add(0, eb, c[4]); syz = syz.index_add(0, eb, c[5])
 
         return (vx, vy, vz,
                 sxx, syy, szz, sxy, sxz, syz,
@@ -288,7 +363,7 @@ class ElasticVSSEM3D(DerivedInitState):
         vx = vx - dt * inv_M * (-R_x + b_x)
         vy = vy - dt * inv_M * (-R_y + b_y)
         vz = vz - dt * inv_M * (-R_z + b_z)
-        z = torch.zeros_like(sxx)
+        z = torch.zeros_like(fields[9])            # the band memory layout
         return (vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
                 *(z for _ in range(18)))
 

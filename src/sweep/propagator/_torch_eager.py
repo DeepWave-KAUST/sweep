@@ -1,5 +1,4 @@
 import types
-import sys
 import warnings
 import weakref
 
@@ -7,6 +6,8 @@ import torch
 from torch.utils.checkpoint import checkpoint as ckpt_torch
 
 
+from sweep._compile import (SettledSteps as _SettledSteps, compile_notice,
+                            compiler_failures as _compiler_failures, compiler_hint, failure_reason)
 from sweep.propagator.base import PropBase
 from sweep.propagator.options import EAGER_DEFAULTS
 from sweep.equations._cpml import StripLayout
@@ -19,14 +20,6 @@ from sweep.propagator._torch_eager_custom_grad import _CustomGradientMixin
 
 _DYNAMO_LIMIT_WARNED = False
 _NO_COMPILE_WARNED = False
-# Compiling the step takes seconds to minutes and prints nothing; say so once
-# per process, before the first compiled call, so a long first call does not
-# look like a hang.  stderr, not warnings: notebooks often silence warnings.
-_COMPILE_NOTICE_SHOWN = False
-_COMPILE_NOTICE = (
-    "sweep: compiling the eager time step with torch.compile; the first forward/backward "
-    "pass takes longer (seconds to a few minutes, once per grid size, cached on disk for "
-    "later runs). EagerOptions(use_compile=False) runs uncompiled instead.")
 
 # Compiling inside a checkpointed forward breaks its recompute before torch 2.5
 # (see _rollout_ckpt).
@@ -106,57 +99,6 @@ def _raise_dynamo_recompile_limit(target=32):
     for name in names:
         if getattr(cfg, name) < target:
             setattr(cfg, name, target)
-
-
-def _compiler_failures():
-    """Exception types meaning the compiler failed, as opposed to the code it
-    compiles: a step that is wrong eagerly raises its own error and must keep
-    doing so. The names moved between torch releases, so collect what exists."""
-    found = []
-    for module, name in (("torch._dynamo.exc", "BackendCompilerFailed"),
-                         ("torch._inductor.exc", "InductorError"),
-                         ("torch._inductor.exc", "CppCompileError")):
-        try:
-            found.append(getattr(__import__(module, fromlist=[name]), name))
-        except (ImportError, AttributeError):
-            pass
-    return tuple(found)
-
-
-class _SettledSteps:
-    """Which steps of one rollout take the compiled step.
-
-    Dynamo guards on every input's ``requires_grad``.  In a rollout that
-    differentiates the models those flags change over the first steps: the
-    wavefields start as zeros and pick up ``requires_grad`` as the models
-    reach them.  Each change compiled a graph that then served one step, two
-    of the three graphs a rollout compiled.  So steps run uncompiled until
-    their inputs' flags repeat from one step to the next.  A step's flags
-    follow from the previous step's alone, so they stay put from there, and the
-    first compiled step is the only one that compiles.  Without gradients the
-    flags never change and only step 0 runs uncompiled.
-
-    The answer for a step never changes once given: a checkpoint's recompute
-    replays its steps and has to take the path the forward took.
-    """
-
-    def __init__(self):
-        self.first = None           # the first compiled step
-        self._flags = None
-        self._plain = set()
-
-    def compiled(self, step, wavefield):
-        if self.first is not None:
-            return step >= self.first
-        if step in self._plain:
-            return False
-        flags = tuple(w.requires_grad for w in wavefield)
-        if flags == self._flags:
-            self.first = step
-            return True
-        self._flags = flags
-        self._plain.add(step)
-        return False
 
 
 class _PropTorchEager(
@@ -280,15 +222,21 @@ class _PropTorchEager(
         # C++ graph that gc cannot see, and a dropped propagator would keep its
         # workspace and boundary ring on the device for good.
         owner = weakref.ref(self)
+        # Compiling takes seconds to minutes and prints nothing: every new compile --
+        # a new grid size or shot count (the wavefields' shape), a new set of models
+        # that require grad -- is announced before it starts (sweep._compile). The
+        # models are arguments of the step, and _SettledSteps keeps one set of flags
+        # per rollout, so the notice repeats a line only for a new compile.
+        grid = "x".join(str(n) for n in self._shape_phys)
+        notice = compile_notice(f"the {type(self.equation).__name__} step",
+                                lambda shape: f"{shape[0]} shots on a {grid} grid"
+                                if shape and shape[0] > 1 else f"a {grid} grid")
 
         def step(*args, **kwargs):
-            global _COMPILE_NOTICE_SHOWN
             prop = owner()
             if prop is not None and not prop.use_compile:
                 return fn(*args, **kwargs)
-            if not _COMPILE_NOTICE_SHOWN:
-                _COMPILE_NOTICE_SHOWN = True
-                print(_COMPILE_NOTICE, file=sys.stderr, flush=True)
+            notice(args, kwargs)
             try:
                 return compiled(*args, **kwargs)
             except _compiler_failures() as exc:
@@ -315,14 +263,13 @@ class _PropTorchEager(
     def _disable_compile(self, exc):
         """Run uncompiled from now on, and say so once."""
         self.use_compile = False
-        reason = str(exc).strip().splitlines()
-        reason = reason[0] if reason else type(exc).__name__
+        hint = compiler_hint("cuda" if "cuda" in str(self.dev) else "cpu")
         warnings.warn(
             f"torch.compile could not build the {type(self.equation).__name__} step on "
-            f"{self.dev} ({type(exc).__name__}: {reason[:200]}); running it uncompiled, "
-            "which is slower but gives the same result. On CPU, Inductor needs "
-            "g++ >= 10. Pass eager_options=EagerOptions(use_compile=False) to skip "
-            "the attempt.", RuntimeWarning, stacklevel=3)
+            f"{self.dev} ({type(exc).__name__}: {failure_reason(exc)}); running it uncompiled, "
+            f"which is slower but gives the same result.{hint} Pass "
+            "eager_options=EagerOptions(use_compile=False) to skip the attempt.",
+            RuntimeWarning, stacklevel=3)
 
     def _mark_compile_step_begin(self):
         if self.use_compile and self.dev is not None and "cuda" in str(self.dev):

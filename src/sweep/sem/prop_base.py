@@ -75,6 +75,7 @@ import numbers
 import torch
 import torch.utils.checkpoint
 
+from .._compile import SettledSteps, compile_or_fallback
 from .mesh import MESH_BUILDERS
 from .mesh.hex8 import hex8_layout
 from .cpml.acoustic import build_cpml
@@ -431,27 +432,46 @@ _OPTION_HINTS = {
                       "storage_dtype=...))",
     "bs_store_dtype_elem": " (a constructor option)",
     "checkpoint_chunk": " (the constructor's memory=Ckpt(chunks=...))",
+    "compile_step": " (a constructor option, as on PropTorch: PropSEM(..., "
+                    "eager_options=EagerOptions(use_compile=...)); the step is "
+                    "compiled by default)",
 }
+
+# The chunk of the default memory on impl='eager', Ckpt(chunks=_DEFAULT_CKPT_CHUNK);
+# see PropSEM._default_memory. Measured on an A100, one forward+backward call of
+# 2-D elastic at 201x401, nt=1000: chunks 8 / 32 / 100 take 0.51 / 0.61 / 0.81 s
+# (the full tape 1.24 s); at 801x1601, nt=500: 1.27 / 1.47 / 2.16 s (full 1.13 s).
+_DEFAULT_CKPT_CHUNK = 8
+
+# The memory strategy a PropSEM built without memory= takes in place of
+# _default_memory's; None keeps that. test/conftest.py sets Full(): the suite's
+# memory=None meant the full tape when it was written.
+_DEFAULT_MEMORY = None
+
+# The EagerOptions a PropSEM built without eager_options= runs with; None is
+# EagerOptions()'s defaults, PropTorch's. test/conftest.py sets an uncompiled
+# one: compiling every propagator of the suite would cost CI hours on CPU.
+_DEFAULT_EAGER_OPTIONS = None
 
 # Constructor keywords that were renamed or removed, with what replaces them:
 # a TypeError naming the replacement instead of Python's bare one.
 _CTOR_HINTS = {
     "abcn_elements": "abcn= in grid cells (abcn_elements * n_order)",
+    "use_compile": "eager_options=EagerOptions(use_compile=...), as on PropTorch",
+    "compile_step": "eager_options=EagerOptions(use_compile=...), as on PropTorch",
     "model_padding": "nothing: the absorbing layer is always added outside "
                      "the model, as on PropTorch",
 }
 
 
-def _reject_unsupported(self, kwargs, *, compile_step, adj,
+def _reject_unsupported(self, kwargs, *, adj,
                         return_wavefield, models,
                         snapshot_times=None, snapshot_interval=None):
     """The argument rejections of one ``_forward_fields`` call, IN ORDER.
 
     The order is contract: each raise has (or could have) a test pinning its
-    exception type and message, and two of them fire on the same call --
-    ``impl='c'`` + ``compile_step`` + ``adj=True`` must keep raising the
-    compile_step ``NotImplementedError``, not the adj one. Kept as one
-    straight-line helper for exactly that reason: a dict-driven table would
+    exception type and message, and several can fire on the same call. Kept as
+    one straight-line helper for exactly that reason: a dict-driven table would
     make the winner depend on iteration order.
     """
     if kwargs:
@@ -460,11 +480,6 @@ def _reject_unsupported(self, kwargs, *, compile_step, adj,
             f"PropSEM.forward got unknown option(s): {det}. Every "
             f"supported option is a named parameter -- check the "
             f"signature; a typo here used to be silently ignored.")
-    if self._use_c and compile_step:
-        raise NotImplementedError(
-            "compile_step compiles the eager eq.step; impl='c' runs a "
-            "compiled CUDA loop already and has no step to wrap. It used "
-            "to be accepted and silently ignored.")
     if adj:
         raise NotImplementedError(
             "PropSEM produces gradients via autograd; adj=True is not supported.")
@@ -474,15 +489,15 @@ def _reject_unsupported(self, kwargs, *, compile_step, adj,
                 "return_wavefield needs impl='eager': the CUDA kernels run the "
                 "whole time loop inside one call and keep no intermediate "
                 "state to copy out.")
-        if self._memory == "boundary":
+        # the default strategy gives way: snapshots run the full tape
+        if self._memory == "boundary" and self._memory_explicit:
             raise ValueError(
                 "return_wavefield is not available with memory=BoundarySaving() "
                 "-- the forward state is discarded and reconstructed.")
-        if self._ckpt_chunk:
+        if self._ckpt_chunk and self._memory_explicit:
             raise ValueError(
-                "return_wavefield runs the shots one by one, where Ckpt (a "
-                "knob of the vmapped multi-shot path) would be silently "
-                "ignored.")
+                "return_wavefield is not available with memory=Ckpt() -- the "
+                "checkpointed rollout keeps one state per chunk, not per step.")
     elif snapshot_times is not None or snapshot_interval is not None:
         # PropTorch ignores these without return_wavefield; here they are
         # refused, since a caller who passed them expects snapshots back
@@ -606,9 +621,11 @@ class PropSEM:
     ``free_surface`` takes PropTorch's edge spec (default ``False``) and
     ``topography`` its per-column surface rows; ``memory`` is ``Full()``,
     ``BoundarySaving(storage_dtype=...)`` or ``Ckpt(chunks=...)``; ``impl``
-    ``None`` is ``'auto'``; ``nt`` may be left to the wavelet; ``device`` or
-    ``dev``. The rest is the SEM's own: the equation class and ``n_order``,
-    ``f_dominant`` (the C-PML's frequency), ``density`` (the fixed density of
+    ``None`` is ``'auto'``; ``eager_options`` is an ``EagerOptions`` (or its dict)
+    for ``impl='eager'``, the step compiled unless ``use_compile=False``; ``nt``
+    may be left to the wavelet; ``device`` or ``dev``. The rest is the SEM's
+    own: the equation class and ``n_order``, ``f_dominant`` (the C-PML's
+    frequency), ``density`` (the fixed density of
     :class:`AcousticPotentialSEM2D`), ``bs_band_mode`` and
     ``bs_store_dtype_elem`` (what boundary saving keeps of the C-PML band,
     and at what precision its element histories on ``impl='c'``), and
@@ -631,6 +648,7 @@ class PropSEM:
         memory=None,
         f_dominant: float = 10.0,
         impl=None,
+        eager_options=None,
         device=None,
         dev=None,
         dtype: torch.dtype = torch.float32,
@@ -687,7 +705,9 @@ class PropSEM:
         self.dtype = dtype
 
         self._select_backend(equation, impl, self.dev, density)
+        self.eager_options = self._resolve_eager_options(eager_options)
         self._resolve_memory(memory, bs_store_dtype_elem)
+        self._check_compile_mode()
         if self._use_c:
             # from the ORDER, not from the mesh: PropSEM.mesh is lazy on
             # purpose (the DD ranks must never materialise the global one --
@@ -704,11 +724,17 @@ class PropSEM:
         read: ``_memory`` (``None`` or ``'boundary'``), ``_bs_store`` (the
         ring's storage dtype; ``None`` keeps the compute precision) and
         ``_ckpt_chunk`` (steps per checkpointed chunk). What PropSEM cannot
-        do is refused, never dropped."""
+        do is refused, never dropped. ``memory=None`` takes PropTorch's default
+        strategy (see ``_default_memory``); ``memory_strategy`` names the one
+        in force, as on PropTorch."""
         from sweep.propagator.options import (BoundarySaving, Ckpt, Full,
                                               as_memory_strategy)
         m = as_memory_strategy(memory)
-        self.memory = Full() if m is None else m
+        self._memory_explicit = m is not None
+        self.memory = m if m is not None else self._default_memory()
+        m = self.memory
+        self.memory_strategy = ("boundary" if isinstance(m, BoundarySaving) else
+                                "ckpt" if isinstance(m, Ckpt) else "full")
         self._memory = self._bs_store = self._ckpt_chunk = None
         refusal = getattr(self.equation, "bs_refusal", None)
         if isinstance(m, BoundarySaving) and refusal:
@@ -725,6 +751,11 @@ class PropSEM:
                     f"PropSEM's boundary saving keeps its ring on the device "
                     f"and takes storage_dtype only; BoundarySaving("
                     f"{', '.join(b + '=...' for b in bad)}) is not supported.")
+            if m.storage_dtype == "fp16":
+                raise NotImplementedError(
+                    "PropSEM's boundary rings take storage_dtype 'fp32', 'bf16' or "
+                    "'int8'; fp16 is not supported (a plain fp16 cast flushes the "
+                    "SEM's small field values to zero; bf16 has fp32's range).")
             self._memory = "boundary"
             # 'fp32', the default, is "no compression": the compute dtype
             self._bs_store = None if m.storage_dtype == "fp32" else m.storage_dtype
@@ -752,6 +783,26 @@ class PropSEM:
                     "histories impl='c' boundary saving keeps; it needs "
                     "impl='c' and memory=BoundarySaving().")
         self._bs_store_elem = bs_store_dtype_elem
+
+    def _default_memory(self):
+        """PropTorch's default strategy: boundary saving on ``impl='c'`` where its
+        kernels run it (else the full tape), checkpointing on eager -- in chunks of
+        ``_DEFAULT_CKPT_CHUNK`` steps, which the CUDA-graph rollout runs faster
+        than ``Ckpt()``'s 100 (it rebuilds its graphs per call, at a cost that
+        grows with the chunk). A CUDA-graph compile mode on CUDA takes the full
+        tape, the one memory mode it works with (``_check_compile_mode``)."""
+        from sweep.propagator.options import BoundarySaving, Ckpt, Full
+        if _DEFAULT_MEMORY is not None:
+            return dataclasses.replace(_DEFAULT_MEMORY)
+        if self._use_c:
+            from .prop_c import c_boundary_saving_supported
+            return (BoundarySaving() if c_boundary_saving_supported(
+                self.equation, self.abcn_elements > 0) else Full())
+        if (self.eager_options.use_compile
+                and self.eager_options.compile_mode in ("reduce-overhead", "max-autotune")
+                and torch.device(self.dev).type == "cuda"):
+            return Full()
+        return Ckpt(chunks=_DEFAULT_CKPT_CHUNK)
 
     def _resolve_equation(self, equation, shape, abcn_elements, source_type, receiver_type,
                           equation_options=None):
@@ -866,6 +917,57 @@ class PropSEM:
         # record from (the BASE fields behind a derived p / vx), in that order
         self.snapshot_fields = list(self._recv_base)
         self.snapshot_times_last = ()
+
+    def _resolve_eager_options(self, eager_options):
+        """``eager_options`` as on PropTorch: an ``EagerOptions`` or its dict, for
+        ``impl='eager'`` only; ``None`` takes its defaults, so the step is compiled.
+        The PropTorch options the SEM step has no counterpart for are refused when
+        they differ from their defaults."""
+        from sweep.propagator.options import EAGER_DEFAULTS, EagerOptions, options_to_dict
+        if eager_options is None:
+            base = _DEFAULT_EAGER_OPTIONS or EagerOptions()
+            return dataclasses.replace(base)
+        if self._use_c:
+            raise ValueError(
+                "eager_options can only be used with impl='eager'; this PropSEM runs "
+                "impl='c' (pass impl='eager' to run the eager step).")
+        opts = EagerOptions(**options_to_dict(eager_options))
+        if opts.store_last_wavefield != EAGER_DEFAULTS.store_last_wavefield:
+            raise NotImplementedError(
+                "EagerOptions(store_last_wavefield=...) is PropTorch's; PropSEM returns "
+                "wavefields through return_wavefield=True and snapshot_times=.")
+        if opts.cpml_strips != EAGER_DEFAULTS.cpml_strips:
+            raise NotImplementedError(
+                "EagerOptions(cpml_strips=...) is PropTorch's strip layout; the SEM's "
+                "C-PML runs on the band elements by mesh size, and "
+                "equation_options={'band_split': True | False} chooses it.")
+        return opts
+
+    def _check_compile_mode(self):
+        """The CUDA-graph compile modes replay the compiled step with its outputs
+        in buffers the next replay reuses. Boundary saving and Ckpt step again
+        from states they keep, which those replays overwrite (torch: "accessing
+        tensor output of CUDAGraphs that has been overwritten"), so the two are
+        refused together here instead."""
+        mode = self.eager_options.compile_mode
+        if (self._use_c or not self.eager_options.use_compile
+                or mode not in ("reduce-overhead", "max-autotune")
+                or torch.device(self.dev).type != "cuda"):
+            return
+        if self._memory == "boundary" or self._ckpt_chunk:
+            what = "BoundarySaving()" if self._memory == "boundary" else "Ckpt()"
+            raise ValueError(
+                f"EagerOptions(compile_mode={mode!r}) replays the compiled step as CUDA "
+                f"graphs that reuse their output buffers, which memory={what} needs "
+                "kept: use compile_mode='default' or 'max-autotune-no-cudagraphs' "
+                "(memory=Ckpt() replays its chunks as CUDA graphs itself), or "
+                "memory=Full().")
+
+    def _compile_options(self):
+        """The ``EagerOptions`` the eager step is compiled with, or ``None``."""
+        if self._use_c or not self.eager_options.use_compile:
+            return None
+        return self.eager_options
 
     def _select_backend(self, equation, impl, dev, density):
         """impl=None / 'auto' / 'eager' / 'c', as on PropTorch: the CUDA
@@ -1221,7 +1323,10 @@ class PropSEM:
         # for them, so the builder branches are only reached where they exist.
         import inspect as _inspect
         kw = {}
-        if "dirichlet" in _inspect.signature(self.equation.build).parameters:
+        params = _inspect.signature(self.equation.build).parameters
+        if self._use_c and "band_split" in params and "band_split" not in self._eq_options:
+            kw["band_split"] = False      # the CUDA kernels split on their own; the eager one is unused
+        if "dirichlet" in params:
             # the fluid-solid form carries a pressure-release surface on its
             # FLUID side; route the same free_surface the acoustic branch uses
             kw["dirichlet"] = self.free_surface
@@ -1386,7 +1491,7 @@ class PropSEM:
 
     def _forward_fields(self, wavelet, sources, receivers, models=None,
                         adj=False, return_wavefield=False,
-                        compile_step=False, source_vector=None,
+                        source_vector=None,
                         pml_guard="warn", snapshot_times=None,
                         snapshot_interval=None, **kwargs):
         """``return_wavefield=True`` (eager only) returns ``(seis, snapshots)``
@@ -1406,7 +1511,8 @@ class PropSEM:
         gradient exact in the lossless interior. ``Full()`` keeps the full
         autograd tape; ``Ckpt(chunks=k)`` checkpoints it in ``k``-step chunks.
 
-        ``compile_step=True`` ``torch.compile``\\ s the per-step graph.
+        The eager step is compiled as the constructor's ``eager_options`` say: by
+        default it is (``EagerOptions(use_compile=False)`` runs it as it is).
 
         ``models`` is ``[vp]`` for acoustic and ``[vp, vs, rho]`` for elastic.
         ``source_vector`` (elastic only) is the body-force direction; default is
@@ -1442,7 +1548,7 @@ class PropSEM:
                                      or ``_run_batched``
         ===========================  ==================================
         """
-        _reject_unsupported(self, kwargs, compile_step=compile_step, adj=adj,
+        _reject_unsupported(self, kwargs, adj=adj,
                             return_wavefield=return_wavefield, models=models,
                             snapshot_times=snapshot_times,
                             snapshot_interval=snapshot_interval)
@@ -1477,12 +1583,13 @@ class PropSEM:
         # stays AHEAD of the runner choice -- a source in the absorbing band
         # must be reported before a checkpoint/nshots quarrel is.
         props = self._build_props(eq, pershot_eqs, acq, pml_guard)
+        compile_options = self._compile_options()
         if snap_steps is not None:
             return self._forward_snapshots(props, acq, snap_steps,
-                                           compile_step=compile_step)
+                                           compile_options=compile_options)
         return self._forward_eager(eq, pershot_eqs, props, acq,
                                    memory=self._memory,
-                                   compile_step=compile_step,
+                                   compile_options=compile_options,
                                    checkpoint_chunk=self._ckpt_chunk,
                                    store_dtype=self._bs_store)
 
@@ -1544,9 +1651,14 @@ class PropSEM:
                 receiver_xz=self._rec_row(acq.receivers, b),
                 receiver_type=self._recv_base,
                 pml_guard=pml_guard, **extra))
+            props[-1].grid_label = self._grid_label()
         return props
 
-    def _forward_snapshots(self, props, acq, steps, *, compile_step=False):
+    def _grid_label(self):
+        """How compile notices name this problem's size: the model grid."""
+        return "a " + "x".join(str(n) for n in self.shape) + " grid"
+
+    def _forward_snapshots(self, props, acq, steps, *, compile_options=None):
         """``return_wavefield=True``: each shot's full-tape forward with its
         snapshots -> ``(seis, snaps)``, seis as ``_forward_eager`` returns it
         and snaps ``(nsnap, nfield, nshots, 1, *grid)`` on the host.
@@ -1559,7 +1671,7 @@ class PropSEM:
         seis, snaps = [], []
         for b in range(acq.nshots):
             s, w = props[b].forward(acq.wav_per_shot[b],
-                                    compile_step=bool(compile_step),
+                                    compile_options=compile_options,
                                     snapshot_times=steps)
             seis.append(s)
             w = w.detach().cpu()                # (nsnap, nfield, n_global)
@@ -1661,7 +1773,7 @@ class PropSEM:
     # The one eager entry: built props + mode -> seismogram
     # ------------------------------------------------------------------ #
     def _forward_eager(self, eq, pershot_eqs, props, acq, *, memory=None,
-                       compile_step=False, checkpoint_chunk=None,
+                       compile_options=None, checkpoint_chunk=None,
                        store_dtype=None):
         """Run the built props under one memory mode -> ``(nshots, nt, nrec,
         ncomp)``. Reads like ``prop_c.sem_c_forward_shot_batch``: the props carry
@@ -1676,18 +1788,21 @@ class PropSEM:
                                     vmapped rollout closure-captures ONE
                                     equation's coefficients)
                                     shared model, nshots>1 -> ``_forward_bs_batched``
-        memory=None/'full'          single shot -> ``props[0].forward`` (no vmap
+        memory=None/'full'/Ckpt     single shot -> ``props[0].forward`` (no vmap
                                     overhead)
                                     per-shot models -> that, looped
                                     shared model, nshots>1 -> ``_run_batched``
-                                    (vmapped; ``checkpoint_chunk`` chunks its tape)
+                                    (vmapped)
         ==========================  ================================================
 
-        ``checkpoint_chunk`` reaches exactly one of them, so the other two
-        full-tape branches REJECT it rather than accept and drop it. The two
-        rejections keep their historical (and differing) exception types.
+        ``checkpoint_chunk`` (``Ckpt(chunks=...)``) reaches all three full-tape
+        branches: ``props[b].forward`` runs the checkpointed rollout of
+        :mod:`sweep.sem.ckpt_rollout` (CUDA graphs on CUDA), ``_run_batched``
+        checkpoints its vmapped chunks with ``torch.utils.checkpoint``.
+        ``compile_options`` (the ``EagerOptions`` to compile with, or ``None``)
+        reaches every runner but the vmapped boundary-saving batch, whose
+        reverse march runs uncompiled.
         """
-        compile_step = bool(compile_step)
         recv_idxs = self._recv_idxs(eq)
         nshots = acq.nshots
 
@@ -1695,43 +1810,33 @@ class PropSEM:
             if nshots == 1:                          # single shot: no vmap overhead
                 return self._forward_bs_single(
                     eq, props[0], acq.wav_per_shot[0], recv_idxs,
-                    compile_step=compile_step, store_dtype=store_dtype).unsqueeze(0)
+                    compile_options=compile_options, store_dtype=store_dtype).unsqueeze(0)
             if pershot_eqs is not None:
                 # per-shot models: the vmapped rollout closure-captures ONE
                 # equation's coefficients, so batch by looping instead.
                 return torch.stack([self._forward_bs_single(
                     pershot_eqs[b], props[b], acq.wav_per_shot[b], recv_idxs,
-                    compile_step=compile_step,
+                    compile_options=compile_options,
                     store_dtype=store_dtype) for b in range(nshots)], 0)
             return self._forward_bs_batched(eq, props, acq, recv_idxs,
                                             store_dtype=store_dtype)
 
         if nshots == 1:                              # single shot: no vmap overhead
-            if checkpoint_chunk:
-                # It only reaches _run_batched, which this branch never calls,
-                # so it used to be accepted and dropped. Say so rather than let
-                # a caller believe the tape is being chunked.
-                raise ValueError(
-                    "Ckpt only applies to the multi-shot (vmapped) path; this "
-                    "call has nshots=1, where it would be a no-op. Use "
-                    "memory=BoundarySaving() to bound single-shot memory.")
-            # (nt, nrec, ncomp) from the low level -> (1, nt, nrec, ncomp)
-            return props[0].forward(acq.wav_per_shot[0],
-                                    compile_step=compile_step).unsqueeze(0)
+            # (nt, nrec, ncomp) from the low level -> (1, nt, nrec, ncomp);
+            # Ckpt runs the checkpointed rollout (sweep.sem.ckpt_rollout)
+            return props[0].forward(acq.wav_per_shot[0], compile_options=compile_options,
+                                    checkpoint_chunk=checkpoint_chunk).unsqueeze(0)
         if pershot_eqs is not None:
             # per-shot models: vmap's mapped-step closure captures ONE
             # equation's coefficient tensors, so run the shots as a loop. A
             # broadcast (shared) model still reaches the vmapped path below.
-            if checkpoint_chunk:
-                raise NotImplementedError(
-                    "Ckpt applies to the vmapped shared-model path; per-shot "
-                    "models run as a loop, where it would be silently ignored.")
             return torch.stack([props[b].forward(acq.wav_per_shot[b],
-                                                 compile_step=compile_step)
+                                                 compile_options=compile_options,
+                                                 checkpoint_chunk=checkpoint_chunk)
                                 for b in range(nshots)], 0)
         return self._run_batched(eq, props, acq.wav_per_shot, recv_idxs,
                                  chunk_size=checkpoint_chunk,
-                                 compile_step=compile_step)
+                                 compile_options=compile_options)
 
     # ------------------------------------------------------------------ #
     # The receiver gather, in ONE place: it was written out verbatim in
@@ -1758,7 +1863,7 @@ class PropSEM:
     # The four eager runners
     # ------------------------------------------------------------------ #
     def _forward_bs_single(self, eq, prop, wav, recv_idxs, *,
-                           compile_step=False, store_dtype=None):
+                           compile_options=None, store_dtype=None):
         """Single-shot boundary-saved rollout -> ``(nt, nrec, ncomp)``."""
         from .boundary_saving import run_boundary_saved
         mesh = eq.mesh
@@ -1769,7 +1874,8 @@ class PropSEM:
                                                       self.dtype)
         rec_G, rec_W = self._on_dev(*self._gather_rows(mesh, prop))
         out = run_boundary_saved(eq, source_spec, wav, rec_G, rec_W,
-                                 self.dt, self.nt, compile_step=compile_step,
+                                 self.dt, self.nt, compile_options=compile_options,
+                                 compile_size=self._grid_label(),
                                  store_dtype=store_dtype, recv_idx=recv_idxs)
         return torch.stack(out, -1).transpose(0, 1)
 
@@ -1780,10 +1886,9 @@ class PropSEM:
         closure captures one equation's coefficients (the per-shot-model case
         loops :func:`_forward_bs_single` instead).
 
-        ``compile_step`` is deliberately absent: ``run_boundary_saved_batched``
-        does not take it (compile(vmap) of the BS step is a separate lever), and
-        accepting it here would be the silent no-op the option guards exist to
-        stop.
+        It runs uncompiled whatever ``eager_options`` say:
+        ``run_boundary_saved_batched`` has no compiled form (compile(vmap) of the
+        BS step is a separate lever).
         """
         from .boundary_saving import run_boundary_saved_batched
         mesh = eq.mesh
@@ -1800,7 +1905,7 @@ class PropSEM:
 
 
     def _run_batched(self, eq, props, wav_per_shot, recv_idxs, *,
-                     chunk_size=None, compile_step=False):
+                     chunk_size=None, compile_options=None):
         """vmap-batched multi-shot time loop — runs all shots in parallel.
 
         ``torch.vmap`` vectorises the *single-shot* ``eq.step`` over the shot
@@ -1808,7 +1913,7 @@ class PropSEM:
         (``in_dims=0``) and the constant coefficients are closure-captured.
         Bit-for-bit identical to the per-shot loop; autograd flows to the model.
 
-        ``compile_step=True`` wraps the vmapped step in :func:`torch.compile`.
+        ``compile_options`` (an ``EagerOptions``) compiles the vmapped step.
         """
         dev, dtype, dt, nt = self.dev, self.dtype, self.dt, self.nt
         B = len(props)
@@ -1828,10 +1933,15 @@ class PropSEM:
 
         st0 = eq.init_state(dt, dev, dtype)                      # tuple
         dyn = tuple(f.unsqueeze(0).repeat(B, *([1] * f.dim())) for f in st0)
-        vstep = torch.vmap(lambda fields, src: eq.step(fields, src, dt),
-                           in_dims=(0, 0))
-        if compile_step:
-            vstep = torch.compile(vstep)
+        vstep_plain = torch.vmap(lambda fields, src: eq.step(fields, src, dt),
+                                 in_dims=(0, 0))
+        vstep = compile_or_fallback(vstep_plain, dev, f"the vmapped {type(eq).__name__} step",
+                                    compile_options, size=f"{B} shots on {self._grid_label()}",
+                                    captured=eq)
+        # The first steps run uncompiled while the fields pick up requires_grad,
+        # and a checkpointed chunk's recompute takes the path its forward took
+        # (SettledSteps, keyed on the step index).
+        settled = SettledSteps()
 
         ar = torch.arange(B, device=dev)[:, None, None]
 
@@ -1841,7 +1951,7 @@ class PropSEM:
             for j in range(k):
                 sval = wav_B[:, n0 + j]
                 src = [pat * sval[:, None] for pat in patterns]
-                d = vstep(d, src)
+                d = (vstep if settled.compiled(n0 + j, d) else vstep_plain)(d, src)
                 comps = [(d[ri].reshape(B, -1)[ar, rec_GI[ri]] * rec_W).sum(-1)
                          for ri in recv_idxs]
                 chunk.append(torch.stack(comps, -1))           # (B, nrec, ncomp)

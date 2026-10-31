@@ -15,6 +15,55 @@ from __future__ import annotations
 
 import torch
 
+from .._compile import is_compiling
+
+
+def contract(spec: str, D: torch.Tensor, F: torch.Tensor) -> torch.Tensor:
+    """``torch.einsum(spec, D, F)`` for a GLL reference-derivative contraction.
+
+    ``D`` is the ``(n, n)`` derivative matrix and ``spec`` contracts one of its
+    indices with one axis of ``F``, putting the other one at that axis
+    (``"bg,eag->eab"`` is d/dxi, ``"db,ead->eab"`` its transpose). Uncompiled, and
+    compiled for the CPU, this is the einsum. While torch.compile traces it for a
+    GPU it is written as ``n`` broadcast multiply-adds instead: Inductor lowers the
+    einsum to a batched GEMM on ``n x n`` blocks that nothing fuses with, while the
+    sum fuses with the gather before it and the pointwise work after it -- the
+    compiled step runs 1.05-1.75x faster forward and 1.07-1.57x forward+backward
+    (H100; most on 3-D and large 2-D meshes). Uncompiled the sum is slower (``n``
+    kernels instead of one), and so it is compiled for the CPU.
+    """
+    if F.is_cuda and is_compiling():
+        out = _contract_unrolled(spec, D, F)
+        if out is not None:
+            return out
+    return torch.einsum(spec, D, F)
+
+
+def _contract_unrolled(spec, D, F):
+    """:func:`contract` as ``n`` multiply-adds, or ``None`` if ``spec`` is not one."""
+    ins, _, out = spec.replace(" ", "").partition("->")
+    a, _, b = ins.partition(",")
+    if (len(a) != 2 or a[0] == a[1] or len(b) != F.dim() or len(out) != len(b)
+            or len(set(b)) != len(b)):
+        return None
+    shared = [ch for ch in a if ch in b]
+    if len(shared) != 1:
+        return None
+    c = shared[0]
+    f = a[1] if a[0] == c else a[0]
+    p = b.index(c)
+    n = D.shape[0]
+    if f in b or out != b[:p] + f + b[p + 1:] or tuple(D.shape) != (n, n) or F.shape[p] != n:
+        return None
+    shape = [1] * F.dim()
+    shape[p] = n
+    acc = None
+    for k in range(n):
+        row = D[:, k] if a[1] == c else D[k, :]          # runs over the free index
+        t = F.narrow(p, k, 1) * row.reshape(shape)
+        acc = t if acc is None else acc + t
+    return acc
+
 
 def assemble(r_e: torch.Tensor, ibool: torch.Tensor, like: torch.Tensor):
     """Assemble element-local ``r_e`` to global nodes.
@@ -106,12 +155,12 @@ def phys_grads(D, ibool, ixx, ixz, iex, iez, *fields):
     """
     if len(fields) == 1:
         f_e = fields[0][ibool]
-        d_dxi  = torch.einsum("bg,eag->eab", D, f_e)
-        d_deta = torch.einsum("ag,egb->eab", D, f_e)
+        d_dxi  = contract("bg,eag->eab", D, f_e)
+        d_deta = contract("ag,egb->eab", D, f_e)
         return [ixx * d_dxi + iex * d_deta, ixz * d_dxi + iez * d_deta]
     f_e = torch.stack(fields, dim=-1)[ibool]                  # (E,ngll,ngll,K)
-    d_dxi  = torch.einsum("bg,eagk->eabk", D, f_e)
-    d_deta = torch.einsum("ag,egbk->eabk", D, f_e)
+    d_dxi  = contract("bg,eagk->eabk", D, f_e)
+    d_deta = contract("ag,egbk->eabk", D, f_e)
     d_dx = ixx.unsqueeze(-1) * d_dxi + iex.unsqueeze(-1) * d_deta
     d_dz = ixz.unsqueeze(-1) * d_dxi + iez.unsqueeze(-1) * d_deta
     out = []
@@ -132,9 +181,9 @@ def phys_grads3(D, ibool, inv_J, *fields):
     Returns a flat list ``[df0_dx, df0_dy, df0_dz, df1_dx, …]``.
     """
     f_e = torch.stack(fields, dim=-1)[ibool]        # (E,ngll,ngll,ngll,K)
-    d_ref = (torch.einsum("xX,ezyXk->ezyxk", D, f_e),      # ∂/∂ξ  (x-axis)
-             torch.einsum("yY,ezYxk->ezyxk", D, f_e),      # ∂/∂η  (y-axis)
-             torch.einsum("zZ,eZyxk->ezyxk", D, f_e))      # ∂/∂γ  (z-axis)
+    d_ref = (contract("xX,ezyXk->ezyxk", D, f_e),      # ∂/∂ξ  (x-axis)
+             contract("yY,ezYxk->ezyxk", D, f_e),      # ∂/∂η  (y-axis)
+             contract("zZ,eZyxk->ezyxk", D, f_e))      # ∂/∂γ  (z-axis)
     out = []
     for k in range(len(fields)):
         for d in range(3):
@@ -171,7 +220,7 @@ def stress_divergence3(D, ibool, inv_J, w_jac, sig, like):
         for m, ein in enumerate(("Xx,ezyX->ezyx", "Yy,ezYx->ezyx",
                                  "Zz,eZyx->ezyx")):
             F = w_jac * sum(row[j] * inv_J[..., m, j] for j in range(3))
-            t = torch.einsum(ein, D, F)
+            t = contract(ein, D, F)
             acc = t if acc is None else acc + t
         R.append(acc)
     return assemble_each(R, ibool, like)
