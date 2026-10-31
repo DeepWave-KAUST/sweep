@@ -107,8 +107,8 @@ Three things speed it up, and they combine:
   derivatives need `Full()`).
 - **The C-PML on the absorbing band only.** The elastic C-PML equations
   (`ElasticSEM2DDeformed`, `ElasticVSSEM2DDeformed`, `ElasticVTISEM2DDeformed`,
-  `ElasticVSSEM3D`, `ElasticVSSEM3DDeformed`) run the bare operators on the
-  interior elements and the C-PML terms on the band elements, as the CUDA
+  `ElasticTTISEM2DDeformed`, `ElasticVSSEM3D`, `ElasticVSSEM3DDeformed`) run the bare
+  operators on the interior elements and the C-PML terms on the band elements, as the CUDA
   kernels do, on meshes with at least 40000 interior elements (an 801 × 1601
   grid has 80000). On smaller meshes the extra element pass costs about as much
   as it saves, or more, so they keep the full-mesh step;
@@ -135,7 +135,7 @@ long per forward step, and 1.5–2.8× as long per forward + backward step as
 `impl='c'` with `BoundarySaving()` (1.8–5.5× against `Full()`). `impl='eager'`
 runs everything else: the equations without CUDA kernels
 (`AcousticSEM2DDeformed`, `ElasticVSSEM2DDeformed`, `ElasticVTISEM2DDeformed`,
-`ElasticVSSEM3DDeformed` and the Biot forms), the CPU, fp64,
+`ElasticTTISEM2DDeformed`, `ElasticVSSEM3DDeformed` and the Biot forms), the CPU, fp64,
 [wavefield snapshots](#wavefield-snapshots) and second derivatives
 (`create_graph=True` with `Full()`). On a GPU, its defaults — the compiled
 step and `Ckpt(chunks=8)` — are its fastest configuration for single shots, at
@@ -651,6 +651,47 @@ solid angles there. A force needs none of this; its stamp has no derivative.
 `test/sem/test_sem_moment3d.py` checks the 3-D stamp against differences of
 the point load, the shares, the mirror symmetry of an explosion on a corner and
 Hex27 against Hex8.
+
+## Anisotropic media
+
+`ElasticVTISEM2DDeformed` is the velocity-stress elastic SEM in a VTI medium, one with a
+vertical symmetry axis: its models are `vp`, `vs` (the vertical velocities), `rho` and
+Thomsen's `epsilon` and `delta` (`sweep.sem.thomsen_to_vti_cij`). `ElasticTTISEM2DDeformed`
+tilts the axis by a sixth model, `theta` (radians), with the closed-form Bond rotation of the
+FD `ElasticTTI2nd`, in its axes (z down) and with its sign of `theta`
+(`sweep.sem.thomsen_to_tti_cij`). The tilt adds the couplings `c15` and `c35` of the normal
+stresses to the shear strain; `theta = 0` is the VTI class, and all six models are
+differentiable.
+
+```python
+from sweep.sem import ElasticTTISEM2DDeformed, PropSEM
+
+solver = PropSEM(ElasticTTISEM2DDeformed, shape=(nz, nx), dh=2.5, dt=2e-4,
+                 free_surface=True, source_type=["vz"], receiver_type=["vx", "vz"])
+seis = solver(wavelet, sources, receivers, models=[vp, vs, rho, epsilon, delta, theta])
+```
+
+The fastest wave is not `vp`: along the plane of isotropy the P velocity is
+`vp sqrt(1 + 2 epsilon)`, and the time step has to allow for it.
+
+`test/sem/specfem_compare/run_compare_aniso.py` compares both classes with SPECFEM2D's
+anisotropic elastic medium (its material type 2, `c11 c13 c15 c33 c35 c55`, whose `c15` and
+`c35` change sign in its z-up axes). The cases are a VTI shale (`epsilon = 0.25`,
+`delta = 0.10`) with a vertical and a 30° axis, each with a point force and with an
+explosion, in a 3000 m box with all four sides free. The box has no absorbing layer because
+SPECFEM2D's C-PML and Stacey conditions use isotropic moduli in anisotropic elements. With
+SPECFEM2D built in double precision and our step in fp64, the records agree to 1e-13 in
+relative L2 for all four cases: 1.2 s, the free-edge echoes included, at 24 receivers on a
+500 m ring and 5 near the top edge. The two codes take the same steps. Matching them needs
+two conventions on our side:
+
+- SPECFEM2D's Newmark velocity at a step is the mean of the two half-step velocities around
+  it, which a linear interpolation of ours reproduces.
+- `PropSEM`'s stress source loads the running sum of the wavelet, so the explosion's wavelet
+  is the backward difference of SPECFEM2D's moment samples.
+
+Against SPECFEM2D in its default single precision the records agree to 3-5e-5, the round-off
+of a 6000-step fp32 run.
 
 ## Visco-elastic attenuation
 

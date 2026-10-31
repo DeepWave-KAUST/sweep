@@ -87,6 +87,7 @@ Spectral element (sweep.sem, run with PropSEM):
   ElasticSEM2DDeformed        quad9 2-D, topography  ['vp', 'vs', 'rho']                                                 yes            yes
   ElasticSEM3D                hex8 3-D               ['vp', 'vs', 'rho']                                                 yes            yes
   ElasticSEM3DDeformed        hex27 3-D, topography  ['vp', 'vs', 'rho']                                                 yes            yes
+  ElasticTTISEM2DDeformed     quad9 2-D, topography  ['vp', 'vs', 'rho', 'epsilon', 'delta', 'theta']                    no             no
   ElasticVSSEM2DDeformed      quad9 2-D, topography  ['vp', 'vs', 'rho']                                                 no             no
   ElasticVSSEM3D              hex8 3-D               ['vp', 'vs', 'rho']                                                 yes            yes
   ElasticVSSEM3DDeformed      hex27 3-D, topography  ['vp', 'vs', 'rho']                                                 no             no

@@ -26,6 +26,16 @@ and this project adheres to
   skill.  The docs page *AI assistants (Agent Skills)* covers the install,
   and `test/test_skill_snippets.py` runs every code block of the skill so
   its examples cannot fall behind the API.
+- **`ElasticTTISEM2DDeformed`: tilted transverse isotropy on the SEM.** The VTI
+  velocity-stress SEM with its symmetry axis tilted by a sixth model, `theta` (radians), by
+  the closed-form Bond rotation of the FD `ElasticTTI2nd`, in its axes and with its sign of
+  `theta` (`sweep.sem.thomsen_to_tti_cij`); the tilt adds the `c15`, `c35` couplings to the
+  stress update. `theta = 0` is `ElasticVTISEM2DDeformed`, and all six models are
+  differentiable, under boundary saving too. Both classes agree with SPECFEM2D's anisotropic
+  elastic medium (material type 2) to 1e-13 in relative L2 with SPECFEM2D built in double
+  precision: a VTI shale with a vertical and a 30° axis, a force and an explosion, all sides
+  free (`test/sem/specfem_compare/run_compare_aniso.py`, cases from
+  `make_specfem_aniso_cases.py`). Eager, 2-D.
 - **`BiotVSSEM3DDeformed`: the Biot SEM in 3-D.** The velocity-stress Biot SEM of
   `BiotVSSEM2DDeformed` on the Hex27 mesh of `ElasticVSSEM3DDeformed` (flat or under a
   topography): the same coefficients, placement and exact per-node drag, the open-pore

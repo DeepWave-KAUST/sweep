@@ -75,8 +75,12 @@ the FD classes. `models=` per class: `api-signatures.md`.
 | `ElasticVSSEM3D` | hex8 | `vp, vs, rho` | yes | yes | 3-D elastic with absorbing boundary, flat |
 | `ElasticVSSEM3DDeformed` | hex27 | `vp, vs, rho` | no | yes | 3-D elastic, topography + absorbing |
 | `ElasticVTISEM2DDeformed` | quad9 | `vp, vs, rho, epsilon, delta` | no | yes | VTI |
+| `ElasticTTISEM2DDeformed` | quad9 | `vp, vs, rho, epsilon, delta, theta` | no | yes | TTI: the VTI medium tilted by `theta` (radians, the FD `ElasticTTI2nd`'s tilt) |
+| `ViscoElasticVSSEM2DDeformed` | quad9 | `vp, vs, rho, Qp, Qs` | no | yes | GSLS attenuation; `f_ref`, `f_band`, `n_sls` via `equation_options`; no boundary saving |
 | `AcousticElasticSEM2D` | quad9 | `vp, vs, rho` | yes | yes | coupled fluid-solid (ocean over seabed); records `p, vx, vz` (default) or `chi, u_x, u_z` |
 | `BiotVSSEM2DDeformed`, `BiotAnisoPermSEM2DDeformed` | quad9 | Biot set | no | yes | poroelastic; no boundary saving |
+| `ViscoBiotVSSEM2DDeformed` | quad9 | Biot set + `Qp, Qs` | no | yes | Biot with a GSLS frame; no boundary saving |
+| `BiotVSSEM3DDeformed` | hex27 | Biot set | no | yes | 3-D Biot (fluid and dry regions, isotropic drag); no boundary saving |
 
 ## 5. Sources and receivers
 
@@ -89,7 +93,8 @@ the FD classes. `models=` per class: `api-signatures.md`.
   `p` is receiver-only.
 - Elastic `source_type`: `["vz"]`/`["vx"]` = force along that axis (default: unit vertical
   force), `["sxx", "szz"]` = explosion (moment rate), `["sxz"]` = shear moment. Forces and
-  stresses cannot be mixed in one call; stress names are 2-D only.
+  stresses cannot be mixed in one call; in 3-D the stress names are `sxx, syy, szz, sxy, sxz,
+  syz`.
 
 ## 6. Memory, batching, multi-GPU
 

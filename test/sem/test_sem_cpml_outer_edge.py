@@ -21,8 +21,8 @@ from sweep.equations.biot_params import biot_fluid
 from sweep.propagator import Full
 from sweep.sem import (BiotAnisoPermSEM2DDeformed, BiotVSSEM2DDeformed, BiotVSSEM3DDeformed,
                        ElasticVSSEM2DDeformed, ElasticVSSEM3D, ElasticVSSEM3DDeformed,
-                       ElasticVTISEM2DDeformed, PropSEM, ViscoBiotVSSEM2DDeformed,
-                       ViscoElasticVSSEM2DDeformed)
+                       ElasticTTISEM2DDeformed, ElasticVTISEM2DDeformed, PropSEM,
+                       ViscoBiotVSSEM2DDeformed, ViscoElasticVSSEM2DDeformed)
 from sweep.sem.mesh.boundaries import free_surface_node_idx
 from test_biot import DAI1
 
@@ -72,6 +72,7 @@ def _built(eq, ndim, coef, free_surface=True):
     (ElasticVSSEM2DDeformed, 2, ELASTIC),
     (ViscoElasticVSSEM2DDeformed, 2, ELASTIC + (30.0, 20.0)),
     (ElasticVTISEM2DDeformed, 2, ELASTIC + (0.1, 0.05)),
+    (ElasticTTISEM2DDeformed, 2, ELASTIC + (0.1, 0.05, 0.4)),
     (BiotVSSEM2DDeformed, 2, ROCK),
     (ViscoBiotVSSEM2DDeformed, 2, ROCK + (30.0, 20.0)),
     (BiotAnisoPermSEM2DDeformed, 2, ROCK + (0.0, ROCK[-1])),

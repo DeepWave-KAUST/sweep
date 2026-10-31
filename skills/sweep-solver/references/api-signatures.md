@@ -176,9 +176,9 @@ forward(wavelet, sources, receivers, models=None, return_wavefield=False, adj=Fa
 ```text
 PropSEM(equation=<class 'sweep.sem.equations.acoustic2d.AcousticSEM2D'>, *, shape, dh, dt, nt=None,
     n_order: 'int' = 4, abcn=None, free_surface=False, topography=None, memory=None, f_dominant:
-    'float' = 10.0, impl=None, device=None, dev=None, dtype: 'torch.dtype' = torch.float32, density:
-    'float' = 1000.0, bs_band_mode: 'str' = 'full', bs_store_dtype_elem=None, source_type=None,
-    receiver_type=None, equation_options=None, **kwargs)
+    'float' = 10.0, impl=None, eager_options=None, device=None, dev=None, dtype: 'torch.dtype' =
+    torch.float32, density: 'float' = 1000.0, bs_band_mode: 'str' = 'full',
+    bs_store_dtype_elem=None, source_type=None, receiver_type=None, equation_options=None, **kwargs)
 ```
 
 SEM propagator with the FD ``PropTorch`` constructor and call.
@@ -199,14 +199,18 @@ __call__(wavelet, sources, receivers, models=None, **kw)
 | `AcousticSEM3DDeformed` | `['vp']` |
 | `BiotAnisoPermSEM2DDeformed` | `['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b_xx', 'b_xz', 'b_zz']` |
 | `BiotVSSEM2DDeformed` | `['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']` |
+| `BiotVSSEM3DDeformed` | `['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']` |
 | `ElasticSEM2D` | `['vp', 'vs', 'rho']` |
 | `ElasticSEM2DDeformed` | `['vp', 'vs', 'rho']` |
 | `ElasticSEM3D` | `['vp', 'vs', 'rho']` |
 | `ElasticSEM3DDeformed` | `['vp', 'vs', 'rho']` |
+| `ElasticTTISEM2DDeformed` | `['vp', 'vs', 'rho', 'epsilon', 'delta', 'theta']` |
 | `ElasticVSSEM2DDeformed` | `['vp', 'vs', 'rho']` |
 | `ElasticVSSEM3D` | `['vp', 'vs', 'rho']` |
 | `ElasticVSSEM3DDeformed` | `['vp', 'vs', 'rho']` |
 | `ElasticVTISEM2DDeformed` | `['vp', 'vs', 'rho', 'epsilon', 'delta']` |
+| `ViscoBiotVSSEM2DDeformed` | `['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b', 'Qp', 'Qs']` |
+| `ViscoElasticVSSEM2DDeformed` | `['vp', 'vs', 'rho', 'Qp', 'Qs']` |
 
 ## Signals, datasets, parallel
 

@@ -136,6 +136,13 @@ First-order in time; the source and receiver fields are `v_x`, `v_z` (and
       inherited_members: true
       show_if_no_docstring: true
 
+::: sweep.sem.ElasticTTISEM2DDeformed
+    options:
+      heading_level: 3
+      members: [build]
+      inherited_members: true
+      show_if_no_docstring: true
+
 ::: sweep.sem.ViscoElasticVSSEM2DDeformed
     options:
       heading_level: 3
