@@ -30,7 +30,9 @@ SPECFEM2D's conventions are options: ``velocities="real_modulus"`` takes ``rho v
 ``rho vs^2`` as the real parts of the moduli at ``f_ref``, as its ``READ_VELOCITIES_AT_f0``
 does, which leaves the phase velocity higher than ``vp`` by about ``3 / (8 Q^2)``; and
 ``n_fit = 2 n_sls - 1`` samples the constant-Q least squares at its frequencies (log-spaced
-over ``f_band`` with the ends; the default 200 fits the band throughout).
+over ``f_band`` with the ends; the default 200 fits the band throughout). ``velocities=
+"unrelaxed"`` takes ``vp``, ``vs`` as the infinite-frequency velocities, which is how SPECFEM2D
+reads them without ``READ_VELOCITIES_AT_f0``.
 
 The explicit stress update runs at the unrelaxed velocities, above ``vp`` / ``vs`` for a
 finite Q (~8% at Q = 10 for the default band of a factor 12): take ``dt`` from those
@@ -74,7 +76,15 @@ def gsls_real_modulus_factors(taus, tau_sigma, f_ref):
     return s_R * (1.0 + sum(taus)), s_R
 
 
-VELOCITY_CONVENTIONS = {"phase": gsls_moduli_factors, "real_modulus": gsls_real_modulus_factors}
+def gsls_unrelaxed_factors(taus, tau_sigma, f_ref):
+    """``(s_U, s_R)`` when ``v`` is the unrelaxed (infinite-frequency) velocity, as SPECFEM2D
+    reads its input without ``READ_VELOCITIES_AT_f0``: ``s_U = 1``, ``s_R = 1 / (1 + sum t)``."""
+    total = 1.0 + sum(taus)
+    return total / total, 1.0 / total
+
+
+VELOCITY_CONVENTIONS = {"phase": gsls_moduli_factors, "real_modulus": gsls_real_modulus_factors,
+                        "unrelaxed": gsls_unrelaxed_factors}
 
 
 def gsls_setup(Qp_e, Qs_e, f_ref, f_band, n_sls, who, *, n_fit=200, velocities="phase"):

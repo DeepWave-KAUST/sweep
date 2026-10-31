@@ -10,7 +10,12 @@ run per medium (``--equation`` picks among the isotropic ones):
   mechanisms (``n_sls`` over ``f_ref / 10 .. 10 f_ref``), its fit (``n_fit = 2 n_sls - 1``)
   and its reading of the velocities at ``f_ref`` (``velocities="real_modulus"``);
 * water: AcousticPotentialSEM2D and AcousticSEM2D, pressure-free on every edge as SPECFEM2D's
-  fluid is wherever there is no absorbing condition;
+  fluid is wherever there is no absorbing condition; attenuating water:
+  ViscoAcousticPotentialSEM2D with SPECFEM2D's mechanisms, fit and reading of the velocity
+  (``velocities="unrelaxed"``, as it reads it without ``READ_VELOCITIES_AT_f0``), as it is and
+  with the line of SPECFEM2D's memory update that sets ``dot_e1_old = dot_e1`` inside its loop
+  over the mechanisms (``SpecfemMemoryLine``: the mechanisms after the first convolve ``d^n``
+  in place of ``d^(n-1)``);
 * water over rock: AcousticElasticSEM2D, the water pressure-free on its top and sides;
 * layers across curved interfaces: the mesh of ``PropSEM(interfaces=...)``, each layer's
   material per element (``layered_model``): AcousticElasticSEM2D under water, else
@@ -52,10 +57,35 @@ import torch
 from sweep.sem import (AcousticElasticSEM2D, AcousticPotentialSEM2D, AcousticSEM2D,
                        ElasticSEM2D, ElasticSEM2DDeformed, ElasticTTISEM2DDeformed,
                        ElasticVSSEM2DDeformed, ElasticVTISEM2DDeformed, PropSEM,
-                       ViscoElasticVSSEM2DDeformed, thomsen_to_tti_cij)
+                       ViscoAcousticPotentialSEM2D, ViscoElasticVSSEM2DDeformed,
+                       thomsen_to_tti_cij)
+
+class SpecfemMemoryLine(ViscoAcousticPotentialSEM2D):
+    """ViscoAcousticPotentialSEM2D with SPECFEM2D 8.1.0's ``update_memory_var_acous_weak_form``
+    as it runs: ``dot_e1_old = dot_e1`` sits inside the loop over the mechanisms, so all but
+    the first see the current ``d`` as the previous one (bare path only, as the box has no
+    C-PML)."""
+
+    def step(self, fields, src, dt):
+        chi_now, chi_prev, psi_x, psi_z, zeta_x, zeta_z, *mem = fields
+        e, d_prev = mem[:-1], mem[-1]
+        assert self.cpml is None
+        K = self.stiffness_apply(chi_now)
+        d = -K * self._inv_M_geo
+        new_e = []
+        for l, ts in enumerate(self.tau_sigma):
+            a = math.exp(-0.5 * dt / ts)
+            b = -self._t_node[l] * (1.0 - a) / (1.0 + self._t_sum)
+            new_e.append(a * a * e[l] + b * (d + a * (d_prev if l == 0 else d)))
+        load = self.mass_geo * sum(new_e) + src[0]
+        chi_next = 2.0 * chi_now - chi_prev + dt * dt * self._inv_M * (-K + load)
+        (chi_next,) = self._apply_dirichlet(chi_next)
+        return (chi_next, chi_now, psi_x, psi_z, zeta_x, zeta_z, *new_e, d)
+
 
 CASES = ("iso_force", "iso_explosion", "hill_explosion", "vti_force", "vti_explosion",
-         "tti30_force", "tti30_explosion", "visco_explosion", "water_pressure", "sea_pressure",
+         "tti30_force", "tti30_explosion", "visco_explosion", "water_pressure",
+         "water_visco_pressure", "sea_pressure",
          "sea_curved_pressure", "layers_curved_explosion")
 ISOTROPIC = {"vs": ElasticVSSEM2DDeformed, "displacement": ElasticSEM2DDeformed,
              "quad4": ElasticSEM2D}
@@ -131,6 +161,8 @@ def equations(g, picks):
         return [AcousticElasticSEM2D]
     if m["kind"] == "visco":
         return [ViscoElasticVSSEM2DDeformed]
+    if m["kind"] == "visco_acoustic":
+        return [ViscoAcousticPotentialSEM2D, SpecfemMemoryLine]
     keys = picks or [k for k in ISOTROPIC if not (k == "quad4" and m["hill"])]
     return [ISOTROPIC[k] for k in keys]
 
@@ -147,6 +179,8 @@ def check_materials(g):
     elif m["kind"] == "visco":
         assert mats == {1: (1, iso(m) + [0.0, 0.0, m["q"], m["q"]])}, mats
         return (m["vp"], m["vs"], m["rho"], m["q"], m["q"])
+    elif m["kind"] == "visco_acoustic":
+        assert mats == {1: (1, iso(m) + [0.0, 0.0, m["q"], m["q"]])}, mats
     elif m["kind"] == "layered":                 # SPECFEM2D's materials count up from the bottom
         no_q = [0.0, 0.0, 9999.0, 9999.0]
         assert mats == {i + 1: (1, iso(lay) + no_q) for i, lay in enumerate(m["layers"][::-1])}
@@ -187,11 +221,18 @@ def run_sem(g, eq, device, dtype, n_order=4):
         def layered(prop):
             return [prop.layered_model([lay.get(k, 0.0) for lay in m["layers"]])
                     for k in ("vp", "vs", "rho")]
-    if m["kind"] == "acoustic":
+    if m["kind"] in ("acoustic", "visco_acoustic"):
         kappa = m["rho"] * m["vp"] ** 2
         kw.update(free_surface=ALL_SIDES, receiver_type=["p"])
         models = [full(m["vp"])]
-        if eq is AcousticPotentialSEM2D:
+        if issubclass(eq, ViscoAcousticPotentialSEM2D):
+            kw["density"] = m["rho"]
+            kw["equation_options"] = {"f_ref": m["f_ref"], "n_sls": m["n_sls"],
+                                      "f_band": (m["f_ref"] / 10.0, 10.0 * m["f_ref"]),
+                                      "n_fit": 2 * m["n_sls"] - 1, "velocities": "unrelaxed"}
+            models.append(full(m["q"]))
+            calls = [(None, w / kappa)]
+        elif eq is AcousticPotentialSEM2D:
             kw["density"] = m["rho"]
             calls = [(None, w / kappa)]
         else:

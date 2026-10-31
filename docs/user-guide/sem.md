@@ -774,6 +774,42 @@ and halving the step divides the difference by four (4.2e-5 at 0.1 ms).
 Stacey sides, gives 1.2% for the visco-elastic records and 1.7% for the elastic ones; there the
 absorbing conditions of the two codes differ as well.
 
+## Visco-acoustic attenuation
+
+`ViscoAcousticPotentialSEM2D` is `AcousticPotentialSEM2D` with SPECFEM2D's
+`ATTENUATION_VISCOACOUSTIC`: its weak form and its Newmark update of the memory variables.
+`n_sls` standard linear solids relax the bulk modulus, with relaxation times fixed over
+`f_band` and strengths fitted for a constant `Qkappa`. The memories are node fields, as
+SPECFEM2D's are. At every step, with `d = M_geo^-1 (-K chi)` (the stiffness over the
+geometric mass), each memory takes `e = A^2 e + B (d + A d_prev)`, with
+`A = exp(-dt / (2 tau_sigma))`, and the potential's load gains `M_geo sum(e)`. The models are
+`vp` and `Qk`, and the density is `density=`, as for the potential form:
+
+```python
+from sweep.sem import PropSEM, ViscoAcousticPotentialSEM2D
+
+solver = PropSEM(ViscoAcousticPotentialSEM2D, shape=(nz, nx), dh=5.0, dt=5e-4,
+                 free_surface=True, density=1020.0, receiver_type=["p"],
+                 equation_options={"f_ref": 15.0, "n_sls": 3})
+seis = solver(wavelet, sources, receivers, models=[vp, qk])
+```
+
+`equation_options` take the visco-elastic class's `f_ref`, `f_band`, `n_sls`, `n_fit` and
+`velocities`. The default reading of `vp` is the phase velocity at `f_ref`. `"unrelaxed"`
+reads it as the infinite-frequency velocity, which is how SPECFEM2D reads its input without
+`READ_VELOCITIES_AT_f0`; with that flag SPECFEM2D does not rebuild its acoustic mass matrix.
+All models are differentiable, and element arrays of `Qk = inf` give the potential step bit for
+bit. Boundary saving is refused because the attenuation is dissipative, and the class runs on
+eager only.
+
+Against SPECFEM2D, with its mechanisms, its fit (`n_fit = 2 n_sls - 1`) and its reading of the
+velocity, the records differ by 2.8% (Q = 30, 0.2 ms steps, see
+[Against SPECFEM2D](#against-specfem2d)). The difference is in SPECFEM2D 8.1.0:
+`update_memory_var_acous_weak_form` sets `dot_e1_old = dot_e1` inside its loop over the
+mechanisms, so every mechanism after the first convolves the current `d` in place of the last
+step's. That makes those mechanisms first order in `dt` instead of second. With that one line
+reproduced (`SpecfemMemoryLine` in the comparison script) the records agree to 8e-13.
+
 ## Poroelastic waves (Biot)
 
 `BiotVSSEM2DDeformed` solves the equations of the FD `sweep.equations.Biot` —
@@ -1439,6 +1475,7 @@ receivers):
 | `AcousticElasticSEM2D`, with `interfaces` | the same over a curved sea floor (a 150 m seamount) | 4e-12 |
 | `ElasticVSSEM2DDeformed`, `ElasticSEM2DDeformed`, with `interfaces` | the rock over a stiffer one across a sinusoidal interface | 2e-12 |
 | `ViscoElasticVSSEM2DDeformed` | the rock with Q = 30, SPECFEM2D's conventions | 2e-4 |
+| `ViscoAcousticPotentialSEM2D` | the water with Qkappa = 30, SPECFEM2D's conventions | 3e-2; 8e-13 with SPECFEM2D's memory-update line |
 
 Matching the two codes takes these conventions on our side:
 
@@ -1467,6 +1504,8 @@ The remaining differences are round-off, except for the visco-elastic case:
   interpolates in the element that holds the point. The table leaves those two out.
 - **The visco-elastic records** keep the time scheme of the memory variables (see
   [Visco-elastic attenuation](#visco-elastic-attenuation)).
+- **The visco-acoustic records** keep a line of SPECFEM2D's that we do not reproduce (see
+  [Visco-acoustic attenuation](#visco-acoustic-attenuation)).
 
 The Biot classes discretize the poroelastic equations differently from SPECFEM2D (see
 [Validation](#validation)), and the 3-D classes have not been compared with SPECFEM3D.

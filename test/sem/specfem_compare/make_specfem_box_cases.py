@@ -16,6 +16,10 @@ Cases, a vertical point force (``*_force``) or an explosion (``*_explosion``, Mx
   ``ATTENUATION_VISCOELASTIC`` with three mechanisms and the velocities read at 15 Hz;
 * ``water_pressure``: water (vp 1500, rho 1020) filling the box, a pressure source (SPECFEM2D's
   force in an acoustic element); every edge of a fluid element is pressure-free there;
+* ``water_visco_pressure``: the water with Qkappa = 30, SPECFEM2D's
+  ``ATTENUATION_VISCOACOUSTIC`` with three mechanisms at 15 Hz; the velocity read as the
+  unrelaxed one (``READ_VELOCITIES_AT_f0`` off: SPECFEM2D does not rebuild the acoustic mass
+  matrix with it);
 * ``sea_pressure``: 600 m of that water over the rock, the pressure source 105 m deep,
   hydrophones 50 m deep and geophones 50 m below the sea floor;
 * ``sea_curved_pressure``: the water over the rock with a curved sea floor (a 150 m seamount,
@@ -51,6 +55,7 @@ ROCK = dict(kind="isotropic", rho=2400.0, vp=3000.0, vs=1500.0)
 WATER = dict(kind="acoustic", rho=1020.0, vp=1500.0)
 SEA = dict(kind="coupled", water=WATER, rock=ROCK, depth=600.0)
 VISCO = dict(ROCK, kind="visco", q=30.0, n_sls=3, f_ref=F0)
+VISCO_WATER = dict(WATER, kind="visco_acoustic", q=30.0, n_sls=3, f_ref=F0)
 STIFF = dict(kind="isotropic", rho=2500.0, vp=4000.0, vs=2300.0)
 SEAMOUNT = dict(shape="gauss", z0=L - 600.0, height=150.0, x0=1800.0, sigma=300.0)
 WAVY = dict(shape="sine", z0=L - 1500.0, height=120.0, x0=0.0, sigma=1500.0)
@@ -67,6 +72,7 @@ CASES = {"iso_force": (ROCK, "force", None),
          "hill_explosion": (ROCK, "explosion", HILL),
          "visco_explosion": (VISCO, "explosion", None),
          "water_pressure": (WATER, "pressure", None),
+         "water_visco_pressure": (VISCO_WATER, "pressure", None),
          "sea_pressure": (SEA, "pressure", None),
          "sea_curved_pressure": (CURVED_SEA, "pressure", None),
          "layers_curved_explosion": (CURVED_LAYERS, "explosion", None)}
@@ -136,7 +142,7 @@ def isotropic(i, m):
 for name, (medium, source, hill) in CASES.items():
     nz = n if hill is None else int(round((L + hill["height"]) / H))   # element rows
     nw = int(round(medium["depth"] / H)) if medium["kind"] == "coupled" else 0
-    if medium["kind"] in ("isotropic", "acoustic", "visco"):
+    if medium["kind"] in ("isotropic", "acoustic", "visco", "visco_acoustic"):
         mats, regions = [isotropic(1, medium)], [f"1 {n} 1 {nz} 1"]
     elif medium["kind"] == "coupled":            # rows count up from the bottom
         mats = [isotropic(1, medium["rock"]), isotropic(2, medium["water"])]
@@ -164,6 +170,11 @@ for name, (medium, source, hill) in CASES.items():
         for k, v in (("ATTENUATION_VISCOELASTIC", ".true."), ("N_SLS", medium["n_sls"]),
                      ("ATTENUATION_f0_REFERENCE", dble(medium["f_ref"])),
                      ("READ_VELOCITIES_AT_f0", ".true."), ("USE_SOLVOPT", ".false.")):
+            par = setp(par, k, v)
+    if medium["kind"] == "visco_acoustic":
+        for k, v in (("ATTENUATION_VISCOACOUSTIC", ".true."), ("N_SLS", medium["n_sls"]),
+                     ("ATTENUATION_f0_REFERENCE", dble(medium["f_ref"])),
+                     ("READ_VELOCITIES_AT_f0", ".false."), ("USE_SOLVOPT", ".false.")):
             par = setp(par, k, v)
     par = re.sub(r"^1 1 .*\n^2 2 .*\n^3 1 .*$", "\n".join(mats), par, count=1, flags=re.M)
     par = re.sub(r"^1 50 1   25 1\n^1 50 26  30 2\n^1 50 31  50 3$", "\n".join(regions), par,

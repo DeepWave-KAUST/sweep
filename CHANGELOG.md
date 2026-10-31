@@ -26,6 +26,15 @@ and this project adheres to
   skill.  The docs page *AI assistants (Agent Skills)* covers the install,
   and `test/test_skill_snippets.py` runs every code block of the skill so
   its examples cannot fall behind the API.
+- **`ViscoAcousticPotentialSEM2D`: visco-acoustic attenuation on the SEM.** The potential
+  form with SPECFEM2D's `ATTENUATION_VISCOACOUSTIC`: its weak form, node memories and Newmark
+  update, models `vp, Qk` and `density=`, and the visco-elastic class's `f_ref`, `f_band`,
+  `n_sls`, `n_fit` and `velocities` (with `"unrelaxed"`, SPECFEM2D's reading without
+  `READ_VELOCITIES_AT_f0`, now on both classes). `Qk = inf` is the potential step bit for bit,
+  and all models are differentiable. Against SPECFEM2D 8.1.0 the records differ by 2.8% at Q =
+  30; its `update_memory_var_acous_weak_form` sets `dot_e1_old = dot_e1` inside the loop over
+  the mechanisms, and with that line reproduced they agree to 8e-13. Eager, 2-D; no boundary
+  saving (dissipative).
 - **Curved internal interfaces on the 2-D SEM mesh.** `PropSEM(interfaces=[...])` takes
   internal interfaces like `topography`, one row per column and top-down, and its Quad9 mesh
   follows them: each layer gets whole element rows (`interface_elements`, by default shared

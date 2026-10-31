@@ -67,6 +67,7 @@ the FD classes. `models=` per class: `api-signatures.md`.
 |---|---|---|---|---|---|
 | `AcousticPotentialSEM2D` | quad9 | `vp` | yes (batched, BS) | yes | acoustic FWI workhorse; records `p` (default) or `chi` |
 | `AcousticSEM2D` / `AcousticSEM2DDeformed` | quad4 / quad9 | `vp` | no | yes | |
+| `ViscoAcousticPotentialSEM2D` | quad9 | `vp, Qk` (+ `density=`) | no | yes | SPECFEM2D's visco-acoustic potential form; no boundary saving |
 | `AcousticSEM3D` / `AcousticSEM3DDeformed` | hex8 / hex27 | `vp` | yes | yes | 3-D acoustic (with topography for Deformed) |
 | `ElasticSEM2DDeformed` | quad9 | `vp, vs, rho` | yes | yes | 2-D elastic with topography |
 | `ElasticVSSEM2DDeformed` | quad9 | `vp, vs, rho` | no | yes | velocity-stress |
