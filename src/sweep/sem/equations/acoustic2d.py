@@ -1,9 +1,10 @@
 """Element-local SEM operators for 2-D constant-density acoustic.
 
 Strong form    :  ∂²u/∂t²  =  c²(x) ∇²u  +  s(x, t)
-Discretized    :  ü  =  c² M⁻¹ (b − K u)     (c² per global node; M diagonal
+Discretized    :  ü  =  c² M⁻¹ (−K u) + M⁻¹ b   (c² per global node; M diagonal
                                           after GLL collocation; K = ∫ ∇v · ∇u dΩ,
-                                          c²-free, applied element-locally)
+                                          c²-free, applied element-locally; the
+                                          load b is not scaled by c²)
 
 Conventions
 -----------

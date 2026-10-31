@@ -26,6 +26,16 @@ and this project adheres to
   skill.  The docs page *AI assistants (Agent Skills)* covers the install,
   and `test/test_skill_snippets.py` runs every code block of the skill so
   its examples cannot fall behind the API.
+- **The 2-D SEM against SPECFEM2D to round-off.** `test/sem/specfem_compare/run_compare_box.py`
+  runs the 2-D classes against SPECFEM2D built in double precision on the cases of
+  `make_specfem_box_cases.py`: homogeneous media in a box with all four sides free, a Ricker,
+  6000 steps, no shift or scale fitted. The elastic classes (`ElasticVSSEM2DDeformed`,
+  `ElasticSEM2DDeformed`, `ElasticSEM2D`, the VTI and TTI ones) agree to 1e-13, and to 3e-12
+  under a Gaussian hill. The acoustic ones (`AcousticPotentialSEM2D`, `AcousticSEM2D`) agree
+  to 1e-12 in pressure, and `AcousticElasticSEM2D` (water over rock) to 2e-12. The
+  visco-elastic class agrees to 2e-4 with SPECFEM2D's conventions; its memory variables'
+  time scheme differs. The conventions the comparison matches are in the SEM guide's
+  "Against SPECFEM2D".
 - **`ElasticTTISEM2DDeformed`: tilted transverse isotropy on the SEM.** The VTI
   velocity-stress SEM with its symmetry axis tilted by a sixth model, `theta` (radians), by
   the closed-form Bond rotation of the FD `ElasticTTI2nd`, in its axes and with its sign of
@@ -34,8 +44,8 @@ and this project adheres to
   differentiable, under boundary saving too. Both classes agree with SPECFEM2D's anisotropic
   elastic medium (material type 2) to 1e-13 in relative L2 with SPECFEM2D built in double
   precision: a VTI shale with a vertical and a 30° axis, a force and an explosion, all sides
-  free (`test/sem/specfem_compare/run_compare_aniso.py`, cases from
-  `make_specfem_aniso_cases.py`). Eager, 2-D.
+  free (`test/sem/specfem_compare/run_compare_box.py`, cases from
+  `make_specfem_box_cases.py`). Eager, 2-D.
 - **`BiotVSSEM3DDeformed`: the Biot SEM in 3-D.** The velocity-stress Biot SEM of
   `BiotVSSEM2DDeformed` on the Hex27 mesh of `ElasticVSSEM3DDeformed` (flat or under a
   topography): the same coefficients, placement and exact per-node drag, the open-pore
@@ -60,8 +70,13 @@ and this project adheres to
   Against SPECFEM2D's `ATTENUATION_VISCOELASTIC` (Q = 30, half-space, its band
   `f0 / 10 .. 10 f0`) the records agree to 1.2% in relative L2 (1.7% for the elastic pair)
   and the visco/elastic spectral ratios to 0.1-1.1% in amplitude
-  (`test/sem/specfem_compare/run_compare_visco.py`). Eager, 2-D; no boundary saving
-  (dissipative). The band and the moduli factors of the fit are shared with the FD class
+  (`test/sem/specfem_compare/run_compare_visco.py`). SPECFEM2D's reading of the velocities
+  at `f_ref` (`velocities="real_modulus"`: `rho v^2` is the real part of the modulus there,
+  which puts the phase velocity about `3 / (8 Q^2)` above `v`) and its fit's frequencies
+  (`n_fit = 2 n_sls - 1`) are options; with both, the records agree with SPECFEM2D's to 2e-4
+  in a box with free sides, SPECFEM2D in double precision (0.9% with the defaults), the rest
+  being the memory variables' time scheme (second order: 4.2e-5 at half the step). Eager,
+  2-D; no boundary saving (dissipative). The band and the moduli factors of the fit are shared with the FD class
   (`sweep.equations.visco_elastic.gsls_band`, `gsls_moduli_factors`); the default band, a
   factor 12, is that of SPECFEM2D's original fit, not of its current one.
 - **`ViscoBiotVSSEM2DDeformed`: Biot with an attenuating frame.** The models of

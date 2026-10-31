@@ -674,24 +674,13 @@ seis = solver(wavelet, sources, receivers, models=[vp, vs, rho, epsilon, delta, 
 The fastest wave is not `vp`: along the plane of isotropy the P velocity is
 `vp sqrt(1 + 2 epsilon)`, and the time step has to allow for it.
 
-`test/sem/specfem_compare/run_compare_aniso.py` compares both classes with SPECFEM2D's
-anisotropic elastic medium (its material type 2, `c11 c13 c15 c33 c35 c55`, whose `c15` and
-`c35` change sign in its z-up axes). The cases are a VTI shale (`epsilon = 0.25`,
-`delta = 0.10`) with a vertical and a 30° axis, each with a point force and with an
-explosion, in a 3000 m box with all four sides free. The box has no absorbing layer because
-SPECFEM2D's C-PML and Stacey conditions use isotropic moduli in anisotropic elements. With
-SPECFEM2D built in double precision and our step in fp64, the records agree to 1e-13 in
-relative L2 for all four cases: 1.2 s, the free-edge echoes included, at 24 receivers on a
-500 m ring and 5 near the top edge. The two codes take the same steps. Matching them needs
-two conventions on our side:
-
-- SPECFEM2D's Newmark velocity at a step is the mean of the two half-step velocities around
-  it, which a linear interpolation of ours reproduces.
-- `PropSEM`'s stress source loads the running sum of the wavelet, so the explosion's wavelet
-  is the backward difference of SPECFEM2D's moment samples.
-
-Against SPECFEM2D in its default single precision the records agree to 3-5e-5, the round-off
-of a 6000-step fp32 run.
+Both classes agree with SPECFEM2D's anisotropic elastic medium to 1e-13 (see
+[Against SPECFEM2D](#against-specfem2d)). That medium is SPECFEM2D's material type 2,
+`c11 c13 c15 c33 c35 c55`; in its z-up axes `c15` and `c35` change sign. The cases are a VTI
+shale (`epsilon = 0.25`, `delta = 0.10`) with a vertical and a 30° axis, each with a point
+force and with an explosion. They need the box with free sides, because SPECFEM2D's C-PML
+and Stacey conditions use isotropic moduli in anisotropic elements. Against SPECFEM2D in its
+default single precision the records agree to 3-5e-5, the round-off of a 6000-step fp32 run.
 
 ## Visco-elastic attenuation
 
@@ -722,15 +711,32 @@ step bit for bit. The C-PML terms run on every element, without the band split. 
 saving is refused because the attenuation is dissipative; use `Full()` or
 `Ckpt(chunks=...)`.
 
+Two conventions of SPECFEM2D's `ATTENUATION_VISCOELASTIC` differ from the defaults, and
+both are options:
+
+- **Velocities at `f_ref`.** By default `vp` and `vs` are the phase velocities at `f_ref`.
+  With `equation_options={"velocities": "real_modulus"}`, `rho vp^2` and `rho vs^2` are
+  instead the real parts of the moduli at `f_ref`, which is how SPECFEM2D's
+  `READ_VELOCITIES_AT_f0` reads them. Its phase velocity at `f_ref` is then higher than
+  `vp`, by about `3 / (8 Q^2)`, or 4e-4 at Q = 30.
+- **The constant-Q fit.** By default the least squares samples the band at 200 frequencies.
+  With `n_fit = 2 n_sls - 1` it samples SPECFEM2D's frequencies instead: `2 n_sls - 1` of
+  them, log-spaced, ends included.
+
 `test/sem/test_sem_visco_elastic.py` checks the elastic limit, the checkpointed and vmapped
-rollouts, and the gradients in `vp`, `Qp` and `Qs` against central differences.
-`test/sem/specfem_compare/run_compare_visco.py` compares the class with SPECFEM2D's
-`ATTENUATION_VISCOELASTIC` on a homogeneous half-space with Q = 30 (velocities at 12 Hz,
-three mechanisms over SPECFEM2D's band). The visco-elastic records agree to 1.2% in
-relative L2, against 1.7% for the elastic records on the same meshes, and the
-visco/elastic spectral ratios of the two codes agree to 0.1% in amplitude and 3 mrad in
-phase (medians over 4-25 Hz, offsets up to 200 m), and to 0.3-1.1% and 7-13 mrad at offsets
-of 200-450 m.
+rollouts, the gradients in `vp`, `Qp` and `Qs` against central differences, and the two
+options against SPECFEM2D's formulas. Against SPECFEM2D itself (Q = 30, three mechanisms over
+its band `f_ref / 10 .. 10 f_ref`; see [Against SPECFEM2D](#against-specfem2d)), the records
+differ by 0.9% in relative L2 with the defaults. The difference is almost entirely a time
+shift from the velocity reading: the visco/elastic spectral ratios of the two codes agree to
+0.1% in amplitude, and differ in phase linearly with frequency. With both options the
+records agree to 2e-4 at a time step of 0.2 ms. What is left is the time scheme of the memory
+variables: SPECFEM2D convolves its strain memories recursively at the displacement's step,
+while ours advance by the trapezoidal rule at the half step. Both are second order in `dt`,
+and halving the step divides the difference by four (4.2e-5 at 0.1 ms).
+`test/sem/specfem_compare/run_compare_visco.py`, an earlier comparison on a half-space with
+Stacey sides, gives 1.2% for the visco-elastic records and 1.7% for the elastic ones; there the
+absorbing conditions of the two codes differ as well.
 
 ## Poroelastic waves (Biot)
 
@@ -1364,6 +1370,56 @@ Distributed checks (multi-GPU box):
 `torchrun --nproc_per_node=P test/sem/dd_api_check_sem.py` and
 `test/sem/dd_grad_compare.py` (saves single-vs-multi gradients for
 plotting).
+
+## Against SPECFEM2D
+
+`test/sem/specfem_compare/run_compare_box.py` runs the 2-D classes against SPECFEM2D 8.1.0
+built in double precision. The cases come from `make_specfem_box_cases.py`:
+
+- a homogeneous medium in a 3000 m box of 10 m elements with all four sides free;
+- a 15 Hz Ricker inside an element;
+- receivers on a 500 m ring around the source and 10 m below the top edge;
+- 6000 steps of 0.2 ms, the edge echoes included.
+
+The box has no absorbing layer, so the two codes solve the same problem. Our step runs in
+fp64, and no shift or scale is fitted. The records agree as follows (relative L2 over all
+receivers):
+
+| Class | Case | Agreement |
+| --- | --- | --- |
+| `ElasticVSSEM2DDeformed`, `ElasticSEM2DDeformed`, `ElasticSEM2D` | rock, a force and an explosion | 1e-13 |
+| `ElasticVSSEM2DDeformed`, `ElasticSEM2DDeformed` | an explosion under a 100 m Gaussian hill | 3e-12 |
+| `ElasticVTISEM2DDeformed`, `ElasticTTISEM2DDeformed` | a VTI shale with a vertical and a 30° axis, a force and an explosion | 1e-13 |
+| `AcousticPotentialSEM2D`, `AcousticSEM2D` | water, a pressure source, the pressure | 1e-12 |
+| `AcousticElasticSEM2D` | 600 m of water over the rock: hydrophones and geophones | 2e-12 |
+| `ViscoElasticVSSEM2DDeformed` | the rock with Q = 30, SPECFEM2D's conventions | 2e-4 |
+
+Matching the two codes takes these conventions on our side:
+
+- **The velocity record.** SPECFEM2D's Newmark velocity at a step is the mean of the two
+  half-step velocities around it. On the velocity-stress classes a linear interpolation of
+  ours reproduces it. On the displacement classes it is the central difference that
+  `PropSEM` takes.
+- **The explosion's wavelet.** `PropSEM`'s stress source loads the running sum of the
+  wavelet, so the wavelet is the backward difference of SPECFEM2D's moment samples.
+- **The acoustic source.** SPECFEM2D's pressure source adds `h stf / kappa` to the
+  potential's load, so our `chi` source takes `stf / kappa`.
+- **`AcousticSEM2D`.** Its field is SPECFEM2D's potential for the wavelet `stf`, and the
+  pressure is the trace's second difference. Driving the field with the second difference of
+  the source instead would start it with a step, because SPECFEM2D's Ricker is not zero at
+  its first sample.
+
+The remaining differences are round-off, except for the visco-elastic case:
+
+- **Under the hill**, the receivers next to the curved surface reach 5e-11. That comes from
+  locating them in curved elements: our Newton tolerance is about 4e-11 m there, where
+  SPECFEM2D locates them to 1e-12 m.
+- **The pressure** is a second difference of the potential, which amplifies round-off.
+- **The visco-elastic records** keep the time scheme of the memory variables (see
+  [Visco-elastic attenuation](#visco-elastic-attenuation)).
+
+The Biot classes discretize the poroelastic equations differently from SPECFEM2D (see
+[Validation](#validation)), and the 3-D classes have not been compared with SPECFEM3D.
 
 ## Backend parity
 
