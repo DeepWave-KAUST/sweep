@@ -1,4 +1,5 @@
-"""sweep CLI — engine introspection only (`list equations`, `show <Eq>`).
+"""sweep CLI — engine introspection (`list equations`, `show <Eq>`), the
+benchmark datasets and the Agent Skill installer (`skill install`).
 
 Both solver families answer: the finite-difference equations of
 `sweep.equations` and the spectral-element ones of `sweep.sem`.
@@ -238,7 +239,7 @@ def _show_sem_equation(class_name, cls):
     return 0
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         prog='sweep',
         description='SWEEP (Seismic Wave Equation Exploration Platform) — engine introspection. '
@@ -255,8 +256,10 @@ def main():
     show_parser.add_argument('component', help='Wave equation class name to show wavefields for')
     datasets_parser.add_argument('args', nargs=argparse.REMAINDER,
                                  help='subcommand + args (see `sweep datasets -h`)')
+    from sweep.skill import add_parser as add_skill_parser
+    add_skill_parser(subparsers)
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.command == 'list' and args.component == 'equations':
         list_equations()
@@ -266,6 +269,9 @@ def main():
     if args.command == 'datasets':
         from sweep.datasets.cli import main as datasets_main
         return datasets_main(args.args)
+    if args.command == 'skill':
+        from sweep.skill import run as run_skill
+        return run_skill(args)
     parser.print_help()
     return 0
 

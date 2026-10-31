@@ -10,8 +10,9 @@ API instead of guessing it: which equation and models to use, `impl='c'` vs
 SEM, multi-GPU, the CLI and `sweep.datasets`, and the pitfalls that fail
 silently.
 
-The skill is written for the current release (0.3.6). It is not part of the
-wheel; take it from the repository.
+The skill is written for the current release. From sweep-solver 0.3.7 the
+wheel carries it and `sweep skill install` puts it where your assistant
+reads it; with 0.3.6, take it from the repository.
 
 ## Contents
 
@@ -33,42 +34,44 @@ wheel; take it from the repository.
 The assistant reads `SKILL.md` first and opens a reference file only when the
 task needs it.
 
-## Get the folder
+## Install
 
-Clone only the skill:
+Run the command on the machine where the assistant runs (for a session on a
+cluster, on the cluster):
+
+```bash
+sweep skill install
+```
+
+It copies the skill to `~/.claude/skills/sweep-solver/` for Claude Code and
+to `~/.agents/skills/sweep-solver/` for Codex, for each of the two it finds
+for your user (its `~/.claude`, `~/.agents` or `~/.codex` folder, or its
+command on `PATH`). Run it again after upgrading `sweep-solver` to update the
+copy. An assistant reads skills from these folders and nothing is registered,
+so a skill copied before the assistant is installed is picked up once it is;
+a session that is already running may need a restart.
+
+| Command | What it does |
+|---|---|
+| `sweep skill install` | install for the assistants found; with none found, install nothing and list the options |
+| `sweep skill install --for claude` / `--for codex` / `--for all` | install for those, found or not |
+| `sweep skill install --project [DIR]` | install into `DIR/.claude/skills/` or `DIR/.agents/skills/` (default: the current directory), which is what a cloud session working on that repository sees |
+| `sweep skill zip [-o FILE]` | write `sweep-solver.zip` for **Claude.ai**: upload it in the skills section of the settings |
+| `sweep skill path` | print where the installed package keeps the skill |
+
+An existing folder is replaced only when it is this skill; any other folder
+of that name, or a symlink, is left alone with an error.
+
+**From the repository** (sweep-solver 0.3.6, or other assistants): clone
+only the skill and copy the folder, keeping its name `sweep-solver`, to one
+of the folders above. Other assistants can be given `SKILL.md` and left to
+open the reference files it points to.
 
 ```bash
 git clone --depth 1 --filter=blob:none --sparse https://github.com/DeepWave-KAUST/sweep.git sweep-skill
 git -C sweep-skill sparse-checkout set skills/sweep-solver
-```
-
-The folder is then `sweep-skill/skills/sweep-solver`. A full clone of the
-repository works as well.
-
-## Install
-
-Copy the folder, keeping its name `sweep-solver`, to where your assistant
-looks for skills.
-
-**Claude Code**: for all your projects, or only for one project:
-
-```bash
 mkdir -p ~/.claude/skills && cp -r sweep-skill/skills/sweep-solver ~/.claude/skills/
-mkdir -p .claude/skills && cp -r sweep-skill/skills/sweep-solver .claude/skills/   # run in the project
 ```
-
-**Codex**: the same, with `~/.agents/skills/` or the project's
-`.agents/skills/`.
-
-**Claude.ai**: zip the folder and upload the zip in the skills section of the
-settings.
-
-```bash
-cd sweep-skill/skills && zip -r sweep-solver.zip sweep-solver
-```
-
-**Other assistants**: give them `SKILL.md` and let them open the reference
-files it points to.
 
 ## Use
 
@@ -82,7 +85,7 @@ Before running generated code on a new machine, the assistant can check the
 environment with
 
 ```bash
-python ~/.claude/skills/sweep-solver/scripts/check_env.py
+python "$(sweep skill path)"/scripts/check_env.py
 ```
 
 ## Keeping it correct

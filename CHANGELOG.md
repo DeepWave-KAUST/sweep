@@ -10,6 +10,22 @@ and this project adheres to
 ## [Unreleased]
 
 ### Added
+- **Agent Skill for AI coding assistants** in `skills/sweep-solver/`
+  ([agentskills.io](https://agentskills.io) format): a `SKILL.md` entry point
+  plus on-demand references (equations, propagators, boundaries, gradients,
+  imaging, SEM, parallelism, CLI and datasets, generated API signatures) and
+  two helper scripts, `check_env.py` and `stability_check.py`.  Claude Code,
+  Codex, Claude.ai and other assistants that read the format then write
+  `sweep` code with the real API.  The wheel carries it (as
+  `sweep/_skill/sweep-solver`), and **`sweep skill install`** copies it to
+  `~/.claude/skills/` (Claude Code) and `~/.agents/skills/` (Codex) for the
+  assistants it finds, or for those named with `--for claude|codex|all`;
+  with none found and none named it installs nothing and lists the options.
+  `--project DIR` installs into a project, `sweep skill zip` writes the zip
+  Claude.ai takes, and an existing folder is replaced only when it is this
+  skill.  The docs page *AI assistants (Agent Skills)* covers the install,
+  and `test/test_skill_snippets.py` runs every code block of the skill so
+  its examples cannot fall behind the API.
 - **`PropSEM(impl='eager', memory=Ckpt(chunks=K))` checkpoints single shots and
   per-shot models**, which it used to refuse (`nshots=1`) or loop without
   (per-shot models): `sweep.sem.ckpt_rollout` keeps one state per `K` steps and
@@ -28,6 +44,9 @@ and this project adheres to
   round-off.
 
 ### Changed
+- The CPU test workflow runs as four parallel jobs (`sem-biot`, `sem`,
+  `rest`, `skill`), each with its own executed-test floor, instead of one
+  job.
 - **Every new compile of the eager step is announced, on PropTorch and PropSEM.**
   The line saying that `torch.compile` is compiling used to print once per
   process, so a later grid size, shot count or first gradient call compiled again
