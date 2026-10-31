@@ -54,6 +54,30 @@ Point the GPU job at the same `TORCH_EXTENSIONS_DIR` and it starts without
 compiling, and without nvcc: a source stamp beside the core says it matches the
 tree and the target.
 
+## The host (CPU) core
+
+The same `csrc/` tree compiled by `g++` instead of nvcc serves `impl='c'` on a
+CPU device, for `impl='auto'` as for an explicit `impl='c'`. It needs
+a C++17 compiler with OpenMP (`g++ >= 9` or `clang++ >= 10`; `CXX` overrides)
+and `ninja` — no nvcc, no torch headers, no GPU:
+
+```bash
+python -m sweep.build --cpu
+```
+
+builds it once into `TORCH_EXTENSIONS_DIR/sweep_C/core_cpu/` (2–3 min). Without
+it, the first CPU construction with `impl='auto'` builds the same core (the
+compiler's output kept in `build.log` there; a failed build warns once and that
+process runs eager), and so does the first `impl='c'` call. `SWEEP_CORE_CPU=<path>`
+points at a core built elsewhere; `python -m sweep.build --cpu --core` files one
+under `sweep/lib/cpu/` with its `core.json` for a wheel. `ViscoAcoustic` (cuFFT)
+and the equations not ported yet (`ElasticBorn`, the qP equations, the SEM
+kernels; `sweep.backend.c.hostcore.HOST_UNPORTED`) are not built into it: on a
+CPU device `impl='c'` falls back to eager with a warning for them (`PropSEM`
+refuses `impl='c'` off CUDA, as it always has).
+Architecture, numerics and the kernel rules are in
+[The host (CPU) core](host_core.md).
+
 ## Diagnostics
 
 ```bash
@@ -62,8 +86,8 @@ sweep list equations
 
 ```python
 import sweep
-print(sweep.is_torch_binding_available())          # can impl='c' run here? builds nothing
-print(sweep.backend.torch.binding.diagnostics())   # why or why not, which core, which shim
+print(sweep.is_torch_binding_available())          # can impl='c' run on CUDA here? builds nothing
+print(sweep.backend.torch.binding.diagnostics())   # why or why not, which core, which shim; ["host_core"] for the CPU
 ```
 
 `sweep.precompile()` loads the core up front (building it first when none fits)

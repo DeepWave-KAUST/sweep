@@ -15,8 +15,10 @@ are:
   (`"torch"` for PyTorch eager / `torch.compile`; `"jax"` for JAX on
   `PropJax`).
 - `impl` — the **implementation path** under that framework (`"eager"` =
-  pure-Python operators with PyTorch autograd; `"c"` = the prebuilt CUDA core
-  (`libsweep_core.so`) driven through the pure-Python `sweep._C` ctypes layer).
+  pure-Python operators with PyTorch autograd; `"c"` = the compiled core
+  (`libsweep_core.so`) driven through the pure-Python `sweep._C` ctypes layer —
+  the prebuilt CUDA core on a CUDA device, the host core built from the same
+  sources on a CPU device).
 
 The two axes are orthogonal:
 
@@ -24,12 +26,15 @@ The two axes are orthogonal:
 | --- | --- | --- | --- |
 | `torch` | `eager` | CPU or CUDA | Pure-Python operators + PyTorch autograd |
 | `torch` | `c` | CUDA | Prebuilt CUDA core via the `sweep._C` ctypes layer |
+| `torch` | `c` (explicit) | CPU | The same compiled code as the [host core](../dev/host_core.md), when one is at hand |
 | `jax` | — | CPU or CUDA | JAX implementation via `PropJax` |
 
 `"cuda"` is **not** a backend or `impl` value — it is a device choice driven by
-the tensors you pass in. The compiled path runs on CUDA tensors only; a host
-model tensor is refused with a clear error, and a CPU propagator resolves to
-`impl="eager"`.
+the tensors you pass in. The compiled path follows that device: CUDA tensors
+run the CUDA core; CPU tensors run the host core when `impl="c"` is spelled out
+and a host core is at hand (otherwise a warning and eager). A CPU propagator
+with `impl=None` resolves to `impl="eager"`. Models on mixed devices are
+refused with a clear error.
 
 A minimal invocation for each path:
 

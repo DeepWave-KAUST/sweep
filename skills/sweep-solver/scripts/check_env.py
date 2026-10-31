@@ -2,9 +2,11 @@
 """Report whether this Python environment can run sweep, and on which backend.
 
 Prints: Python / sweep / torch versions, torch's CUDA build and the GPU it sees,
-whether sweep's compiled CUDA core (impl='c') is usable and loads, and whether
-the eager backend runs a one-shot forward on the CPU (and the GPU). Exit code 0
-when at least the eager CPU path works.
+whether sweep's compiled cores (impl='c': the CUDA core, and the host core on
+the CPU) are usable and load, and whether the eager backend runs a one-shot
+forward on the CPU (and the GPU). Builds nothing: a host core that would be
+built on first use is reported, not built. Exit code 0 when at least the eager
+CPU path works.
 
     python check_env.py
 """
@@ -79,7 +81,7 @@ def main() -> int:
 
     from sweep.backend.torch import binding
     diag = binding.diagnostics()
-    line("impl='c' usable", f"{diag.get('usable')}  (reason: {diag.get('reason')})")
+    line("impl='c' usable (cuda)", f"{diag.get('usable')}  (reason: {diag.get('reason')})")
     core = diag.get("shipped_core") or {}
     line("shipped CUDA core", f"{core.get('tag')} -- {core.get('reason')} "
                               f"(available: {core.get('available')})")
@@ -91,7 +93,20 @@ def main() -> int:
         ok = False
         line("eager forward on cpu", f"FAILED: {exc!r}")
         traceback.print_exc()
-    line("compiled core on cpu", "none: there is no CPU core; CPU runs use impl='eager'")
+    host = diag.get("host_core") or {}
+    at_hand = host.get("shipped") or host.get("cached")
+    if at_hand:
+        try:
+            line("impl='c' forward on cpu", f"OK (impl={tiny_forward('cpu', 'c')}; host core {at_hand})")
+        except Exception as exc:  # noqa: BLE001
+            line("impl='c' on cpu", f"FAILED: {exc!r}")
+    elif host.get("can_build"):
+        line("host (CPU) core", f"not built yet: the first CPU impl='c' run builds it once "
+                                f"(1-3 min; {host.get('build_reason')}), or `python -m sweep.build --cpu`")
+    else:
+        line("host (CPU) core", f"unavailable ({host.get('build_reason')}); CPU runs use impl='eager'")
+    if host.get("unported"):
+        line("host core lacks", ", ".join(host["unported"]) + " (eager on the CPU)")
 
     if cuda:
         if diag.get("usable"):

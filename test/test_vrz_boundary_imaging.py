@@ -43,9 +43,12 @@ Three things pinned here, all found on field-data int8 gradients:
    alike.  The DD propagator refuses 2-D VRZ, but the compiled bs path takes
    cut_face_mask 0xF.  Fixed: vrz2d_recon_box keeps the row on a cut face, as
    the 3-D twin always did.  Pinned on one domain with no absorbing pad, where
-   a cut face and an ordinary face are the same physics.
+   a cut face and an ordinary face are the same physics, on the CUDA core and
+   on the host (CPU) core, whose rows take the same box (kernels.cu
+   vrz2d_nopml_box).
 """
 import functools
+import os
 from unittest import mock
 
 import numpy as np
@@ -80,6 +83,13 @@ def _binding_ready():
         return bool(is_torch_binding_available())
     except Exception:
         return False
+
+
+def _host_core():
+    if os.environ.get("SWEEP_TEST_HOST_CORE", "1").lower() in ("0", "false", "no", "off"):
+        return False
+    from sweep.backend.c import hostcore
+    return hostcore.available()
 
 
 def _ramp(shape, top, bottom):
@@ -209,7 +219,7 @@ def test_vrz2d_c_matches_eager():
 CUT_MASKS = (1, 2, 4, 8, 15)
 
 
-def _cut2d_run(so, mode, cut_mask):
+def _cut2d_run(so, mode, cut_mask, dev):
     """2-D VRZ on one domain with no absorbing pad (abcn=0) and the faces in
     ``cut_mask`` declared DD cuts.  Without a pad a cut face and an ordinary
     one are the same physics -- no damping, a halo nothing writes -- so the
@@ -222,13 +232,13 @@ def _cut2d_run(so, mode, cut_mask):
     from sweep.propagator.options import BoundarySaving, Full
     from sweep.propagator.torch import PropTorch
 
-    dev = "cuda"
     shape, _, nt, src, rec, vp, z = _setup(2)
     mem = Full() if mode == "full" else BoundarySaving(storage="gpu", storage_dtype="fp32")
     eq = AcousticVRZ(spatial_order=so, device=dev, backend="torch")
     with mock.patch.object(prop_base, "dd_cut_face_mask", lambda mesh, ndim: cut_mask):
         prop = PropTorch(eq, backend="torch", impl="c", memory=mem,
-                         shape=shape, abcn=0, dh=DH, dt=DT, nt=nt)
+                         shape=shape, abcn=0, dh=DH, dt=DT, nt=nt, dev=dev)
+    assert prop.impl == "c"
     assert prop._dd_cut_mask == cut_mask and prop.pad == (0, 0, 0, 0)
     wav = torch.tensor(_ricker(nt, DT), device=dev)
     m = [torch.tensor(vp, device=dev, requires_grad=True),
@@ -239,8 +249,8 @@ def _cut2d_run(so, mode, cut_mask):
 
 
 @functools.lru_cache(maxsize=None)
-def _cut2d_reference(so):
-    return _cut2d_run(so, "full", 0)
+def _cut2d_reference(so, dev):
+    return _cut2d_run(so, "full", 0, dev)
 
 
 def _cut_rows(d, cut_mask):
@@ -250,12 +260,15 @@ def _cut_rows(d, cut_mask):
     return torch.cat(rows)
 
 
-@pytest.mark.skipif(not _binding_ready(), reason="CUDA + compiled sweep._C required")
+@pytest.mark.parametrize("dev", [
+    pytest.param("cuda", marks=pytest.mark.skipif(not _binding_ready(), reason="CUDA + compiled sweep._C required")),
+    pytest.param("cpu", marks=pytest.mark.skipif(not _host_core(), reason="no host (CPU) core at hand")),
+])
 @pytest.mark.parametrize("cut_mask", CUT_MASKS)
-@pytest.mark.parametrize("so", [4, 10])   # 4: the fused tiled step; 10: acoustic_vrz2nd_nopml
-def test_vrz2d_bs_reconstructs_the_cut_adjacent_row(so, cut_mask):
-    rec_f, *g_f = _cut2d_reference(so)
-    rec_c, *g_c = _cut2d_run(so, "bs", cut_mask)
+@pytest.mark.parametrize("so", [4, 10])   # 4: the fused tiled step (CUDA); 10: acoustic_vrz2nd_nopml
+def test_vrz2d_bs_reconstructs_the_cut_adjacent_row(so, cut_mask, dev):
+    rec_f, *g_f = _cut2d_reference(so, dev)
+    rec_c, *g_c = _cut2d_run(so, "bs", cut_mask, dev)
     # the premise: declaring the faces cut changed no physics
     assert _rel(rec_c, rec_f) < REL_TOL_MODES, f"record rel {_rel(rec_c, rec_f):.3e}"
     for name, gf, gc in zip(("vp", "z"), g_f, g_c):

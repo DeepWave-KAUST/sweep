@@ -33,8 +33,9 @@ CLI equivalent: `sweep list equations`, `sweep show Elastic`. Field aliases are 
 
 ## 2. Family tables
 
-`c` = compiled CUDA kernels exist. FS = free surface: `per-edge` means any subset of the four 2-D
-faces on eager and c; `top` = top face only; `refused` = raises `NotImplementedError`.
+`c` = compiled kernels exist (`impl='c'`), on CUDA and on the CPU (host core) unless marked
+CUDA only. FS = free surface: `per-edge` means any subset of the four 2-D faces on eager and c;
+`top` = top face only; `refused` = raises `NotImplementedError`.
 
 ### Acoustic
 
@@ -45,7 +46,7 @@ faces on eager and c; `top` = top face only; `refused` = raises `NotImplementedE
 | `AcousticVRZ`, `AcousticVRZ3D` | 2/3 | `vp, z` | `h1` / `h1` | yes | top | variable density, `z` = impedance; c refuses wavelet grad |
 | `AcousticVRR` | 2 | `vp, rx, rz` | `h1` / `h1` | no | top | vector-reflectivity form |
 | `Acoustic1st` | 2 | `vp, rho` | `p` / `p` (rec also `vx, vz`) | no | not implemented (see SKILL pitfall 12) | default `backend='jax'`; `pml_type` `cpmls` or `spml` |
-| `ViscoAcoustic` | 2 | `vp, Q, omega` | `h1` / `h1` | yes | per-edge | Zhu & Harris (2014) constant Q; no boundary saving (c defaults to `Full()`) |
+| `ViscoAcoustic` | 2 | `vp, Q, omega` | `h1` / `h1` | yes, CUDA only | per-edge | Zhu & Harris (2014) constant Q; no boundary saving (c defaults to `Full()`) |
 | `AcousticBorn`, `AcousticBorn3D` | 2/3 | `vp, mp` | `h1` / **`sh1`** | yes | top | Born pair; see `imaging.md` |
 | `AcousticCurvilinear` | 2 | `vp` | `h1` / `h1` | no | built in | boundary-fitted grid for `topography=` |
 
@@ -53,9 +54,9 @@ faces on eager and c; `top` = top face only; `refused` = raises `NotImplementedE
 
 | Class (aliases) | Dim | models | src / rec | c | Notes |
 |---|---|---|---|---|---|
-| `AcousticVTI` (`AcousticVTILiang`, `AcousticVTIDefault`) | 2 | `vp, epsilon, delta` | `h1` / `h1` | yes (full, BS) | pure qP, Liang et al. 2023; `s_gradient='adjoint'`; warns when `dt` breaks its stability limit; eager BS refused |
-| `AcousticTTI` (`AcousticTTILiang`) | 2 | `vp, epsilon, delta, theta` | `h1` / `h1` | yes | `theta` in rad |
-| `AcousticVTIBorn` / `AcousticTTIBorn` | 2 | `+ mp` | `h1` / `sh1` | yes, `mp` grad only | Born pair of the above |
+| `AcousticVTI` (`AcousticVTILiang`, `AcousticVTIDefault`) | 2 | `vp, epsilon, delta` | `h1` / `h1` | yes (full, BS), CUDA only | pure qP, Liang et al. 2023; `s_gradient='adjoint'`; warns when `dt` breaks its stability limit; eager BS refused |
+| `AcousticTTI` (`AcousticTTILiang`) | 2 | `vp, epsilon, delta, theta` | `h1` / `h1` | yes, CUDA only | `theta` in rad |
+| `AcousticVTIBorn` / `AcousticTTIBorn` | 2 | `+ mp` | `h1` / `sh1` | yes, CUDA only, `mp` grad only | Born pair of the above |
 | `AcousticVTI1st` (`AcousticVTIDuveneck`), `AcousticVTI1st3D` (`AcousticVTIDuveneck3D`, `AcousticVTIDefault3D`) | 2/3 | `vp, epsilon, delta, rho` | **`sH, sV`** / **`vz`** | yes | Duveneck 2008, staggered; warns if `epsilon < delta`; `recommended_dt(vp_max, epsilon_max, h)` classmethod |
 | `AcousticTariq` (`AcousticVTIAlkhalifah`) | 2 | `vv, v, eta` | `h1` / `h1` | no | Alkhalifah 2000 eta form |
 | `AcousticAniso` | 2/3 | per `method=` | | | factory: `AcousticAniso(method="duveneck"|"liang"|"alkhalifah", symmetry="vti"|"tti", ndim=2)` returns one of the above |
@@ -66,7 +67,7 @@ faces on eager and c; `top` = top face only; `refused` = raises `NotImplementedE
 |---|---|---|---|---|---|---|
 | `Elastic` | 2 | `vp, vs, rho` | `sxx, szz` (explosion) / `vx, vz` | yes | per-edge | Virieux staggered; sources also `vx, vz` (force), `sxz`; receivers also `sxx, szz` |
 | `Elastic3D` | 3 | `vp, vs, rho` | `sxx, syy, szz` / `vx, vy, vz` | yes | top | `type(eq).__name__` prints `Elastic` |
-| `ElasticBorn` | 2 | `vp, vs, rho, dvp, dvs, drho` | `sxx, szz` / **`svx, svz`** | yes, `d*` grads only | per-edge | Born pair of `Elastic`; absolute perturbations; see `imaging.md` §6 |
+| `ElasticBorn` | 2 | `vp, vs, rho, dvp, dvs, drho` | `sxx, szz` / **`svx, svz`** | yes, CUDA only, `d*` grads only | per-edge | Born pair of `Elastic`; absolute perturbations; see `imaging.md` §6 |
 | `ViscoElastic` | 2 | `vp, vs, rho, Qp, Qs` | as `Elastic` | yes | per-edge | GSLS, `f_ref=10.0`, `n_sls=3`; `Qp=Qs=inf` equals `Elastic`; c has no boundary saving |
 | `ElasticVRR` | 2 | `vp, vs, Rp_x, Rp_z, Rs_x, Rs_z` | `sxx, szz` / `px, pz` | yes | top | vector reflectivity, no density model; helper `compute_vector_reflectivity` |
 | `ElasticTTISG`, `ElasticTTISG3D` | 2/3 | `vp0, vs0, rho, epsilon, delta, gamma, theta, phi` | `sxx, szz` / `vx, vz` | yes | refused | standard staggered grid; `spatial_order` default 8 (2-D) |

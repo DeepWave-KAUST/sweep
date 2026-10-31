@@ -127,6 +127,9 @@ class CompiledCallParams:
     adcig_max_lag: int = 0
     topo_rows_param: torch.Tensor = None   # runtime padded surface row per col
     has_topo_param: bool = False
+    # equation.air_cells_are_vacuum under image topography: the backward
+    # zeroes the cotangent of receivers above the surface
+    drop_air_receivers: bool = False
     fs_faces: int = -1   # per-edge free-surface bitmask (-1 => legacy z-min)
     cut_face_mask: int = 0   # DD cut faces (0 => single domain)
     # Equation-specific aux tensors, opaque to the wrapper (e.g. the

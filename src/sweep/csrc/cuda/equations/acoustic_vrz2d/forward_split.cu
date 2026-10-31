@@ -12,22 +12,27 @@
 // The cells are those of the former single kernel, each computed by the same
 // expressions.
 #include "kernels.cuh"
+#include "../../launch/launch.h"   // SWEEP_LAUNCH, SWEEP_LAUNCH_ROWS
 #include "../../launch/box.cuh"
+#include "../../launch/cell_path.h"
+#include "../../common/host_rows.h"   // host core: box_launch_rows, box_cell_at
 
 namespace {
 
 using fdtd::Box;
 
 // ----------------------------------------------------------------- interior
-template<int Order>
-__global__ void vrz2d_fwd_interior(
-    AcousticWavefieldPointer wf, const float* __restrict__ vp,
+// One cell of vrz2d_fwd_interior: everything after the kernel's box_cell guard
+// (launch/cell_path.h).  The kernel has no other test -- every cell of its box
+// takes the plain update -- so its interior box is the launch box itself and
+// every path is the same code.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__ void vrz2d_fwd_interior_cell(
+    int ix, int iz, int b,
+    const AcousticWavefieldPointer& wf, const float* __restrict__ vp,
     const float* __restrict__ z, const float* __restrict__ inv_z,
-    LaplaceParam lap_ctx, GradParam grad_ctx, SolverContext solver, Box box)
+    const LaplaceParam& lap_ctx, const GradParam& grad_ctx, const SolverContext& solver)
 {
-    int ix, iy, iz, b;
-    if (!fdtd::box_cell(box, solver.B, ix, iy, iz, b)) return;
-
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
 
@@ -57,6 +62,53 @@ __global__ void vrz2d_fwd_interior(
     float rhs = kappa * (beta * (lap_x + lap_z) + dbdx * dudx + dbdz * dudz);
     f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * rhs;
 }
+
+template<int Order>
+__global__ void vrz2d_fwd_interior(
+    AcousticWavefieldPointer wf, const float* __restrict__ vp,
+    const float* __restrict__ z, const float* __restrict__ inv_z,
+    LaplaceParam lap_ctx, GradParam grad_ctx, SolverContext solver, Box box)
+{
+    int ix, iy, iz, b;
+    if (!fdtd::box_cell(box, solver.B, ix, iy, iz, b)) return;
+
+    vrz2d_fwd_interior_cell<Order>(ix, iz, b, wf, vp, z, inv_z, lap_ctx, grad_ctx, solver);
+}
+
+#if defined(SWEEP_HOST_CORE)
+// Host row launcher of vrz2d_fwd_interior (launch/cell_path.h), for
+// SWEEP_LAUNCH_ROWS in launch_fwd: the virtual thread (gx, gy, gz) of the box
+// launch is the cell box_cell_at decodes, and the span of row (gy, gz) is
+// box_launch_rows: the box's whole x extent, empty past the last shot (and,
+// with a surface, above it: VRZ sets none) -- exactly the threads whose
+// box_cell guard passes, so every one of them runs the kernel's one body.  No
+// arithmetic here; the cell lambda captures BY VALUE (see acoustic2d).  Order
+// -1 (runtime M) takes the same span; its row loop does not vectorise.
+//
+// The cell gets vrz2d_unit_sx(grad_ctx) (kernels.cuh), the unit-stride copy;
+// with any other stride the span is empty.
+
+template<int Order>
+struct Vrz2dFwdInteriorRows {
+    static void run(dim3 grid, dim3 block, AcousticWavefieldPointer wf, const float* vp,
+                    const float* z, const float* inv_z, LaplaceParam lap_ctx, GradParam grad_ctx,
+                    SolverContext solver, Box box)
+    {
+        auto call = [&](auto&&... a) { vrz2d_fwd_interior<Order>(a...); };
+        const Box span_box = grad_ctx.sx == 1 ? box : Box{0, 0, 0, 0, 0, 0};
+        sweep::host::launch_rows(
+            grid, block, sweep::host::box_launch_rows(span_box, solver),
+            [=](int gx, int gy, int gz) {
+                int ix, iy, iz, b;
+                sweep::host::box_cell_at(box, gx, gy, gz, ix, iy, iz, b);
+                vrz2d_fwd_interior_cell<Order, CellPath::Interior>(
+                    ix, iz, b, wf, vp, z, inv_z, lap_ctx, vrz2d_unit_sx(grad_ctx), solver);
+            },
+            call,
+            wf, vp, z, inv_z, lap_ctx, grad_ctx, solver, box);
+    }
+};
+#endif
 
 // ----------------------------------------------------------------- CPML ring
 template<int Order>
@@ -146,12 +198,13 @@ void launch_fwd(const FwdArgs& a, const SolverContext& ctx)
     const Box in = fdtd::intersect(fdtd::phys_box(ctx, 1), all);
     if (!fdtd::empty(in)) {
         const auto L = fdtd::box_launch(in, ctx.B, fdtd::kBoxBlock);
-        vrz2d_fwd_interior<Order><<<L.grid, L.block>>>(a.wf, a.vp, a.z, a.iz, a.lap, a.g, ctx, in);
+        SWEEP_LAUNCH_ROWS((vrz2d_fwd_interior<Order>), Vrz2dFwdInteriorRows<Order>::run, L.grid, L.block,
+                          a.wf, a.vp, a.z, a.iz, a.lap, a.g, ctx, in);
     }
     const fdtd::SlabSet ring = fdtd::slab_set(all, in);
     if (ring.n == 0) return;
     const auto L = fdtd::slab_set_launch(ring, ctx.B);
-    vrz2d_fwd_ring<Order><<<L.grid, L.block>>>(a.wf, a.vp, a.z, a.iz, a.lap, a.g, a.gx, a.gz,
+    SWEEP_LAUNCH((vrz2d_fwd_ring<Order>), L.grid, L.block, a.wf, a.vp, a.z, a.iz, a.lap, a.g, a.gx, a.gz,
                                                a.cpml, ctx, ring);
 }
 

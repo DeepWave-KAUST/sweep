@@ -29,6 +29,7 @@
 // All kernels are `static` (the .cuh is included by two TUs).
 #pragma once
 #include <cuda_runtime.h>
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 namespace sem3d {
 
@@ -150,14 +151,14 @@ static inline void sem3d_zero_g9(const In& in, bool slab, cudaStream_t stream,
 // deformed pair (columnar metric). The parameter is named for its first user.
 // K##_by_flag is the kernel's table, <false> then <true>.
 #define SEM3D_LAUNCH_SLAB(slab, K, grid, block, shm, stream, ...) \
-    K##_by_flag[(slab) ? 1 : 0]<<<grid, block, shm, stream>>>(__VA_ARGS__)
+    SWEEP_LAUNCH_ON(K##_by_flag[(slab) ? 1 : 0], grid, block, shm, stream, __VA_ARGS__)
 // two-flag twin: <SLAB, FLAG>. FLAG is WTAPE for step_T (read w_sum from the
 // tape instead of recomputing it) and COL for the deformed grads (columnar
 // metric: four inv_J components identically zero, two mesh-wide constants).
 // K##_by_flags is the kernel's table, <false, false>, <false, true>,
 // <true, false>, <true, true>.
 #define SEM3D_LAUNCH_SLAB2(slab, wt, K, grid, block, shm, stream, ...) \
-    K##_by_flags[((slab) ? 2 : 0) + ((wt) ? 1 : 0)]<<<grid, block, shm, stream>>>(__VA_ARGS__)
+    SWEEP_LAUNCH_ON(K##_by_flags[((slab) ? 2 : 0) + ((wt) ? 1 : 0)], grid, block, shm, stream, __VA_ARGS__)
 
 using sem3d_acoustic_cpml_grads_fn = void (*)(const float*, const float*, const float*,
     const float*, const int*, const float*, const float*, const float*, const float*,
@@ -420,7 +421,7 @@ __global__ void sem3d_vs_vel_update(
 // Launch KERNEL<NC> for the input's stiffness count (0 isotropic, 9 VTI, 21 TTI).
 // KERNEL##_by_nc is the kernel's table, <21>, <9>, <0>.
 #define SEM3D_VS_LAUNCH_NC(nc, KERNEL, grid, block, shmem, stream, ...) \
-    KERNEL##_by_nc[(nc) == 21 ? 0 : (nc) == 9 ? 1 : 2]<<<grid, block, shmem, stream>>>(__VA_ARGS__)
+    SWEEP_LAUNCH_ON(KERNEL##_by_nc[(nc) == 21 ? 0 : (nc) == 9 ? 1 : 2], grid, block, shmem, stream, __VA_ARGS__)
 
 
 // G: velocity gradients of the NEW v + v-memory update + stretch + isotropic

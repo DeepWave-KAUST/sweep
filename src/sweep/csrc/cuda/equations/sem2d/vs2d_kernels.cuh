@@ -158,6 +158,6 @@ __global__ void sem2d_vs_sigma_div_T(
 // Launch KERNEL<NC> for the input's stiffness count (0 isotropic, 4 VTI, 6 TTI).
 // KERNEL##_by_nc is the kernel's table, <6>, <4>, <0>.
 #define SEM2D_VS_LAUNCH_NC(nc, KERNEL, grid, block, shmem, stream, ...) \
-    KERNEL##_by_nc[(nc) == 6 ? 0 : (nc) == 4 ? 1 : 2]<<<grid, block, shmem, stream>>>(__VA_ARGS__)
+    SWEEP_LAUNCH_ON(KERNEL##_by_nc[(nc) == 6 ? 0 : (nc) == 4 ? 1 : 2], grid, block, shmem, stream, __VA_ARGS__)
 
 } // namespace sem2d

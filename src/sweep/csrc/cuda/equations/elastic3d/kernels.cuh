@@ -1,5 +1,7 @@
 #pragma once
 #include "../../launch/by_order.cuh"
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
+#include "../../launch/cell_path.h"
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include "../../common/context.h"
@@ -40,20 +42,20 @@
 
 #define LAUNCH_3DELASTIC_VELOCITY_ADJOINT(order, grid, block, ...)                     \
     do {                                                        \
-        if      ((order) == 2) elastic_velocity_adjoint_kernel_3d<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_velocity_adjoint_kernel_3d<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_velocity_adjoint_kernel_3d<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_velocity_adjoint_kernel_3d<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_velocity_adjoint_kernel_3d<-1><<<grid, block>>>(__VA_ARGS__);\
+        if      ((order) == 2) SWEEP_LAUNCH((elastic_velocity_adjoint_kernel_3d<2>), grid, block, __VA_ARGS__); \
+        else if ((order) == 4) SWEEP_LAUNCH((elastic_velocity_adjoint_kernel_3d<4>), grid, block, __VA_ARGS__); \
+        else if ((order) == 6) SWEEP_LAUNCH((elastic_velocity_adjoint_kernel_3d<6>), grid, block, __VA_ARGS__); \
+        else if ((order) == 8) SWEEP_LAUNCH((elastic_velocity_adjoint_kernel_3d<8>), grid, block, __VA_ARGS__); \
+        else                   SWEEP_LAUNCH((elastic_velocity_adjoint_kernel_3d<-1>), grid, block, __VA_ARGS__);\
     } while (0)
 
 #define LAUNCH_3DELASTIC_STRESS_ADJOINT(order, grid, block, ...)                       \
     do {                                                        \
-        if      ((order) == 2) elastic_stress_adjoint_kernel_3d<2><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 4) elastic_stress_adjoint_kernel_3d<4><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 6) elastic_stress_adjoint_kernel_3d<6><<<grid, block>>>(__VA_ARGS__); \
-        else if ((order) == 8) elastic_stress_adjoint_kernel_3d<8><<<grid, block>>>(__VA_ARGS__); \
-        else                   elastic_stress_adjoint_kernel_3d<-1><<<grid, block>>>(__VA_ARGS__);\
+        if      ((order) == 2) SWEEP_LAUNCH((elastic_stress_adjoint_kernel_3d<2>), grid, block, __VA_ARGS__); \
+        else if ((order) == 4) SWEEP_LAUNCH((elastic_stress_adjoint_kernel_3d<4>), grid, block, __VA_ARGS__); \
+        else if ((order) == 6) SWEEP_LAUNCH((elastic_stress_adjoint_kernel_3d<6>), grid, block, __VA_ARGS__); \
+        else if ((order) == 8) SWEEP_LAUNCH((elastic_stress_adjoint_kernel_3d<8>), grid, block, __VA_ARGS__); \
+        else                   SWEEP_LAUNCH((elastic_stress_adjoint_kernel_3d<-1>), grid, block, __VA_ARGS__);\
     } while (0)
 
 #define LAUNCH_3DELASTIC_VELOCITY_ADJOINT_PREPARE(order, grid, block, ...) \
@@ -71,33 +73,48 @@
 #define LAUNCH_CALCULATE_GRAD_3DELASTIC_BS(order, grid, block, ...) \
     SWEEP_LAUNCH_BY_ORDER(calculate_grad_elastic3d_bs_by_order, order, grid, block, __VA_ARGS__)
 
-template<int Order>
-__global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_velocity_kernel_3d(
-    ElasticWavefieldPointer wf,
+// ``wf.offset(b, spatial_size)`` for a cell (launch/cell_path.h).  offset()
+// shifts the 3-D-only fields (vy, syy, sxy, syz) behind ``if (p)``, for 2-D
+// reuse of the struct.  A 3-D cell dereferences every field it uses, on its
+// own path as on the kernel's, so on an interior path those are non-null and
+// the shift is unconditional: the same pointers, without the in-loop select
+// that hides from the host compiler that the row's base pointers are loop
+// invariant (the row would not vectorise).  Spelled in integers, so a field
+// the cell does not use (null in a forward-velocity view, say) is never
+// null-pointer arithmetic; it is dead code anyway.  On Any: offset() itself.
+template<CellPath Path>
+__device__ __forceinline__ ElasticWavefieldPointer elastic3d_cell_offset(
+    const ElasticWavefieldPointer& wf, int b, int spatial_size)
+{
+    ElasticWavefieldPointer out = wf.offset(b, spatial_size);
+    if constexpr (interior_path<Path>) {
+        const uintptr_t shift = (uintptr_t)(intptr_t)(b * spatial_size) * sizeof(float);
+        out.vy  = reinterpret_cast<float*>(reinterpret_cast<uintptr_t>(wf.vy)  + shift);
+        out.syy = reinterpret_cast<float*>(reinterpret_cast<uintptr_t>(wf.syy) + shift);
+        out.sxy = reinterpret_cast<float*>(reinterpret_cast<uintptr_t>(wf.sxy) + shift);
+        out.syz = reinterpret_cast<float*>(reinterpret_cast<uintptr_t>(wf.syz) + shift);
+    }
+    return out;
+}
+
+// One cell of elastic_velocity_kernel_3d: everything after the kernel's guards
+// (launch/cell_path.h).  Interior box: the interior test's box, below the FS
+// helper's mirror rows (common/host_rows.h elastic3d_fs_box); free surface as
+// the ELASTIC_FS_Z flag; no optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_velocity_3d_cell(
+    int ix, int iy, int iz, int b,
+    const ElasticWavefieldPointer& wf,
     const float* __restrict__ rho,
-    SGradParam grad_ctx,
-    ElasticCPMLPointer cpml,
-    SolverContext solver
+    const SGradParam& grad_ctx,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iy = blockIdx.y * blockDim.y + threadIdx.y;
-    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
-
-    if (ix >= solver.nx || iy >= solver.ny) return;
-    if (iz_global >= solver.nz * solver.B) return;
-
-    int b  = iz_global / solver.nz;
-    int iz = iz_global % solver.nz;
-
     constexpr bool is_runtime = (Order == -1);
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
-
-    if (ix < halo || ix >= solver.nx - halo ||
-        iy < halo || iy >= solver.ny - halo ||
-        iz < halo || iz >= solver.nz - halo)
-        return;
 
     int spatial_size = solver.nx * solver.ny * solver.nz;
 
@@ -106,27 +123,25 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_velocity_
         iy * solver.nx +
         ix;
 
-    auto f = wf.offset(b, spatial_size);
+    auto f = elastic3d_cell_offset<Path>(wf, b, spatial_size);
     const float* rho_b = rho + b * spatial_size;
 
     int x0 = solver.phys_x0();
-    int x1 = solver.phys_x1();
     int y0 = solver.phys_y0();
-    int y1 = solver.phys_y1();
     int z0 = solver.phys_z0();
     int z1 = solver.phys_z1();
 
     float dsxx_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.sxx, ix, iy, iz, grad_ctx);
     float dsxy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
-    float dsxz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx, solver, true, true);
+    float dsxz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD, Path>(f.sxz, ix, iy, iz, grad_ctx, solver, true, true);
 
     float dsxy_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
     float dsyy_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.syy, ix, iy, iz, grad_ctx);
-    float dsyz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx, solver, true, true);
+    float dsyz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD, Path>(f.syz, ix, iy, iz, grad_ctx, solver, true, true);
 
     float dsxz_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx);
     float dsyz_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx);
-    float dszz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD >(f.szz, ix, iy, iz, grad_ctx, solver, true);
+    float dszz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD, Path>(f.szz, ix, iy, iz, grad_ctx, solver, true);
 
     float inv_rho = 1.f / rho_b[idx];
 
@@ -135,12 +150,19 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_velocity_
     // interior branch.  The PML branch with all-zero coefficients is
     // mathematically identity but NOT bitwise identical (different FMA
     // contraction), so the cut-side band must take the interior branch too.
-    bool interior =
-        ix >= (solver.cut_x_lo() ? halo : x0 + 1) &&
-        ix <  (solver.cut_x_hi() ? solver.nx - halo : x1 - 1) &&
-        iy >= (solver.cut_y_lo() ? halo : y0 + 1) &&
-        iy <  (solver.cut_y_hi() ? solver.ny - halo : y1 - 1) &&
-        iz >= z0 + 1 && iz < z1 - 1;
+    // x1 / y1 are read here, next to their only use, rather than with x0 / z0
+    // above: same loads, but as one split cell nvcc otherwise keeps them live
+    // from the top and order 6 grows by 8 instructions (the SASS check).
+    int x1 = solver.phys_x1();
+    int y1 = solver.phys_y1();
+    bool interior = true;
+    if constexpr (!interior_path<Path>)
+        interior =
+            ix >= (solver.cut_x_lo() ? halo : x0 + 1) &&
+            ix <  (solver.cut_x_hi() ? solver.nx - halo : x1 - 1) &&
+            iy >= (solver.cut_y_lo() ? halo : y0 + 1) &&
+            iy <  (solver.cut_y_hi() ? solver.ny - halo : y1 - 1) &&
+            iz >= z0 + 1 && iz < z1 - 1;
 
     if (interior) {
         f.vx[idx] += solver.dt * inv_rho *
@@ -224,17 +246,10 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_velocity_
         (dsxz_dx + dsyz_dy + dszz_dz);
 }
 
-using elastic_velocity_kernel_3d_fn = void (*)(ElasticWavefieldPointer, const float*,
-    SGradParam, ElasticCPMLPointer, SolverContext);
-SWEEP_BY_ORDER_DECL(elastic_velocity_kernel_3d_fn, elastic_velocity_kernel_3d_by_order);
-
-
 template<int Order>
-__global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_stress_kernel_3d(
+__global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_velocity_kernel_3d(
     ElasticWavefieldPointer wf,
-    const float* __restrict__ lambda,
-    const float* __restrict__ mu,
-    float* __restrict__ u_this_t,
+    const float* __restrict__ rho,
     SGradParam grad_ctx,
     ElasticCPMLPointer cpml,
     SolverContext solver
@@ -259,6 +274,36 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_stress_ke
         iz < halo || iz >= solver.nz - halo)
         return;
 
+    elastic_velocity_3d_cell<Order>(ix, iy, iz, b, wf, rho, grad_ctx, cpml, solver);
+}
+
+using elastic_velocity_kernel_3d_fn = void (*)(ElasticWavefieldPointer, const float*,
+    SGradParam, ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(elastic_velocity_kernel_3d_fn, elastic_velocity_kernel_3d_by_order);
+
+
+// One cell of elastic_stress_kernel_3d: everything after the kernel's guards
+// (launch/cell_path.h).  Interior box: the interior test's box, below the FS
+// helper's mirror rows (common/host_rows.h elastic3d_fs_box; the surface row
+// with its Robertsson block is out); free surface as the ELASTIC_FS_Z flag;
+// optional output: u_this_t.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_stress_3d_cell(
+    int ix, int iy, int iz, int b,
+    const ElasticWavefieldPointer& wf,
+    const float* __restrict__ lambda,
+    const float* __restrict__ mu,
+    float* __restrict__ u_this_t,
+    const SGradParam& grad_ctx,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver
+)
+{
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
     int spatial_size = solver.nx * solver.ny * solver.nz;
 
     int idx =
@@ -266,7 +311,7 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_stress_ke
         iy * solver.nx +
         ix;
 
-    auto f = wf.offset(b, spatial_size);
+    auto f = elastic3d_cell_offset<Path>(wf, b, spatial_size);
 
     const float* lam_b = lambda + b * spatial_size;
     const float* mu_b  = mu     + b * spatial_size;
@@ -280,26 +325,28 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_stress_ke
 
     float dvx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.vx, ix, iy, iz, grad_ctx);
     float dvx_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx);
-    float dvx_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx, solver, false);
+    float dvx_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD, Path>(f.vx, ix, iy, iz, grad_ctx, solver, false);
 
     float dvy_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx);
     float dvy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.vy, ix, iy, iz, grad_ctx);
-    float dvy_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx, solver, false);
+    float dvy_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD, Path>(f.vy, ix, iy, iz, grad_ctx, solver, false);
 
     float dvz_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
     float dvz_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
-    float dvz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx, solver, true, true);
+    float dvz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD, Path>(f.vz, ix, iy, iz, grad_ctx, solver, true, true);
 
     float lam = lam_b[idx];
     float mu_ = mu_b[idx];
 
     // Cut-aware interior band — see elastic_velocity_kernel_3d.
-    bool interior =
-        ix >= (solver.cut_x_lo() ? halo : x0 + 1) &&
-        ix <  (solver.cut_x_hi() ? solver.nx - halo : x1 - 1) &&
-        iy >= (solver.cut_y_lo() ? halo : y0 + 1) &&
-        iy <  (solver.cut_y_hi() ? solver.ny - halo : y1 - 1) &&
-        iz >= z0 + 1 && iz < z1 - 1;
+    bool interior = true;
+    if constexpr (!interior_path<Path>)
+        interior =
+            ix >= (solver.cut_x_lo() ? halo : x0 + 1) &&
+            ix <  (solver.cut_x_hi() ? solver.nx - halo : x1 - 1) &&
+            iy >= (solver.cut_y_lo() ? halo : y0 + 1) &&
+            iy <  (solver.cut_y_hi() ? solver.ny - halo : y1 - 1) &&
+            iz >= z0 + 1 && iz < z1 - 1;
 
     if (interior) {
         float div_v = dvx_dx + dvy_dy + dvz_dz;
@@ -322,7 +369,7 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_stress_ke
         f.syz[idx] += solver.dt *
             mu_ * (dvy_dz + dvz_dy);
 
-        if (elastic3d_is_top_free_surface_row(solver, iz)) {
+        if (elastic3d_is_top_free_surface_row<Path>(solver, iz)) {
             // Robertsson tangential FS correction (3-D): sigma_zz=0 => surface-row
             // sxx/syy each get -dt*lam*(lam/(lam+2mu)*(dvx_dx+dvy_dy)+dvz_dz)
             // added (equal for xx & yy); matches eager elastic3d/das_mu3d.
@@ -333,7 +380,7 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_stress_ke
             f.szz[idx] = 0.f;   // z-low FS: zero only szz; sxz/syz are +h/2 medium values (fix)
         }
 
-        if (u_this_t) {
+        if (optional_output<Path>(u_this_t)) {
             float* u_this_b = u_this_t + b * spatial_size;
             int comp_stride = solver.B * spatial_size;
             u_this_b[0 * comp_stride + idx] = f.vx[idx];
@@ -416,7 +463,7 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_stress_ke
     f.syz[idx] += solver.dt *
         mu_ * (dvy_dz + dvz_dy);
 
-    if (elastic3d_is_top_free_surface_row(solver, iz)) {
+    if (elastic3d_is_top_free_surface_row<Path>(solver, iz)) {
         // Robertsson tangential FS correction (3-D); see elastic_stress_kernel_3d.
         float _rob = -solver.dt * lam *
             (lam / (lam + 2.f * mu_) * (dvx_dx + dvy_dy) + dvz_dz);
@@ -434,6 +481,39 @@ __global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_stress_ke
     }
 }
 
+template<int Order>
+__global__ void __launch_bounds__(256, ELASTIC3D_LB_MINBLOCKS) elastic_stress_kernel_3d(
+    ElasticWavefieldPointer wf,
+    const float* __restrict__ lambda,
+    const float* __restrict__ mu,
+    float* __restrict__ u_this_t,
+    SGradParam grad_ctx,
+    ElasticCPMLPointer cpml,
+    SolverContext solver
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if (ix >= solver.nx || iy >= solver.ny) return;
+    if (iz_global >= solver.nz * solver.B) return;
+
+    int b  = iz_global / solver.nz;
+    int iz = iz_global % solver.nz;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
+    if (ix < halo || ix >= solver.nx - halo ||
+        iy < halo || iy >= solver.ny - halo ||
+        iz < halo || iz >= solver.nz - halo)
+        return;
+
+    elastic_stress_3d_cell<Order>(ix, iy, iz, b, wf, lambda, mu, u_this_t, grad_ctx, cpml, solver);
+}
+
 using elastic_stress_kernel_3d_fn = void (*)(ElasticWavefieldPointer, const float*,
     const float*, float*, SGradParam, ElasticCPMLPointer, SolverContext);
 SWEEP_BY_ORDER_DECL(elastic_stress_kernel_3d_fn, elastic_stress_kernel_3d_by_order);
@@ -448,6 +528,65 @@ __global__ void elastic_capture_strips_3d(
     int nx, int ny, int nz,
     int x0, int x1, int y0, int y1, int z0, int z1,
     int wxl, int wxh, int wyl, int wyh, int wzl, int wzh);
+
+// One cell of elastic_velocity_kernel_3d_nopml: everything after the kernel's
+// guards (launch/cell_path.h).  Interior box: the guard box below the FS
+// helper's mirror rows (common/host_rows.h elastic3d_fs_box); free surface as
+// the ELASTIC_FS_Z flag; optional output: the carriers (fvx_prev decides).
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_velocity_3d_nopml_cell(
+    int ix, int iy, int iz, int b,
+    const ElasticWavefieldPointer& wf,
+    const float* __restrict__ rho,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver,
+    // Boundary-saving carriers: receive v(it+1) (the value loaded below)
+    // before the in-place reverse update.  nullptr = plain reconstruction.
+    float* __restrict__ fvx_prev,
+    float* __restrict__ fvy_prev,
+    float* __restrict__ fvz_prev
+)
+{
+    int spatial_size = solver.nx * solver.ny * solver.nz;
+
+    int idx =
+        iz * solver.nx * solver.ny +
+        iy * solver.nx +
+        ix;
+
+    auto f = elastic3d_cell_offset<Path>(wf, b, spatial_size);
+    const float* rho_b = rho + b * spatial_size;
+
+    float dsxx_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.sxx, ix, iy, iz, grad_ctx);
+    float dsxy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
+    float dsxz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD, Path>(f.sxz, ix, iy, iz, grad_ctx, solver, true, true);
+
+    float dsxy_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
+    float dsyy_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.syy, ix, iy, iz, grad_ctx);
+    float dsyz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD, Path>(f.syz, ix, iy, iz, grad_ctx, solver, true, true);
+
+    float dsxz_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx);
+    float dsyz_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx);
+    float dszz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD, Path>(f.szz, ix, iy, iz, grad_ctx, solver, true);
+
+    float inv_rho = 1.f / rho_b[idx];
+
+    if (optional_output<Path>(fvx_prev)) {
+        fvx_prev[b * spatial_size + idx] = f.vx[idx];
+        fvy_prev[b * spatial_size + idx] = f.vy[idx];
+        fvz_prev[b * spatial_size + idx] = f.vz[idx];
+    }
+
+    f.vx[idx] -= solver.dt * inv_rho *
+        (dsxx_dx + dsxy_dy + dsxz_dz);
+
+    f.vy[idx] -= solver.dt * inv_rho *
+        (dsxy_dx + dsyy_dy + dsyz_dz);
+
+    f.vz[idx] -= solver.dt * inv_rho *
+        (dsxz_dx + dsyz_dy + dszz_dz);
+}
 
 template<int Order>
 __global__ void elastic_velocity_kernel_3d_nopml(
@@ -498,6 +637,30 @@ __global__ void elastic_velocity_kernel_3d_nopml(
         iz < top_halo || iz >= solver.nz - wide)
         return;
 
+    elastic_velocity_3d_nopml_cell<Order>(ix, iy, iz, b, wf, rho, grad_ctx, solver, fvx_prev,
+                                          fvy_prev, fvz_prev);
+}
+
+using elastic_velocity_kernel_3d_nopml_fn = void (*)(ElasticWavefieldPointer,
+    const float*, SGradParam, SolverContext, float*, float*, float*);
+SWEEP_BY_ORDER_DECL(elastic_velocity_kernel_3d_nopml_fn, elastic_velocity_kernel_3d_nopml_by_order);
+
+
+// One cell of elastic_stress_kernel_3d_nopml: everything after the kernel's
+// guards (launch/cell_path.h).  Interior box: the guard box below the FS
+// helper's mirror rows (common/host_rows.h elastic3d_fs_box); free surface as
+// the ELASTIC_FS_Z flag; no optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_stress_3d_nopml_cell(
+    int ix, int iy, int iz, int b,
+    const ElasticWavefieldPointer& wf,
+    const float* __restrict__ lambda,
+    const float* __restrict__ mu,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
     int spatial_size = solver.nx * solver.ny * solver.nz;
 
     int idx =
@@ -505,43 +668,47 @@ __global__ void elastic_velocity_kernel_3d_nopml(
         iy * solver.nx +
         ix;
 
-    auto f = wf.offset(b, spatial_size);
-    const float* rho_b = rho + b * spatial_size;
+    auto f = elastic3d_cell_offset<Path>(wf, b, spatial_size);
 
-    float dsxx_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.sxx, ix, iy, iz, grad_ctx);
-    float dsxy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
-    float dsxz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx, solver, true, true);
+    const float* lam_b = lambda + b * spatial_size;
+    const float* mu_b  = mu     + b * spatial_size;
 
-    float dsxy_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
-    float dsyy_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.syy, ix, iy, iz, grad_ctx);
-    float dsyz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx, solver, true, true);
+    float dvx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.vx, ix, iy, iz, grad_ctx);
+    float dvx_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx);
+    float dvx_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD, Path>(f.vx, ix, iy, iz, grad_ctx, solver, false);
 
-    float dsxz_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx);
-    float dsyz_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx);
-    float dszz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD >(f.szz, ix, iy, iz, grad_ctx, solver, true);
+    float dvy_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx);
+    float dvy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.vy, ix, iy, iz, grad_ctx);
+    float dvy_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD, Path>(f.vy, ix, iy, iz, grad_ctx, solver, false);
 
-    float inv_rho = 1.f / rho_b[idx];
+    float dvz_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
+    float dvz_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
+    float dvz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD, Path>(f.vz, ix, iy, iz, grad_ctx, solver, true, true);
 
-    if (fvx_prev != nullptr) {
-        fvx_prev[b * spatial_size + idx] = f.vx[idx];
-        fvy_prev[b * spatial_size + idx] = f.vy[idx];
-        fvz_prev[b * spatial_size + idx] = f.vz[idx];
-    }
 
-    f.vx[idx] -= solver.dt * inv_rho *
-        (dsxx_dx + dsxy_dy + dsxz_dz);
+    float lam = lam_b[idx];
+    float mu_ = mu_b[idx];
 
-    f.vy[idx] -= solver.dt * inv_rho *
-        (dsxy_dx + dsyy_dy + dsyz_dz);
+    float div_v = dvx_dx + dvy_dy + dvz_dz;
 
-    f.vz[idx] -= solver.dt * inv_rho *
-        (dsxz_dx + dsyz_dy + dszz_dz);
+    f.sxx[idx] -= solver.dt *
+        (lam * div_v + 2.f * mu_ * dvx_dx);
+
+    f.syy[idx] -= solver.dt *
+        (lam * div_v + 2.f * mu_ * dvy_dy);
+
+    f.szz[idx] -= solver.dt *
+        (lam * div_v + 2.f * mu_ * dvz_dz);
+
+    f.sxy[idx] -= solver.dt *
+        mu_ * (dvx_dy + dvy_dx);
+
+    f.sxz[idx] -= solver.dt *
+        mu_ * (dvx_dz + dvz_dx);
+
+    f.syz[idx] -= solver.dt *
+        mu_ * (dvy_dz + dvz_dy);
 }
-
-using elastic_velocity_kernel_3d_nopml_fn = void (*)(ElasticWavefieldPointer,
-    const float*, SGradParam, SolverContext, float*, float*, float*);
-SWEEP_BY_ORDER_DECL(elastic_velocity_kernel_3d_nopml_fn, elastic_velocity_kernel_3d_nopml_by_order);
-
 
 template<int Order>
 __global__ void elastic_stress_kernel_3d_nopml(
@@ -588,53 +755,7 @@ __global__ void elastic_stress_kernel_3d_nopml(
         iz < top_halo || iz >= solver.nz - wide)
         return;
 
-    int spatial_size = solver.nx * solver.ny * solver.nz;
-
-    int idx =
-        iz * solver.nx * solver.ny +
-        iy * solver.nx +
-        ix;
-
-    auto f = wf.offset(b, spatial_size);
-
-    const float* lam_b = lambda + b * spatial_size;
-    const float* mu_b  = mu     + b * spatial_size;
-
-    float dvx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.vx, ix, iy, iz, grad_ctx);
-    float dvx_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx);
-    float dvx_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx, solver, false);
-
-    float dvy_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx);
-    float dvy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.vy, ix, iy, iz, grad_ctx);
-    float dvy_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx, solver, false);
-
-    float dvz_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
-    float dvz_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
-    float dvz_dz = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx, solver, true, true);
-
-
-    float lam = lam_b[idx];
-    float mu_ = mu_b[idx];
-
-    float div_v = dvx_dx + dvy_dy + dvz_dz;
-
-    f.sxx[idx] -= solver.dt *
-        (lam * div_v + 2.f * mu_ * dvx_dx);
-
-    f.syy[idx] -= solver.dt *
-        (lam * div_v + 2.f * mu_ * dvy_dy);
-
-    f.szz[idx] -= solver.dt *
-        (lam * div_v + 2.f * mu_ * dvz_dz);
-
-    f.sxy[idx] -= solver.dt *
-        mu_ * (dvx_dy + dvy_dx);
-
-    f.sxz[idx] -= solver.dt *
-        mu_ * (dvx_dz + dvz_dx);
-
-    f.syz[idx] -= solver.dt *
-        mu_ * (dvy_dz + dvz_dy);
+    elastic_stress_3d_nopml_cell<Order>(ix, iy, iz, b, wf, lambda, mu, grad_ctx, solver);
 }
 
 using elastic_stress_kernel_3d_nopml_fn = void (*)(ElasticWavefieldPointer,
@@ -832,12 +953,17 @@ __global__ void elastic_velocity_adjoint_kernel_3d(
 
 }
 
-template<int Order>
-__global__ void elastic_velocity_adjoint_prepare_3d(
-    ElasticWavefieldPointer wf,
+// One cell of elastic_velocity_adjoint_prepare_3d: everything after the
+// kernel's bounds guards (launch/cell_path.h).  Interior box: the interior
+// test's box (no free-surface logic here); no optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_velocity_adjoint_prepare_3d_cell(
+    int ix, int iy, int iz, int b,
+    const ElasticWavefieldPointer& wf,
     const float* __restrict__ rho,
-    ElasticCPMLPointer cpml,
-    SolverContext solver,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver,
     float* __restrict__ pxx,
     float* __restrict__ pxy,
     float* __restrict__ pxz,
@@ -849,16 +975,6 @@ __global__ void elastic_velocity_adjoint_prepare_3d(
     float* __restrict__ pzz
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iy = blockIdx.y * blockDim.y + threadIdx.y;
-    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
-
-    if (ix >= solver.nx || iy >= solver.ny) return;
-    if (iz_global >= solver.nz * solver.B) return;
-
-    int b  = iz_global / solver.nz;
-    int iz = iz_global % solver.nz;
-
     constexpr bool is_runtime = (Order == -1);
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
@@ -867,7 +983,7 @@ __global__ void elastic_velocity_adjoint_prepare_3d(
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
 
     const float* rho_b = rho + b * spatial_size;
-    auto f = wf.offset(b, spatial_size);
+    auto f = elastic3d_cell_offset<Path>(wf, b, spatial_size);
     int x0 = solver.phys_x0();
     int x1 = solver.phys_x1();
     int y0 = solver.phys_y0();
@@ -899,12 +1015,14 @@ __global__ void elastic_velocity_adjoint_prepare_3d(
     // take it too (different FMA contraction on the PML branch — see
     // elastic_velocity_kernel_3d).  p at cut-side halo cells feeds owned
     // cells through the apply stencil, so this is required for bitwise DD.
-    bool interior =
-        ix >= (solver.cut_x_lo() ? halo : x0 + 1) &&
-        ix <  (solver.cut_x_hi() ? solver.nx - halo : x1 - 1) &&
-        iy >= (solver.cut_y_lo() ? halo : y0 + 1) &&
-        iy <  (solver.cut_y_hi() ? solver.ny - halo : y1 - 1) &&
-        iz >= z0 + 1 && iz < z1 - 1;
+    bool interior = true;
+    if constexpr (!interior_path<Path>)
+        interior =
+            ix >= (solver.cut_x_lo() ? halo : x0 + 1) &&
+            ix <  (solver.cut_x_hi() ? solver.nx - halo : x1 - 1) &&
+            iy >= (solver.cut_y_lo() ? halo : y0 + 1) &&
+            iy <  (solver.cut_y_hi() ? solver.ny - halo : y1 - 1) &&
+            iz >= z0 + 1 && iz < z1 - 1;
 
     if (interior) {
         pxx[b * spatial_size + idx] = bar_dsxx_dx;
@@ -976,10 +1094,97 @@ __global__ void elastic_velocity_adjoint_prepare_3d(
     }
 }
 
+template<int Order>
+__global__ void elastic_velocity_adjoint_prepare_3d(
+    ElasticWavefieldPointer wf,
+    const float* __restrict__ rho,
+    ElasticCPMLPointer cpml,
+    SolverContext solver,
+    float* __restrict__ pxx,
+    float* __restrict__ pxy,
+    float* __restrict__ pxz,
+    float* __restrict__ pyx,
+    float* __restrict__ pyy,
+    float* __restrict__ pyz,
+    float* __restrict__ pzx,
+    float* __restrict__ pzy,
+    float* __restrict__ pzz
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if (ix >= solver.nx || iy >= solver.ny) return;
+    if (iz_global >= solver.nz * solver.B) return;
+
+    int b  = iz_global / solver.nz;
+    int iz = iz_global % solver.nz;
+
+    elastic_velocity_adjoint_prepare_3d_cell<Order>(ix, iy, iz, b, wf, rho, cpml, solver, pxx, pxy,
+                                                    pxz, pyx, pyy, pyz, pzx, pzy, pzz);
+}
+
 using elastic_velocity_adjoint_prepare_3d_fn = void (*)(ElasticWavefieldPointer,
     const float*, ElasticCPMLPointer, SolverContext, float*, float*, float*, float*,
     float*, float*, float*, float*, float*);
 SWEEP_BY_ORDER_DECL(elastic_velocity_adjoint_prepare_3d_fn, elastic_velocity_adjoint_prepare_3d_by_order);
+
+// One cell of elastic_velocity_adjoint_apply_3d: everything after the
+// kernel's guards (launch/cell_path.h).  Interior box: the halo box below the
+// FS adjoint helper's reach (common/host_rows.h elastic3d_fs_box, adjoint);
+// free surface as the ELASTIC_FS_Z flag; no optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_velocity_adjoint_apply_3d_cell(
+    int ix, int iy, int iz, int b,
+    const ElasticWavefieldPointer& wf,
+    const float* __restrict__ pxx,
+    const float* __restrict__ pxy,
+    const float* __restrict__ pxz,
+    const float* __restrict__ pyx,
+    const float* __restrict__ pyy,
+    const float* __restrict__ pyz,
+    const float* __restrict__ pzx,
+    const float* __restrict__ pzy,
+    const float* __restrict__ pzz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    int spatial_size = solver.nx * solver.ny * solver.nz;
+    int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
+    auto f = elastic3d_cell_offset<Path>(wf, b, spatial_size);
+
+    const float* pxx_b = pxx + b * spatial_size;
+    const float* pxy_b = pxy + b * spatial_size;
+    const float* pxz_b = pxz + b * spatial_size;
+    const float* pyx_b = pyx + b * spatial_size;
+    const float* pyy_b = pyy + b * spatial_size;
+    const float* pyz_b = pyz + b * spatial_size;
+    const float* pzx_b = pzx + b * spatial_size;
+    const float* pzy_b = pzy + b * spatial_size;
+    const float* pzz_b = pzz + b * spatial_size;
+
+    float dpxx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(pxx_b, ix, iy, iz, grad_ctx);
+    float dpxy_dy = sgradient<3, Order, Y, DIFF_FORWARD>(pxy_b, ix, iy, iz, grad_ctx);
+    float dpxz_dz = elastic3d_top_fs_adjoint_sgradient_z<Order, DIFF_BACKWARD, Path>(pxz_b, ix, iy, iz, grad_ctx, solver, true, true);
+
+    float dpyx_dx = sgradient<3, Order, X, DIFF_FORWARD>(pyx_b, ix, iy, iz, grad_ctx);
+    float dpyy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(pyy_b, ix, iy, iz, grad_ctx);
+    float dpyz_dz = elastic3d_top_fs_adjoint_sgradient_z<Order, DIFF_BACKWARD, Path>(pyz_b, ix, iy, iz, grad_ctx, solver, true, true);
+
+    float dpzx_dx = sgradient<3, Order, X, DIFF_FORWARD>(pzx_b, ix, iy, iz, grad_ctx);
+    float dpzy_dy = sgradient<3, Order, Y, DIFF_FORWARD>(pzy_b, ix, iy, iz, grad_ctx);
+    float dpzz_dz = elastic3d_top_fs_adjoint_sgradient_z<Order, DIFF_FORWARD, Path>(pzz_b, ix, iy, iz, grad_ctx, solver, true);
+
+    f.sxx[idx] += dpxx_dx;
+    f.sxy[idx] += dpxy_dy + dpyx_dx;
+    f.sxz[idx] += dpxz_dz + dpzx_dx;
+    f.syy[idx] += dpyy_dy;
+    f.syz[idx] += dpyz_dz + dpzy_dy;
+    f.szz[idx] += dpzz_dz;
+}
 
 template<int Order>
 __global__ void elastic_velocity_adjoint_apply_3d(
@@ -1016,38 +1221,8 @@ __global__ void elastic_velocity_adjoint_apply_3d(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.ny * solver.nz;
-    int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
-    auto f = wf.offset(b, spatial_size);
-
-    const float* pxx_b = pxx + b * spatial_size;
-    const float* pxy_b = pxy + b * spatial_size;
-    const float* pxz_b = pxz + b * spatial_size;
-    const float* pyx_b = pyx + b * spatial_size;
-    const float* pyy_b = pyy + b * spatial_size;
-    const float* pyz_b = pyz + b * spatial_size;
-    const float* pzx_b = pzx + b * spatial_size;
-    const float* pzy_b = pzy + b * spatial_size;
-    const float* pzz_b = pzz + b * spatial_size;
-
-    float dpxx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(pxx_b, ix, iy, iz, grad_ctx);
-    float dpxy_dy = sgradient<3, Order, Y, DIFF_FORWARD>(pxy_b, ix, iy, iz, grad_ctx);
-    float dpxz_dz = elastic3d_top_fs_adjoint_sgradient_z<Order, DIFF_BACKWARD>(pxz_b, ix, iy, iz, grad_ctx, solver, true, true);
-
-    float dpyx_dx = sgradient<3, Order, X, DIFF_FORWARD>(pyx_b, ix, iy, iz, grad_ctx);
-    float dpyy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(pyy_b, ix, iy, iz, grad_ctx);
-    float dpyz_dz = elastic3d_top_fs_adjoint_sgradient_z<Order, DIFF_BACKWARD>(pyz_b, ix, iy, iz, grad_ctx, solver, true, true);
-
-    float dpzx_dx = sgradient<3, Order, X, DIFF_FORWARD>(pzx_b, ix, iy, iz, grad_ctx);
-    float dpzy_dy = sgradient<3, Order, Y, DIFF_FORWARD>(pzy_b, ix, iy, iz, grad_ctx);
-    float dpzz_dz = elastic3d_top_fs_adjoint_sgradient_z<Order, DIFF_FORWARD>(pzz_b, ix, iy, iz, grad_ctx, solver, true);
-
-    f.sxx[idx] += dpxx_dx;
-    f.sxy[idx] += dpxy_dy + dpyx_dx;
-    f.sxz[idx] += dpxz_dz + dpzx_dx;
-    f.syy[idx] += dpyy_dy;
-    f.syz[idx] += dpyz_dz + dpzy_dy;
-    f.szz[idx] += dpzz_dz;
+    elastic_velocity_adjoint_apply_3d_cell<Order>(ix, iy, iz, b, wf, pxx, pxy, pxz, pyx, pyy, pyz,
+                                                  pzx, pzy, pzz, grad_ctx, solver);
 }
 
 using elastic_velocity_adjoint_apply_3d_fn = void (*)(ElasticWavefieldPointer,
@@ -1183,13 +1358,21 @@ __global__ void elastic_stress_adjoint_kernel_3d(
 
 }
 
-template<int Order>
-__global__ void elastic_stress_adjoint_prepare_3d(
-    ElasticWavefieldPointer wf,
+// One cell of elastic_stress_adjoint_prepare_3d: everything after the
+// kernel's bounds guards (launch/cell_path.h).  Interior box: the interior
+// test's box below the FS helper's mirror rows (common/host_rows.h
+// elastic3d_fs_box: no surface row, so no zeroing and no Robertsson
+// transpose) and, with imaging, inside the physical box; free surface as the
+// ELASTIC_FS_Z flag; optional output: the fused imaging (grad_vp_out decides).
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_stress_adjoint_prepare_3d_cell(
+    int ix, int iy, int iz, int b,
+    const ElasticWavefieldPointer& wf,
     const float* __restrict__ lambda,
     const float* __restrict__ mu,
-    ElasticCPMLPointer cpml,
-    SolverContext solver,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver,
     float* __restrict__ qxx,
     float* __restrict__ qxy,
     float* __restrict__ qxz,
@@ -1199,38 +1382,21 @@ __global__ void elastic_stress_adjoint_prepare_3d(
     float* __restrict__ qzx,
     float* __restrict__ qzy,
     float* __restrict__ qzz,
-    // grad_ctx always forwarded (used only when imaging pointers below are
-    // non-null); harmless for bs/ckpt callers that pass null imaging args.
-    SGradParam grad_ctx,
-    // FUSED vp/vs/rho-gradient imaging (full-mode only).  Mirrors the 2-D fold:
-    // at this kernel's entry the adjoint stress AND velocity are the un-mutated
-    // post-source adjoint[it] fields, so the operands match
-    // calculate_grad_elastic3d_bs exactly (same kernel the full loop launched
-    // separately, fed the forward velocity view).  No lag.  All-null otherwise.
-    const float* __restrict__ grad_fvx      = nullptr,  // u_forward[it]   vx
-    const float* __restrict__ grad_fvy      = nullptr,  // u_forward[it]   vy
-    const float* __restrict__ grad_fvz      = nullptr,  // u_forward[it]   vz
-    const float* __restrict__ grad_fvx_prev = nullptr,  // u_forward[it+1] vx
-    const float* __restrict__ grad_fvy_prev = nullptr,  // u_forward[it+1] vy
-    const float* __restrict__ grad_fvz_prev = nullptr,  // u_forward[it+1] vz
-    const float* __restrict__ grad_vp_model = nullptr,
-    const float* __restrict__ grad_vs_model = nullptr,
-    const float* __restrict__ grad_rho_model= nullptr,
-    float* __restrict__ grad_vp_out         = nullptr,
-    float* __restrict__ grad_vs_out         = nullptr,
-    float* __restrict__ grad_rho_out        = nullptr
+    const SGradParam& grad_ctx,
+    const float* __restrict__ grad_fvx,         // fused imaging: see the kernel
+    const float* __restrict__ grad_fvy,
+    const float* __restrict__ grad_fvz,
+    const float* __restrict__ grad_fvx_prev,
+    const float* __restrict__ grad_fvy_prev,
+    const float* __restrict__ grad_fvz_prev,
+    const float* __restrict__ grad_vp_model,
+    const float* __restrict__ grad_vs_model,
+    const float* __restrict__ grad_rho_model,
+    float* __restrict__ grad_vp_out,
+    float* __restrict__ grad_vs_out,
+    float* __restrict__ grad_rho_out
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iy = blockIdx.y * blockDim.y + threadIdx.y;
-    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
-
-    if (ix >= solver.nx || iy >= solver.ny) return;
-    if (iz_global >= solver.nz * solver.B) return;
-
-    int b  = iz_global / solver.nz;
-    int iz = iz_global % solver.nz;
-
     constexpr bool is_runtime = (Order == -1);
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
@@ -1240,7 +1406,7 @@ __global__ void elastic_stress_adjoint_prepare_3d(
 
     const float* lam_b = lambda + b * spatial_size;
     const float* mu_b = mu + b * spatial_size;
-    auto f = wf.offset(b, spatial_size);
+    auto f = elastic3d_cell_offset<Path>(wf, b, spatial_size);
     int x0 = solver.phys_x0();
     int x1 = solver.phys_x1();
     int y0 = solver.phys_y0();
@@ -1258,7 +1424,7 @@ __global__ void elastic_stress_adjoint_prepare_3d(
     float bar_sxy = f.sxy[idx];
     float bar_sxz = f.sxz[idx];
     float bar_syz = f.syz[idx];
-    if (elastic3d_is_top_free_surface_row(solver, iz)) {
+    if (elastic3d_is_top_free_surface_row<Path>(solver, iz)) {
         bar_szz = 0.f;   // z-low FS: zero only szz; keep sxz/syz (+h/2 medium values, fix)
         f.szz[idx] = 0.f;
     }
@@ -1273,10 +1439,15 @@ __global__ void elastic_stress_adjoint_prepare_3d(
         constexpr bool is_runtime_g = (Order == -1);
         constexpr int  M_static_g   = is_runtime_g ? 0 : (Order / 2);
         int halo_g = is_runtime_g ? solver.M : M_static_g;
-        if (grad_vp_out != nullptr &&
-            ix >= solver.phys_x0() && ix < solver.phys_x1() &&
-            iy >= solver.phys_y0() && iy < solver.phys_y1() &&
-            iz >= solver.phys_z0() && iz < solver.phys_z1()) {   // physical box only
+        bool image;
+        if constexpr (interior_path<Path>)   // the box is inside the physical box
+            image = optional_output<Path>(grad_vp_out);
+        else
+            image = grad_vp_out != nullptr &&
+                ix >= solver.phys_x0() && ix < solver.phys_x1() &&
+                iy >= solver.phys_y0() && iy < solver.phys_y1() &&
+                iz >= solver.phys_z0() && iz < solver.phys_z1();   // physical box only
+        if (image) {
             const float* fvx_b      = grad_fvx      + b * spatial_size;
             const float* fvy_b      = grad_fvy      + b * spatial_size;
             const float* fvz_b      = grad_fvz      + b * spatial_size;
@@ -1292,18 +1463,18 @@ __global__ void elastic_stress_adjoint_prepare_3d(
 
             float fvx_x = sgradient<3, Order, X, DIFF_BACKWARD>(fvx_b, ix, iy, iz, grad_ctx);
             float fvx_y = sgradient<3, Order, Y, DIFF_FORWARD >(fvx_b, ix, iy, iz, grad_ctx);
-            float fvx_z = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD >(fvx_b, ix, iy, iz, grad_ctx, solver, false);
+            float fvx_z = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD, Path>(fvx_b, ix, iy, iz, grad_ctx, solver, false);
 
             float fvy_x = sgradient<3, Order, X, DIFF_FORWARD >(fvy_b, ix, iy, iz, grad_ctx);
             float fvy_y = sgradient<3, Order, Y, DIFF_BACKWARD>(fvy_b, ix, iy, iz, grad_ctx);
-            float fvy_z = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD >(fvy_b, ix, iy, iz, grad_ctx, solver, false);
+            float fvy_z = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD, Path>(fvy_b, ix, iy, iz, grad_ctx, solver, false);
 
             float fvz_x = sgradient<3, Order, X, DIFF_FORWARD >(fvz_b, ix, iy, iz, grad_ctx);
             float fvz_y = sgradient<3, Order, Y, DIFF_FORWARD >(fvz_b, ix, iy, iz, grad_ctx);
-            float fvz_z = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(fvz_b, ix, iy, iz, grad_ctx, solver, true, true);
+            float fvz_z = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD, Path>(fvz_b, ix, iy, iz, grad_ctx, solver, true, true);
 
             float grad_lambda, grad_mu;
-            if (elastic3d_is_top_free_surface_row(solver, iz)) {
+            if (elastic3d_is_top_free_surface_row<Path>(solver, iz)) {
                 // Robertsson material derivative (3-D): FS-row sxx/syy depend on
                 // lam,mu through coef,coef2.  With lam=rho(vp^2-2vs^2), mu=rho vs^2:
                 // dC/dlam=dC2/dlam=4vs^4/vp^4; dC/dmu=4(vp^4-2vp^2vs^2+2vs^4)/vp^4;
@@ -1342,7 +1513,7 @@ __global__ void elastic_stress_adjoint_prepare_3d(
     // the Robertsson fix makes sxx=coef*dvx_dx+coef2*dvy_dy, syy=coef2*dvx_dx+
     // coef*dvy_dy, szz=0 (bar_szz already 0), so dvz_dz drops out of the row.
     float bar_dvx_dx, bar_dvy_dy, bar_dvz_dz;
-    if (elastic3d_is_top_free_surface_row(solver, iz)) {
+    if (elastic3d_is_top_free_surface_row<Path>(solver, iz)) {
         float coef  = 4.f * mu_ * (lam + mu_) / l2m;
         float coef2 = 2.f * lam * mu_ / l2m;
         bar_dvx_dx = solver.dt * (coef  * bar_sxx + coef2 * bar_syy);
@@ -1365,12 +1536,14 @@ __global__ void elastic_stress_adjoint_prepare_3d(
     // and interior cells have no slab storage to read.
 
     // Cut-aware interior band — see elastic_velocity_adjoint_prepare_3d.
-    bool interior =
-        ix >= (solver.cut_x_lo() ? halo : x0 + 1) &&
-        ix <  (solver.cut_x_hi() ? solver.nx - halo : x1 - 1) &&
-        iy >= (solver.cut_y_lo() ? halo : y0 + 1) &&
-        iy <  (solver.cut_y_hi() ? solver.ny - halo : y1 - 1) &&
-        iz >= z0 + 1 && iz < z1 - 1;
+    bool interior = true;
+    if constexpr (!interior_path<Path>)
+        interior =
+            ix >= (solver.cut_x_lo() ? halo : x0 + 1) &&
+            ix <  (solver.cut_x_hi() ? solver.nx - halo : x1 - 1) &&
+            iy >= (solver.cut_y_lo() ? halo : y0 + 1) &&
+            iy <  (solver.cut_y_hi() ? solver.ny - halo : y1 - 1) &&
+            iz >= z0 + 1 && iz < z1 - 1;
 
     if (interior) {
         qxx[b * spatial_size + idx] = bar_dvx_dx;
@@ -1440,12 +1613,121 @@ __global__ void elastic_stress_adjoint_prepare_3d(
     }
 }
 
+template<int Order>
+__global__ void elastic_stress_adjoint_prepare_3d(
+    ElasticWavefieldPointer wf,
+    const float* __restrict__ lambda,
+    const float* __restrict__ mu,
+    ElasticCPMLPointer cpml,
+    SolverContext solver,
+    float* __restrict__ qxx,
+    float* __restrict__ qxy,
+    float* __restrict__ qxz,
+    float* __restrict__ qyx,
+    float* __restrict__ qyy,
+    float* __restrict__ qyz,
+    float* __restrict__ qzx,
+    float* __restrict__ qzy,
+    float* __restrict__ qzz,
+    // grad_ctx always forwarded (used only when imaging pointers below are
+    // non-null); harmless for bs/ckpt callers that pass null imaging args.
+    SGradParam grad_ctx,
+    // FUSED vp/vs/rho-gradient imaging (full-mode only).  Mirrors the 2-D fold:
+    // at this kernel's entry the adjoint stress AND velocity are the un-mutated
+    // post-source adjoint[it] fields, so the operands match
+    // calculate_grad_elastic3d_bs exactly (same kernel the full loop launched
+    // separately, fed the forward velocity view).  No lag.  All-null otherwise.
+    const float* __restrict__ grad_fvx      = nullptr,  // u_forward[it]   vx
+    const float* __restrict__ grad_fvy      = nullptr,  // u_forward[it]   vy
+    const float* __restrict__ grad_fvz      = nullptr,  // u_forward[it]   vz
+    const float* __restrict__ grad_fvx_prev = nullptr,  // u_forward[it+1] vx
+    const float* __restrict__ grad_fvy_prev = nullptr,  // u_forward[it+1] vy
+    const float* __restrict__ grad_fvz_prev = nullptr,  // u_forward[it+1] vz
+    const float* __restrict__ grad_vp_model = nullptr,
+    const float* __restrict__ grad_vs_model = nullptr,
+    const float* __restrict__ grad_rho_model= nullptr,
+    float* __restrict__ grad_vp_out         = nullptr,
+    float* __restrict__ grad_vs_out         = nullptr,
+    float* __restrict__ grad_rho_out        = nullptr
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if (ix >= solver.nx || iy >= solver.ny) return;
+    if (iz_global >= solver.nz * solver.B) return;
+
+    int b  = iz_global / solver.nz;
+    int iz = iz_global % solver.nz;
+
+    elastic_stress_adjoint_prepare_3d_cell<Order>(ix, iy, iz, b, wf, lambda, mu, cpml, solver, qxx,
+                                                  qxy, qxz, qyx, qyy, qyz, qzx, qzy, qzz, grad_ctx,
+                                                  grad_fvx, grad_fvy, grad_fvz, grad_fvx_prev,
+                                                  grad_fvy_prev, grad_fvz_prev, grad_vp_model,
+                                                  grad_vs_model, grad_rho_model, grad_vp_out,
+                                                  grad_vs_out, grad_rho_out);
+}
+
 using elastic_stress_adjoint_prepare_3d_fn = void (*)(ElasticWavefieldPointer,
     const float*, const float*, ElasticCPMLPointer, SolverContext, float*, float*,
     float*, float*, float*, float*, float*, float*, float*, SGradParam, const float*,
     const float*, const float*, const float*, const float*, const float*, const float*,
     const float*, const float*, float*, float*, float*);
 SWEEP_BY_ORDER_DECL(elastic_stress_adjoint_prepare_3d_fn, elastic_stress_adjoint_prepare_3d_by_order);
+
+// One cell of elastic_stress_adjoint_apply_3d: everything after the kernel's
+// guards (launch/cell_path.h).  Interior box: the halo box below the FS
+// adjoint helper's reach (common/host_rows.h elastic3d_fs_box, adjoint); free
+// surface as the ELASTIC_FS_Z flag; no optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_stress_adjoint_apply_3d_cell(
+    int ix, int iy, int iz, int b,
+    const ElasticWavefieldPointer& wf,
+    const float* __restrict__ qxx,
+    const float* __restrict__ qxy,
+    const float* __restrict__ qxz,
+    const float* __restrict__ qyx,
+    const float* __restrict__ qyy,
+    const float* __restrict__ qyz,
+    const float* __restrict__ qzx,
+    const float* __restrict__ qzy,
+    const float* __restrict__ qzz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    int spatial_size = solver.nx * solver.ny * solver.nz;
+    int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
+    auto f = elastic3d_cell_offset<Path>(wf, b, spatial_size);
+
+    const float* qxx_b = qxx + b * spatial_size;
+    const float* qxy_b = qxy + b * spatial_size;
+    const float* qxz_b = qxz + b * spatial_size;
+    const float* qyx_b = qyx + b * spatial_size;
+    const float* qyy_b = qyy + b * spatial_size;
+    const float* qyz_b = qyz + b * spatial_size;
+    const float* qzx_b = qzx + b * spatial_size;
+    const float* qzy_b = qzy + b * spatial_size;
+    const float* qzz_b = qzz + b * spatial_size;
+
+    float dqxx_dx = sgradient<3, Order, X, DIFF_FORWARD>(qxx_b, ix, iy, iz, grad_ctx);
+    float dqxy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(qxy_b, ix, iy, iz, grad_ctx);
+    float dqxz_dz = elastic3d_top_fs_adjoint_sgradient_z<Order, DIFF_FORWARD, Path>(qxz_b, ix, iy, iz, grad_ctx, solver, false);
+
+    float dqyx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(qyx_b, ix, iy, iz, grad_ctx);
+    float dqyy_dy = sgradient<3, Order, Y, DIFF_FORWARD>(qyy_b, ix, iy, iz, grad_ctx);
+    float dqyz_dz = elastic3d_top_fs_adjoint_sgradient_z<Order, DIFF_FORWARD, Path>(qyz_b, ix, iy, iz, grad_ctx, solver, false);
+
+    float dqzx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(qzx_b, ix, iy, iz, grad_ctx);
+    float dqzy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(qzy_b, ix, iy, iz, grad_ctx);
+    float dqzz_dz = elastic3d_top_fs_adjoint_sgradient_z<Order, DIFF_BACKWARD, Path>(qzz_b, ix, iy, iz, grad_ctx, solver, true, true);
+
+    f.vx[idx] += dqxx_dx + dqxy_dy + dqxz_dz;
+    f.vy[idx] += dqyx_dx + dqyy_dy + dqyz_dz;
+    f.vz[idx] += dqzx_dx + dqzy_dy + dqzz_dz;
+}
 
 template<int Order>
 __global__ void elastic_stress_adjoint_apply_3d(
@@ -1482,35 +1764,8 @@ __global__ void elastic_stress_adjoint_apply_3d(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.ny * solver.nz;
-    int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
-    auto f = wf.offset(b, spatial_size);
-
-    const float* qxx_b = qxx + b * spatial_size;
-    const float* qxy_b = qxy + b * spatial_size;
-    const float* qxz_b = qxz + b * spatial_size;
-    const float* qyx_b = qyx + b * spatial_size;
-    const float* qyy_b = qyy + b * spatial_size;
-    const float* qyz_b = qyz + b * spatial_size;
-    const float* qzx_b = qzx + b * spatial_size;
-    const float* qzy_b = qzy + b * spatial_size;
-    const float* qzz_b = qzz + b * spatial_size;
-
-    float dqxx_dx = sgradient<3, Order, X, DIFF_FORWARD>(qxx_b, ix, iy, iz, grad_ctx);
-    float dqxy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(qxy_b, ix, iy, iz, grad_ctx);
-    float dqxz_dz = elastic3d_top_fs_adjoint_sgradient_z<Order, DIFF_FORWARD>(qxz_b, ix, iy, iz, grad_ctx, solver, false);
-
-    float dqyx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(qyx_b, ix, iy, iz, grad_ctx);
-    float dqyy_dy = sgradient<3, Order, Y, DIFF_FORWARD>(qyy_b, ix, iy, iz, grad_ctx);
-    float dqyz_dz = elastic3d_top_fs_adjoint_sgradient_z<Order, DIFF_FORWARD>(qyz_b, ix, iy, iz, grad_ctx, solver, false);
-
-    float dqzx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(qzx_b, ix, iy, iz, grad_ctx);
-    float dqzy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(qzy_b, ix, iy, iz, grad_ctx);
-    float dqzz_dz = elastic3d_top_fs_adjoint_sgradient_z<Order, DIFF_BACKWARD>(qzz_b, ix, iy, iz, grad_ctx, solver, true, true);
-
-    f.vx[idx] += dqxx_dx + dqxy_dy + dqxz_dz;
-    f.vy[idx] += dqyx_dx + dqyy_dy + dqyz_dz;
-    f.vz[idx] += dqzx_dx + dqzy_dy + dqzz_dz;
+    elastic_stress_adjoint_apply_3d_cell<Order>(ix, iy, iz, b, wf, qxx, qxy, qxz, qyx, qyy, qyz,
+                                                qzx, qzy, qzz, grad_ctx, solver);
 }
 
 using elastic_stress_adjoint_apply_3d_fn = void (*)(ElasticWavefieldPointer,
@@ -1518,6 +1773,103 @@ using elastic_stress_adjoint_apply_3d_fn = void (*)(ElasticWavefieldPointer,
     const float*, const float*, const float*, SGradParam, SolverContext);
 SWEEP_BY_ORDER_DECL(elastic_stress_adjoint_apply_3d_fn, elastic_stress_adjoint_apply_3d_by_order);
 
+
+// One cell of calculate_grad_elastic3d_bs: everything after the kernel's
+// guards (launch/cell_path.h).  Interior box: the physical box below the FS
+// helper's mirror rows (common/host_rows.h elastic3d_fs_box: no surface row,
+// so no Robertsson derivative); free surface as the ELASTIC_FS_Z flag; no
+// optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void calculate_grad_elastic3d_bs_cell(
+    int ix, int iy, int iz, int b,
+
+    const ElasticWavefieldPointer& forward,
+    const ElasticWavefieldPointer& adjoint,
+
+    const float* __restrict__ fvx_prev,
+    const float* __restrict__ fvy_prev,
+    const float* __restrict__ fvz_prev,
+
+    const float* __restrict__ vp,        // (B, nz, nx)
+    const float* __restrict__ vs,        // (B, nz, nx)
+    const float* __restrict__ rho,       // (B, nz, nx)
+
+    float* __restrict__ grad_vp,             // (B, nz, nx)
+    float* __restrict__ grad_vs,             // (B, nz, nx)
+    float* __restrict__ grad_rho,            // (B, nz, nx)
+
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    int spatial_size = solver.nx * solver.ny * solver.nz;
+
+    int idx =
+        iz * solver.nx * solver.ny +
+        iy * solver.nx +
+        ix;
+
+    const float* fvx_prev_b = fvx_prev + b * spatial_size;
+    const float* fvy_prev_b = fvy_prev + b * spatial_size;
+    const float* fvz_prev_b = fvz_prev + b * spatial_size;
+
+    auto f = elastic3d_cell_offset<Path>(forward, b, spatial_size);
+    auto a = elastic3d_cell_offset<Path>(adjoint, b, spatial_size);
+
+    const float* vp_b = vp + b * spatial_size;
+    const float* vs_b = vs + b * spatial_size;
+    const float* rho_b = rho + b * spatial_size;
+
+    float* gvp = grad_vp + b * spatial_size;
+    float* gvs = grad_vs + b * spatial_size;
+    float* grho = grad_rho + b * spatial_size;
+
+    float fvx_x = sgradient<3, Order, X, DIFF_BACKWARD>(f.vx, ix, iy, iz, grad_ctx);
+    float fvx_y = sgradient<3, Order, Y, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx);
+    float fvx_z = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD, Path>(f.vx, ix, iy, iz, grad_ctx, solver, false);
+
+    float fvy_x = sgradient<3, Order, X, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx);
+    float fvy_y = sgradient<3, Order, Y, DIFF_BACKWARD>(f.vy, ix, iy, iz, grad_ctx);
+    float fvy_z = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD, Path>(f.vy, ix, iy, iz, grad_ctx, solver, false);
+
+    float fvz_x = sgradient<3, Order, X, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
+    float fvz_y = sgradient<3, Order, Y, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
+    float fvz_z = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD, Path>(f.vz, ix, iy, iz, grad_ctx, solver, true, true);
+
+    float bar_szz = elastic3d_is_top_free_surface_row<Path>(solver, iz) ? 0.f : a.szz[idx];
+    float bar_sxz = a.sxz[idx];   // z-low FS: sxz is a +h/2 medium value, not zeroed (fix)
+    float bar_syz = a.syz[idx];   // z-low FS: syz is a +h/2 medium value, not zeroed (fix)
+    float grad_lambda, grad_mu;
+    if (elastic3d_is_top_free_surface_row<Path>(solver, iz)) {
+        // Robertsson material derivative (3-D); see elastic_stress_adjoint_prepare_3d.
+        float vp2 = vp_b[idx]*vp_b[idx], vs2 = vs_b[idx]*vs_b[idx], vp4 = vp2*vp2;
+        float dCl  = 4.f * vs2*vs2 / vp4;
+        float dCm  = 4.f * (vp4 - 2.f*vp2*vs2 + 2.f*vs2*vs2) / vp4;
+        float dC2m = 2.f * (vp2 - 2.f*vs2)*(vp2 - 2.f*vs2) / vp4;
+        grad_lambda = dCl * (a.sxx[idx] + a.syy[idx]) * (fvx_x + fvy_y);
+        grad_mu = a.sxx[idx]*(dCm*fvx_x + dC2m*fvy_y) + a.syy[idx]*(dC2m*fvx_x + dCm*fvy_y)
+                + bar_sxz*(fvx_z + fvz_x) + a.sxy[idx]*(fvx_y + fvy_x) + bar_syz*(fvy_z + fvz_y);
+    } else {
+        grad_lambda = (a.sxx[idx] + a.syy[idx] + bar_szz) * (fvx_x + fvy_y + fvz_z);
+        grad_mu = 2*(a.sxx[idx] * fvx_x +
+                     a.syy[idx] * fvy_y +
+                     bar_szz * fvz_z) +
+                     bar_sxz * (fvx_z + fvz_x) +
+                     a.sxy[idx] * (fvx_y + fvy_x) +
+                     bar_syz * (fvy_z + fvz_y);
+    }
+
+    gvp[idx] +=   -2*rho_b[idx]*vp_b[idx]*grad_lambda* solver.dt;
+    gvs[idx] += -(-4*rho_b[idx]*vs_b[idx]*grad_lambda +
+                   2*rho_b[idx]*vs_b[idx]*grad_mu)* solver.dt;
+
+    grho[idx] += (a.vx[idx] * (f.vx[idx]-fvx_prev_b[idx]) +
+                  a.vy[idx] * (f.vy[idx]-fvy_prev_b[idx]) +
+                  a.vz[idx] * (f.vz[idx]-fvz_prev_b[idx])) / rho_b[idx];
+    grho[idx] -= grad_lambda * (vp_b[idx]*vp_b[idx] - 2*vs_b[idx]*vs_b[idx])* solver.dt +
+                 grad_mu     * (vs_b[idx]*vs_b[idx]) * solver.dt;
+}
 
 template<int Order>
 __global__ void calculate_grad_elastic3d_bs(
@@ -1564,72 +1916,9 @@ __global__ void calculate_grad_elastic3d_bs(
         iz < solver.phys_z0() || iz >= solver.phys_z1())
         return;
 
-    int spatial_size = solver.nx * solver.ny * solver.nz;
-
-    int idx =
-        iz * solver.nx * solver.ny +
-        iy * solver.nx +
-        ix;
-
-    const float* fvx_prev_b = fvx_prev + b * spatial_size;
-    const float* fvy_prev_b = fvy_prev + b * spatial_size;
-    const float* fvz_prev_b = fvz_prev + b * spatial_size;
-
-    auto f = forward.offset(b, spatial_size);
-    auto a = adjoint.offset(b, spatial_size);
-
-    const float* vp_b = vp + b * spatial_size;
-    const float* vs_b = vs + b * spatial_size;
-    const float* rho_b = rho + b * spatial_size;
-
-    float* gvp = grad_vp + b * spatial_size;
-    float* gvs = grad_vs + b * spatial_size;
-    float* grho = grad_rho + b * spatial_size;
-
-    float fvx_x = sgradient<3, Order, X, DIFF_BACKWARD>(f.vx, ix, iy, iz, grad_ctx);
-    float fvx_y = sgradient<3, Order, Y, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx);
-    float fvx_z = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD >(f.vx, ix, iy, iz, grad_ctx, solver, false);
-
-    float fvy_x = sgradient<3, Order, X, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx);
-    float fvy_y = sgradient<3, Order, Y, DIFF_BACKWARD>(f.vy, ix, iy, iz, grad_ctx);
-    float fvy_z = elastic3d_top_fs_sgradient_z<Order, DIFF_FORWARD >(f.vy, ix, iy, iz, grad_ctx, solver, false);
-
-    float fvz_x = sgradient<3, Order, X, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
-    float fvz_y = sgradient<3, Order, Y, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
-    float fvz_z = elastic3d_top_fs_sgradient_z<Order, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx, solver, true, true);
-
-    float bar_szz = elastic3d_is_top_free_surface_row(solver, iz) ? 0.f : a.szz[idx];
-    float bar_sxz = a.sxz[idx];   // z-low FS: sxz is a +h/2 medium value, not zeroed (fix)
-    float bar_syz = a.syz[idx];   // z-low FS: syz is a +h/2 medium value, not zeroed (fix)
-    float grad_lambda, grad_mu;
-    if (elastic3d_is_top_free_surface_row(solver, iz)) {
-        // Robertsson material derivative (3-D); see elastic_stress_adjoint_prepare_3d.
-        float vp2 = vp_b[idx]*vp_b[idx], vs2 = vs_b[idx]*vs_b[idx], vp4 = vp2*vp2;
-        float dCl  = 4.f * vs2*vs2 / vp4;
-        float dCm  = 4.f * (vp4 - 2.f*vp2*vs2 + 2.f*vs2*vs2) / vp4;
-        float dC2m = 2.f * (vp2 - 2.f*vs2)*(vp2 - 2.f*vs2) / vp4;
-        grad_lambda = dCl * (a.sxx[idx] + a.syy[idx]) * (fvx_x + fvy_y);
-        grad_mu = a.sxx[idx]*(dCm*fvx_x + dC2m*fvy_y) + a.syy[idx]*(dC2m*fvx_x + dCm*fvy_y)
-                + bar_sxz*(fvx_z + fvz_x) + a.sxy[idx]*(fvx_y + fvy_x) + bar_syz*(fvy_z + fvz_y);
-    } else {
-        grad_lambda = (a.sxx[idx] + a.syy[idx] + bar_szz) * (fvx_x + fvy_y + fvz_z);
-        grad_mu = 2*(a.sxx[idx] * fvx_x +
-                     a.syy[idx] * fvy_y +
-                     bar_szz * fvz_z) +
-                     bar_sxz * (fvx_z + fvz_x) +
-                     a.sxy[idx] * (fvx_y + fvy_x) +
-                     bar_syz * (fvy_z + fvz_y);
-    }
-
-    gvp[idx] +=   -2*rho_b[idx]*vp_b[idx]*grad_lambda* solver.dt;
-    gvs[idx] += -(-4*rho_b[idx]*vs_b[idx]*grad_lambda +
-                   2*rho_b[idx]*vs_b[idx]*grad_mu)* solver.dt;
-
-    grho[idx] += (a.vx[idx] * (f.vx[idx]-fvx_prev_b[idx]) +
-                  a.vy[idx] * (f.vy[idx]-fvy_prev_b[idx]) +
-                  a.vz[idx] * (f.vz[idx]-fvz_prev_b[idx])) / rho_b[idx];
-    grho[idx] -= grad_lambda * (vp_b[idx]*vp_b[idx] - 2*vs_b[idx]*vs_b[idx])* solver.dt +
-                 grad_mu     * (vs_b[idx]*vs_b[idx]) * solver.dt;
+    calculate_grad_elastic3d_bs_cell<Order>(ix, iy, iz, b, forward, adjoint, fvx_prev, fvy_prev,
+                                            fvz_prev, vp, vs, rho, grad_vp, grad_vs, grad_rho,
+                                            grad_ctx, solver);
 }
 
 using calculate_grad_elastic3d_bs_fn = void (*)(ElasticWavefieldPointer,

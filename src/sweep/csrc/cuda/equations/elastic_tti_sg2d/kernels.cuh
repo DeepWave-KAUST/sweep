@@ -1,5 +1,6 @@
 #pragma once
 #include "../../launch/by_order.cuh"
+#include "../../launch/cell_path.h"
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -188,26 +189,42 @@ __host__ inline float* field_ptr(const WavefieldPointer& wf, int field)
 #define LAUNCH_CALCULATE_GRAD_ELASTIC_TTI_SG_NOBS(order, grid, block, ...) \
     SWEEP_LAUNCH_BY_ORDER(calculate_grad_elastic_tti_sg_nobs_by_order, order, grid, block, __VA_ARGS__)
 
-template<int Order>
-__global__ void elastic_tti_sg_velocity_kernel(
-    WavefieldPointer wf,
-    StiffnessPointer model,
-    SGradParam grad_ctx,
-    ElasticCPMLPointer cpml,
-    SolverContext solver
+// Every table kernel below is split per launch/cell_path.h: the __global__
+// function keeps its index decode and guards and calls a _cell body (the
+// rest of the kernel, unchanged and in the same order), which the host
+// core's row launchers (kernels.cu) also run on an interior path.  The
+// interior boxes, in (ix, iz), are spelled next to the launchers; the free
+// surface reaches the cells through the Path-aware FS helpers
+// (common/elastic_free_surface.cuh) and the ELASTIC_FS_Z flag.
+//
+// The indices of one cell, as the kernels decode them, handed to a _cell body
+// in one by-value struct rather than as three int parameters (see
+// elastic_tti_2nd2d/kernels.cuh CellIndex2): nvcc orders a compare's operands
+// by kind, and a bare int parameter would flip the guards' predicates.
+struct CellIndex2 {
+    int ix, iz, b;
+};
+
+// One cell of elastic_tti_sg_velocity_kernel (launch/cell_path.h).  Interior
+// box: the in_pml_2d test's interior (phys(halo)) inside the halo guard,
+// without the forward FS reach (host_rows.h elastic_fs_box_2d); FS z face as
+// the ELASTIC_FS_Z flag; no optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_tti_sg_velocity_cell(
+    CellIndex2 cell,
+    const WavefieldPointer& wf,
+    const StiffnessPointer& model,
+    const SGradParam& grad_ctx,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
+    const int ix = cell.ix, iz = cell.iz, b = cell.b;
 
     constexpr bool is_runtime = (Order == -1);
     constexpr int M_static = is_runtime ? 0 : (Order / 2);
     const int halo = is_runtime ? solver.M : M_static;
-    if (ix < halo || ix >= solver.nx - halo || iz < halo || iz >= solver.nz - halo)
-        return;
 
     const int spatial_size = solver.nx * solver.nz;
     const int idx = iz * solver.nx + ix;
@@ -216,17 +233,19 @@ __global__ void elastic_tti_sg_velocity_kernel(
     auto m = model.offset(b, spatial_size);
 
     float dsxx_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.sxx, ix, 0, iz, grad_ctx);
-    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true);
+    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(f.sxz, ix, iz, grad_ctx, solver, true);
     float dsxy_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxy, ix, 0, iz, grad_ctx);
-    float dsyz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.syz, ix, iz, grad_ctx, solver, true);
+    float dsyz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(f.syz, ix, iz, grad_ctx, solver, true);
     float dsxz_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
-    float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.szz, ix, iz, grad_ctx, solver, true);
+    float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path>(f.szz, ix, iz, grad_ctx, solver, true);
 
     const float scale = solver.dt / m.rho[idx];
 
     // Interior fast-path: ax/bx vanish, so the six aux fields stay zero and the
     // gradients just feed through to the velocity update.
-    const bool in_pml = solver.in_pml_2d(ix, iz, halo);
+    bool in_pml = false;
+    if constexpr (!interior_path<Path>)
+        in_pml = solver.in_pml_2d(ix, iz, halo);
     if (!in_pml) {
         f.vx[idx] += scale * (dsxx_dx + dsxz_dz);
         f.vy[idx] += scale * (dsxy_dx + dsyz_dz);
@@ -262,15 +281,10 @@ __global__ void elastic_tti_sg_velocity_kernel(
     f.vz[idx] += scale * (dsxz_dx + dszz_dz);
 }
 
-using elastic_tti_sg_velocity_kernel_fn = void (*)(WavefieldPointer, StiffnessPointer,
-    SGradParam, ElasticCPMLPointer, SolverContext);
-SWEEP_BY_ORDER_DECL(elastic_tti_sg_velocity_kernel_fn, elastic_tti_sg_velocity_kernel_by_order);
-
 template<int Order>
-__global__ void elastic_tti_sg_stress_kernel(
+__global__ void elastic_tti_sg_velocity_kernel(
     WavefieldPointer wf,
     StiffnessPointer model,
-    float* __restrict__ u_this,
     SGradParam grad_ctx,
     ElasticCPMLPointer cpml,
     SolverContext solver
@@ -288,27 +302,74 @@ __global__ void elastic_tti_sg_stress_kernel(
     if (ix < halo || ix >= solver.nx - halo || iz < halo || iz >= solver.nz - halo)
         return;
 
+    elastic_tti_sg_velocity_cell<Order>(CellIndex2{ix, iz, b}, wf, model, grad_ctx, cpml, solver);
+}
+
+using elastic_tti_sg_velocity_kernel_fn = void (*)(WavefieldPointer, StiffnessPointer,
+    SGradParam, ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(elastic_tti_sg_velocity_kernel_fn, elastic_tti_sg_velocity_kernel_by_order);
+
+// The stress kernel's LEGACY in_pml test, exactly as the kernel spells it.
+// The SolverContext comes in BY VALUE: nvcc then reads its fields as the
+// kernel's own by-value parameter and folds the lazy || chain into one
+// predicate, as it did before the split (through a reference the last term
+// stays a branch).  The rest of the cell keeps the reference, whose repeated
+// free_surface reads are what the kernel compiled to.
+__device__ __forceinline__
+bool elastic_tti_sg_stress_in_pml(CellIndex2 cell, SolverContext solver, int halo)
+{
+    const int ix = cell.ix, iz = cell.iz;
+    const int top_pml = solver.free_surface ? (halo + 1) : (solver.abcn + halo);
+    const bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
+                        (iz < top_pml) || (iz >= solver.nz - solver.abcn - halo);
+    return in_pml;
+}
+
+// One cell of elastic_tti_sg_stress_kernel (launch/cell_path.h).  Interior
+// box: the interior of the kernel's LEGACY in_pml test (abcn + halo on the
+// x faces and the bottom, ``free_surface ? halo + 1 : abcn + halo`` on top,
+// as the kernel spells it) inside the halo guard, without the forward FS
+// reach (which also drops the FS row and its traction solve); FS z face as
+// the ELASTIC_FS_Z flag; optional output: u_this (u_allt, forward only).
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_tti_sg_stress_cell(
+    CellIndex2 cell,
+    const WavefieldPointer& wf,
+    const StiffnessPointer& model,
+    float* __restrict__ u_this,
+    const SGradParam& grad_ctx,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver
+)
+{
+    const int ix = cell.ix, iz = cell.iz, b = cell.b;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int M_static = is_runtime ? 0 : (Order / 2);
+    const int halo = is_runtime ? solver.M : M_static;
+
     const int spatial_size = solver.nx * solver.nz;
     const int idx = iz * solver.nx + ix;
     const int comp_stride = solver.B * spatial_size;
 
     auto f = wf.offset(b, spatial_size);
     auto m = model.offset(b, spatial_size);
-    float* u_this_b = u_this ? u_this + b * spatial_size : nullptr;
+    float* u_this_b = optional_output<Path>(u_this) ? u_this + b * spatial_size : nullptr;
 
     float dvx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.vx, ix, 0, iz, grad_ctx);
     float dvy_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.vy, ix, 0, iz, grad_ctx);
     float dvz_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.vz, ix, 0, iz, grad_ctx);
-    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true);
-    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.vx, ix, iz, grad_ctx, solver, false);
-    float dvy_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.vy, ix, iz, grad_ctx, solver, false);
+    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(f.vz, ix, iz, grad_ctx, solver, true);
+    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path>(f.vx, ix, iz, grad_ctx, solver, false);
+    float dvy_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path>(f.vy, ix, iz, grad_ctx, solver, false);
 
     // Interior fast-path. Conservative for free_surface: keep iz==halo on the
     // full PML path because both (a) the anisotropic FS gradient adjustment
     // and (b) szz/sxz/syz=0 BC fire only there.
-    const int top_pml = solver.free_surface ? (halo + 1) : (solver.abcn + halo);
-    const bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                        (iz < top_pml) || (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = false;
+    if constexpr (!interior_path<Path>)
+        in_pml = elastic_tti_sg_stress_in_pml(cell, solver, halo);
 
     if (!in_pml) {
         const float shear_xz = dvz_dx + dvx_dz;
@@ -332,7 +393,7 @@ __global__ void elastic_tti_sg_stress_kernel(
             m.C16[idx] * dvx_dx + m.C66[idx] * dvy_dx + m.C56[idx] * shear_xz +
             m.C46[idx] * dvy_dz + m.C36[idx] * dvz_dz
         );
-        if (u_this_b) {
+        if (optional_output<Path>(u_this_b)) {
             u_this_b[0 * comp_stride + idx] = f.vx[idx];
             u_this_b[1 * comp_stride + idx] = f.vy[idx];
             u_this_b[2 * comp_stride + idx] = f.vz[idx];
@@ -440,9 +501,69 @@ __global__ void elastic_tti_sg_stress_kernel(
     }
 }
 
+template<int Order>
+__global__ void elastic_tti_sg_stress_kernel(
+    WavefieldPointer wf,
+    StiffnessPointer model,
+    float* __restrict__ u_this,
+    SGradParam grad_ctx,
+    ElasticCPMLPointer cpml,
+    SolverContext solver
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int M_static = is_runtime ? 0 : (Order / 2);
+    const int halo = is_runtime ? solver.M : M_static;
+    if (ix < halo || ix >= solver.nx - halo || iz < halo || iz >= solver.nz - halo)
+        return;
+
+    elastic_tti_sg_stress_cell<Order>(CellIndex2{ix, iz, b}, wf, model, u_this, grad_ctx, cpml, solver);
+}
+
 using elastic_tti_sg_stress_kernel_fn = void (*)(WavefieldPointer, StiffnessPointer,
     float*, SGradParam, ElasticCPMLPointer, SolverContext);
 SWEEP_BY_ORDER_DECL(elastic_tti_sg_stress_kernel_fn, elastic_tti_sg_stress_kernel_by_order);
+
+// One cell of elastic_tti_sg_velocity_kernel_nopml (launch/cell_path.h).  No
+// PML branch: interior box = the kernel's guard box (abcn + M + 1, ``M`` on
+// top with a free surface) without the forward FS reach; FS z face as the
+// ELASTIC_FS_Z flag.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_tti_sg_velocity_nopml_cell(
+    CellIndex2 cell,
+    const WavefieldPointer& wf,
+    const StiffnessPointer& model,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    const int ix = cell.ix, iz = cell.iz, b = cell.b;
+
+    const int spatial_size = solver.nx * solver.nz;
+    const int idx = iz * solver.nx + ix;
+
+    auto f = wf.offset(b, spatial_size);
+    auto m = model.offset(b, spatial_size);
+
+    float dsxx_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.sxx, ix, 0, iz, grad_ctx);
+    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(f.sxz, ix, iz, grad_ctx, solver, true);
+    float dsxy_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxy, ix, 0, iz, grad_ctx);
+    float dsyz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(f.syz, ix, iz, grad_ctx, solver, true);
+    float dsxz_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
+    float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path>(f.szz, ix, iz, grad_ctx, solver, true);
+
+    const float scale = solver.dt / m.rho[idx];
+    f.vx[idx] -= scale * (dsxx_dx + dsxz_dz);
+    f.vy[idx] -= scale * (dsxy_dx + dsyz_dz);
+    f.vz[idx] -= scale * (dsxz_dx + dszz_dz);
+}
 
 template<int Order>
 __global__ void elastic_tti_sg_velocity_kernel_nopml(
@@ -466,50 +587,27 @@ __global__ void elastic_tti_sg_velocity_kernel_nopml(
     if (ix < halo || ix >= solver.nx - halo || iz < top_halo || iz >= solver.nz - halo)
         return;
 
-    const int spatial_size = solver.nx * solver.nz;
-    const int idx = iz * solver.nx + ix;
-
-    auto f = wf.offset(b, spatial_size);
-    auto m = model.offset(b, spatial_size);
-
-    float dsxx_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.sxx, ix, 0, iz, grad_ctx);
-    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true);
-    float dsxy_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxy, ix, 0, iz, grad_ctx);
-    float dsyz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.syz, ix, iz, grad_ctx, solver, true);
-    float dsxz_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
-    float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.szz, ix, iz, grad_ctx, solver, true);
-
-    const float scale = solver.dt / m.rho[idx];
-    f.vx[idx] -= scale * (dsxx_dx + dsxz_dz);
-    f.vy[idx] -= scale * (dsxy_dx + dsyz_dz);
-    f.vz[idx] -= scale * (dsxz_dx + dszz_dz);
+    elastic_tti_sg_velocity_nopml_cell<Order>(CellIndex2{ix, iz, b}, wf, model, grad_ctx, solver);
 }
 
 using elastic_tti_sg_velocity_kernel_nopml_fn = void (*)(WavefieldPointer,
     StiffnessPointer, SGradParam, SolverContext);
 SWEEP_BY_ORDER_DECL(elastic_tti_sg_velocity_kernel_nopml_fn, elastic_tti_sg_velocity_kernel_nopml_by_order);
 
-template<int Order>
-__global__ void elastic_tti_sg_stress_kernel_nopml(
-    WavefieldPointer wf,
-    StiffnessPointer model,
-    SGradParam grad_ctx,
-    SolverContext solver
+// One cell of elastic_tti_sg_stress_kernel_nopml (launch/cell_path.h).  No
+// PML branch: interior box = the kernel's guard box without the forward FS
+// reach; FS z face as the ELASTIC_FS_Z flag.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_tti_sg_stress_nopml_cell(
+    CellIndex2 cell,
+    const WavefieldPointer& wf,
+    const StiffnessPointer& model,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
-
-    constexpr bool is_runtime = (Order == -1);
-    constexpr int M_static = is_runtime ? 0 : (Order / 2);
-    const int M = is_runtime ? solver.M : M_static;
-    const int halo = solver.abcn + M + 1;
-    const int top_halo = solver.free_surface ? M : halo;
-    if (ix < halo || ix >= solver.nx - halo || iz < top_halo || iz >= solver.nz - halo)
-        return;
+    const int ix = cell.ix, iz = cell.iz, b = cell.b;
 
     const int spatial_size = solver.nx * solver.nz;
     const int idx = iz * solver.nx + ix;
@@ -520,9 +618,9 @@ __global__ void elastic_tti_sg_stress_kernel_nopml(
     float dvx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.vx, ix, 0, iz, grad_ctx);
     float dvy_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.vy, ix, 0, iz, grad_ctx);
     float dvz_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.vz, ix, 0, iz, grad_ctx);
-    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true);
-    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.vx, ix, iz, grad_ctx, solver, false);
-    float dvy_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.vy, ix, iz, grad_ctx, solver, false);
+    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(f.vz, ix, iz, grad_ctx, solver, true);
+    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path>(f.vx, ix, iz, grad_ctx, solver, false);
+    float dvy_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path>(f.vy, ix, iz, grad_ctx, solver, false);
 
     const float shear_xz = dvz_dx + dvx_dz;
     f.sxx[idx] -= solver.dt * (
@@ -547,16 +645,48 @@ __global__ void elastic_tti_sg_stress_kernel_nopml(
     );
 }
 
+template<int Order>
+__global__ void elastic_tti_sg_stress_kernel_nopml(
+    WavefieldPointer wf,
+    StiffnessPointer model,
+    SGradParam grad_ctx,
+    SolverContext solver
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int M_static = is_runtime ? 0 : (Order / 2);
+    const int M = is_runtime ? solver.M : M_static;
+    const int halo = solver.abcn + M + 1;
+    const int top_halo = solver.free_surface ? M : halo;
+    if (ix < halo || ix >= solver.nx - halo || iz < top_halo || iz >= solver.nz - halo)
+        return;
+
+    elastic_tti_sg_stress_nopml_cell<Order>(CellIndex2{ix, iz, b}, wf, model, grad_ctx, solver);
+}
+
 using elastic_tti_sg_stress_kernel_nopml_fn = void (*)(WavefieldPointer,
     StiffnessPointer, SGradParam, SolverContext);
 SWEEP_BY_ORDER_DECL(elastic_tti_sg_stress_kernel_nopml_fn, elastic_tti_sg_stress_kernel_nopml_by_order);
 
-template<int Order>
-__global__ void elastic_tti_sg_stress_adjoint_prepare(
-    WavefieldPointer wf,
-    StiffnessPointer model,
-    ElasticCPMLPointer cpml,
-    SolverContext solver,
+// One cell of elastic_tti_sg_stress_adjoint_prepare (launch/cell_path.h).
+// Pointwise.  Interior box: the in_pml_2d test's interior (phys(halo))
+// without the free-surface rows (the two FS-row tests: the legacy
+// elastic_is_top_free_surface_row(solver, iz) overload, phys_z0() /
+// phys_z1() - 1); no flag, no optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_tti_sg_stress_adjoint_prepare_cell(
+    CellIndex2 cell,
+    const WavefieldPointer& wf,
+    const StiffnessPointer& model,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver,
     float* __restrict__ q_vxx,
     float* __restrict__ q_vyx,
     float* __restrict__ q_vzx,
@@ -565,11 +695,7 @@ __global__ void elastic_tti_sg_stress_adjoint_prepare(
     float* __restrict__ q_vzz
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
+    const int ix = cell.ix, iz = cell.iz, b = cell.b;
 
     constexpr bool is_runtime = (Order == -1);
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
@@ -586,7 +712,7 @@ __global__ void elastic_tti_sg_stress_adjoint_prepare(
     float bar_syz = f.syz[idx];
     float bar_sxz = f.sxz[idx];
     float bar_sxy = f.sxy[idx];
-    if (elastic_is_top_free_surface_row(solver, iz)) {
+    if (elastic_is_top_free_surface_row<Path>(solver, iz)) {
         bar_szz = 0.f;
         bar_syz = 0.f;
         bar_sxz = 0.f;
@@ -629,7 +755,7 @@ __global__ void elastic_tti_sg_stress_adjoint_prepare(
     float bar_dvx_dz_full = bar_dvx_dz_mod;
     float bar_dvy_dz_full = bar_dvy_dz_mod;
     float bar_dvz_dz_full = bar_dvz_dz_mod;
-    if (elastic_is_top_free_surface_row(solver, iz)) {
+    if (elastic_is_top_free_surface_row<Path>(solver, iz)) {
         const float C13 = m.C13[idx], C14 = m.C14[idx], C15 = m.C15[idx];
         const float C33 = m.C33[idx], C34 = m.C34[idx], C35 = m.C35[idx], C36 = m.C36[idx];
         const float C44 = m.C44[idx], C45 = m.C45[idx], C46 = m.C46[idx];
@@ -666,7 +792,9 @@ __global__ void elastic_tti_sg_stress_adjoint_prepare(
     // fields stay 0, so the six q_v* outputs collapse to bar_dv*_d* and
     // the six m_v* writes become 0 -> 0. Skip them.
     const int shift = b * spatial_size + idx;
-    bool in_pml = solver.in_pml_2d(ix, iz, halo);
+    bool in_pml = false;
+    if constexpr (!interior_path<Path>)
+        in_pml = solver.in_pml_2d(ix, iz, halo);
     if (!in_pml) {
         q_vxx[shift] = bar_dvx_dx;
         q_vxz[shift] = bar_dvx_dz_full;
@@ -708,10 +836,75 @@ __global__ void elastic_tti_sg_stress_adjoint_prepare(
     f.m_vzz[idx] = az * tmp_vzz;
 }
 
+template<int Order>
+__global__ void elastic_tti_sg_stress_adjoint_prepare(
+    WavefieldPointer wf,
+    StiffnessPointer model,
+    ElasticCPMLPointer cpml,
+    SolverContext solver,
+    float* __restrict__ q_vxx,
+    float* __restrict__ q_vyx,
+    float* __restrict__ q_vzx,
+    float* __restrict__ q_vxz,
+    float* __restrict__ q_vyz,
+    float* __restrict__ q_vzz
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    elastic_tti_sg_stress_adjoint_prepare_cell<Order>(CellIndex2{ix, iz, b}, wf, model, cpml, solver,
+        q_vxx, q_vyx, q_vzx, q_vxz, q_vyz, q_vzz);
+}
+
 using elastic_tti_sg_stress_adjoint_prepare_fn = void (*)(WavefieldPointer,
     StiffnessPointer, ElasticCPMLPointer, SolverContext, float*, float*, float*, float*,
     float*, float*);
 SWEEP_BY_ORDER_DECL(elastic_tti_sg_stress_adjoint_prepare_fn, elastic_tti_sg_stress_adjoint_prepare_by_order);
+
+// One cell of elastic_tti_sg_stress_adjoint_apply (launch/cell_path.h).  No
+// PML branch: interior box = the halo guard without the ADJOINT FS reach;
+// FS z face as the ELASTIC_FS_Z flag.  vx, vy and vz are each updated twice
+// (the x scatter, then the z scatter), in that order on every path.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_tti_sg_stress_adjoint_apply_cell(
+    CellIndex2 cell,
+    const WavefieldPointer& wf,
+    const float* __restrict__ q_vxx,
+    const float* __restrict__ q_vyx,
+    const float* __restrict__ q_vzx,
+    const float* __restrict__ q_vxz,
+    const float* __restrict__ q_vyz,
+    const float* __restrict__ q_vzz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    const int ix = cell.ix, iz = cell.iz, b = cell.b;
+
+    const int spatial_size = solver.nx * solver.nz;
+    const int idx = iz * solver.nx + ix;
+    const int shift = b * spatial_size;
+    auto f = wf.offset(b, spatial_size);
+
+    const float* vxx = q_vxx + shift;
+    const float* vyx = q_vyx + shift;
+    const float* vzx = q_vzx + shift;
+    const float* vxz = q_vxz + shift;
+    const float* vyz = q_vyz + shift;
+    const float* vzz = q_vzz + shift;
+
+    f.vx[idx] += sgradient<2, Order, X, DIFF_FORWARD>(vxx, ix, 0, iz, grad_ctx);
+    f.vy[idx] += sgradient<2, Order, X, DIFF_BACKWARD>(vyx, ix, 0, iz, grad_ctx);
+    f.vz[idx] += sgradient<2, Order, X, DIFF_BACKWARD>(vzx, ix, 0, iz, grad_ctx);
+    f.vx[idx] += elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD, Path>(vxz, ix, iz, grad_ctx, solver, false);
+    f.vy[idx] += elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD, Path>(vyz, ix, iz, grad_ctx, solver, false);
+    f.vz[idx] += elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(vzz, ix, iz, grad_ctx, solver, true);
+}
 
 template<int Order>
 __global__ void elastic_tti_sg_stress_adjoint_apply(
@@ -738,24 +931,8 @@ __global__ void elastic_tti_sg_stress_adjoint_apply(
     if (ix < halo || ix >= solver.nx - halo || iz < halo || iz >= solver.nz - halo)
         return;
 
-    const int spatial_size = solver.nx * solver.nz;
-    const int idx = iz * solver.nx + ix;
-    const int shift = b * spatial_size;
-    auto f = wf.offset(b, spatial_size);
-
-    const float* vxx = q_vxx + shift;
-    const float* vyx = q_vyx + shift;
-    const float* vzx = q_vzx + shift;
-    const float* vxz = q_vxz + shift;
-    const float* vyz = q_vyz + shift;
-    const float* vzz = q_vzz + shift;
-
-    f.vx[idx] += sgradient<2, Order, X, DIFF_FORWARD>(vxx, ix, 0, iz, grad_ctx);
-    f.vy[idx] += sgradient<2, Order, X, DIFF_BACKWARD>(vyx, ix, 0, iz, grad_ctx);
-    f.vz[idx] += sgradient<2, Order, X, DIFF_BACKWARD>(vzx, ix, 0, iz, grad_ctx);
-    f.vx[idx] += elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD>(vxz, ix, iz, grad_ctx, solver, false);
-    f.vy[idx] += elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD>(vyz, ix, iz, grad_ctx, solver, false);
-    f.vz[idx] += elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD>(vzz, ix, iz, grad_ctx, solver, true);
+    elastic_tti_sg_stress_adjoint_apply_cell<Order>(CellIndex2{ix, iz, b}, wf, q_vxx, q_vyx, q_vzx,
+        q_vxz, q_vyz, q_vzz, grad_ctx, solver);
 }
 
 using elastic_tti_sg_stress_adjoint_apply_fn = void (*)(WavefieldPointer, const float*,
@@ -763,12 +940,17 @@ using elastic_tti_sg_stress_adjoint_apply_fn = void (*)(WavefieldPointer, const 
     SolverContext);
 SWEEP_BY_ORDER_DECL(elastic_tti_sg_stress_adjoint_apply_fn, elastic_tti_sg_stress_adjoint_apply_by_order);
 
-template<int Order>
-__global__ void elastic_tti_sg_velocity_adjoint_prepare(
-    WavefieldPointer wf,
-    StiffnessPointer model,
-    ElasticCPMLPointer cpml,
-    SolverContext solver,
+// One cell of elastic_tti_sg_velocity_adjoint_prepare (launch/cell_path.h).
+// Pointwise, no free-surface logic.  Interior box: the in_pml_2d test's
+// interior (phys(halo)); no flag, no optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_tti_sg_velocity_adjoint_prepare_cell(
+    CellIndex2 cell,
+    const WavefieldPointer& wf,
+    const StiffnessPointer& model,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver,
     float* __restrict__ q_txxx,
     float* __restrict__ q_txzz,
     float* __restrict__ q_txyx,
@@ -777,11 +959,7 @@ __global__ void elastic_tti_sg_velocity_adjoint_prepare(
     float* __restrict__ q_tzzz
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
+    const int ix = cell.ix, iz = cell.iz, b = cell.b;
 
     constexpr bool is_runtime = (Order == -1);
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
@@ -806,7 +984,9 @@ __global__ void elastic_tti_sg_velocity_adjoint_prepare(
     // ax/az/bx/bz coefficients vanish, m_t* aux fields stay 0, so the six
     // q_t* outputs collapse to bar_ds*_d* and the six m_t* writes become
     // 0 -> 0. Skip them.
-    bool in_pml = solver.in_pml_2d(ix, iz, halo);
+    bool in_pml = false;
+    if constexpr (!interior_path<Path>)
+        in_pml = solver.in_pml_2d(ix, iz, halo);
     if (!in_pml) {
         q_txxx[shift] = bar_dsxx_dx;
         q_txzz[shift] = bar_dsxz_dz;
@@ -848,10 +1028,75 @@ __global__ void elastic_tti_sg_velocity_adjoint_prepare(
     f.m_tzzz[idx] = azh * tmp_tzzz;
 }
 
+template<int Order>
+__global__ void elastic_tti_sg_velocity_adjoint_prepare(
+    WavefieldPointer wf,
+    StiffnessPointer model,
+    ElasticCPMLPointer cpml,
+    SolverContext solver,
+    float* __restrict__ q_txxx,
+    float* __restrict__ q_txzz,
+    float* __restrict__ q_txyx,
+    float* __restrict__ q_tyzz,
+    float* __restrict__ q_txzx,
+    float* __restrict__ q_tzzz
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    elastic_tti_sg_velocity_adjoint_prepare_cell<Order>(CellIndex2{ix, iz, b}, wf, model, cpml, solver,
+        q_txxx, q_txzz, q_txyx, q_tyzz, q_txzx, q_tzzz);
+}
+
 using elastic_tti_sg_velocity_adjoint_prepare_fn = void (*)(WavefieldPointer,
     StiffnessPointer, ElasticCPMLPointer, SolverContext, float*, float*, float*, float*,
     float*, float*);
 SWEEP_BY_ORDER_DECL(elastic_tti_sg_velocity_adjoint_prepare_fn, elastic_tti_sg_velocity_adjoint_prepare_by_order);
+
+// One cell of elastic_tti_sg_velocity_adjoint_apply (launch/cell_path.h).  No
+// PML branch: interior box = the halo guard without the ADJOINT FS reach;
+// FS z face as the ELASTIC_FS_Z flag.  sxz is updated twice (the z scatter,
+// then the x scatter), in that order on every path.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_tti_sg_velocity_adjoint_apply_cell(
+    CellIndex2 cell,
+    const WavefieldPointer& wf,
+    const float* __restrict__ q_txxx,
+    const float* __restrict__ q_txzz,
+    const float* __restrict__ q_txyx,
+    const float* __restrict__ q_tyzz,
+    const float* __restrict__ q_txzx,
+    const float* __restrict__ q_tzzz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    const int ix = cell.ix, iz = cell.iz, b = cell.b;
+
+    const int spatial_size = solver.nx * solver.nz;
+    const int idx = iz * solver.nx + ix;
+    const int shift = b * spatial_size;
+    auto f = wf.offset(b, spatial_size);
+
+    const float* txxx = q_txxx + shift;
+    const float* txzz = q_txzz + shift;
+    const float* txyx = q_txyx + shift;
+    const float* tyzz = q_tyzz + shift;
+    const float* txzx = q_txzx + shift;
+    const float* tzzz = q_tzzz + shift;
+
+    f.sxx[idx] += sgradient<2, Order, X, DIFF_BACKWARD>(txxx, ix, 0, iz, grad_ctx);
+    f.sxz[idx] += elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(txzz, ix, iz, grad_ctx, solver, true);
+    f.sxy[idx] += sgradient<2, Order, X, DIFF_FORWARD>(txyx, ix, 0, iz, grad_ctx);
+    f.syz[idx] += elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(tyzz, ix, iz, grad_ctx, solver, true);
+    f.sxz[idx] += sgradient<2, Order, X, DIFF_FORWARD>(txzx, ix, 0, iz, grad_ctx);
+    f.szz[idx] += elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD, Path>(tzzz, ix, iz, grad_ctx, solver, true);
+}
 
 template<int Order>
 __global__ void elastic_tti_sg_velocity_adjoint_apply(
@@ -878,30 +1123,119 @@ __global__ void elastic_tti_sg_velocity_adjoint_apply(
     if (ix < halo || ix >= solver.nx - halo || iz < halo || iz >= solver.nz - halo)
         return;
 
-    const int spatial_size = solver.nx * solver.nz;
-    const int idx = iz * solver.nx + ix;
-    const int shift = b * spatial_size;
-    auto f = wf.offset(b, spatial_size);
-
-    const float* txxx = q_txxx + shift;
-    const float* txzz = q_txzz + shift;
-    const float* txyx = q_txyx + shift;
-    const float* tyzz = q_tyzz + shift;
-    const float* txzx = q_txzx + shift;
-    const float* tzzz = q_tzzz + shift;
-
-    f.sxx[idx] += sgradient<2, Order, X, DIFF_BACKWARD>(txxx, ix, 0, iz, grad_ctx);
-    f.sxz[idx] += elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD>(txzz, ix, iz, grad_ctx, solver, true);
-    f.sxy[idx] += sgradient<2, Order, X, DIFF_FORWARD>(txyx, ix, 0, iz, grad_ctx);
-    f.syz[idx] += elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD>(tyzz, ix, iz, grad_ctx, solver, true);
-    f.sxz[idx] += sgradient<2, Order, X, DIFF_FORWARD>(txzx, ix, 0, iz, grad_ctx);
-    f.szz[idx] += elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD>(tzzz, ix, iz, grad_ctx, solver, true);
+    elastic_tti_sg_velocity_adjoint_apply_cell<Order>(CellIndex2{ix, iz, b}, wf, q_txxx, q_txzz, q_txyx,
+        q_tyzz, q_txzx, q_tzzz, grad_ctx, solver);
 }
 
 using elastic_tti_sg_velocity_adjoint_apply_fn = void (*)(WavefieldPointer,
     const float*, const float*, const float*, const float*, const float*, const float*,
     SGradParam, SolverContext);
 SWEEP_BY_ORDER_DECL(elastic_tti_sg_velocity_adjoint_apply_fn, elastic_tti_sg_velocity_adjoint_apply_by_order);
+
+// One cell of calculate_grad_elastic_tti_sg_nobs (launch/cell_path.h).  No
+// PML branch: interior box = the physical box inside the halo guard (the
+// kernel's two guards) without the forward FS reach (which also drops the
+// FS row's traction rewrite and its zeroed adjoint reads); FS z face as the
+// ELASTIC_FS_Z flag; no optional output (all 16 accumulators are bound).
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void calculate_grad_elastic_tti_sg_nobs_cell(
+    CellIndex2 cell,
+    const WavefieldPointer& adjoint,
+    const StiffnessPointer& model,
+    const StiffnessGradPointer& grad,
+    const float* __restrict__ fvx,
+    const float* __restrict__ fvy,
+    const float* __restrict__ fvz,
+    const float* __restrict__ fvx_next,
+    const float* __restrict__ fvy_next,
+    const float* __restrict__ fvz_next,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    const int ix = cell.ix, iz = cell.iz, b = cell.b;
+
+    const int spatial_size = solver.nx * solver.nz;
+    const int idx = iz * solver.nx + ix;
+    const int shift = b * spatial_size;
+
+    const float* vx = fvx + shift;
+    const float* vy = fvy + shift;
+    const float* vz = fvz + shift;
+    const float* vx_next = fvx_next + shift;
+    const float* vy_next = fvy_next + shift;
+    const float* vz_next = fvz_next + shift;
+
+    auto a = adjoint.offset(b, spatial_size);
+    auto m = model.offset(b, spatial_size);
+    auto g = grad.offset(b, spatial_size);
+
+    float dvx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(vx, ix, 0, iz, grad_ctx);
+    float dvy_dx = sgradient<2, Order, X, DIFF_FORWARD>(vy, ix, 0, iz, grad_ctx);
+    float dvz_dx = sgradient<2, Order, X, DIFF_FORWARD>(vz, ix, 0, iz, grad_ctx);
+    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(vz, ix, iz, grad_ctx, solver, true);
+    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path>(vx, ix, iz, grad_ctx, solver, false);
+    float dvy_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path>(vy, ix, iz, grad_ctx, solver, false);
+
+    // At the FS row the forward replaces dv*_dz with the 3x3 traction-free
+    // solution before the stress update, so ∂σ_**/∂C** must be evaluated
+    // against those modified gradients.
+    if (elastic_is_top_free_surface_row<Path>(solver, iz)) {
+        const float C13 = m.C13[idx], C14 = m.C14[idx], C15 = m.C15[idx];
+        const float C33 = m.C33[idx], C34 = m.C34[idx], C35 = m.C35[idx], C36 = m.C36[idx];
+        const float C44 = m.C44[idx], C45 = m.C45[idx], C46 = m.C46[idx];
+        const float C55 = m.C55[idx], C56 = m.C56[idx];
+        const float aa = C35, bb = C34, cc = C33;
+        const float d = C45, e = C44, fcoef = C34;
+        const float g = C55, h = C45, icoef = C35;
+        const float det = aa * (e * icoef - fcoef * h) - bb * (d * icoef - fcoef * g) + cc * (d * h - e * g);
+        if (fabsf(det) > 1.0e-20f) {
+            const float rhs_zz = C13 * dvx_dx + C36 * dvy_dx + C35 * dvz_dx;
+            const float rhs_yz = C14 * dvx_dx + C46 * dvy_dx + C45 * dvz_dx;
+            const float rhs_xz = C15 * dvx_dx + C56 * dvy_dx + C55 * dvz_dx;
+            const float r1 = -rhs_zz, r2 = -rhs_yz, r3 = -rhs_xz;
+            dvx_dz = ((e * icoef - fcoef * h) * r1 + (cc * h - bb * icoef) * r2 + (bb * fcoef - cc * e) * r3) / det;
+            dvy_dz = ((fcoef * g - d * icoef) * r1 + (aa * icoef - cc * g) * r2 + (cc * d - aa * fcoef) * r3) / det;
+            dvz_dz = ((d * h - e * g) * r1 + (bb * g - aa * h) * r2 + (aa * e - bb * d) * r3) / det;
+        }
+    }
+    float shear_xz = dvz_dx + dvx_dz;
+
+    float bar_sxx = a.sxx[idx];
+    float bar_szz = a.szz[idx];
+    float bar_syz = a.syz[idx];
+    float bar_sxz = a.sxz[idx];
+    float bar_sxy = a.sxy[idx];
+    if (elastic_is_top_free_surface_row<Path>(solver, iz)) {
+        bar_szz = 0.f;
+        bar_syz = 0.f;
+        bar_sxz = 0.f;
+    }
+
+    const float scale = -solver.dt;
+    g.C11[idx] += scale * bar_sxx * dvx_dx;
+    g.C13[idx] += scale * (bar_sxx * dvz_dz + bar_szz * dvx_dx);
+    g.C14[idx] += scale * (bar_sxx * dvy_dz + bar_syz * dvx_dx);
+    g.C15[idx] += scale * (bar_sxx * shear_xz + bar_sxz * dvx_dx);
+    g.C16[idx] += scale * (bar_sxx * dvy_dx + bar_sxy * dvx_dx);
+    g.C33[idx] += scale * bar_szz * dvz_dz;
+    g.C34[idx] += scale * (bar_szz * dvy_dz + bar_syz * dvz_dz);
+    g.C35[idx] += scale * (bar_szz * shear_xz + bar_sxz * dvz_dz);
+    g.C36[idx] += scale * (bar_szz * dvy_dx + bar_sxy * dvz_dz);
+    g.C44[idx] += scale * bar_syz * dvy_dz;
+    g.C45[idx] += scale * (bar_syz * shear_xz + bar_sxz * dvy_dz);
+    g.C46[idx] += scale * (bar_syz * dvy_dx + bar_sxy * dvy_dz);
+    g.C55[idx] += scale * bar_sxz * shear_xz;
+    g.C56[idx] += scale * (bar_sxz * dvy_dx + bar_sxy * shear_xz);
+    g.C66[idx] += scale * bar_sxy * dvy_dx;
+
+    g.rho[idx] += (
+        a.vx[idx] * (vx[idx] - vx_next[idx]) +
+        a.vy[idx] * (vy[idx] - vy_next[idx]) +
+        a.vz[idx] * (vz[idx] - vz_next[idx])
+    ) / m.rho[idx];
+}
 
 template<int Order>
 __global__ void calculate_grad_elastic_tti_sg_nobs(
@@ -938,85 +1272,8 @@ __global__ void calculate_grad_elastic_tti_sg_nobs(
     if (ix < halo || ix >= solver.nx - halo || iz < halo || iz >= solver.nz - halo)
         return;
 
-    const int spatial_size = solver.nx * solver.nz;
-    const int idx = iz * solver.nx + ix;
-    const int shift = b * spatial_size;
-
-    const float* vx = fvx + shift;
-    const float* vy = fvy + shift;
-    const float* vz = fvz + shift;
-    const float* vx_next = fvx_next + shift;
-    const float* vy_next = fvy_next + shift;
-    const float* vz_next = fvz_next + shift;
-
-    auto a = adjoint.offset(b, spatial_size);
-    auto m = model.offset(b, spatial_size);
-    auto g = grad.offset(b, spatial_size);
-
-    float dvx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(vx, ix, 0, iz, grad_ctx);
-    float dvy_dx = sgradient<2, Order, X, DIFF_FORWARD>(vy, ix, 0, iz, grad_ctx);
-    float dvz_dx = sgradient<2, Order, X, DIFF_FORWARD>(vz, ix, 0, iz, grad_ctx);
-    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(vz, ix, iz, grad_ctx, solver, true);
-    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(vx, ix, iz, grad_ctx, solver, false);
-    float dvy_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(vy, ix, iz, grad_ctx, solver, false);
-
-    // At the FS row the forward replaces dv*_dz with the 3x3 traction-free
-    // solution before the stress update, so ∂σ_**/∂C** must be evaluated
-    // against those modified gradients.
-    if (elastic_is_top_free_surface_row(solver, iz)) {
-        const float C13 = m.C13[idx], C14 = m.C14[idx], C15 = m.C15[idx];
-        const float C33 = m.C33[idx], C34 = m.C34[idx], C35 = m.C35[idx], C36 = m.C36[idx];
-        const float C44 = m.C44[idx], C45 = m.C45[idx], C46 = m.C46[idx];
-        const float C55 = m.C55[idx], C56 = m.C56[idx];
-        const float aa = C35, bb = C34, cc = C33;
-        const float d = C45, e = C44, fcoef = C34;
-        const float g = C55, h = C45, icoef = C35;
-        const float det = aa * (e * icoef - fcoef * h) - bb * (d * icoef - fcoef * g) + cc * (d * h - e * g);
-        if (fabsf(det) > 1.0e-20f) {
-            const float rhs_zz = C13 * dvx_dx + C36 * dvy_dx + C35 * dvz_dx;
-            const float rhs_yz = C14 * dvx_dx + C46 * dvy_dx + C45 * dvz_dx;
-            const float rhs_xz = C15 * dvx_dx + C56 * dvy_dx + C55 * dvz_dx;
-            const float r1 = -rhs_zz, r2 = -rhs_yz, r3 = -rhs_xz;
-            dvx_dz = ((e * icoef - fcoef * h) * r1 + (cc * h - bb * icoef) * r2 + (bb * fcoef - cc * e) * r3) / det;
-            dvy_dz = ((fcoef * g - d * icoef) * r1 + (aa * icoef - cc * g) * r2 + (cc * d - aa * fcoef) * r3) / det;
-            dvz_dz = ((d * h - e * g) * r1 + (bb * g - aa * h) * r2 + (aa * e - bb * d) * r3) / det;
-        }
-    }
-    float shear_xz = dvz_dx + dvx_dz;
-
-    float bar_sxx = a.sxx[idx];
-    float bar_szz = a.szz[idx];
-    float bar_syz = a.syz[idx];
-    float bar_sxz = a.sxz[idx];
-    float bar_sxy = a.sxy[idx];
-    if (elastic_is_top_free_surface_row(solver, iz)) {
-        bar_szz = 0.f;
-        bar_syz = 0.f;
-        bar_sxz = 0.f;
-    }
-
-    const float scale = -solver.dt;
-    g.C11[idx] += scale * bar_sxx * dvx_dx;
-    g.C13[idx] += scale * (bar_sxx * dvz_dz + bar_szz * dvx_dx);
-    g.C14[idx] += scale * (bar_sxx * dvy_dz + bar_syz * dvx_dx);
-    g.C15[idx] += scale * (bar_sxx * shear_xz + bar_sxz * dvx_dx);
-    g.C16[idx] += scale * (bar_sxx * dvy_dx + bar_sxy * dvx_dx);
-    g.C33[idx] += scale * bar_szz * dvz_dz;
-    g.C34[idx] += scale * (bar_szz * dvy_dz + bar_syz * dvz_dz);
-    g.C35[idx] += scale * (bar_szz * shear_xz + bar_sxz * dvz_dz);
-    g.C36[idx] += scale * (bar_szz * dvy_dx + bar_sxy * dvz_dz);
-    g.C44[idx] += scale * bar_syz * dvy_dz;
-    g.C45[idx] += scale * (bar_syz * shear_xz + bar_sxz * dvy_dz);
-    g.C46[idx] += scale * (bar_syz * dvy_dx + bar_sxy * dvy_dz);
-    g.C55[idx] += scale * bar_sxz * shear_xz;
-    g.C56[idx] += scale * (bar_sxz * dvy_dx + bar_sxy * shear_xz);
-    g.C66[idx] += scale * bar_sxy * dvy_dx;
-
-    g.rho[idx] += (
-        a.vx[idx] * (vx[idx] - vx_next[idx]) +
-        a.vy[idx] * (vy[idx] - vy_next[idx]) +
-        a.vz[idx] * (vz[idx] - vz_next[idx])
-    ) / m.rho[idx];
+    calculate_grad_elastic_tti_sg_nobs_cell<Order>(CellIndex2{ix, iz, b}, adjoint, model, grad, fvx, fvy,
+        fvz, fvx_next, fvy_next, fvz_next, grad_ctx, solver);
 }
 
 using calculate_grad_elastic_tti_sg_nobs_fn = void (*)(WavefieldPointer,

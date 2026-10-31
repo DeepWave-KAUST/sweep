@@ -1,4 +1,5 @@
 #include <algorithm>
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 #include <cstdlib>
 #include <memory>
 #include <optional>
@@ -253,7 +254,7 @@ BackwardOutputCore backward_full_impl(const BackwardInputCore& in)
             adj_view.zetazn
         );
 
-        add_source_3d_signed<<<adj_source_config.grid, adj_source_config.block>>>(
+        SWEEP_LAUNCH(add_source_3d_signed, adj_source_config.grid, adj_source_config.block,
             adj_view.u_next,
             in.adjoint_source.data_ptr<float>(),
             in.adjoint_sources_loc.data_ptr<int>(),
@@ -266,7 +267,7 @@ BackwardOutputCore backward_full_impl(const BackwardInputCore& in)
         adjoint.swap_aux();   // rotate u AND the psi/zeta double-buffers
 
         // source-cell correction of the p_tt imaging (see kernels.cuh)
-        vrz3d_utt_source_correction<<<fdtd::Geom::make(forward_nsrc, B).grid, fdtd::Geom::make(forward_nsrc, B).block>>>(
+        SWEEP_LAUNCH(vrz3d_utt_source_correction, fdtd::Geom::make(forward_nsrc, B).grid, fdtd::Geom::make(forward_nsrc, B).block,
             grad_vp.data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
             vp.data_ptr<float>(),
@@ -668,7 +669,7 @@ BackwardOutputCore Vrz3dBackwardBsRunner::step()
                 adj_view.zetazn
             );
 
-            add_source_3d_signed<<<adj_source_config.grid, adj_source_config.block>>>(
+            SWEEP_LAUNCH(add_source_3d_signed, adj_source_config.grid, adj_source_config.block,
                 adj_view.u_next,
                 p.adjoint_source.data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
@@ -693,7 +694,7 @@ BackwardOutputCore Vrz3dBackwardBsRunner::step()
                 ctx
             );
 
-            add_source_3d<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            SWEEP_LAUNCH(add_source_3d, fwd_source_config.grid, fwd_source_config.block,
                 for_view.u_next,
                 p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
@@ -726,7 +727,7 @@ BackwardOutputCore Vrz3dBackwardBsRunner::step()
         // Source-cell correction of the p_tt imaging: once per imaged step, with
         // the same post-advance λ the gradient below uses (phase 0, or phase 3).
         if (do_grad) {
-            vrz3d_utt_source_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            SWEEP_LAUNCH(vrz3d_utt_source_correction, fwd_source_config.grid, fwd_source_config.block,
                 grad_vp.data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
                 vp.data_ptr<float>(),
@@ -1015,7 +1016,7 @@ BackwardOutputCore backward_ckpt_impl(const BackwardInputCore& in)
                 ctx
             );
 
-            add_source_3d<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            SWEEP_LAUNCH(add_source_3d, fwd_source_config.grid, fwd_source_config.block,
                 for_view.u_next,
                 p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
@@ -1055,7 +1056,7 @@ BackwardOutputCore backward_ckpt_impl(const BackwardInputCore& in)
                 adj_view.zetazn
             );
 
-            add_source_3d_signed<<<adj_source_config.grid, adj_source_config.block>>>(
+            SWEEP_LAUNCH(add_source_3d_signed, adj_source_config.grid, adj_source_config.block,
                 adj_view.u_next,
                 p.adjoint_source.data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
@@ -1068,7 +1069,7 @@ BackwardOutputCore backward_ckpt_impl(const BackwardInputCore& in)
             adjoint.swap_aux();   // rotate u AND the psi/zeta double-buffers
 
             // source-cell correction of the p_tt imaging (see kernels.cuh)
-            vrz3d_utt_source_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            SWEEP_LAUNCH(vrz3d_utt_source_correction, fwd_source_config.grid, fwd_source_config.block,
                 grad_vp.data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
                 vp.data_ptr<float>(),

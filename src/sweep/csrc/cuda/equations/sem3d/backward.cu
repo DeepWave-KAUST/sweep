@@ -6,6 +6,7 @@
 // (in the grad_c2_jx slot), inv_M, wavelet — PyTorch chains through the eager
 // build() to vp_e.
 #include "../../../core/device.h"
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 #include "../../../core/sem_input_core.h"
 #include <cuda_runtime.h>
 #include <cstdint>
@@ -86,23 +87,23 @@ void acoustic3d_backward(const Sem3dBackwardInputCore& in) {
     for (int mm = nt; mm >= 1; --mm) {
         // reverse leapfrog: a_m = 2 a_p1 - a_p2 - dt2 K0(c^2 o inv_M o a_p1)
         // + R^T g  (adj holds c^2 o inv_M o a_p1 until the adjoint source)
-        sem2d::sem2d_scale2<<<nb, TPB, 0, stream>>>(a_p1, inv_M, 1.f, tmp, ng);
-        sem2d::sem2d_scale2<<<nb, TPB, 0, stream>>>(tmp, c2n, 1.f, adj, ng);
+        SWEEP_LAUNCH_ON(sem2d::sem2d_scale2, nb, TPB, 0, stream, a_p1, inv_M, 1.f, tmp, ng);
+        SWEEP_LAUNCH_ON(sem2d::sem2d_scale2, nb, TPB, 0, stream, tmp, c2n, 1.f, adj, ng);
         cudaMemsetAsync(Ktmp, 0, ngb, stream);
         if (def)
-            sem3d_acoustic_stiffness_deformed<<<grid, m, sh_stiff, stream>>>(
+            SWEEP_LAUNCH_ON(sem3d_acoustic_stiffness_deformed, grid, m, sh_stiff, stream,
                 adj, ibool, D, wJ, Ixx, Ixy, Ixz, Iex, Iey, Iez, Igx, Igy, Igz,
                 Ktmp, ngll, E, ng);
         else
-            sem3d_acoustic_stiffness<<<grid, m, sh_stiff, stream>>>(
+            SWEEP_LAUNCH_ON(sem3d_acoustic_stiffness, grid, m, sh_stiff, stream,
                 adj, ibool, D, jx, jy, jz, Ktmp, ngll, E, ng);
         cudaMemsetAsync(adj, 0, ngb, stream);
         if (nrec > 0)
-            sem2d::sem2d_adjoint_source<<<rj, TPB, 0, stream>>>(
+            SWEEP_LAUNCH_ON(sem2d::sem2d_adjoint_source, rj, TPB, 0, stream,
                 grad_syn, rec_G, rec_W, adj, mm - 1, nt, nrec, m);
-        sem2d::sem2d_adj_leapfrog<<<nb, TPB, 0, stream>>>(a_p1, a_p2, Ktmp, adj, dt2, a_m, ng);
+        SWEEP_LAUNCH_ON(sem2d::sem2d_adj_leapfrog, nb, TPB, 0, stream, a_p1, a_p2, Ktmp, adj, dt2, a_m, ng);
         if (kdir > 0)
-            sem2d::sem2d_dirichlet_fill<<<db, TPB, 0, stream>>>(a_m, didx, kdir);
+            SWEEP_LAUNCH_ON(sem2d::sem2d_dirichlet_fill, db, TPB, 0, stream, a_m, didx, kdir);
 
         // gradients at forward line k = mm-1 (uses u^{mm-1} = save[mm-2])
         const int km1 = mm - 1;
@@ -114,27 +115,27 @@ void acoustic3d_backward(const Sem3dBackwardInputCore& in) {
         cudaMemsetAsync(Ku, 0, ngb, stream);
         if (!u_is_zero) {
             if (def)
-                sem3d_acoustic_stiffness_deformed<<<grid, m, sh_stiff, stream>>>(
+                SWEEP_LAUNCH_ON(sem3d_acoustic_stiffness_deformed, grid, m, sh_stiff, stream,
                     u_line, ibool, D, wJ, Ixx, Ixy, Ixz, Iex, Iey, Iez,
                     Igx, Igy, Igz, Ku, ngll, E, ng);
             else
-                sem3d_acoustic_stiffness<<<grid, m, sh_stiff, stream>>>(
+                SWEEP_LAUNCH_ON(sem3d_acoustic_stiffness, grid, m, sh_stiff, stream,
                     u_line, ibool, D, jx, jy, jz, Ku, ngll, E, ng);
-            sem3d_accum_grad_c2<<<nb, TPB, 0, stream>>>(a_m, inv_M, Ku, dt2, gC2, ng);
+            SWEEP_LAUNCH_ON(sem3d_accum_grad_c2, nb, TPB, 0, stream, a_m, inv_M, Ku, dt2, gC2, ng);
         }
-        sem2d::sem2d_scale2<<<nb, TPB, 0, stream>>>(Ku, c2n, 1.f, Ktmp, ng);
-        sem2d::sem2d_accum_gradM<<<nb, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d::sem2d_scale2, nb, TPB, 0, stream, Ku, c2n, 1.f, Ktmp, ng);
+        SWEEP_LAUNCH_ON(sem2d::sem2d_accum_gradM, nb, TPB, 0, stream,
             a_m, pattern, Ktmp, wavelet, km1, dt2, gM, ng);
-        sem2d::sem2d_accum_gradW<<<nb, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d::sem2d_accum_gradW, nb, TPB, 0, stream,
             pattern, inv_M, a_m, dt2, km1, gW, ng);
         if (bsm && !u_is_zero) {
             // reverse-march: u^{mm-2} = 2 u^{mm-1} - u^{mm}
             //   + dt2 invM (pat wav[mm-1] - c^2 K0 u^{mm-1});  Ktmp already
             // holds c^2 K0 u^{mm-1} from the gradient step above.
-            sem2d::sem2d_acoustic_newmark<<<nb, TPB, 0, stream>>>(
+            SWEEP_LAUNCH_ON(sem2d::sem2d_acoustic_newmark, nb, TPB, 0, stream,
                 u_lo, u_hi, Ktmp, pattern, inv_M, wavelet, km1, dt2, u_km1, ng);
             if (kdir > 0)
-                sem2d::sem2d_dirichlet_fill<<<db, TPB, 0, stream>>>(u_km1, didx, kdir);
+                SWEEP_LAUNCH_ON(sem2d::sem2d_dirichlet_fill, db, TPB, 0, stream, u_km1, didx, kdir);
             float* t2 = u_hi; u_hi = u_lo; u_lo = u_km1; u_km1 = t2;
         }
         float* t = a_p2; a_p2 = a_p1; a_p1 = a_m; a_m = t;
@@ -253,14 +254,14 @@ void acoustic3d_cpml_dd_bwd_pre(const Sem3dCpmlBackwardInputCore& in, int64_t k)
     float* gA = in.gA.data_ptr<float>();
     if (nrec > 0) {
         const int rj = (nrec * m + TPB - 1) / TPB;
-        sem2d::sem2d_adjoint_source<<<rj, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d::sem2d_adjoint_source, rj, TPB, 0, stream,
             in.grad_syn.data_ptr<float>(), in.rec_G.data_ptr<int64_t>(),
             in.rec_W.data_ptr<float>(), gA, static_cast<int>(k), nt, nrec, m);
     }
     if (kdir > 0) {
         const int db = (kdir + TPB - 1) / TPB;
         const long* didx = in.dirichlet_idx.data_ptr<int64_t>();
-        sem2d::sem2d_dirichlet_fill<<<db, TPB, 0, stream>>>(gA, didx, kdir);
+        SWEEP_LAUNCH_ON(sem2d::sem2d_dirichlet_fill, db, TPB, 0, stream, gA, didx, kdir);
         float* lf[6] = {in.lpsi_x.data_ptr<float>(), in.lpsi_y.data_ptr<float>(),
                         in.lpsi_z.data_ptr<float>(), in.lzeta_x.data_ptr<float>(),
                         in.lzeta_y.data_ptr<float>(), in.lzeta_z.data_ptr<float>()};
@@ -268,14 +269,14 @@ void acoustic3d_cpml_dd_bwd_pre(const Sem3dCpmlBackwardInputCore& in, int64_t k)
             if (slab) {
                 const int kd = kdsl[j % 3];
                 if (kd > 0)
-                    sem2d::sem2d_dirichlet_fill<<<(kd + TPB - 1) / TPB, TPB, 0, stream>>>(
+                    SWEEP_LAUNCH_ON(sem2d::sem2d_dirichlet_fill, (kd + TPB - 1) / TPB, TPB, 0, stream,
                         lf[j], dsl[j % 3], kd);
             } else {
-                sem2d::sem2d_dirichlet_fill<<<db, TPB, 0, stream>>>(lf[j], didx, kdir);
+                SWEEP_LAUNCH_ON(sem2d::sem2d_dirichlet_fill, db, TPB, 0, stream, lf[j], didx, kdir);
             }
         }
     }
-    sem2d::sem2d_scale2<<<nb, TPB, 0, stream>>>(
+    SWEEP_LAUNCH_ON(sem2d::sem2d_scale2, nb, TPB, 0, stream,
         in.vp2_node.data_ptr<float>(), gA, dt2, in.gw.data_ptr<float>(), ng);
     float* g[9] = {in.gx.data_ptr<float>(), in.gy.data_ptr<float>(),
                    in.gz.data_ptr<float>(), in.kx.data_ptr<float>(),
@@ -345,10 +346,10 @@ void acoustic3d_cpml_dd_bwd_pre(const Sem3dCpmlBackwardInputCore& in, int64_t k)
                 if (slab) {
                     const int n_ = nsl[axis];
                     if (n_ > 0)
-                        sem3d_slab_scale<<<(n_ + TPB - 1) / TPB, TPB, 0, stream>>>(
+                        SWEEP_LAUNCH_ON(sem3d_slab_scale, (n_ + TPB - 1) / TPB, TPB, 0, stream,
                             as[axis], ps[axis], aps[axis], axis, sl, n_);
                 } else {
-                    sem2d::sem2d_scale2<<<nb, TPB, 0, stream>>>(as[axis], ps[axis], 1.f, aps[axis], ng);
+                    SWEEP_LAUNCH_ON(sem2d::sem2d_scale2, nb, TPB, 0, stream, as[axis], ps[axis], 1.f, aps[axis], ng);
                 }
             }
         }
@@ -487,7 +488,7 @@ void acoustic3d_cpml_dd_bwd_mid(const Sem3dCpmlBackwardInputCore& in, int64_t k)
         if (k == 1) {
             cudaMemsetAsync(u_km1, 0, ngb, stream);          // u^0 = 0
         } else {
-            sem2d::sem2d_acoustic_cpml_newmark<<<nb, TPB, 0, stream>>>(
+            SWEEP_LAUNCH_ON(sem2d::sem2d_acoustic_cpml_newmark, nb, TPB, 0, stream,
                 in.u_lo.data_ptr<float>(), in.u_hi.data_ptr<float>(),
                 in.vp2_node.data_ptr<float>(), in.w_sum.data_ptr<float>(),
                 in.inv_M.data_ptr<float>(), in.src_pattern.data_ptr<float>(),
@@ -496,7 +497,7 @@ void acoustic3d_cpml_dd_bwd_mid(const Sem3dCpmlBackwardInputCore& in, int64_t k)
             const int kdir = static_cast<int>(in.dirichlet_idx.numel());
             if (kdir > 0) {
                 const int db = (kdir + TPB - 1) / TPB;
-                sem2d::sem2d_dirichlet_fill<<<db, TPB, 0, stream>>>(
+                SWEEP_LAUNCH_ON(sem2d::sem2d_dirichlet_fill, db, TPB, 0, stream,
                     u_km1, in.dirichlet_idx.data_ptr<int64_t>(), kdir);
             }
             const int nband = static_cast<int>(in.band_idx.numel());
@@ -544,10 +545,10 @@ void acoustic3d_cpml_dd_bwd_end(const Sem3dCpmlBackwardInputCore& in, int64_t k)
     // pattern (a cut plane is complete on BOTH strips after the exchange)
     const float* pat_w = in.src_pattern_own.numel()
         ? in.src_pattern_own.data_ptr<float>() : in.src_pattern.data_ptr<float>();
-    sem2d::sem2d_accum_gradW<<<nb, TPB, 0, stream>>>(
+    SWEEP_LAUNCH_ON(sem2d::sem2d_accum_gradW, nb, TPB, 0, stream,
         pat_w, in.inv_M.data_ptr<float>(), in.gA.data_ptr<float>(), dt2,
         static_cast<int>(k), in.grad_wavelet.data_ptr<float>(), ng);
-    sem2d::sem2d_scale1<<<nb, TPB, 0, stream>>>(
+    SWEEP_LAUNCH_ON(sem2d::sem2d_scale1, nb, TPB, 0, stream,
         in.gA.data_ptr<float>(), -1.f, in.gB.data_ptr<float>(), ng);
     SWEEP_CUDA_CHECK(cudaGetLastError());
 }
@@ -625,14 +626,14 @@ void elastic3d_backward(const Sem3dElasticBackwardInputCore& in) {
 
     for (int mm = nt; mm >= 1; --mm) {
         const int k = mm - 1;
-        sem2d::sem2d_scale2<<<nb, TPB, 0, stream>>>(ax1, inv_M, 1.f, tx, ng);
-        sem2d::sem2d_scale2<<<nb, TPB, 0, stream>>>(ay1, inv_M, 1.f, ty, ng);
+        SWEEP_LAUNCH_ON(sem2d::sem2d_scale2, nb, TPB, 0, stream, ax1, inv_M, 1.f, tx, ng);
+        SWEEP_LAUNCH_ON(sem2d::sem2d_scale2, nb, TPB, 0, stream, ay1, inv_M, 1.f, ty, ng);
     // columnar metric (sem3d_types.h). Set only by prop_c.metric_consts, and
     // read only by the deformed kernels below; 0 is the full 3x3 path.
     const bool col = in.columnar != 0;
     const float c_ixx = static_cast<float>(in.col_ixx);
     const float c_iey = static_cast<float>(in.col_iey);
-        sem2d::sem2d_scale2<<<nb, TPB, 0, stream>>>(az1, inv_M, 1.f, tz, ng);
+        SWEEP_LAUNCH_ON(sem2d::sem2d_scale2, nb, TPB, 0, stream, az1, inv_M, 1.f, tz, ng);
         cudaMemsetAsync(Kx, 0, ngb, stream);
         cudaMemsetAsync(Ky, 0, ngb, stream);
         cudaMemsetAsync(Kz, 0, ngb, stream);
@@ -643,20 +644,20 @@ void elastic3d_backward(const Sem3dElasticBackwardInputCore& in) {
                 Ixx, Ixy, Ixz, Iex, Iey, Iez, Igx, Igy, Igz, c_ixx, c_iey,
                 Kx, Ky, Kz, ngll, E, ng);
         else
-            sem3d_elastic_stiffness<<<grid, m, sh_st, stream>>>(
+            SWEEP_LAUNCH_ON(sem3d_elastic_stiffness, grid, m, sh_st, stream,
                 tx, ty, tz, ibool, D, lam, mu, l2m, w3, Gxx, Gyy, Gzz, Gxy, Gxz, Gyz,
                 jac, Kx, Ky, Kz, ngll, E, ng);
         cudaMemsetAsync(adx, 0, ngb, stream);
         cudaMemsetAsync(ady, 0, ngb, stream);
         cudaMemsetAsync(adz, 0, ngb, stream);
         if (nrec > 0) {
-            sem2d::sem2d_adjoint_source<<<rj, TPB, 0, stream>>>(gsx, rec_G, rec_W, adx, k, nt, nrec, m);
-            sem2d::sem2d_adjoint_source<<<rj, TPB, 0, stream>>>(gsy, rec_G, rec_W, ady, k, nt, nrec, m);
-            sem2d::sem2d_adjoint_source<<<rj, TPB, 0, stream>>>(gsz, rec_G, rec_W, adz, k, nt, nrec, m);
+            SWEEP_LAUNCH_ON(sem2d::sem2d_adjoint_source, rj, TPB, 0, stream, gsx, rec_G, rec_W, adx, k, nt, nrec, m);
+            SWEEP_LAUNCH_ON(sem2d::sem2d_adjoint_source, rj, TPB, 0, stream, gsy, rec_G, rec_W, ady, k, nt, nrec, m);
+            SWEEP_LAUNCH_ON(sem2d::sem2d_adjoint_source, rj, TPB, 0, stream, gsz, rec_G, rec_W, adz, k, nt, nrec, m);
         }
-        sem2d::sem2d_adj_leapfrog<<<nb, TPB, 0, stream>>>(ax1, ax2, Kx, adx, dt2, axm, ng);
-        sem2d::sem2d_adj_leapfrog<<<nb, TPB, 0, stream>>>(ay1, ay2, Ky, ady, dt2, aym, ng);
-        sem2d::sem2d_adj_leapfrog<<<nb, TPB, 0, stream>>>(az1, az2, Kz, adz, dt2, azm, ng);
+        SWEEP_LAUNCH_ON(sem2d::sem2d_adj_leapfrog, nb, TPB, 0, stream, ax1, ax2, Kx, adx, dt2, axm, ng);
+        SWEEP_LAUNCH_ON(sem2d::sem2d_adj_leapfrog, nb, TPB, 0, stream, ay1, ay2, Ky, ady, dt2, aym, ng);
+        SWEEP_LAUNCH_ON(sem2d::sem2d_adj_leapfrog, nb, TPB, 0, stream, az1, az2, Kz, adz, dt2, azm, ng);
 
         const bool u_is_zero = (mm == 1);
         cudaMemsetAsync(Kx, 0, ngb, stream);
@@ -673,20 +674,20 @@ void elastic3d_backward(const Sem3dElasticBackwardInputCore& in) {
                     Ixx, Ixy, Ixz, Iex, Iey, Iez, Igx, Igy, Igz, c_ixx, c_iey,
                     Kx, Ky, Kz, ngll, E, ng);
             else
-                sem3d_elastic_stiffness<<<grid, m, sh_st, stream>>>(
+                SWEEP_LAUNCH_ON(sem3d_elastic_stiffness, grid, m, sh_st, stream,
                     uxk, uyk, uzk, ibool, D, lam, mu, l2m, w3, Gxx, Gyy, Gzz, Gxy, Gxz, Gyz,
                     jac, Kx, Ky, Kz, ngll, E, ng);
         }
-        sem2d::sem2d_accum_gradM<<<nb, TPB, 0, stream>>>(axm, px_, Kx, wav, k, dt2, gM, ng);
-        sem2d::sem2d_accum_gradM<<<nb, TPB, 0, stream>>>(aym, py_, Ky, wav, k, dt2, gM, ng);
-        sem2d::sem2d_accum_gradM<<<nb, TPB, 0, stream>>>(azm, pz_, Kz, wav, k, dt2, gM, ng);
-        sem2d::sem2d_accum_gradW<<<nb, TPB, 0, stream>>>(px_, inv_M, axm, dt2, k, gW, ng);
-        sem2d::sem2d_accum_gradW<<<nb, TPB, 0, stream>>>(py_, inv_M, aym, dt2, k, gW, ng);
-        sem2d::sem2d_accum_gradW<<<nb, TPB, 0, stream>>>(pz_, inv_M, azm, dt2, k, gW, ng);
+        SWEEP_LAUNCH_ON(sem2d::sem2d_accum_gradM, nb, TPB, 0, stream, axm, px_, Kx, wav, k, dt2, gM, ng);
+        SWEEP_LAUNCH_ON(sem2d::sem2d_accum_gradM, nb, TPB, 0, stream, aym, py_, Ky, wav, k, dt2, gM, ng);
+        SWEEP_LAUNCH_ON(sem2d::sem2d_accum_gradM, nb, TPB, 0, stream, azm, pz_, Kz, wav, k, dt2, gM, ng);
+        SWEEP_LAUNCH_ON(sem2d::sem2d_accum_gradW, nb, TPB, 0, stream, px_, inv_M, axm, dt2, k, gW, ng);
+        SWEEP_LAUNCH_ON(sem2d::sem2d_accum_gradW, nb, TPB, 0, stream, py_, inv_M, aym, dt2, k, gW, ng);
+        SWEEP_LAUNCH_ON(sem2d::sem2d_accum_gradW, nb, TPB, 0, stream, pz_, inv_M, azm, dt2, k, gW, ng);
         if (!u_is_zero) {
-            sem2d::sem2d_scale2<<<nb, TPB, 0, stream>>>(inv_M, axm, -dt2, yx, ng);
-            sem2d::sem2d_scale2<<<nb, TPB, 0, stream>>>(inv_M, aym, -dt2, yy, ng);
-            sem2d::sem2d_scale2<<<nb, TPB, 0, stream>>>(inv_M, azm, -dt2, yz, ng);
+            SWEEP_LAUNCH_ON(sem2d::sem2d_scale2, nb, TPB, 0, stream, inv_M, axm, -dt2, yx, ng);
+            SWEEP_LAUNCH_ON(sem2d::sem2d_scale2, nb, TPB, 0, stream, inv_M, aym, -dt2, yy, ng);
+            SWEEP_LAUNCH_ON(sem2d::sem2d_scale2, nb, TPB, 0, stream, inv_M, azm, -dt2, yz, ng);
             if (def)
                 SEM3D_LAUNCH_SLAB(col, sem3d_elastic_imaging_deformed,
                                   grid, m, sh_im, stream,
@@ -694,7 +695,7 @@ void elastic3d_backward(const Sem3dElasticBackwardInputCore& in) {
                     Ixx, Ixy, Ixz, Iex, Iey, Iez, Igx, Igy, Igz, c_ixx, c_iey,
                     gL2m, gLam, gMu, ngll, E, ng);
             else
-                sem3d_elastic_imaging<<<grid, m, sh_im, stream>>>(
+                SWEEP_LAUNCH_ON(sem3d_elastic_imaging, grid, m, sh_im, stream,
                     uxk, uyk, uzk, yx, yy, yz, ibool, D, w3, jac,
                     Gxx, Gyy, Gzz, Gxy, Gxz, Gyz, gL2m, gLam, gMu, ngll, E, ng);
         }
@@ -803,9 +804,9 @@ void elastic_vs3d_backward(const Sem3dVsBackwardInputCore& in) {
     SWEEP_CHECK(0 <= t0 && t0 < t1 && t1 <= nt, "sem3d VS: bad step range");
     for (int k = t1 - 1; k >= t0; --k) {
         if (nrec > 0) {
-            sem2d::sem2d_adjoint_source<<<rj, TPB, 0, stream>>>(gsx, rec_G, rec_W, lvx, k, nt, nrec, m);
-            sem2d::sem2d_adjoint_source<<<rj, TPB, 0, stream>>>(gsy, rec_G, rec_W, lvy, k, nt, nrec, m);
-            sem2d::sem2d_adjoint_source<<<rj, TPB, 0, stream>>>(gsz, rec_G, rec_W, lvz, k, nt, nrec, m);
+            SWEEP_LAUNCH_ON(sem2d::sem2d_adjoint_source, rj, TPB, 0, stream, gsx, rec_G, rec_W, lvx, k, nt, nrec, m);
+            SWEEP_LAUNCH_ON(sem2d::sem2d_adjoint_source, rj, TPB, 0, stream, gsy, rec_G, rec_W, lvy, k, nt, nrec, m);
+            SWEEP_LAUNCH_ON(sem2d::sem2d_adjoint_source, rj, TPB, 0, stream, gsz, rec_G, rec_W, lvz, k, nt, nrec, m);
         }
         const float* gv_k = sgv + static_cast<size_t>(k - t0) * 9 * Em;
         if (def)
@@ -822,21 +823,21 @@ void elastic_vs3d_backward(const Sem3dVsBackwardInputCore& in) {
                 ihx, ihy, ihz, dt, lvx, lvy, lvz, gLam, gMu, gL2m, gC, ngll, E, ng);
         // v^k at history row k - t0 + 1, v^(k-1) one row up (row 0: the call's start)
         const size_t ok = static_cast<size_t>(k - t0 + 1) * ng;
-        sem3d_vs_vel_update_T<<<nb, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem3d_vs_vel_update_T, nb, TPB, 0, stream,
             lvx, lvy, lvz, svx + ok, svy + ok, svz + ok,
             svx + (ok - ng), svy + (ok - ng), svz + (ok - ng),
             inv_M, dt, lRx, lRy, lRz, gM, ng);
-        sem2d::sem2d_accum_gradW<<<nb, TPB, 0, stream>>>(px_, inv_M, lvx, dt, k, gW, ng);
-        sem2d::sem2d_accum_gradW<<<nb, TPB, 0, stream>>>(py_, inv_M, lvy, dt, k, gW, ng);
-        sem2d::sem2d_accum_gradW<<<nb, TPB, 0, stream>>>(pz_, inv_M, lvz, dt, k, gW, ng);
+        SWEEP_LAUNCH_ON(sem2d::sem2d_accum_gradW, nb, TPB, 0, stream, px_, inv_M, lvx, dt, k, gW, ng);
+        SWEEP_LAUNCH_ON(sem2d::sem2d_accum_gradW, nb, TPB, 0, stream, py_, inv_M, lvy, dt, k, gW, ng);
+        SWEEP_LAUNCH_ON(sem2d::sem2d_accum_gradW, nb, TPB, 0, stream, pz_, inv_M, lvz, dt, k, gW, ng);
         if (cp)
-            sem3d_vs_cpml_nodal_T<<<nb, TPB, 0, stream>>>(a_n, lRx, lRy, lRz, lmsig, lP, ng);
+            SWEEP_LAUNCH_ON(sem3d_vs_cpml_nodal_T, nb, TPB, 0, stream, a_n, lRx, lRy, lRz, lmsig, lP, ng);
         if (def)
-            sem3d_vs_sigma_div_T_deformed<<<grid, m, sh9, stream>>>(
+            SWEEP_LAUNCH_ON(sem3d_vs_sigma_div_T_deformed, grid, m, sh9, stream,
                 lRx, lRy, lRz, lP, lsig, ax, bx, ay, by, az, bz, wJ,
                 Ixx, Ixy, Ixz, Iex, Iey, Iez, Igx, Igy, Igz, ibool, D, ngll, E, ng);
         else
-            sem3d_vs_sigma_div_T<<<grid, m, sh9, stream>>>(
+            SWEEP_LAUNCH_ON(sem3d_vs_sigma_div_T, grid, m, sh9, stream,
                 lRx, lRy, lRz, lP, lsig, ax, bx, ay, by, az, bz,
                 wHx, wHy, wHz, ibool, D, ngll, E, ng);
     }

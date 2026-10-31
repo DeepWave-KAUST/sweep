@@ -494,7 +494,7 @@ MemoryStrategy = Union[Full, BoundarySaving, Ckpt]
 _STRATEGY_TYPES = {"full": Full, "boundary": BoundarySaving, "ckpt": Ckpt}
 
 
-def as_memory_strategy(value):
+def as_memory_strategy(value, *, warn=True):
     """Normalise anything that can name a memory strategy into one of the types.
 
     Accepts, in order of preference:
@@ -508,14 +508,20 @@ def as_memory_strategy(value):
       the record of what was actually run;
     * ``None`` -- returned as ``None``, meaning "no request", which is distinct
       from ``Full()``.
+
+    ``warn=False`` reads without the deprecation warning, for a look ahead at
+    a request that is read again (and warned about) where it is used: the
+    warning fires once per process per spelling, so a silenced first read
+    would swallow it for good.
     """
     if value is None or isinstance(value, (Full, BoundarySaving, Ckpt)):
         return value
 
     if isinstance(value, MemoryOptions):
-        warn_deprecated_spelling(
-            "MemoryOptions(strategy=..., boundary=..., ckpt=...)",
-            "Full() / BoundarySaving(...) / Ckpt(...)")
+        if warn:
+            warn_deprecated_spelling(
+                "MemoryOptions(strategy=..., boundary=..., ckpt=...)",
+                "Full() / BoundarySaving(...) / Ckpt(...)")
         if value.strategy is None:
             return None
         if value.strategy == "full":
@@ -538,9 +544,10 @@ def as_memory_strategy(value):
         # strategy, and the same word therefore appears twice.
         nested = data.pop(kind, None)
         if nested is not None:
-            warn_deprecated_spelling(
-                f"the nested {{'strategy': {kind!r}, {kind!r}: {{...}}}} dict",
-                f"a flat {{'kind': {kind!r}, ...}} dict")
+            if warn:
+                warn_deprecated_spelling(
+                    f"the nested {{'strategy': {kind!r}, {kind!r}: {{...}}}} dict",
+                    f"a flat {{'kind': {kind!r}, ...}} dict")
             data = dict(nested)
         data.pop("boundary", None)
         data.pop("ckpt", None)
@@ -605,38 +612,68 @@ _MEMORY_CAPABILITIES = {
         "boundary_tail_steps": False,         # no truncated backward in the eager driver
         "ckpt_mode": ("chunk",),              # no recursive/binomial schedule
     },
+    # impl='c' on a CPU device runs the host core (sweep.backend.c.hostcore): the
+    # same drivers, but the compute device IS the host, so 'cpu'/'disk' staging
+    # would copy host memory onto itself (and pin it).  'gpu' means "on the
+    # compute device" and is the one storage that exists there.
+    "c@cpu": {
+        "strategies": ("full", "boundary", "ckpt"),
+        "boundary_storage": ("gpu",),
+        "boundary_tail_steps": True,
+        "ckpt_mode": ("chunk", "recursive"),
+        "ckpt_storage": ("gpu",),
+    },
 }
 
 
-def check_memory_supported(impl, strategy):
+def _capability_key(impl, device):
+    """``'c@cpu'`` for the compiled backend on a CPU device, else the impl."""
+    if impl != "c" or device is None:
+        return impl
+    dtype = getattr(device, "type", None)
+    if dtype is None:
+        try:
+            import torch
+            dtype = torch.device(device).type
+        except Exception:
+            dtype = str(device).split(":", 1)[0]
+    return "c@cpu" if dtype == "cpu" else impl
+
+
+def check_memory_supported(impl, strategy, device=None):
     """Refuse a memory request the backend cannot honour, before it is built.
 
     Raises :class:`NotImplementedError` naming the impl, the option and what it
     does support. An unsupported request must never be quietly downgraded: the
-    run would report one strategy and compute another.
+    run would report one strategy and compute another.  ``device`` picks the
+    host core's row for ``impl='c'`` on a CPU device.
     """
-    caps = _MEMORY_CAPABILITIES.get(impl)
+    key = _capability_key(impl, device)
+    caps = _MEMORY_CAPABILITIES.get(key)
     if caps is None or strategy is None:
         return
+    label = "impl='c' on a CPU device" if key == "c@cpu" else f"impl={impl!r}"
     name = getattr(strategy, "strategy", None)
     if name is None:
         return
     if name not in caps["strategies"]:
         raise NotImplementedError(
-            f"impl={impl!r} does not implement the {name!r} gradient-memory "
+            f"{label} does not implement the {name!r} gradient-memory "
             f"strategy; it supports {', '.join(caps['strategies'])}.")
 
     if name == "boundary":
         storage = getattr(strategy, "storage", "gpu")
         if storage not in caps["boundary_storage"]:
             raise NotImplementedError(
-                f"impl={impl!r} boundary saving does not implement "
+                f"{label} boundary saving does not implement "
                 f"storage={storage!r}; it supports "
-                f"{', '.join(caps['boundary_storage'])}.")
+                f"{', '.join(caps['boundary_storage'])}"
+                + (" (on a CPU device the boundary already lives on the compute device)."
+                   if key == "c@cpu" else "."))
         tail = getattr(strategy, "tail_steps", None)
         if tail and not caps["boundary_tail_steps"]:
             raise NotImplementedError(
-                f"impl={impl!r} boundary saving does not implement tail_steps "
+                f"{label} boundary saving does not implement tail_steps "
                 f"(truncated backward); it would be accepted and ignored, "
                 f"returning a full-length gradient. Use impl='c' for "
                 f"tail_steps={tail!r}.")
@@ -645,5 +682,11 @@ def check_memory_supported(impl, strategy):
         mode = getattr(strategy, "mode", "chunk")
         if mode not in caps["ckpt_mode"]:
             raise NotImplementedError(
-                f"impl={impl!r} checkpointing does not implement "
+                f"{label} checkpointing does not implement "
                 f"mode={mode!r}; it supports {', '.join(caps['ckpt_mode'])}.")
+        storage = getattr(strategy, "storage", "gpu")
+        if "ckpt_storage" in caps and storage not in caps["ckpt_storage"]:
+            raise NotImplementedError(
+                f"{label} checkpointing does not implement storage={storage!r}; "
+                f"it supports {', '.join(caps['ckpt_storage'])} (on a CPU device the "
+                "checkpoints already live on the compute device).")

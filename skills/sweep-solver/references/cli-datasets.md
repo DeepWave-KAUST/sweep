@@ -17,8 +17,9 @@ sweep datasets list | head -n 15         # dataset catalog
 sweep datasets where                     # cache directory
 ```
 
-- `Torch Binding` column: the class has CUDA kernels. `Binding Ready`: `impl='c'` can run here
-  now (GPU visible, fitting core). A yes/no mismatch: check
+- `Torch Binding` column: the class has compiled kernels. `Binding Ready`: `impl='c'` can run on
+  CUDA here now (GPU visible, fitting core); a CPU-only box says `no` even when the host core
+  serves `impl='c'` on the CPU (`diagnostics()["host_core"]`). A yes/no mismatch: check
   `sweep.backend.torch.binding.diagnostics()["reason"]` or `python scripts/check_env.py`.
 - `sweep show X > /dev/null` exits 0 only for a real equation: usable as an availability probe.
   The facades `DAS` and `AcousticAniso` are not listed and `show` refuses them.

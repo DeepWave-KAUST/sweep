@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 #include "../../core/check.h"
+#include "../../core/compute_device.h"   // on_compute_device: the residency the checks below ask for
 #include "../../core/device.h"
 #include "../../core/buflist.h"   // BufList, for the pool/set twins
 #include "../../core/check.h"
@@ -28,7 +29,13 @@ inline void validate_cuda_copy_bufs(const Buf& dst, const Buf& src, const char* 
 inline void copy_tensor_cuda_async(const Buf& dst, const Buf& src)
 {
     validate_cuda_copy_bufs(dst, src, "CUDA async copy");
-    SWEEP_CHECK(dst.is_cuda() || src.is_cuda(), "CUDA async copy expects at least one CUDA buffer.");
+    // The CUDA core stages host<->device through this call, so one operand
+    // may live off the device.  The host core has no legitimate mixed copy: a
+    // "CUDA" buffer there is a device pointer about to be handed to memmove.
+    SWEEP_CHECK(sweep::kCoreIsCuda ? (sweep::on_compute_device(dst) || sweep::on_compute_device(src))
+                                   : (sweep::on_compute_device(dst) && sweep::on_compute_device(src)),
+                "async copy expects ", (sweep::kCoreIsCuda ? "at least one buffer" : "both buffers"),
+                " on the compute device (", sweep::kComputeDeviceName, ").");
     const cudaMemcpyKind kind = (dst.is_cuda() && src.is_cuda()) ? cudaMemcpyDeviceToDevice
                               : dst.is_cuda()                    ? cudaMemcpyHostToDevice
                                                                  : cudaMemcpyDeviceToHost;
@@ -40,14 +47,15 @@ inline void copy_tensor_cuda_async(const Buf& dst, const Buf& src)
 
 inline void copy_tensor_device_to_device_async(const Buf& dst, const Buf& src)
 {
-    SWEEP_CHECK(dst.is_cuda() && src.is_cuda(), "CUDA device copy expects CUDA buffers.");
+    SWEEP_CHECK(sweep::on_compute_device(dst) && sweep::on_compute_device(src),
+                "device copy expects buffers on the compute device (", sweep::kComputeDeviceName, ").");
     copy_tensor_cuda_async(dst, src);
 }
 
 inline void zero_tensor_device_async(const Buf& dst)
 {
     SWEEP_CHECK(dst.defined(), "CUDA zero expects a defined buffer.");
-    SWEEP_CHECK(dst.is_cuda(), "CUDA zero expects a CUDA buffer.");
+    SWEEP_CHECK(sweep::on_compute_device(dst), "zero expects a buffer on the compute device (", sweep::kComputeDeviceName, ").");
     SWEEP_CHECK(dst.is_contiguous(), "CUDA zero destination must be contiguous.");
     if (dst.numel() == 0) return;
     SWEEP_CUDA_CHECK(cudaMemsetAsync(dst.data_ptr(), 0,
@@ -82,7 +90,7 @@ inline const Buf& pool_required(const BufList& pool, int idx, const Buf& like, c
     const Buf& b = pool[idx];
     SWEEP_CHECK(same_shape(b, like), what, " slot ", idx, " has the wrong shape for its reference buffer");
     SWEEP_CHECK(b.dtype() == BoundaryDtype::FP32, what, " slot ", idx, " must be float32");
-    SWEEP_CHECK(b.is_cuda(), what, " slot ", idx, " must be a CUDA buffer");
+    SWEEP_CHECK(sweep::on_compute_device(b), what, " slot ", idx, " must be a ", sweep::kComputeDeviceName, " buffer");
     return b;
 }
 
@@ -110,9 +118,9 @@ inline const Buf& pool_slot_checked(const BufList& pool, int idx, const Buf& lik
                 what, "[", idx, "] has shape ", b.sizes(), " but the expected geometry is ", like.sizes());
     SWEEP_CHECK(b.dtype() == BoundaryDtype::FP32,
                 what, "[", idx, "] must be float32");
-    SWEEP_CHECK(b.is_cuda(),
-                what, "[", idx, "] must live on the GPU (a host buffer here reads as an "
-                "illegal address inside the kernels)");
+    SWEEP_CHECK(sweep::on_compute_device(b),
+                what, "[", idx, "] must live on the compute device (", sweep::kComputeDeviceName,
+                "): a buffer on the other tier reads as an illegal address inside the kernels");
     return b;
 }
 
@@ -152,9 +160,10 @@ inline BufList wavefield_set(const BufList& list, int k, int n, const char* what
                 k + 1, " sets of ", n, "), got ", list.size());
     BufList set{list.p + static_cast<int64_t>(k) * n, n};
     for (int i = 0; i < n; ++i)
-        SWEEP_CHECK(set[i].defined() && set[i].is_cuda() && set[i].dtype() == BoundaryDtype::FP32
+        SWEEP_CHECK(sweep::on_compute_device(set[i]) && set[i].dtype() == BoundaryDtype::FP32
                         && set[i].is_contiguous(),
-                    what, ": set ", k, " slot ", i, " must be a contiguous float32 CUDA buffer");
+                    what, ": set ", k, " slot ", i, " must be a contiguous float32 ",
+                    sweep::kComputeDeviceName, " buffer");
     return set;
 }
 

@@ -14,7 +14,8 @@ What is pinned here, and why each check exists:
   binary is on the box;
 * the loader -- cuFFT is seated from the pip wheel first and a toolkit is
   looked for only when the load fails on libcufft; one load per process
-  under a lock;
+  under a lock; ``sweep._C`` answers dunder lookups (introspection, pytest's
+  collection) without loading;
 * ``adapt()`` -- the one place a tensor becomes a ``Buf`` (the twin of
   ``cuda/common/buf_torch.h``'s ``buf_of``): pointer, sizes/strides verbatim
   (a DD cut face has a nonzero stride on a 0-size dim), the storage tag, the
@@ -123,7 +124,7 @@ def _no_compile(monkeypatch):
 
 
 def _core_or_skip():
-    """The loaded core, or a pytest skip.
+    """The loaded CUDA core, or a pytest skip.
 
     These tests never compile, so a core is at hand only when the shipped one
     fits this torch/GPU (``jit._shipped_core``) or a locally built one is
@@ -131,10 +132,12 @@ def _core_or_skip():
     and is the one call that would otherwise build -- which ``_no_compile``
     turns into ``_CompileRefused``, here a skip.  A core that IS there but is
     refused by the ABI/layout guard is a red, not a skip: that is the guard
-    doing its job on a stale binary."""
+    doing its job on a stale binary.  Looked up by kind: ``loader._lib`` is
+    whichever core loaded first -- the host core, when an earlier test in this
+    process ran impl='c' on a CPU device."""
     from sweep.backend.c import jit, loader
-    if loader._lib is not None:
-        return loader._lib
+    if loader._libs.get("cuda") is not None:
+        return loader._libs["cuda"]
     so, why = jit._shipped_core()
     if so is None:
         try:
@@ -232,6 +235,7 @@ class _FakeCore:
         self.layout = list(layout)
         self.probed = []
         self.sweep_core_abi_version = _FakeFn(lambda: self.abi)
+        self.sweep_core_device = _FakeFn(lambda: b"cuda")    # what the loader asks a 'cuda' core
         self.sweep_layout_count = _FakeFn(lambda: len(self.layout))
         self.sweep_layout_probe = _FakeFn(self._probe)
 
@@ -396,6 +400,7 @@ class TestLoader:
         _, abi = _mods()
         calls = []
         monkeypatch.setattr(loader, "_lib", None)
+        monkeypatch.setattr(loader, "_libs", {})
         monkeypatch.setattr(jit, "core_path", lambda: Path("/nowhere/libsweep_core.so"))
         monkeypatch.setattr(jit, "_preload_cufft", lambda home: calls.append(("preload", home)))
         monkeypatch.setattr(jit, "_find_cuda_home", lambda: calls.append(("find_cuda_home",)) or "/fake/cuda")
@@ -455,6 +460,7 @@ class TestLoader:
 
         monkeypatch.setattr(ctypes, "CDLL", counting)
         monkeypatch.setattr(loader, "_lib", None)
+        monkeypatch.setattr(loader, "_libs", {})
         got, errors = [], []
         gate = threading.Barrier(8)
 
@@ -473,6 +479,26 @@ class TestLoader:
         assert not errors, errors
         assert len(got) == 8 and all(g is got[0] for g in got)
         assert len(loads) == 1, "the lock must make the first load happen once"
+
+    def test_introspection_does_not_load_a_core(self, monkeypatch):
+        """pytest's collection reads ``__test__`` and, through ``issubclass``,
+        ``__bases__`` of every module-level name, so a test module importing
+        ``sweep._C`` loaded the core at collection -- on a CPU-only source
+        checkout, built the host core (~100 s a CI shard).  No entry is a
+        dunder: those are answered without loading; ``__all__`` and the
+        entries still load."""
+        import sweep._C as _C
+        loads = []
+        monkeypatch.setattr(_C, "_load", lambda *a, **k: loads.append(1))
+        assert getattr(_C, "__test__", False) is False
+        assert not hasattr(_C, "__wrapped__")
+        with pytest.raises(TypeError):
+            issubclass(_C, Exception)
+        assert loads == []
+        for name in ("__all__", "acoustic2d_forward_definitely_not_an_entry"):
+            with pytest.raises(AttributeError):
+                getattr(_C, name)
+        assert loads == [1, 1]
 
 
 # --------------------------------------------------------------------------- #
@@ -825,20 +851,39 @@ class TestInputValidation:
         assert core.models.p[0].data_ == t.data_ptr()
         assert core.models.p[1].defined_ is False
 
-    def test_cpu_models_are_refused_on_the_call_path_not_in_the_probe(self):
-        """Every entry and runner takes the launch stream through
-        ``_launch_stream``, which refuses host models before the core can
-        dereference them; the bare ``_stream_for_models`` probe keeps
-        answering 0 for host models (test_core_stream_scope pins that)."""
+    def test_models_pick_the_core_by_device(self, monkeypatch):
+        """Every entry and runner resolves ``(core, stream)`` through
+        ``_core_for``: CUDA models -> the CUDA core and torch's stream, CPU
+        models -> the host core and stream 0, any other device -> refused by
+        name before the core can dereference anything; no models -> whichever
+        core loads.  The bare ``_stream_for_models`` probe keeps answering 0 for
+        host models (test_core_stream_scope pins that)."""
         from sweep.backend.c import entries
+        _, abi = _mods()
+        fakes = {"cuda": object(), "cpu": object()}
+        monkeypatch.setattr(entries, "core_lib", lambda kind: fakes[kind])
+        monkeypatch.setattr(entries, "any_core_lib", lambda: fakes["cuda"])
+        fi = abi.ForwardInput()
+        fi.models = [torch.zeros(1, 1, 8, 8)]
+        assert entries._core_for(fi.models, "acoustic2d_forward") == (fakes["cpu"], 0)
+        assert entries._stream_for_models(fi.models) == 0
+        fi.models = []
+        assert entries._core_for(fi.models, "acoustic2d_forward") == (fakes["cuda"], 0)
+        fi.models = [torch.zeros(1, 1, 8, 8, device="meta")]
+        with pytest.raises(RuntimeError, match=r"acoustic2d_forward: models\[0\] is a meta tensor; no compiled core"):
+            entries._core_for(fi.models, "acoustic2d_forward")
+
+    def test_a_missing_host_core_is_a_message_naming_it(self, monkeypatch):
+        from sweep.backend.c import entries
+
+        def no_cpu(kind):
+            raise RuntimeError("sweep's host (CPU) core is unavailable: no g++")
+        monkeypatch.setattr(entries, "core_lib", no_cpu)
         _, abi = _mods()
         fi = abi.ForwardInput()
         fi.models = [torch.zeros(1, 1, 8, 8)]
-        with pytest.raises(RuntimeError, match=r"acoustic2d_forward: models\[0\] is a cpu tensor.*expected a CUDA tensor"):
-            entries._launch_stream(fi, "acoustic2d_forward")
-        assert entries._stream_for_models(fi.models) == 0
-        fi.models = []
-        assert entries._launch_stream(fi, "acoustic2d_forward") == 0
+        with pytest.raises(RuntimeError, match=r"models\[0\] is a cpu tensor and the cpu core cannot be loaded: .*no g\+\+"):
+            entries._core_for(fi.models, "acoustic2d_forward")
 
     def test_single_tensor_for_models_is_refused_before_indexing(self):
         from sweep.backend.c import entries
@@ -848,23 +893,31 @@ class TestInputValidation:
         with pytest.raises(RuntimeError, match="list of tensors"):
             entries._stream_for_models(fi.models)
         with pytest.raises(RuntimeError, match="list of tensors"):
-            entries._launch_stream(fi, "x")
+            entries._core_for(fi.models, "x")
 
+    @_ctypes_only
     @requires_binding()
-    def test_cpu_models_through_an_entry_are_a_message(self):
-        """Host models are refused before the core sees them, on both layers
-        (ctypes here, the pybind shim under SWEEP_JIT_FULL=1) and for every
-        entry: there is no CPU engine to route them to."""
+    def test_cpu_models_without_a_host_core_are_a_message(self, monkeypatch):
+        """Host models go to the host core (test_host_core.py runs them); when
+        none can be had, every entry says so by name instead of handing a host
+        pointer to the CUDA core."""
         _core_or_skip()
         import sweep._C as _C
+        from sweep.backend.c import entries, loader
+
+        def no_cpu(kind):
+            if kind == "cpu":
+                raise RuntimeError("sweep's host (CPU) core is unavailable: (test)")
+            return loader.core_lib(kind)
+        monkeypatch.setattr(entries, "core_lib", no_cpu)
         fi = _C.ForwardInput()
         fi.models = [torch.zeros(1, 1, 8, 8)]
         for fn in (_C.acoustic2d_forward, _C.elastic_tti_2nd2d_forward):
-            with pytest.raises(RuntimeError, match="expected a CUDA tensor"):
+            with pytest.raises(RuntimeError, match="cpu tensor and the cpu core cannot be loaded"):
                 fn(fi)
         bi = _C.BackwardInput()
         bi.models = [torch.zeros(1, 1, 8, 8)]
-        with pytest.raises(RuntimeError, match="expected a CUDA tensor"):
+        with pytest.raises(RuntimeError, match="cpu tensor and the cpu core cannot be loaded"):
             _C.acoustic2d_backward(bi)
 
 
@@ -1015,8 +1068,8 @@ class _FakeCallCore(_FakeCore):
 
 
 def _cpu_input(abi):
-    """A ForwardInput with no models: ``_launch_stream`` then needs no device
-    (and refuses nothing), and ``adapt`` runs on host tensors alone."""
+    """A ForwardInput with no models: ``_core_for`` then takes whichever core
+    loads (faked below) with stream 0, and ``adapt`` runs on host tensors alone."""
     fi = abi.ForwardInput()
     fi.record_out = torch.zeros(1, 4, 10)
     fi.nt = 10
@@ -1024,10 +1077,24 @@ def _cpu_input(abi):
 
 
 class TestReturnNothing:
+    @pytest.fixture(autouse=True)
+    def _fake_core_resolution(self, monkeypatch):
+        """Entries and runners pick their core per call; here every pick lands
+        on the fake the test built (set through ``self.fake``)."""
+        from sweep.backend.c import entries
+        holder = {}
+        monkeypatch.setattr(entries, "any_core_lib", lambda: holder["fake"])
+        monkeypatch.setattr(entries, "core_lib", lambda kind: holder["fake"])
+        self._holder = holder
+
+    def _use(self, fake):
+        self._holder["fake"] = fake
+        return fake
+
     def test_an_entry_returns_none_and_the_record_is_the_bound_tensor(self):
         from sweep.backend.c import entries
         _, abi = _mods()
-        fake = _FakeCallCore(abi)
+        fake = self._use(_FakeCallCore(abi))
         fn = entries._make_entry(fake, 3, "acoustic2d_forward", 0)
         fi = _cpu_input(abi)
         rec = fi.record_out
@@ -1040,11 +1107,11 @@ class TestReturnNothing:
     def test_an_entry_error_is_the_cores_message(self):
         from sweep.backend.c import entries
         _, abi = _mods()
-        fake = _FakeCallCore(abi, rc=7, message=b"acoustic2d_forward: nt must be positive")
+        fake = self._use(_FakeCallCore(abi, rc=7, message=b"acoustic2d_forward: nt must be positive"))
         fn = entries._make_entry(fake, 3, "acoustic2d_forward", 0)
         with pytest.raises(RuntimeError, match="nt must be positive"):
             fn(_cpu_input(abi))
-        fake = _FakeCallCore(abi, rc=7)
+        fake = self._use(_FakeCallCore(abi, rc=7))
         fn = entries._make_entry(fake, 3, "acoustic2d_forward", 0)
         with pytest.raises(RuntimeError, match=r"acoustic2d_forward failed \(rc=7\) without a message"):
             fn(_cpu_input(abi))
@@ -1058,8 +1125,7 @@ class TestReturnNothing:
     def test_a_runner_run_returns_none_and_close_destroys_once(self, monkeypatch):
         from sweep.backend.c import runners
         _, abi = _mods()
-        fake = _FakeCallCore(abi)
-        monkeypatch.setattr(runners, "core_lib", lambda: fake)
+        fake = self._use(_FakeCallCore(abi))
         r = runners.ForwardRunner(5, _cpu_input(abi))
         assert fake.calls == [("create", 5)]
         assert r.run(0, 4, 0) is None and r.run(4, 8, 2) is None
@@ -1074,8 +1140,7 @@ class TestReturnNothing:
     def test_a_runner_error_is_the_cores_message(self, monkeypatch):
         from sweep.backend.c import runners
         _, abi = _mods()
-        fake = _FakeCallCore(abi, rc=3, message=b"segment out of range")
-        monkeypatch.setattr(runners, "core_lib", lambda: fake)
+        fake = self._use(_FakeCallCore(abi, rc=3, message=b"segment out of range"))
         r = runners.ForwardRunner(5, _cpu_input(abi))
         with pytest.raises(RuntimeError, match="segment out of range"):
             r.run(0, 99, 0)

@@ -6,10 +6,13 @@ the two must still record the same thing -- including the Rayleigh wave along
 the surface.  They used not to: ElasticVRR mirrored sxz and pz about the
 integer surface row and zeroed the surface-row sxz, the two things Elastic had
 dropped (Kristek, Moczo & Archuleta 2002, Table 1), which made its Rayleigh
-wave 2-7 % slow.
+wave 2-7 % slow.  ``impl='c'`` runs on the CUDA core and on the host (CPU)
+core, which builds the same kernels.
 """
 
 from __future__ import annotations
+
+import os
 
 import numpy as np
 import pytest
@@ -24,19 +27,28 @@ DH, DT, NT = 10.0, 1.5e-3, 500
 ABCN, SO = 20, 4
 
 
-def _impls():
-    impls = ["eager"]
-    if torch.cuda.is_available():
-        impls.append("c")
-    return impls
+def _host_core():
+    if os.environ.get("SWEEP_TEST_HOST_CORE", "1").lower() in ("0", "false", "no", "off"):
+        return False
+    from sweep.backend.c import hostcore
+    return hostcore.available()
 
 
-def _run(cls, impl, models, receiver_type):
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
+CASES = [
+    pytest.param("eager", "cuda" if torch.cuda.is_available() else "cpu", id="eager"),
+    pytest.param("c", "cuda", id="c-cuda",
+                 marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")),
+    pytest.param("c", "cpu", id="c-cpu",
+                 marks=pytest.mark.skipif(not _host_core(), reason="no host (CPU) core at hand")),
+]
+
+
+def _run(cls, impl, models, receiver_type, dev):
     kw = dict(use_ckpt=False, eager_options={"use_compile": False}) if impl == "eager" else {}
     prop = PropTorch(cls(spatial_order=SO, device=dev, backend="torch"), shape=(NZ, NX),
                      abcn=ABCN, dh=DH, dt=DT, impl=impl, dev=dev, free_surface=True,
                      receiver_type=receiver_type, **kw)
+    assert prop.impl == impl
     t = np.arange(NT, dtype=np.float32) * DT - 0.06
     wav = torch.tensor((1e3 * ricker(t, f=10.0)).astype(np.float32), device=dev)
     src = np.array([[10, 2]])                                # 2 rows below the surface
@@ -45,13 +57,13 @@ def _run(cls, impl, models, receiver_type):
         return prop(wav, src, rec, models=[m.to(dev) for m in models])
 
 
-@pytest.mark.parametrize("impl", _impls())
-def test_zero_reflectivity_free_surface_matches_constant_density_elastic(impl):
+@pytest.mark.parametrize("impl,dev", CASES)
+def test_zero_reflectivity_free_surface_matches_constant_density_elastic(impl, dev):
     vp = torch.full((NZ, NX), 2000.0)
     vs = torch.full((NZ, NX), 1000.0)
     zero = torch.zeros((NZ, NX))
-    evr = _run(ElasticVRR, impl, [vp, vs, zero, zero, zero, zero], ["px", "pz"])
-    ela = _run(Elastic, impl, [vp, vs, torch.ones((NZ, NX))], ["vx", "vz"])
+    evr = _run(ElasticVRR, impl, [vp, vs, zero, zero, zero, zero], ["px", "pz"], dev)
+    ela = _run(Elastic, impl, [vp, vs, torch.ones((NZ, NX))], ["vx", "vz"], dev)
     rel = ((evr - ela).norm() / ela.norm()).item()
     # the old surface treatment gave 1.8 here; fp32 round-off is ~1e-6
     assert rel < 1e-4, f"ElasticVRR vs Elastic under a free surface: rel L2 {rel:.3e}"

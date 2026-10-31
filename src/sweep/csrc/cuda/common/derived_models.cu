@@ -7,6 +7,8 @@
 // coefficients bit-identical to ``rho * vs * vs`` and friends evaluated by
 // torch one elementwise op at a time.
 #include "derived_models.h"
+#include "../../core/compute_device.h"
+#include "../launch/launch.h"   // SWEEP_LAUNCH
 #include <cuda_runtime.h>
 #include <algorithm>
 #include "../../core/check.h"
@@ -69,8 +71,8 @@ __global__ void scale_kernel(const float* __restrict__ in, float s, float* __res
 
 void check_operand(const Buf& t, const Buf& like, const char* name)
 {
-    SWEEP_CHECK(t.defined() && t.is_cuda() && t.dtype() == BoundaryDtype::FP32 && t.element_size() == 4 && t.is_contiguous(),
-                "derived_models: ", name, " must be a contiguous float32 CUDA tensor");
+    SWEEP_CHECK(sweep::on_compute_device(t) && t.dtype() == BoundaryDtype::FP32 && t.element_size() == 4 && t.is_contiguous(),
+                "derived_models: ", name, " must be a contiguous float32 ", sweep::kComputeDeviceName, " tensor");
     SWEEP_CHECK(t.numel() == like.numel(),
                 "derived_models: ", name, " has ", t.numel(), " elements, expected ", like.numel());
 }
@@ -90,7 +92,7 @@ void derive_lame(const Buf& vp, const Buf& vs, const Buf& rho,
     const int64_t n = vp.numel();
     if (n == 0) return;
     sweep::DeviceGuard guard(device_index_of(vp));
-    lame_kernel<<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(
+    SWEEP_LAUNCH_ON(lame_kernel, grid_for(n), kThreads, 0, sweep::current_stream(),
         vp.data_ptr<float>(), vs.data_ptr<float>(), rho.data_ptr<float>(),
         mu.data_ptr<float>(), lambda.data_ptr<float>(), n);
     SWEEP_KERNEL_LAUNCH_CHECK();
@@ -112,7 +114,7 @@ void derive_vti_stiffness(const Buf& vp, const Buf& epsilon,
     const int64_t n = vp.numel();
     if (n == 0) return;
     sweep::DeviceGuard guard(device_index_of(vp));
-    vti_stiffness_kernel<<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(
+    SWEEP_LAUNCH_ON(vti_stiffness_kernel, grid_for(n), kThreads, 0, sweep::current_stream(),
         vp.data_ptr<float>(), epsilon.data_ptr<float>(), delta.data_ptr<float>(),
         rho.data_ptr<float>(), c11.data_ptr<float>(), c13.data_ptr<float>(),
         c33.data_ptr<float>(), inv_rho.data_ptr<float>(), n);
@@ -126,7 +128,7 @@ void derive_reciprocal(const Buf& z, const Buf& inv_z)
     const int64_t n = z.numel();
     if (n == 0) return;
     sweep::DeviceGuard guard(device_index_of(z));
-    reciprocal_kernel<<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(
+    SWEEP_LAUNCH_ON(reciprocal_kernel, grid_for(n), kThreads, 0, sweep::current_stream(),
         z.data_ptr<float>(), inv_z.data_ptr<float>(), n);
     SWEEP_KERNEL_LAUNCH_CHECK();
 }
@@ -139,7 +141,7 @@ void derive_scale(const Buf& in, float s, const Buf& out)
     const int64_t n = in.numel();
     if (n == 0) return;
     sweep::DeviceGuard guard(device_index_of(in));
-    scale_kernel<<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(
+    SWEEP_LAUNCH_ON(scale_kernel, grid_for(n), kThreads, 0, sweep::current_stream(),
         in.data_ptr<float>(), s, out.data_ptr<float>(), n);
     SWEEP_KERNEL_LAUNCH_CHECK();
 }

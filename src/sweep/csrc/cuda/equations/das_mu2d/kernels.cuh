@@ -1,5 +1,6 @@
 #pragma once
 #include "../../launch/by_order.cuh"
+#include "../../launch/cell_path.h"
 
 #include "../elastic2d/kernels.cuh"
 
@@ -15,42 +16,64 @@
 #define LAUNCH_DAS_MU2D_STRESS_STRAIN_ADJOINT_PREPARE(order, grid, block, ...) \
     SWEEP_LAUNCH_BY_ORDER(das_mu2d_stress_strain_adjoint_prepare_by_order, order, grid, block, __VA_ARGS__)
 
-template<int Order>
-__global__ void das_mu2d_stress_strain_kernel(
-    DasMuWavefieldPointer2D wf,
+// The cell's index, by value (as elastic_tti_2nd2d's CellIndex2): with plain
+// int parameters nvcc emits ``ix < solver.abcn + halo`` & co. with their
+// operands swapped; a field of a by-value struct is a load, ranked like the
+// kernel's own decoded index, and the split kernel keeps its SASS
+// (docs/dev/host_core.md rule 7).  On the host it is free.
+struct DasMu2dCellIndex {
+    int ix, iz, b;
+};
+
+// das_mu2d_stress_strain_kernel's legacy in_pml test, as the kernel spells it.
+// SolverContext by value: through the cell's reference nvcc would not
+// speculate the last term's load (solver.nz), and the || chain would end in
+// a branch where the kernel had one predicate.  The copy is only the four
+// fields read here, loaded where the kernel speculated them.
+__device__ __forceinline__ bool das_mu2d_stress_in_pml(DasMu2dCellIndex cell, int halo, SolverContext solver)
+{
+    const int ix = cell.ix, iz = cell.iz;
+    int top_pml = solver.free_surface ? (halo + 1) : (solver.abcn + halo);
+    return (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
+           (iz < top_pml) || (iz >= solver.nz - solver.abcn - halo);
+}
+
+// One cell of das_mu2d_stress_strain_kernel: everything after the kernel's
+// guards (launch/cell_path.h).  Interior box: the legacy in_pml test's
+// interior (top_pml spelled on solver.free_surface, as below), inside the
+// FS helper's forward box (common/host_rows.h elastic_fs_box_2d); the z FS
+// axis as the ELASTIC_FS_Z flag (the x derivatives are plain sgradients, so
+// ELASTIC_FS_X is never set); optional output: u_this.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void das_mu2d_stress_strain_cell(
+    DasMu2dCellIndex cell,
+    const DasMuWavefieldPointer2D& wf,
     const float* __restrict__ lambda,
     const float* __restrict__ mu,
     float* __restrict__ u_this,
-    SGradParam grad_ctx,
-    ElasticCPMLPointer cpml,
-    SolverContext solver
+    const SGradParam& grad_ctx,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
+    const int ix = cell.ix, iz = cell.iz, b = cell.b;
 
     constexpr bool is_runtime = (Order == -1);
     constexpr int M_static = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
 
-    if (ix < halo || ix >= solver.nx - halo ||
-        iz < halo || iz >= solver.nz - halo)
-        return;
-
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
     auto f = wf.offset(b, spatial_size);
-    float* u_this_b = u_this ? u_this + b * spatial_size : nullptr;
+    float* u_this_b = optional_output<Path>(u_this) ? u_this + b * spatial_size : nullptr;
 
     const float* lam_b = lambda + b * spatial_size;
     const float* mu_b = mu + b * spatial_size;
 
     float dvx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.vx, ix, 0, iz, grad_ctx);
-    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true, true);
-    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.vx, ix, iz, grad_ctx, solver, false);
+    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(f.vz, ix, iz, grad_ctx, solver, true, true);
+    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path>(f.vx, ix, iz, grad_ctx, solver, false);
     float dvz_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.vz, ix, 0, iz, grad_ctx);
 
     float lam = lam_b[idx];
@@ -58,9 +81,9 @@ __global__ void das_mu2d_stress_strain_kernel(
 
     // Interior fast-path. Conservative for free_surface: keep iz==halo on the
     // full PML path so the szz/sxz=0 BC still fires.
-    int top_pml = solver.free_surface ? (halo + 1) : (solver.abcn + halo);
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < top_pml) || (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = false;
+    if constexpr (!interior_path<Path>)
+        in_pml = das_mu2d_stress_in_pml(cell, halo, solver);
 
     if (!in_pml) {
         f.sxx[idx] += solver.dt * ((lam + 2.f * mu_) * dvx_dx + lam * dvz_dz);
@@ -69,7 +92,7 @@ __global__ void das_mu2d_stress_strain_kernel(
         f.exx[idx] += solver.dt * dvx_dx;
         f.ezz[idx] += solver.dt * dvz_dz;
         f.exz[idx] += 0.5f * solver.dt * (dvx_dz + dvz_dx);
-        if (u_this_b) {
+        if (optional_output<Path>(u_this_b)) {
             int comp_stride = solver.B * spatial_size;
             u_this_b[0 * comp_stride + idx] = f.vx[idx];
             u_this_b[1 * comp_stride + idx] = f.vz[idx];
@@ -105,7 +128,7 @@ __global__ void das_mu2d_stress_strain_kernel(
     f.ezz[idx] += solver.dt * dvz_dz;
     f.exz[idx] += 0.5f * solver.dt * (dvx_dz + dvz_dx);
 
-    if (elastic_is_top_free_surface_row(solver, iz)) {
+    if (elastic_is_top_free_surface_row<Path>(solver, iz)) {
         // Robertsson free-surface fix: surface-row sigma_xx uses the modified
         // coefficient 4 mu (lam+mu)/(lam+2mu) * dvx_dx (from sigma_zz=0).
         // Applied as a correction on top of the bulk update above (the
@@ -121,21 +144,15 @@ __global__ void das_mu2d_stress_strain_kernel(
     }
 }
 
-using das_mu2d_stress_strain_kernel_fn = void (*)(DasMuWavefieldPointer2D, const float*,
-    const float*, float*, SGradParam, ElasticCPMLPointer, SolverContext);
-SWEEP_BY_ORDER_DECL(das_mu2d_stress_strain_kernel_fn, das_mu2d_stress_strain_kernel_by_order);
-
 template<int Order>
-__global__ void das_mu2d_stress_strain_adjoint_prepare(
+__global__ void das_mu2d_stress_strain_kernel(
     DasMuWavefieldPointer2D wf,
     const float* __restrict__ lambda,
     const float* __restrict__ mu,
+    float* __restrict__ u_this,
+    SGradParam grad_ctx,
     ElasticCPMLPointer cpml,
-    SolverContext solver,
-    float* __restrict__ qxx,
-    float* __restrict__ qzz,
-    float* __restrict__ qxz,
-    float* __restrict__ qzx
+    SolverContext solver
 )
 {
     int ix = blockIdx.x * blockDim.x + threadIdx.x;
@@ -144,6 +161,41 @@ __global__ void das_mu2d_stress_strain_adjoint_prepare(
 
     if (ix >= solver.nx || iz >= solver.nz) return;
 
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int M_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
+    if (ix < halo || ix >= solver.nx - halo ||
+        iz < halo || iz >= solver.nz - halo)
+        return;
+
+    das_mu2d_stress_strain_cell<Order>(DasMu2dCellIndex{ix, iz, b}, wf, lambda, mu, u_this, grad_ctx, cpml, solver);
+}
+
+using das_mu2d_stress_strain_kernel_fn = void (*)(DasMuWavefieldPointer2D, const float*,
+    const float*, float*, SGradParam, ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(das_mu2d_stress_strain_kernel_fn, das_mu2d_stress_strain_kernel_by_order);
+
+// One cell of das_mu2d_stress_strain_adjoint_prepare: everything after the
+// kernel's guard (launch/cell_path.h).  Interior box: the in_pml_2d test's
+// interior without the z free-surface rows (is_fs: the szz zeroing and the
+// Robertsson transpose stay on the kernel's path); no FS derivative helper,
+// so no flag; no optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void das_mu2d_stress_strain_adjoint_prepare_cell(
+    int ix, int iz, int b,
+    const DasMuWavefieldPointer2D& wf,
+    const float* __restrict__ lambda,
+    const float* __restrict__ mu,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver,
+    float* __restrict__ qxx,
+    float* __restrict__ qzz,
+    float* __restrict__ qxz,
+    float* __restrict__ qzx
+)
+{
     constexpr bool is_runtime = (Order == -1);
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
@@ -162,7 +214,7 @@ __global__ void das_mu2d_stress_strain_adjoint_prepare(
     float lam = lam_b[idx];
     float mu_ = mu_b[idx];
 
-    bool is_fs = elastic_is_top_free_surface_row(solver, iz);
+    bool is_fs = elastic_is_top_free_surface_row<Path>(solver, iz);
     float bar_sxx = f.sxx[idx];
     float bar_szz = f.szz[idx];
     float bar_sxz = f.sxz[idx];
@@ -196,7 +248,9 @@ __global__ void das_mu2d_stress_strain_adjoint_prepare(
     // adjoint prepare: ax/az/bx/bz vanish outside the PML band, m_v* aux
     // fields stay 0, so the four q* outputs collapse to bar_dv*_d* and
     // the four m_v* writes become 0 -> 0.
-    bool in_pml = solver.in_pml_2d(ix, iz, halo);
+    bool in_pml = false;
+    if constexpr (!interior_path<Path>)
+        in_pml = solver.in_pml_2d(ix, iz, halo);
     if (!in_pml) {
         qxx_b[idx] = bar_dvx_dx;
         qzz_b[idx] = bar_dvz_dz;
@@ -228,6 +282,29 @@ __global__ void das_mu2d_stress_strain_adjoint_prepare(
     f.m_vzz[idx] = az * tmp_vzz;
     f.m_vxz[idx] = azh * tmp_vxz;
     f.m_vzx[idx] = axh * tmp_vzx;
+}
+
+template<int Order>
+__global__ void das_mu2d_stress_strain_adjoint_prepare(
+    DasMuWavefieldPointer2D wf,
+    const float* __restrict__ lambda,
+    const float* __restrict__ mu,
+    ElasticCPMLPointer cpml,
+    SolverContext solver,
+    float* __restrict__ qxx,
+    float* __restrict__ qzz,
+    float* __restrict__ qxz,
+    float* __restrict__ qzx
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    das_mu2d_stress_strain_adjoint_prepare_cell<Order>(ix, iz, b, wf, lambda, mu, cpml, solver,
+                                                       qxx, qzz, qxz, qzx);
 }
 
 using das_mu2d_stress_strain_adjoint_prepare_fn = void (*)(DasMuWavefieldPointer2D,

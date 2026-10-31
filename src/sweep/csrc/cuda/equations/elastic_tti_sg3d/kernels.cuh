@@ -1,5 +1,6 @@
 #pragma once
 #include "../../launch/by_order.cuh"
+#include "../../launch/cell_path.h"
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -153,33 +154,66 @@ struct StiffnessGradPointer {
 #define LAUNCH_CALCULATE_GRAD_ELASTIC_TTI_SG3D_NOBS(order, grid, block, ...) \
     SWEEP_LAUNCH_BY_ORDER(calculate_grad_elastic_tti_sg3d_nobs_by_order, order, grid, block, __VA_ARGS__)
 
+// The indices of one cell, as the kernels decode them, handed to a _cell body
+// in one by-value struct rather than as four int parameters.  That keeps the
+// CUDA code what it was before the split: nvcc puts a compare's operands in
+// a canonical order by kind, and a bare int parameter ranks below a load,
+// so ``ix >= x0 + 1`` with ix a parameter is emitted as ``x0 < ix`` -- the
+// branch polarities flip and, in some specialisations, the scheduling with
+// them.  A field of a by-value struct is a load, as the kernel's own decoded
+// index ranks, and the split kernel compiles to the same SASS (checked with
+// cuobjdump, docs/dev/host_core.md rule 7).  On the host it is free.
+struct CellIndex3 {
+    int ix, iy, iz, b;
+};
+
+// The kernels' boxes in (ix, iy, iz), for the host row launchers
+// (launch/cell_path.h).  Each spells a kernel test above as a half-open box:
+// the guard of the stencil kernels (cells at least ``halo`` from every edge),
+// the wider guard of the two _nopml kernels (abcn + M + 1), and the interior
+// test of velocity / stress / both adjoint prepares (one cell inside the
+// physical box on every face).
 template<int Order>
-__global__ void __launch_bounds__(256) elastic_tti_sg3d_velocity_kernel(
-    ElasticWavefieldPointer wf,
-    const float* __restrict__ rho,
-    SGradParam grad_ctx,
-    ElasticCPMLPointer cpml,
-    SolverContext solver
-)
+__device__ __forceinline__
+CellBox3 elastic_tti_sg3d_halo_box(const SolverContext& solver)
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iy = blockIdx.y * blockDim.y + threadIdx.y;
-    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
-
-    if (ix >= solver.nx || iy >= solver.ny) return;
-    if (iz_global >= solver.nz * solver.B) return;
-
-    int b  = iz_global / solver.nz;
-    int iz = iz_global % solver.nz;
-
     constexpr bool is_runtime = (Order == -1);
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
+    return {halo, solver.nx - halo, halo, solver.ny - halo, halo, solver.nz - halo};
+}
 
-    if (ix < halo || ix >= solver.nx - halo ||
-        iy < halo || iy >= solver.ny - halo ||
-        iz < halo || iz >= solver.nz - halo)
-        return;
+template<int Order>
+__device__ __forceinline__
+CellBox3 elastic_tti_sg3d_nopml_box(const SolverContext& solver)
+{
+    int M = (Order == -1) ? solver.M : Order / 2;
+    int halo = solver.abcn + M + 1;
+    return {halo, solver.nx - halo, halo, solver.ny - halo, halo, solver.nz - halo};
+}
+
+__device__ __forceinline__
+CellBox3 elastic_tti_sg3d_interior_box(const SolverContext& solver)
+{
+    return {solver.phys_x0() + 1, solver.phys_x1() - 1, solver.phys_y0() + 1,
+            solver.phys_y1() - 1, solver.phys_z0() + 1, solver.phys_z1() - 1};
+}
+
+// One cell of elastic_tti_sg3d_velocity_kernel: everything after the kernel's guards (see
+// launch/cell_path.h).  Interior box: elastic_tti_sg3d_interior_box() (the kernel's own
+// phys+-1 test) inside elastic_tti_sg3d_halo_box<Order>() (its guard).
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_tti_sg3d_velocity_kernel_cell(
+    CellIndex3 cell,
+    const ElasticWavefieldPointer& wf,
+    const float* __restrict__ rho,
+    const SGradParam& grad_ctx,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver
+)
+{
+    const int ix = cell.ix, iy = cell.iy, iz = cell.iz, b = cell.b;
 
     int spatial_size = solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
@@ -208,10 +242,13 @@ __global__ void __launch_bounds__(256) elastic_tti_sg3d_velocity_kernel(
 
     float inv_rho = 1.f / rho_b[idx];
 
-    bool interior =
-        ix >= x0 + 1 && ix < x1 - 1 &&
-        iy >= y0 + 1 && iy < y1 - 1 &&
-        iz >= z0 + 1 && iz < z1 - 1;
+    bool interior = true;
+    if constexpr (!interior_path<Path>) {
+        interior =
+            ix >= x0 + 1 && ix < x1 - 1 &&
+            iy >= y0 + 1 && iy < y1 - 1 &&
+            iz >= z0 + 1 && iz < z1 - 1;
+    }
 
     if (interior) {
         f.vx[idx] += solver.dt * inv_rho * (dsxx_dx + dsxy_dy + dsxz_dz);
@@ -265,15 +302,10 @@ __global__ void __launch_bounds__(256) elastic_tti_sg3d_velocity_kernel(
     f.vz[idx] += solver.dt * inv_rho * (dsxz_dx + dsyz_dy + dszz_dz);
 }
 
-using elastic_tti_sg3d_velocity_kernel_fn = void (*)(ElasticWavefieldPointer,
-    const float*, SGradParam, ElasticCPMLPointer, SolverContext);
-SWEEP_BY_ORDER_DECL(elastic_tti_sg3d_velocity_kernel_fn, elastic_tti_sg3d_velocity_kernel_by_order);
-
 template<int Order>
-__global__ void __launch_bounds__(256) elastic_tti_sg3d_stress_kernel(
+__global__ void __launch_bounds__(256) elastic_tti_sg3d_velocity_kernel(
     ElasticWavefieldPointer wf,
-    StiffnessPointer model,
-    float* __restrict__ u_this_t,
+    const float* __restrict__ rho,
     SGradParam grad_ctx,
     ElasticCPMLPointer cpml,
     SolverContext solver
@@ -297,6 +329,32 @@ __global__ void __launch_bounds__(256) elastic_tti_sg3d_stress_kernel(
         iy < halo || iy >= solver.ny - halo ||
         iz < halo || iz >= solver.nz - halo)
         return;
+
+    elastic_tti_sg3d_velocity_kernel_cell<Order>(CellIndex3{ix, iy, iz, b}, wf, rho, grad_ctx, cpml,
+        solver);
+}
+
+using elastic_tti_sg3d_velocity_kernel_fn = void (*)(ElasticWavefieldPointer,
+    const float*, SGradParam, ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(elastic_tti_sg3d_velocity_kernel_fn, elastic_tti_sg3d_velocity_kernel_by_order);
+
+// One cell of elastic_tti_sg3d_stress_kernel: everything after the kernel's guards (see
+// launch/cell_path.h).  Interior box: elastic_tti_sg3d_interior_box() inside
+// elastic_tti_sg3d_halo_box<Order>(), where the memory-variable block is
+// skipped; optional output: u_this_t.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_tti_sg3d_stress_kernel_cell(
+    CellIndex3 cell,
+    const ElasticWavefieldPointer& wf,
+    const StiffnessPointer& model,
+    float* __restrict__ u_this_t,
+    const SGradParam& grad_ctx,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver
+)
+{
+    const int ix = cell.ix, iy = cell.iy, iz = cell.iz, b = cell.b;
 
     int spatial_size = solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
@@ -323,10 +381,13 @@ __global__ void __launch_bounds__(256) elastic_tti_sg3d_stress_kernel(
     float dvz_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.vz, ix, iy, iz, grad_ctx);
     float dvz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(f.vz, ix, iy, iz, grad_ctx);
 
-    bool interior =
-        ix >= x0 + 1 && ix < x1 - 1 &&
-        iy >= y0 + 1 && iy < y1 - 1 &&
-        iz >= z0 + 1 && iz < z1 - 1;
+    bool interior = true;
+    if constexpr (!interior_path<Path>) {
+        interior =
+            ix >= x0 + 1 && ix < x1 - 1 &&
+            iy >= y0 + 1 && iy < y1 - 1 &&
+            iz >= z0 + 1 && iz < z1 - 1;
+    }
 
     if (!interior) {
         float az = cpml.az[iz];
@@ -398,7 +459,7 @@ __global__ void __launch_bounds__(256) elastic_tti_sg3d_stress_kernel(
         m.C46[idx] * e4 + m.C56[idx] * e5 + m.C66[idx] * e6
     );
 
-    if (u_this_t) {
+    if (optional_output<Path>(u_this_t)) {
         float* u_this_b = u_this_t + b * spatial_size;
         int comp_stride = solver.B * spatial_size;
         u_this_b[0 * comp_stride + idx] = f.vx[idx];
@@ -407,9 +468,82 @@ __global__ void __launch_bounds__(256) elastic_tti_sg3d_stress_kernel(
     }
 }
 
+template<int Order>
+__global__ void __launch_bounds__(256) elastic_tti_sg3d_stress_kernel(
+    ElasticWavefieldPointer wf,
+    StiffnessPointer model,
+    float* __restrict__ u_this_t,
+    SGradParam grad_ctx,
+    ElasticCPMLPointer cpml,
+    SolverContext solver
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if (ix >= solver.nx || iy >= solver.ny) return;
+    if (iz_global >= solver.nz * solver.B) return;
+
+    int b  = iz_global / solver.nz;
+    int iz = iz_global % solver.nz;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
+    if (ix < halo || ix >= solver.nx - halo ||
+        iy < halo || iy >= solver.ny - halo ||
+        iz < halo || iz >= solver.nz - halo)
+        return;
+
+    elastic_tti_sg3d_stress_kernel_cell<Order>(CellIndex3{ix, iy, iz, b}, wf, model, u_this_t,
+        grad_ctx, cpml, solver);
+}
+
 using elastic_tti_sg3d_stress_kernel_fn = void (*)(ElasticWavefieldPointer,
     StiffnessPointer, float*, SGradParam, ElasticCPMLPointer, SolverContext);
 SWEEP_BY_ORDER_DECL(elastic_tti_sg3d_stress_kernel_fn, elastic_tti_sg3d_stress_kernel_by_order);
+
+// One cell of elastic_tti_sg3d_velocity_kernel_nopml: everything after the kernel's guards (see
+// launch/cell_path.h).  Straight-line body: the interior box is the kernel's guard box,
+// elastic_tti_sg3d_nopml_box<Order>().
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_tti_sg3d_velocity_kernel_nopml_cell(
+    CellIndex3 cell,
+    const ElasticWavefieldPointer& wf,
+    const float* __restrict__ rho,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    const int ix = cell.ix, iy = cell.iy, iz = cell.iz, b = cell.b;
+
+    int spatial_size = solver.nx * solver.ny * solver.nz;
+    int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
+
+    auto f = wf.offset(b, spatial_size);
+    const float* rho_b = rho + b * spatial_size;
+
+    float dsxx_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.sxx, ix, iy, iz, grad_ctx);
+    float dsxy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
+    float dsxz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx);
+
+    float dsxy_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
+    float dsyy_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.syy, ix, iy, iz, grad_ctx);
+    float dsyz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx);
+
+    float dsxz_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx);
+    float dsyz_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx);
+    float dszz_dz = sgradient<3, Order, Z, DIFF_FORWARD >(f.szz, ix, iy, iz, grad_ctx);
+
+    float inv_rho = 1.f / rho_b[idx];
+
+    f.vx[idx] -= solver.dt * inv_rho * (dsxx_dx + dsxy_dy + dsxz_dz);
+    f.vy[idx] -= solver.dt * inv_rho * (dsxy_dx + dsyy_dy + dsyz_dz);
+    f.vz[idx] -= solver.dt * inv_rho * (dsxz_dx + dsyz_dy + dszz_dz);
+}
 
 template<int Order>
 __global__ void elastic_tti_sg3d_velocity_kernel_nopml(
@@ -443,66 +577,28 @@ __global__ void elastic_tti_sg3d_velocity_kernel_nopml(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.ny * solver.nz;
-    int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
-
-    auto f = wf.offset(b, spatial_size);
-    const float* rho_b = rho + b * spatial_size;
-
-    float dsxx_dx = sgradient<3, Order, X, DIFF_FORWARD >(f.sxx, ix, iy, iz, grad_ctx);
-    float dsxy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
-    float dsxz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx);
-
-    float dsxy_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxy, ix, iy, iz, grad_ctx);
-    float dsyy_dy = sgradient<3, Order, Y, DIFF_FORWARD >(f.syy, ix, iy, iz, grad_ctx);
-    float dsyz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx);
-
-    float dsxz_dx = sgradient<3, Order, X, DIFF_BACKWARD>(f.sxz, ix, iy, iz, grad_ctx);
-    float dsyz_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(f.syz, ix, iy, iz, grad_ctx);
-    float dszz_dz = sgradient<3, Order, Z, DIFF_FORWARD >(f.szz, ix, iy, iz, grad_ctx);
-
-    float inv_rho = 1.f / rho_b[idx];
-
-    f.vx[idx] -= solver.dt * inv_rho * (dsxx_dx + dsxy_dy + dsxz_dz);
-    f.vy[idx] -= solver.dt * inv_rho * (dsxy_dx + dsyy_dy + dsyz_dz);
-    f.vz[idx] -= solver.dt * inv_rho * (dsxz_dx + dsyz_dy + dszz_dz);
+    elastic_tti_sg3d_velocity_kernel_nopml_cell<Order>(CellIndex3{ix, iy, iz, b}, wf, rho, grad_ctx,
+        solver);
 }
 
 using elastic_tti_sg3d_velocity_kernel_nopml_fn = void (*)(ElasticWavefieldPointer,
     const float*, SGradParam, SolverContext);
 SWEEP_BY_ORDER_DECL(elastic_tti_sg3d_velocity_kernel_nopml_fn, elastic_tti_sg3d_velocity_kernel_nopml_by_order);
 
-template<int Order>
-__global__ void elastic_tti_sg3d_stress_kernel_nopml(
-    ElasticWavefieldPointer wf,
-    StiffnessPointer model,
-    SGradParam grad_ctx,
-    SolverContext solver
+// One cell of elastic_tti_sg3d_stress_kernel_nopml: everything after the kernel's guards (see
+// launch/cell_path.h).  Straight-line body: the interior box is the kernel's guard box,
+// elastic_tti_sg3d_nopml_box<Order>().
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_tti_sg3d_stress_kernel_nopml_cell(
+    CellIndex3 cell,
+    const ElasticWavefieldPointer& wf,
+    const StiffnessPointer& model,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iy = blockIdx.y * blockDim.y + threadIdx.y;
-    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
-
-    if (ix >= solver.nx || iy >= solver.ny) return;
-    if (iz_global >= solver.nz * solver.B) return;
-
-    int b  = iz_global / solver.nz;
-    int iz = iz_global % solver.nz;
-
-    int M;
-    if constexpr (Order == -1) {
-        M = solver.M;
-    } else {
-        M = Order / 2;
-    }
-
-    int halo = solver.abcn + M + 1;
-
-    if (ix < halo || ix >= solver.nx - halo ||
-        iy < halo || iy >= solver.ny - halo ||
-        iz < halo || iz >= solver.nz - halo)
-        return;
+    const int ix = cell.ix, iy = cell.iy, iz = cell.iz, b = cell.b;
 
     int spatial_size = solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
@@ -555,6 +651,42 @@ __global__ void elastic_tti_sg3d_stress_kernel_nopml(
     );
 }
 
+template<int Order>
+__global__ void elastic_tti_sg3d_stress_kernel_nopml(
+    ElasticWavefieldPointer wf,
+    StiffnessPointer model,
+    SGradParam grad_ctx,
+    SolverContext solver
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if (ix >= solver.nx || iy >= solver.ny) return;
+    if (iz_global >= solver.nz * solver.B) return;
+
+    int b  = iz_global / solver.nz;
+    int iz = iz_global % solver.nz;
+
+    int M;
+    if constexpr (Order == -1) {
+        M = solver.M;
+    } else {
+        M = Order / 2;
+    }
+
+    int halo = solver.abcn + M + 1;
+
+    if (ix < halo || ix >= solver.nx - halo ||
+        iy < halo || iy >= solver.ny - halo ||
+        iz < halo || iz >= solver.nz - halo)
+        return;
+
+    elastic_tti_sg3d_stress_kernel_nopml_cell<Order>(CellIndex3{ix, iy, iz, b}, wf, model, grad_ctx,
+        solver);
+}
+
 using elastic_tti_sg3d_stress_kernel_nopml_fn = void (*)(ElasticWavefieldPointer,
     StiffnessPointer, SGradParam, SolverContext);
 SWEEP_BY_ORDER_DECL(elastic_tti_sg3d_stress_kernel_nopml_fn, elastic_tti_sg3d_stress_kernel_nopml_by_order);
@@ -567,12 +699,17 @@ SWEEP_BY_ORDER_DECL(elastic_tti_sg3d_stress_kernel_nopml_fn, elastic_tti_sg3d_st
 //   qxx=bar_dvx_dx qxy=bar_dvx_dy qxz=bar_dvx_dz
 //   qyx=bar_dvy_dx qyy=bar_dvy_dy qyz=bar_dvy_dz
 //   qzx=bar_dvz_dx qzy=bar_dvz_dy qzz=bar_dvz_dz
-template<int Order>
-__global__ void elastic_tti_sg3d_stress_adjoint_prepare(
-    ElasticWavefieldPointer wf,
-    StiffnessPointer model,
-    ElasticCPMLPointer cpml,
-    SolverContext solver,
+// One cell of elastic_tti_sg3d_stress_adjoint_prepare: everything after the kernel's guards (see
+// launch/cell_path.h).  No halo guard: the interior box is elastic_tti_sg3d_interior_box()
+// itself (the tmp_v* sums are dead there).
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_tti_sg3d_stress_adjoint_prepare_cell(
+    CellIndex3 cell,
+    const ElasticWavefieldPointer& wf,
+    const StiffnessPointer& model,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver,
     float* __restrict__ qxx,
     float* __restrict__ qxy,
     float* __restrict__ qxz,
@@ -584,15 +721,7 @@ __global__ void elastic_tti_sg3d_stress_adjoint_prepare(
     float* __restrict__ qzz
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iy = blockIdx.y * blockDim.y + threadIdx.y;
-    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
-
-    if (ix >= solver.nx || iy >= solver.ny) return;
-    if (iz_global >= solver.nz * solver.B) return;
-
-    int b  = iz_global / solver.nz;
-    int iz = iz_global % solver.nz;
+    const int ix = cell.ix, iy = cell.iy, iz = cell.iz, b = cell.b;
 
     int spatial_size = solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
@@ -659,10 +788,13 @@ __global__ void elastic_tti_sg3d_stress_adjoint_prepare(
     float tmp_vzy = f.m_vzy[idx] + bar_dvz_dy;
     float tmp_vzz = f.m_vzz[idx] + bar_dvz_dz;
 
-    bool interior =
-        ix >= x0 + 1 && ix < x1 - 1 &&
-        iy >= y0 + 1 && iy < y1 - 1 &&
-        iz >= z0 + 1 && iz < z1 - 1;
+    bool interior = true;
+    if constexpr (!interior_path<Path>) {
+        interior =
+            ix >= x0 + 1 && ix < x1 - 1 &&
+            iy >= y0 + 1 && iy < y1 - 1 &&
+            iz >= z0 + 1 && iz < z1 - 1;
+    }
 
     if (interior) {
         qxx[b * spatial_size + idx] = bar_dvx_dx;
@@ -711,10 +843,95 @@ __global__ void elastic_tti_sg3d_stress_adjoint_prepare(
     f.m_vzz[idx] = az * tmp_vzz;
 }
 
+template<int Order>
+__global__ void elastic_tti_sg3d_stress_adjoint_prepare(
+    ElasticWavefieldPointer wf,
+    StiffnessPointer model,
+    ElasticCPMLPointer cpml,
+    SolverContext solver,
+    float* __restrict__ qxx,
+    float* __restrict__ qxy,
+    float* __restrict__ qxz,
+    float* __restrict__ qyx,
+    float* __restrict__ qyy,
+    float* __restrict__ qyz,
+    float* __restrict__ qzx,
+    float* __restrict__ qzy,
+    float* __restrict__ qzz
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if (ix >= solver.nx || iy >= solver.ny) return;
+    if (iz_global >= solver.nz * solver.B) return;
+
+    int b  = iz_global / solver.nz;
+    int iz = iz_global % solver.nz;
+
+    elastic_tti_sg3d_stress_adjoint_prepare_cell<Order>(CellIndex3{ix, iy, iz, b}, wf, model, cpml,
+        solver, qxx, qxy, qxz, qyx, qyy, qyz, qzx, qzy, qzz);
+}
+
 using elastic_tti_sg3d_stress_adjoint_prepare_fn = void (*)(ElasticWavefieldPointer,
     StiffnessPointer, ElasticCPMLPointer, SolverContext, float*, float*, float*, float*,
     float*, float*, float*, float*, float*);
 SWEEP_BY_ORDER_DECL(elastic_tti_sg3d_stress_adjoint_prepare_fn, elastic_tti_sg3d_stress_adjoint_prepare_by_order);
+
+// One cell of elastic_tti_sg3d_stress_adjoint_apply: everything after the kernel's guards (see
+// launch/cell_path.h).  Straight-line body: the interior box is the kernel's guard box,
+// elastic_tti_sg3d_halo_box<Order>().
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_tti_sg3d_stress_adjoint_apply_cell(
+    CellIndex3 cell,
+    const ElasticWavefieldPointer& wf,
+    const float* __restrict__ qxx,
+    const float* __restrict__ qxy,
+    const float* __restrict__ qxz,
+    const float* __restrict__ qyx,
+    const float* __restrict__ qyy,
+    const float* __restrict__ qyz,
+    const float* __restrict__ qzx,
+    const float* __restrict__ qzy,
+    const float* __restrict__ qzz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    const int ix = cell.ix, iy = cell.iy, iz = cell.iz, b = cell.b;
+
+    int spatial_size = solver.nx * solver.ny * solver.nz;
+    int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
+    auto f = wf.offset(b, spatial_size);
+
+    const float* qxx_b = qxx + b * spatial_size;
+    const float* qxy_b = qxy + b * spatial_size;
+    const float* qxz_b = qxz + b * spatial_size;
+    const float* qyx_b = qyx + b * spatial_size;
+    const float* qyy_b = qyy + b * spatial_size;
+    const float* qyz_b = qyz + b * spatial_size;
+    const float* qzx_b = qzx + b * spatial_size;
+    const float* qzy_b = qzy + b * spatial_size;
+    const float* qzz_b = qzz + b * spatial_size;
+
+    float dqxx_dx = sgradient<3, Order, X, DIFF_FORWARD >(qxx_b, ix, iy, iz, grad_ctx);
+    float dqxy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(qxy_b, ix, iy, iz, grad_ctx);
+    float dqxz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(qxz_b, ix, iy, iz, grad_ctx);
+
+    float dqyx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(qyx_b, ix, iy, iz, grad_ctx);
+    float dqyy_dy = sgradient<3, Order, Y, DIFF_FORWARD >(qyy_b, ix, iy, iz, grad_ctx);
+    float dqyz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(qyz_b, ix, iy, iz, grad_ctx);
+
+    float dqzx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(qzx_b, ix, iy, iz, grad_ctx);
+    float dqzy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(qzy_b, ix, iy, iz, grad_ctx);
+    float dqzz_dz = sgradient<3, Order, Z, DIFF_FORWARD >(qzz_b, ix, iy, iz, grad_ctx);
+
+    f.vx[idx] += dqxx_dx + dqxy_dy + dqxz_dz;
+    f.vy[idx] += dqyx_dx + dqyy_dy + dqyz_dz;
+    f.vz[idx] += dqzx_dx + dqzy_dy + dqzz_dz;
+}
 
 template<int Order>
 __global__ void elastic_tti_sg3d_stress_adjoint_apply(
@@ -751,35 +968,8 @@ __global__ void elastic_tti_sg3d_stress_adjoint_apply(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.ny * solver.nz;
-    int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
-    auto f = wf.offset(b, spatial_size);
-
-    const float* qxx_b = qxx + b * spatial_size;
-    const float* qxy_b = qxy + b * spatial_size;
-    const float* qxz_b = qxz + b * spatial_size;
-    const float* qyx_b = qyx + b * spatial_size;
-    const float* qyy_b = qyy + b * spatial_size;
-    const float* qyz_b = qyz + b * spatial_size;
-    const float* qzx_b = qzx + b * spatial_size;
-    const float* qzy_b = qzy + b * spatial_size;
-    const float* qzz_b = qzz + b * spatial_size;
-
-    float dqxx_dx = sgradient<3, Order, X, DIFF_FORWARD >(qxx_b, ix, iy, iz, grad_ctx);
-    float dqxy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(qxy_b, ix, iy, iz, grad_ctx);
-    float dqxz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(qxz_b, ix, iy, iz, grad_ctx);
-
-    float dqyx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(qyx_b, ix, iy, iz, grad_ctx);
-    float dqyy_dy = sgradient<3, Order, Y, DIFF_FORWARD >(qyy_b, ix, iy, iz, grad_ctx);
-    float dqyz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(qyz_b, ix, iy, iz, grad_ctx);
-
-    float dqzx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(qzx_b, ix, iy, iz, grad_ctx);
-    float dqzy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(qzy_b, ix, iy, iz, grad_ctx);
-    float dqzz_dz = sgradient<3, Order, Z, DIFF_FORWARD >(qzz_b, ix, iy, iz, grad_ctx);
-
-    f.vx[idx] += dqxx_dx + dqxy_dy + dqxz_dz;
-    f.vy[idx] += dqyx_dx + dqyy_dy + dqyz_dz;
-    f.vz[idx] += dqzx_dx + dqzy_dy + dqzz_dz;
+    elastic_tti_sg3d_stress_adjoint_apply_cell<Order>(CellIndex3{ix, iy, iz, b}, wf, qxx, qxy, qxz,
+        qyx, qyy, qyz, qzx, qzy, qzz, grad_ctx, solver);
 }
 
 using elastic_tti_sg3d_stress_adjoint_apply_fn = void (*)(ElasticWavefieldPointer,
@@ -787,12 +977,17 @@ using elastic_tti_sg3d_stress_adjoint_apply_fn = void (*)(ElasticWavefieldPointe
     const float*, const float*, const float*, SGradParam, SolverContext);
 SWEEP_BY_ORDER_DECL(elastic_tti_sg3d_stress_adjoint_apply_fn, elastic_tti_sg3d_stress_adjoint_apply_by_order);
 
-template<int Order>
-__global__ void elastic_tti_sg3d_velocity_adjoint_prepare(
-    ElasticWavefieldPointer wf,
+// One cell of elastic_tti_sg3d_velocity_adjoint_prepare: everything after the kernel's guards (see
+// launch/cell_path.h).  No halo guard: the interior box is elastic_tti_sg3d_interior_box()
+// itself (the tmp_s* sums are dead there).
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_tti_sg3d_velocity_adjoint_prepare_cell(
+    CellIndex3 cell,
+    const ElasticWavefieldPointer& wf,
     const float* __restrict__ rho,
-    ElasticCPMLPointer cpml,
-    SolverContext solver,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver,
     float* __restrict__ pxx,
     float* __restrict__ pxy,
     float* __restrict__ pxz,
@@ -804,15 +999,7 @@ __global__ void elastic_tti_sg3d_velocity_adjoint_prepare(
     float* __restrict__ pzz
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iy = blockIdx.y * blockDim.y + threadIdx.y;
-    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
-
-    if (ix >= solver.nx || iy >= solver.ny) return;
-    if (iz_global >= solver.nz * solver.B) return;
-
-    int b  = iz_global / solver.nz;
-    int iz = iz_global % solver.nz;
+    const int ix = cell.ix, iy = cell.iy, iz = cell.iz, b = cell.b;
 
     int spatial_size = solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
@@ -851,10 +1038,13 @@ __global__ void elastic_tti_sg3d_velocity_adjoint_prepare(
     float tmp_syzy = f.m_syzy[idx] + bar_dsyz_dy;
     float tmp_szzz = f.m_szzz[idx] + bar_dszz_dz;
 
-    bool interior =
-        ix >= x0 + 1 && ix < x1 - 1 &&
-        iy >= y0 + 1 && iy < y1 - 1 &&
-        iz >= z0 + 1 && iz < z1 - 1;
+    bool interior = true;
+    if constexpr (!interior_path<Path>) {
+        interior =
+            ix >= x0 + 1 && ix < x1 - 1 &&
+            iy >= y0 + 1 && iy < y1 - 1 &&
+            iz >= z0 + 1 && iz < z1 - 1;
+    }
 
     if (interior) {
         pxx[b * spatial_size + idx] = bar_dsxx_dx;
@@ -903,10 +1093,98 @@ __global__ void elastic_tti_sg3d_velocity_adjoint_prepare(
     f.m_szzz[idx] = azh * tmp_szzz;
 }
 
+template<int Order>
+__global__ void elastic_tti_sg3d_velocity_adjoint_prepare(
+    ElasticWavefieldPointer wf,
+    const float* __restrict__ rho,
+    ElasticCPMLPointer cpml,
+    SolverContext solver,
+    float* __restrict__ pxx,
+    float* __restrict__ pxy,
+    float* __restrict__ pxz,
+    float* __restrict__ pyx,
+    float* __restrict__ pyy,
+    float* __restrict__ pyz,
+    float* __restrict__ pzx,
+    float* __restrict__ pzy,
+    float* __restrict__ pzz
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if (ix >= solver.nx || iy >= solver.ny) return;
+    if (iz_global >= solver.nz * solver.B) return;
+
+    int b  = iz_global / solver.nz;
+    int iz = iz_global % solver.nz;
+
+    elastic_tti_sg3d_velocity_adjoint_prepare_cell<Order>(CellIndex3{ix, iy, iz, b}, wf, rho, cpml,
+        solver, pxx, pxy, pxz, pyx, pyy, pyz, pzx, pzy, pzz);
+}
+
 using elastic_tti_sg3d_velocity_adjoint_prepare_fn = void (*)(ElasticWavefieldPointer,
     const float*, ElasticCPMLPointer, SolverContext, float*, float*, float*, float*,
     float*, float*, float*, float*, float*);
 SWEEP_BY_ORDER_DECL(elastic_tti_sg3d_velocity_adjoint_prepare_fn, elastic_tti_sg3d_velocity_adjoint_prepare_by_order);
+
+// One cell of elastic_tti_sg3d_velocity_adjoint_apply: everything after the kernel's guards (see
+// launch/cell_path.h).  Straight-line body: the interior box is the kernel's guard box,
+// elastic_tti_sg3d_halo_box<Order>().
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_tti_sg3d_velocity_adjoint_apply_cell(
+    CellIndex3 cell,
+    const ElasticWavefieldPointer& wf,
+    const float* __restrict__ pxx,
+    const float* __restrict__ pxy,
+    const float* __restrict__ pxz,
+    const float* __restrict__ pyx,
+    const float* __restrict__ pyy,
+    const float* __restrict__ pyz,
+    const float* __restrict__ pzx,
+    const float* __restrict__ pzy,
+    const float* __restrict__ pzz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    const int ix = cell.ix, iy = cell.iy, iz = cell.iz, b = cell.b;
+
+    int spatial_size = solver.nx * solver.ny * solver.nz;
+    int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
+    auto f = wf.offset(b, spatial_size);
+
+    const float* pxx_b = pxx + b * spatial_size;
+    const float* pxy_b = pxy + b * spatial_size;
+    const float* pxz_b = pxz + b * spatial_size;
+    const float* pyx_b = pyx + b * spatial_size;
+    const float* pyy_b = pyy + b * spatial_size;
+    const float* pyz_b = pyz + b * spatial_size;
+    const float* pzx_b = pzx + b * spatial_size;
+    const float* pzy_b = pzy + b * spatial_size;
+    const float* pzz_b = pzz + b * spatial_size;
+
+    float dpxx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(pxx_b, ix, iy, iz, grad_ctx);
+    float dpxy_dy = sgradient<3, Order, Y, DIFF_FORWARD >(pxy_b, ix, iy, iz, grad_ctx);
+    float dpxz_dz = sgradient<3, Order, Z, DIFF_FORWARD >(pxz_b, ix, iy, iz, grad_ctx);
+
+    float dpyx_dx = sgradient<3, Order, X, DIFF_FORWARD >(pyx_b, ix, iy, iz, grad_ctx);
+    float dpyy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(pyy_b, ix, iy, iz, grad_ctx);
+    float dpyz_dz = sgradient<3, Order, Z, DIFF_FORWARD >(pyz_b, ix, iy, iz, grad_ctx);
+
+    float dpzx_dx = sgradient<3, Order, X, DIFF_FORWARD >(pzx_b, ix, iy, iz, grad_ctx);
+    float dpzy_dy = sgradient<3, Order, Y, DIFF_FORWARD >(pzy_b, ix, iy, iz, grad_ctx);
+    float dpzz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(pzz_b, ix, iy, iz, grad_ctx);
+
+    f.sxx[idx] += dpxx_dx;
+    f.sxy[idx] += dpxy_dy + dpyx_dx;
+    f.sxz[idx] += dpxz_dz + dpzx_dx;
+    f.syy[idx] += dpyy_dy;
+    f.syz[idx] += dpyz_dz + dpzy_dy;
+    f.szz[idx] += dpzz_dz;
+}
 
 template<int Order>
 __global__ void elastic_tti_sg3d_velocity_adjoint_apply(
@@ -943,38 +1221,8 @@ __global__ void elastic_tti_sg3d_velocity_adjoint_apply(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.ny * solver.nz;
-    int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
-    auto f = wf.offset(b, spatial_size);
-
-    const float* pxx_b = pxx + b * spatial_size;
-    const float* pxy_b = pxy + b * spatial_size;
-    const float* pxz_b = pxz + b * spatial_size;
-    const float* pyx_b = pyx + b * spatial_size;
-    const float* pyy_b = pyy + b * spatial_size;
-    const float* pyz_b = pyz + b * spatial_size;
-    const float* pzx_b = pzx + b * spatial_size;
-    const float* pzy_b = pzy + b * spatial_size;
-    const float* pzz_b = pzz + b * spatial_size;
-
-    float dpxx_dx = sgradient<3, Order, X, DIFF_BACKWARD>(pxx_b, ix, iy, iz, grad_ctx);
-    float dpxy_dy = sgradient<3, Order, Y, DIFF_FORWARD >(pxy_b, ix, iy, iz, grad_ctx);
-    float dpxz_dz = sgradient<3, Order, Z, DIFF_FORWARD >(pxz_b, ix, iy, iz, grad_ctx);
-
-    float dpyx_dx = sgradient<3, Order, X, DIFF_FORWARD >(pyx_b, ix, iy, iz, grad_ctx);
-    float dpyy_dy = sgradient<3, Order, Y, DIFF_BACKWARD>(pyy_b, ix, iy, iz, grad_ctx);
-    float dpyz_dz = sgradient<3, Order, Z, DIFF_FORWARD >(pyz_b, ix, iy, iz, grad_ctx);
-
-    float dpzx_dx = sgradient<3, Order, X, DIFF_FORWARD >(pzx_b, ix, iy, iz, grad_ctx);
-    float dpzy_dy = sgradient<3, Order, Y, DIFF_FORWARD >(pzy_b, ix, iy, iz, grad_ctx);
-    float dpzz_dz = sgradient<3, Order, Z, DIFF_BACKWARD>(pzz_b, ix, iy, iz, grad_ctx);
-
-    f.sxx[idx] += dpxx_dx;
-    f.sxy[idx] += dpxy_dy + dpyx_dx;
-    f.sxz[idx] += dpxz_dz + dpzx_dx;
-    f.syy[idx] += dpyy_dy;
-    f.syz[idx] += dpyz_dz + dpzy_dy;
-    f.szz[idx] += dpzz_dz;
+    elastic_tti_sg3d_velocity_adjoint_apply_cell<Order>(CellIndex3{ix, iy, iz, b}, wf, pxx, pxy,
+        pxz, pyx, pyy, pyz, pzx, pzy, pzz, grad_ctx, solver);
 }
 
 using elastic_tti_sg3d_velocity_adjoint_apply_fn = void (*)(ElasticWavefieldPointer,
@@ -987,39 +1235,28 @@ SWEEP_BY_ORDER_DECL(elastic_tti_sg3d_velocity_adjoint_apply_fn, elastic_tti_sg3d
 // strain rates the forward stress update consumed; each dL/dCij is the
 // correlation of adjoint stress i with strain rate j (both orderings for
 // off-diagonal entries, which are stored once).
-template<int Order>
-__global__ void calculate_grad_elastic_tti_sg3d_nobs(
-    ElasticWavefieldPointer adjoint,
-    StiffnessPointer model,
-    StiffnessGradPointer grad,
+// One cell of calculate_grad_elastic_tti_sg3d_nobs: everything after the kernel's guards (see
+// launch/cell_path.h).  Straight-line body (no physical-box crop: the PML shell is imaged
+// too): the interior box is the kernel's guard box,
+// elastic_tti_sg3d_halo_box<Order>().
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void calculate_grad_elastic_tti_sg3d_nobs_cell(
+    CellIndex3 cell,
+    const ElasticWavefieldPointer& adjoint,
+    const StiffnessPointer& model,
+    const StiffnessGradPointer& grad,
     const float* __restrict__ fvx,
     const float* __restrict__ fvy,
     const float* __restrict__ fvz,
     const float* __restrict__ fvx_next,
     const float* __restrict__ fvy_next,
     const float* __restrict__ fvz_next,
-    SGradParam grad_ctx,
-    SolverContext solver
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iy = blockIdx.y * blockDim.y + threadIdx.y;
-    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
-
-    if (ix >= solver.nx || iy >= solver.ny) return;
-    if (iz_global >= solver.nz * solver.B) return;
-
-    int b  = iz_global / solver.nz;
-    int iz = iz_global % solver.nz;
-
-    constexpr bool is_runtime = (Order == -1);
-    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
-    int halo = is_runtime ? solver.M : M_static;
-
-    if (ix < halo || ix >= solver.nx - halo ||
-        iy < halo || iy >= solver.ny - halo ||
-        iz < halo || iz >= solver.nz - halo)
-        return;
+    const int ix = cell.ix, iy = cell.iy, iz = cell.iz, b = cell.b;
 
     int spatial_size = solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
@@ -1090,6 +1327,44 @@ __global__ void calculate_grad_elastic_tti_sg3d_nobs(
         a.vy[idx] * (vy[idx] - vy_next[idx]) +
         a.vz[idx] * (vz[idx] - vz_next[idx])
     ) / m.rho[idx];
+}
+
+template<int Order>
+__global__ void calculate_grad_elastic_tti_sg3d_nobs(
+    ElasticWavefieldPointer adjoint,
+    StiffnessPointer model,
+    StiffnessGradPointer grad,
+    const float* __restrict__ fvx,
+    const float* __restrict__ fvy,
+    const float* __restrict__ fvz,
+    const float* __restrict__ fvx_next,
+    const float* __restrict__ fvy_next,
+    const float* __restrict__ fvz_next,
+    SGradParam grad_ctx,
+    SolverContext solver
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if (ix >= solver.nx || iy >= solver.ny) return;
+    if (iz_global >= solver.nz * solver.B) return;
+
+    int b  = iz_global / solver.nz;
+    int iz = iz_global % solver.nz;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
+    if (ix < halo || ix >= solver.nx - halo ||
+        iy < halo || iy >= solver.ny - halo ||
+        iz < halo || iz >= solver.nz - halo)
+        return;
+
+    calculate_grad_elastic_tti_sg3d_nobs_cell<Order>(CellIndex3{ix, iy, iz, b}, adjoint, model,
+        grad, fvx, fvy, fvz, fvx_next, fvy_next, fvz_next, grad_ctx, solver);
 }
 
 using calculate_grad_elastic_tti_sg3d_nobs_fn = void (*)(ElasticWavefieldPointer,

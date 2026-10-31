@@ -1,9 +1,10 @@
 """The stepped runners (the DD time loop) and the boundary session.
 
 A runner is one persistent core handle over a ForwardInput / BackwardInput
-packed once at construction: the core struct, everything it points at and the
-tensors it describes stay alive for the handle's life, so a segment call
-(``run``) costs no re-adaptation.  Like the per-call entries, ``run`` returns
+packed once at construction, on the core whose compute device holds
+``models[0]`` (the CUDA or the host core, like the per-call entries): the core
+struct, everything it points at and the tensors it describes stay alive for
+the handle's life, so a segment call (``run``) costs no re-adaptation.  Like the per-call entries, ``run`` returns
 **nothing**: the core writes into the tensors bound on the params object at
 construction (``record_out`` / ``u_allt_out`` for a forward runner,
 ``grads_out`` / ``illum_out`` for a backward one), and the caller reads them.
@@ -15,8 +16,8 @@ from ctypes import c_void_p
 
 from . import abi as _abi
 from .adapt import adapt
-from .entries import _launch_stream, _stream_for_device, _StreamScope
-from .loader import _ERR_CAP, _raise_core, core_lib
+from .entries import _core_for, _stream_for_device, _StreamScope
+from .loader import _ERR_CAP, _raise_core, any_core_lib, core_lib, kind_for_device
 
 
 class _Runner:
@@ -30,7 +31,8 @@ class _Runner:
 
     def __init__(self, entry_id: int, params):
         self._h = None
-        self._lib = lib = core_lib()
+        lib, stream = _core_for(params.models, f"{self._side} runner create")
+        self._lib = lib
         self._params = params
         self._core, self._keep = adapt(self._in_name, params)
         self._run = getattr(lib, f"sweep_{self._side}_runner_run")
@@ -38,7 +40,7 @@ class _Runner:
         self._destroy = getattr(lib, f"sweep_{self._side}_runner_destroy")
         h = c_void_p()
         err = ctypes.create_string_buffer(_ERR_CAP)
-        with _StreamScope(lib, _launch_stream(params, f"{self._side} runner create")):
+        with _StreamScope(lib, stream):
             rc = getattr(lib, f"sweep_{self._side}_runner_create")(
                 int(entry_id), ctypes.addressof(self._core), ctypes.byref(h), err, _ERR_CAP)
         if rc != 0:
@@ -110,10 +112,15 @@ class BoundarySession:
     exactly once (idempotent, and what ``__del__`` does), after which
     ``handle`` is None and ``finish()`` / ``used`` -- and ``adapt()`` of an
     input that still names this session -- raise instead of passing NULL to
-    the core."""
+    the core.
 
-    def __init__(self):
-        self._lib = lib = core_lib()
+    A session belongs to one core: ``device`` names the core that will be
+    handed the session (the device of the models of the calls that bind it);
+    None means whichever core loads by default (the CUDA core on a GPU box)."""
+
+    def __init__(self, device=None):
+        lib = core_lib(kind_for_device(device)) if device is not None else any_core_lib()
+        self._lib = lib
         self.handle = c_void_p(lib.sweep_session_create())
 
     @property

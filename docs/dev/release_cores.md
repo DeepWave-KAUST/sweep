@@ -1,7 +1,8 @@
 # Release cores
 
-How the CUDA cores that ship in the PyPI wheel are built. Users never need this:
-it is for whoever cuts a release (see [Installation](../getting-started/installation.md)
+How the cores that ship in the PyPI wheel are built -- one CUDA core per CUDA
+major and, from 0.3.7, the host (CPU) core. Users never need this: it is for
+whoever cuts a release (see [Installation](../getting-started/installation.md)
 for installing).
 
 The wheel carries one core per CUDA major, each a fat binary built once, with no
@@ -29,15 +30,15 @@ core locally (nvcc) as before.
 
 Three rules for a core that is going to PyPI:
 
-- **Build both cores, then `python -m build --wheel` from the same tree.**
+- **Build all three cores, then `python -m build --wheel` from the same tree.**
   `src/sweep/lib/` is git-ignored and pruned from the sdist (`MANIFEST.in`), so a
   bare `python -m build` packs the wheel from the pruned sdist and ships no core.
-  The release script sets `SWEEP_REQUIRE_CORE=cu12,cu13`, which makes `setup.py`
-  refuse a tree missing either `src/sweep/lib/<tag>/libsweep_core.so`, naming the
-  missing tag, instead of quietly producing a wheel with one core or none
+  The release script sets `SWEEP_REQUIRE_CORE=cu12,cu13,cpu`, which makes
+  `setup.py` refuse a tree missing any `src/sweep/lib/<tag>/libsweep_core.so`,
+  naming the missing tag, instead of quietly producing a wheel with fewer cores
   (`SWEEP_REQUIRE_CORE=1` asks only for at least one).
 - **Build inside the manylinux container, not on a developer box.**
-  `utils/build_cores_manylinux.sh` runs both `--core` builds and the wheel build in
+  `utils/build_cores_manylinux.sh` runs the three core builds and the wheel build in
   PyTorch's `manylinux2_28-builder` images (glibc 2.28, a 2018-era `libstdc++`), so
   the shipped `.so` needs only `GLIBC_2.17` / `GLIBCXX_3.4.22` and the wheel is
   tagged `manylinux_2_28`, exactly like torch's own wheels. A core linked on a
@@ -47,10 +48,39 @@ Three rules for a core that is going to PyPI:
   because they carry their own `libstdc++`.
 - **Mind the size.** The cu12 list (six SASS targets + `sm_90` PTX) gives a 102 MB
   `.so`, the cu13 list (seven SASS targets + `sm_120` PTX) a 123 MB one; compressed
-  together they make a ~62 MB wheel. PyPI's per-file limit is 100 MB. Every kernel is
-  compiled once (`kernels.cu` and its launch tables, see `cuda_drivers.md`); a kernel
-  named in a header would be compiled again into every includer, and
-  `test/test_core_capi.py` fails when an arch of the core at hand lists a kernel
-  twice. Add SASS entries sparingly and keep exactly one `+PTX` entry per core, the
-  newest arch: each embedded PTX is another copy of every kernel, and a card newer
-  than every SASS entry only ever needs the newest one.
+  together they make a ~62 MB wheel, and the host core adds 23 MB (7 MB compressed),
+  ~69 MB. PyPI's per-file limit is 100 MB. Every kernel is compiled once
+  (`kernels.cu` and its launch tables, see `cuda_drivers.md`); a kernel named in a
+  header would be compiled again into every includer, and `test/test_core_capi.py`
+  fails when an arch of the core at hand lists a kernel twice. Add SASS entries
+  sparingly and keep exactly one `+PTX` entry per core, the newest arch: each
+  embedded PTX is another copy of every kernel, and a card newer than every SASS
+  entry only ever needs the newest one.
+
+## Host (CPU) core
+
+The third core, `src/sweep/lib/cpu/`, is the same sources built by g++ instead
+of nvcc ([The host (CPU) core](host_core.md)), shipped from 0.3.7:
+
+```bash
+python -m sweep.build --cpu --core     # -> src/sweep/lib/cpu/libsweep_core.so + core.json
+```
+
+It needs `g++ >= 9` (or `clang++ >= 10`) with OpenMP and `ninja`, no toolkit,
+and the same manylinux rule as the CUDA cores: the release script builds it in
+the cu12 builder image, so the libstdc++ floor holds. Baseline x86-64 ISA, no
+`-march`: the shipped core must run on any x86-64.
+
+It is what `impl='auto'` runs on a CPU device without building: a wheel without
+`lib/cpu` sends each CPU user with g++ through a one-time 1-3 min build on
+the first CPU construction, and keeps one without a compiler on eager, 1.2-18x slower at
+8-28 threads ([host core](host_core.md), section 4).
+
+The core reaches OpenMP through `libgomp.so.1`, and inside a torch process
+that resolves to the copy torch already loaded (`torch/lib/libgomp.so.1` in
+the pip wheels) -- one runtime, which is why `torch.set_num_threads` sets the
+core's thread count too.  So the core must not need a `GOMP_*` / `OMP_*`
+symbol version newer than torch's copy defines (`GOMP_5.0` / `OMP_5.0` in
+torch 2.9's); the 0.3.7 core needs `GOMP_4.0` / `OMP_1.0` (`#pragma omp
+parallel`, the `omp_get_*` queries), and the release script refuses one that
+needs more than 5.0.

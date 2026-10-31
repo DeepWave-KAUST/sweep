@@ -11,6 +11,7 @@
 
 #include "../context.h"
 #include "../cudautils.h"   // copy_tensor_cuda_async, zero_tensor_device_async
+#include "../../../core/compute_device.h"   // on_compute_device
 #include "disk_io.cuh"
 #include "kernels.cuh"
 #include "types.cuh"
@@ -301,10 +302,10 @@ struct EffectiveBoundarySaver {
                         "of the same band as the persistent buffer).");
             SWEEP_CHECK(staging[i].dtype() == BoundaryDtype::FP32 && staging[i].element_size() == 4,
                         "boundary_staging[", i, "] must be float32");
-            SWEEP_CHECK(staging[i].is_cuda(),
-                        "boundary_staging[", i, "] must live on the GPU (a host "
-                        "tensor here reads as an illegal address inside the "
-                        "kernels)");
+            SWEEP_CHECK(sweep::on_compute_device(staging[i]),
+                        "boundary_staging[", i, "] must live on the compute device (",
+                        sweep::kComputeDeviceName, "): a tensor on the other tier "
+                        "reads as an illegal address inside the kernels");
         }
         bind_tensor_group(staging, "boundary_staging",
                           top_staging_t, bottom_staging_t,

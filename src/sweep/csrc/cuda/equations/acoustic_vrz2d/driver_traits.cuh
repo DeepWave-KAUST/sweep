@@ -37,6 +37,7 @@
 #pragma once
 
 #include <cuda_runtime.h>
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 #include <algorithm>
 
@@ -359,7 +360,7 @@ struct Driver {
                                   const AcousticWavefieldPointer& view,
                                   const ForwardInputCore& p, int it, int nsrc)
     {
-        add_source<<<s.source_config.grid, s.source_config.block>>>(
+        SWEEP_LAUNCH(add_source, s.source_config.grid, s.source_config.block,
             view.u_next,
             p.source.data_ptr<float>(),
             p.sources_loc.data_ptr<int>(),
@@ -374,7 +375,7 @@ struct Driver {
                        Buf& record, const ForwardInputCore& p,
                        int it, int nrec)
     {
-        record_kernel<<<s.record_config.grid, s.record_config.block>>>(
+        SWEEP_LAUNCH(record_kernel, s.record_config.grid, s.record_config.block,
             view.u_next,
             record.data_ptr<float>(),
             p.receivers_loc.data_ptr<int>(),
@@ -498,7 +499,7 @@ struct Driver {
         // The VRZ adjoint injects the NEGATED residual (driver-level sign):
         // sign -1 flips the sample's sign bit inside the kernel, bit-identical
         // to the negated copy this used to inject, with no tensor built.
-        add_source_signed<<<s.record_config.grid, s.record_config.block>>>(
+        SWEEP_LAUNCH(add_source_signed, s.record_config.grid, s.record_config.block,
             adj_view.u_next,
             p.adjoint_source.data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(),
@@ -525,7 +526,7 @@ struct Driver {
                                        int it, int nsrc)
     {
         if (nsrc <= 0) return;
-        vrz2d_utt_source_correction<<<s.source_config.grid, s.source_config.block>>>(
+        SWEEP_LAUNCH(vrz2d_utt_source_correction, s.source_config.grid, s.source_config.block,
             grads[0].data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
             s.vp,
@@ -673,7 +674,7 @@ struct Driver {
             s.grad_ctx,
             ctx
         );
-        add_source<<<s.source_config.grid, s.source_config.block>>>(
+        SWEEP_LAUNCH(add_source, s.source_config.grid, s.source_config.block,
             for_view.u_next,
             p.forward_source.data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(),

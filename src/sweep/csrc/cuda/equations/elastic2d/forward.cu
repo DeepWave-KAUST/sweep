@@ -1,4 +1,5 @@
 #include <cuda_runtime.h>
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 
 #include "elastic2d.h"

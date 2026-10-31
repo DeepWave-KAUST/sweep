@@ -28,7 +28,10 @@
 // shared memory once per block, so a shot with many sources costs a scan of
 // the list per block, not per cell.
 #include "kernels.cuh"
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 #include "../../../core/check.h"
+
+#if !defined(SWEEP_HOST_CORE)
 
 namespace {
 
@@ -216,7 +219,7 @@ void launch_tiled(const float* p, const float* lam, const float* ptt, const floa
     const int wx = ctx.phys_x1() - ctx.phys_x0(), wz = ctx.phys_z1() - ctx.phys_z0();
     if (wx <= 0 || wz <= 0) return;
     dim3 block(BX, BZ), grid((wx + BX - 1) / BX, (wz + BZ - 1) / BZ, ctx.B);
-    vrz2d_grad_tiled<Order, RECON><<<grid, block>>>(p, lam, ptt, pprev, pnext, unext, vp, z, invz,
+    SWEEP_LAUNCH((vrz2d_grad_tiled<Order, RECON>), grid, block, p, lam, ptt, pprev, pnext, unext, vp, z, invz,
                                                    gvp, gz, g, lap, ctx, src);
 }
 
@@ -270,3 +273,35 @@ void launch_acoustic_vrz2d_recon_grad(
     launch_order<true>(order, wf.u_now, lam, nullptr, nullptr, wf.u_prev, wf.u_next, vp, z, inv_z,
                        grad_vp, grad_z, grad_ctx, lap_ctx, ctx, Sources{source, sources_loc, nsrc, it});
 }
+
+#else  // SWEEP_HOST_CORE
+
+// The host core has no block-shared memory or barrier (one virtual thread at a
+// time, csrc/host/launch.h), so the tiled kernel is not built there.  Every
+// order takes the global-memory kernels of kernels.cuh instead -- the ones the
+// CUDA core keeps for order 2 and the runtime orders, which compute the same
+// per-cell result in the same operand order (see the header comment) -- and the
+// boundary-saving reverse step keeps its unfused NOPML + gradient sequence
+// (driver_traits.cuh bs_recon_step asks acoustic_vrz2d_grad_is_tiled).
+bool acoustic_vrz2d_grad_is_tiled(int) { return false; }
+
+void launch_acoustic_vrz2d_grad(
+    int order, dim3 grid, dim3 block,
+    const float* p, const float* lam, const float* ptt, const float* pprev, const float* pnext,
+    const float* vp, const float* z, const float* inv_z,
+    float* c_x, float* c_z, float* e_x, float* e_z,
+    float* grad_vp, float* grad_z, GradParam grad_ctx, LaplaceParam lap_ctx, SolverContext ctx)
+{
+    CALCULATE_GRAD_VRZ2D_AUTO(order, grid, block, p, lam, ptt, pprev, pnext, vp, z, inv_z,
+                              c_x, c_z, e_x, e_z, grad_vp, grad_z, grad_ctx, lap_ctx, ctx);
+}
+
+void launch_acoustic_vrz2d_recon_grad(
+    int order, AcousticWavefieldPointer, const float*, const float*, const float*, const float*,
+    const float*, const int*, int, int, float*, float*, GradParam, LaplaceParam, SolverContext)
+{
+    SWEEP_CHECK(false, "acoustic_vrz2d fused reconstruction: order ", order,
+                " is not tiled on the host core");
+}
+
+#endif  // SWEEP_HOST_CORE

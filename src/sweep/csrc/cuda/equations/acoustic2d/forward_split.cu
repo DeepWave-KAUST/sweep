@@ -16,22 +16,33 @@
 // the air cells the air pre-pass cleared.  acoustic2nd itself stays for
 // visco_acoustic2d.
 #include "kernels.cuh"
+#include "../../launch/launch.h"   // SWEEP_LAUNCH, SWEEP_LAUNCH_ROWS
 #include "../../launch/box.cuh"
+#include "../../common/host_rows.h"   // box_launch_rows, box_cell_at (host core only)
 
 namespace {
 
 using fdtd::Box;
 
 // ----------------------------------------------------------------- interior
-template<int Order>
-__global__ void a2d_fwd_interior(
-    AcousticWavefieldPointer wf, float* __restrict__ u_this, const float* __restrict__ vp,
-    LaplaceParam lap_ctx, SolverContext solver, Box box)
+// One cell of a2d_fwd_interior: everything after the kernel's guards
+// (launch/cell_path.h).  The kernel has no PML branch and keeps both of its
+// early returns -- the box decode and the air test -- which the host span
+// answers instead (A2dFwdInteriorRows); optional output: u_this.
+//
+// The store's test is the kernel's own ``u_this_b != nullptr`` on the Any
+// path and the compile-time answer on an interior one.  Spelled through
+// optional_output on the Any path as well, nvcc no longer folded the test to
+// ``u_this != nullptr`` (it tested u_this and u_this_b both: a different
+// instruction mix at every static order, +8 instructions at orders 4 and 6
+// and a register more at 6 -- docs/dev/host_core.md rule 7).
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__ void a2d_fwd_interior_cell(
+    Acoustic2dCellIndex cell,
+    const AcousticWavefieldPointer& wf, float* __restrict__ u_this, const float* __restrict__ vp,
+    const LaplaceParam& lap_ctx, const SolverContext& solver)
 {
-    int ix, iy, iz, b;
-    if (!fdtd::box_cell(box, solver.B, ix, iy, iz, b)) return;
-    if (solver.has_topo && iz < solver.topo_rows[ix])
-        return;   // air: cleared by acoustic2d_air_clear_kernel
+    const int ix = cell.ix, iz = cell.iz, b = cell.b;
 
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
@@ -48,8 +59,26 @@ __global__ void a2d_fwd_interior(
 
     f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] +
                     v2_dt2 * (lap_x + lap_z);
-    if (u_this_b != nullptr)
+    bool store_u_this;
+    if constexpr (interior_path<Path>)
+        store_u_this = optional_output<Path>(u_this);
+    else
+        store_u_this = u_this_b != nullptr;
+    if (store_u_this)
         u_this_b[idx] = (v * v) * (lap_x + lap_z);
+}
+
+template<int Order>
+__global__ void a2d_fwd_interior(
+    AcousticWavefieldPointer wf, float* __restrict__ u_this, const float* __restrict__ vp,
+    LaplaceParam lap_ctx, SolverContext solver, Box box)
+{
+    int ix, iy, iz, b;
+    if (!fdtd::box_cell(box, solver.B, ix, iy, iz, b)) return;
+    if (solver.has_topo && iz < solver.topo_rows[ix])
+        return;   // air: cleared by acoustic2d_air_clear_kernel
+
+    a2d_fwd_interior_cell<Order>(Acoustic2dCellIndex{ix, iz, b}, wf, u_this, vp, lap_ctx, solver);
 }
 
 // ----------------------------------------------------------------- CPML ring
@@ -138,6 +167,42 @@ __global__ void __launch_bounds__(256) a2d_fwd_ring(
         u_this_b[idx] = (v * v) * w_sum;
 }
 
+#if defined(SWEEP_HOST_CORE)
+// Host row launcher of a2d_fwd_interior, for SWEEP_LAUNCH_ROWS in launch_fwd
+// (launch/cell_path.h).  The kernel has no PML branch, so every virtual
+// thread that passes its two guards runs its interior path: the span is the
+// launch box, each row its whole x extent, minus the rows past the last shot
+// and -- with a surface -- the rows (iz) above the deepest surface row over
+// the box's columns (common/host_rows.h box_launch_rows), where the air test
+// must run.  The box itself carries every other geometry feature (CPML band
+// plus halo, DD cut faces, per-edge pads and free surfaces, the x_base /
+// x_end range: launch_fwd builds it), and box_cell_at decodes a virtual
+// thread exactly as the kernel's box_cell does.  Optional output: u_this.
+// Order -1 (runtime M) takes the same span (the box does not depend on the
+// order); its row loop does not vectorise.  No arithmetic of its own; the cell
+// lambda captures BY VALUE.
+template<int Order>
+struct A2dFwdInteriorRows {
+    static void run(dim3 grid, dim3 block, AcousticWavefieldPointer wf, float* u_this,
+                    const float* vp, LaplaceParam lap_ctx, SolverContext solver, Box box)
+    {
+        auto call = [&](auto&&... a) { a2d_fwd_interior<Order>(a...); };
+        sweep::host::with_optional(u_this, [&](auto path) {
+            sweep::host::launch_rows(
+                grid, block, sweep::host::box_launch_rows(box, solver),
+                [=](int gx, int gy, int gz) {
+                    int ix, iy, iz, b;
+                    sweep::host::box_cell_at(box, gx, gy, gz, ix, iy, iz, b);
+                    a2d_fwd_interior_cell<Order, decltype(path)::value>(
+                        Acoustic2dCellIndex{ix, iz, b}, wf, u_this, vp, lap_ctx, solver);
+                },
+                call,
+                wf, u_this, vp, lap_ctx, solver, box);
+        });
+    }
+};
+#endif
+
 struct FwdArgs {
     AcousticWavefieldPointer wf; float* u_this; const float* vp;
     LaplaceParam lap; GradParam g, gx, gz; AcousticCPMLPointer cpml;
@@ -153,12 +218,13 @@ void launch_fwd(const FwdArgs& a, const SolverContext& ctx)
     const Box in = fdtd::intersect(fdtd::phys_box(ctx, ctx.M), all);
     if (!fdtd::empty(in)) {
         const auto L = fdtd::box_launch(in, ctx.B, fdtd::kBoxBlock);
-        a2d_fwd_interior<Order><<<L.grid, L.block>>>(a.wf, a.u_this, a.vp, a.lap, ctx, in);
+        SWEEP_LAUNCH_ROWS((a2d_fwd_interior<Order>), A2dFwdInteriorRows<Order>::run, L.grid, L.block,
+                          a.wf, a.u_this, a.vp, a.lap, ctx, in);
     }
     const fdtd::SlabSet ring = fdtd::slab_set(all, in);
     if (ring.n == 0) return;
     const auto L = fdtd::slab_set_launch(ring, ctx.B);
-    a2d_fwd_ring<Order><<<L.grid, L.block>>>(a.wf, a.u_this, a.vp, a.lap, a.g, a.gx, a.gz,
+    SWEEP_LAUNCH((a2d_fwd_ring<Order>), L.grid, L.block, a.wf, a.u_this, a.vp, a.lap, a.g, a.gx, a.gz,
                                              a.cpml, ctx, ring);
 }
 

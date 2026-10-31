@@ -25,7 +25,9 @@
 // Blocks are 32x1x8, deep in z, so the z-taps of a block's cells are reused in
 // L1; the x slabs, a few cells wide, take 8x4x8.
 #include "kernels.cuh"
+#include "../../launch/launch.h"   // SWEEP_LAUNCH, SWEEP_LAUNCH_ROWS
 #include "../../launch/box.cuh"
+#include "../../common/host_rows.h"   // host core only: box_launch_rows, box_cell_at
 #include "../../../core/check.h"
 
 namespace {
@@ -36,15 +38,17 @@ struct Region { int x0, y0, z0, nx, ny, nz; };   // lo corner + extent: a shell 
 // --------------------------------------------------------------------------
 // interior
 // --------------------------------------------------------------------------
-template<int Order>
-__global__ void vrz3d_adj_interior(
-    AcousticWavefieldPointer wf,
+// One cell of vrz3d_adj_interior: everything after the kernel's box_cell
+// guard (launch/cell_path.h).  The kernel carries no CPML branch and no other
+// test, so every path is the same code and every cell of its box is interior.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__ void vrz3d_adj_interior_cell(
+    Vrz3dCellIndex cell, const AcousticWavefieldPointer& wf,
     const float* __restrict__ C0, const float* __restrict__ Cx,
     const float* __restrict__ Cy, const float* __restrict__ Cz,
-    LaplaceParam lap_ctx, GradParam grad_ctx, SolverContext solver, Box box)
+    const LaplaceParam& lap_ctx, const GradParam& grad_ctx, const SolverContext& solver)
 {
-    int ix, iy, iz, b;
-    if (!fdtd::box_cell(box, solver.B, ix, iy, iz, b)) return;
+    const int ix = cell.ix, iy = cell.iy, iz = cell.iz, b = cell.b;
 
     const int sy = solver.nx;
     const int sz = solver.nx * solver.ny;
@@ -76,6 +80,52 @@ __global__ void vrz3d_adj_interior(
     float rhs = (lap_x + lap_y + lap_z) - gx - gy - gz;
     f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + dt2 * rhs;
 }
+
+template<int Order>
+__global__ void vrz3d_adj_interior(
+    AcousticWavefieldPointer wf,
+    const float* __restrict__ C0, const float* __restrict__ Cx,
+    const float* __restrict__ Cy, const float* __restrict__ Cz,
+    LaplaceParam lap_ctx, GradParam grad_ctx, SolverContext solver, Box box)
+{
+    int ix, iy, iz, b;
+    if (!fdtd::box_cell(box, solver.B, ix, iy, iz, b)) return;
+    vrz3d_adj_interior_cell<Order>(Vrz3dCellIndex{ix, iy, iz, b}, wf, C0, Cx, Cy, Cz, lap_ctx, grad_ctx,
+                                   solver);
+}
+
+#if defined(SWEEP_HOST_CORE)
+// Host row launcher of vrz3d_adj_interior (launch/cell_path.h), for
+// SWEEP_LAUNCH_ROWS below.  The kernel tests nothing after box_cell, so the
+// span of each row is the whole x extent of its box (common/host_rows.h
+// box_launch_rows: exactly the virtual threads box_cell accepts -- it would
+// also drop rows above a surface, but VRZ sets no topography), and
+// box_cell_at is the cell's decode.  No
+// arithmetic of its own; the cell lambda captures BY VALUE (see acoustic2d).
+// Its x taps are unit-stride as written (VrzProductAccessor stride 1;
+// grad_ctx only lends coeff and dx), so the cell takes grad_ctx as it is.
+// Order -1 (runtime M) takes the same span (the box does not depend on the
+// order); its row loop does not vectorise.
+template<int Order>
+struct Vrz3dAdjInteriorRows {
+    static void run(dim3 grid, dim3 block, AcousticWavefieldPointer wf, const float* C0,
+                    const float* Cx, const float* Cy, const float* Cz, LaplaceParam lap_ctx,
+                    GradParam grad_ctx, SolverContext solver, Box box)
+    {
+        auto call = [&](auto&&... a) { vrz3d_adj_interior<Order>(a...); };
+        sweep::host::launch_rows(
+            grid, block, sweep::host::box_launch_rows(box, solver),
+            [=](int gx, int gy, int gz) {
+                Vrz3dCellIndex c;
+                sweep::host::box_cell_at(box, gx, gy, gz, c.ix, c.iy, c.iz, c.b);
+                vrz3d_adj_interior_cell<Order, CellPath::Interior>(
+                    c, wf, C0, Cx, Cy, Cz, lap_ctx, grad_ctx, solver);
+            },
+            call,
+            wf, C0, Cx, Cy, Cz, lap_ctx, grad_ctx, solver, box);
+    }
+};
+#endif
 
 // --------------------------------------------------------------------------
 // CPML shell
@@ -289,13 +339,13 @@ void launch_split(const SplitArgs& a)
     const Box clear = fdtd::phys_box(ctx, ctx.M + 1);
     if (!fdtd::empty(inner)) {
         const auto L = fdtd::box_launch(inner, ctx.B, fdtd::kBoxBlock);
-        vrz3d_adj_interior<Order><<<L.grid, L.block>>>(a.wf, a.C0, a.Cx, a.Cy, a.Cz,
-                                                       a.lap, a.g, ctx, inner);
+        SWEEP_LAUNCH_ROWS((vrz3d_adj_interior<Order>), Vrz3dAdjInteriorRows<Order>::run, L.grid, L.block,
+                          a.wf, a.C0, a.Cx, a.Cy, a.Cz, a.lap, a.g, ctx, inner);
     }
     // the computed cells minus the interior box, as up to six disjoint slabs
     fdtd::for_each_slab(fdtd::computed_box(ctx), inner, [&](const Box& r, bool x_slab) {
         const auto L = fdtd::box_launch(r, ctx.B, x_slab ? fdtd::kNarrowBlock : fdtd::kBoxBlock);
-        vrz3d_adj_shell<Order><<<L.grid, L.block>>>(a.wf, a.C0, a.Cx, a.Cy, a.Cz,
+        SWEEP_LAUNCH((vrz3d_adj_shell<Order>), L.grid, L.block, a.wf, a.C0, a.Cx, a.Cy, a.Cz,
             a.lap, a.g, a.gx, a.gy, a.gz, a.cpml, ctx, inner, clear,
             Region{r.xlo, r.ylo, r.zlo, r.xhi - r.xlo, r.yhi - r.ylo, r.zhi - r.zlo},
             a.out[0], a.out[1], a.out[2], a.out[3], a.out[4], a.out[5]);

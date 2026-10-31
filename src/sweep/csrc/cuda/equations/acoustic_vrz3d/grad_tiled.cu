@@ -31,10 +31,13 @@
 // the register queues everywhere (the L1 variant spills).  Both variants form
 // the same expressions in the same order: the result does not depend on the GPU.
 #include "kernels.cuh"
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 #include "../../../core/check.h"
 #include <algorithm>
 #include <atomic>
 #include <cuda_runtime.h>
+
+#if !defined(SWEEP_HOST_CORE)
 
 namespace {
 
@@ -326,7 +329,7 @@ void launch_tiled(const float* p, const float* lam, const float* ptt, const floa
     if (wx <= 0 || wy <= 0 || wz <= 0) return;
     const int nchunk = (wz + zc - 1) / zc;
     dim3 block(32, TY), grid((wx + 31) / 32, (wy + TY - 1) / TY, nchunk * ctx.B);
-    vrz3d_grad_tiled<Order, TY, MINB, ZL1><<<grid, block>>>(p, lam, ptt, pprev, pnext, vp, z, invz,
+    SWEEP_LAUNCH((vrz3d_grad_tiled<Order, TY, MINB, ZL1>), grid, block, p, lam, ptt, pprev, pnext, vp, z, invz,
                                                        gvp, gz, deepx, deepy, g, ctx, zc, nchunk);
 }
 
@@ -457,10 +460,35 @@ bool launch_acoustic_vrz3d_grad_pack(int order, const float* p, float* deep_x, f
     const long n = 2L * M * ((long)ctx.ny * ctx.nz + (long)ctx.nx * ctx.nz);
     dim3 block(256), grid((unsigned)std::min<long>((n + 255) / 256, 4096), 1, ctx.B);
     switch (order) {
-        case 2: vrz3d_grad_pack_deep<2><<<grid, block>>>(p, deep_x, deep_y, ctx); break;
-        case 4: vrz3d_grad_pack_deep<4><<<grid, block>>>(p, deep_x, deep_y, ctx); break;
-        case 6: vrz3d_grad_pack_deep<6><<<grid, block>>>(p, deep_x, deep_y, ctx); break;
-        case 8: vrz3d_grad_pack_deep<8><<<grid, block>>>(p, deep_x, deep_y, ctx); break;
+        case 2: SWEEP_LAUNCH((vrz3d_grad_pack_deep<2>), grid, block, p, deep_x, deep_y, ctx); break;
+        case 4: SWEEP_LAUNCH((vrz3d_grad_pack_deep<4>), grid, block, p, deep_x, deep_y, ctx); break;
+        case 6: SWEEP_LAUNCH((vrz3d_grad_pack_deep<6>), grid, block, p, deep_x, deep_y, ctx); break;
+        case 8: SWEEP_LAUNCH((vrz3d_grad_pack_deep<8>), grid, block, p, deep_x, deep_y, ctx); break;
     }
     return true;
 }
+
+#else  // SWEEP_HOST_CORE
+
+// The host core has no block-shared memory or barrier (one virtual thread at a
+// time, csrc/host/launch.h), so the tiled kernel is not built there: both
+// launches report "did not run" and every caller keeps the global-memory
+// kernels of kernels.cuh, the CUDA core's own path at the runtime orders
+// (CALCULATE_GRAD_VRZ3D_AUTO; the phased backward builds c/e and takes their
+// divergence).  Same per-cell result in the same operand order.
+bool acoustic_vrz3d_grad_is_tiled(int) { return false; }
+
+bool launch_acoustic_vrz3d_grad_tiled(
+    int, const float*, const float*, const float*, const float*, const float*, const float*,
+    const float*, const float*, float*, float*, const GradParam&, const SolverContext&,
+    const float*, const float*)
+{
+    return false;
+}
+
+bool launch_acoustic_vrz3d_grad_pack(int, const float*, float*, float*, const SolverContext&)
+{
+    return false;
+}
+
+#endif  // SWEEP_HOST_CORE

@@ -294,10 +294,13 @@ def test_boundary_saving_matches_full_with_source_in_restore_strip(eq, order, fs
 # --------------------------------------------------------------------------- #
 # Other restore-kernel variants
 # --------------------------------------------------------------------------- #
-# restore_backward_2d/3d dispatch on the storage: fp32 on gpu/cpu/async-disk ->
-# the compact band kernel, fp32 on synchronous disk -> the full-grid scan kernel,
-# fp16/int8 -> dequantise + scan kernel, bf16 -> its own kernels. Any fix has to
-# agree with every one of them about which cells are "in the strip".
+# restore_backward_2d/3d dispatch on the storage.  2-D: fp32 on gpu/cpu/
+# async-disk -> the compact band kernel, fp32 on synchronous disk -> the
+# full-grid scan kernel, fp16/int8 -> dequantise + scan kernel, bf16 -> its own
+# scan kernel.  3-D: every dtype takes a compact band kernel off synchronous
+# disk (fp32 boundary_kernel3d_compact, bf16 _compact_bf16, fp16/int8
+# dequantise + boundary_kernel3d_compact_owned) and the scan kernels on it.
+# Any fix has to agree with every one of them about which cells are "in the strip".
 #
 # fp32 variants keep the fp32 floor (out-of-strip controls measured identical on
 # gpu/cpu/disk: 2.5e-7..8.3e-7), so they take the same whole-grid bar. The

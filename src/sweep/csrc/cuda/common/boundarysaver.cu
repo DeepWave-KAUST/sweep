@@ -1,8 +1,11 @@
 #include "context.h"
+#include "../launch/launch.h"   // SWEEP_LAUNCH
 #include "boundary/kernels.cuh"
 #include "boundary/strip.cuh"
 #include <cstdint>
 #include <cuda_runtime.h>
+#include <algorithm>
+#include <cmath>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 
@@ -925,6 +928,20 @@ __global__ void boundary_kernel3d_compact_owned(
 // B=256 → ratio = 1024/260 ≈ 3.94×.
 // ====================================================================
 
+// Quant blocks per shot (the launchers' grid is n_shots of them).
+static inline int64_t quant_blocks_per_shot(int64_t cells_per_shot)
+{
+    return (cells_per_shot + BOUNDARY_INT8_BLOCK - 1) / BOUNDARY_INT8_BLOCK;
+}
+
+// The four block-reduction kernels below are the ONLY __shared__ /
+// __syncthreads users in the tree.  The host core (SWEEP_HOST_CORE) has no
+// block-cooperative execution, so it gets the same two-pass algorithm as plain
+// loops (after the #else): max|val| per 256-cell block, then quantize.  Same
+// operands in the same order; the only host/device difference is the
+// division's rounding (--use_fast_math on the device), which is why int8 /
+// scaled-fp16 strips are compared with a tolerance, not bitwise.
+#if !defined(SWEEP_HOST_CORE)
 __global__ __launch_bounds__(BOUNDARY_INT8_BLOCK) void
 quantize_int8_kernel(const float* __restrict__ src,
                      uint8_t* __restrict__ dst,
@@ -985,18 +1002,13 @@ dequantize_int8_kernel(const uint8_t* __restrict__ src,
 // Host-side launchers — one thread block per (shot, block of that
 // shot), n_shots * ceil(cells_per_shot / 256) in all.  Caller passes
 // the stream so the launch joins the propagator's existing schedule.
-static inline int64_t quant_blocks_per_shot(int64_t cells_per_shot)
-{
-    return (cells_per_shot + BOUNDARY_INT8_BLOCK - 1) / BOUNDARY_INT8_BLOCK;
-}
-
 void launch_quantize_int8(const float* src, uint8_t* dst, float* scale,
                           int64_t n_shots, int64_t cells_per_shot,
                           cudaStream_t stream)
 {
     int64_t per_shot = quant_blocks_per_shot(cells_per_shot);
     if (n_shots <= 0 || per_shot <= 0) return;
-    quantize_int8_kernel<<<n_shots * per_shot, BOUNDARY_INT8_BLOCK, 0, stream>>>(
+    SWEEP_LAUNCH_ON(quantize_int8_kernel, n_shots * per_shot, BOUNDARY_INT8_BLOCK, 0, stream,
         src, dst, scale, cells_per_shot, (unsigned int)per_shot);
 }
 
@@ -1006,7 +1018,7 @@ void launch_dequantize_int8(const uint8_t* src, const float* scale,
 {
     int64_t per_shot = quant_blocks_per_shot(cells_per_shot);
     if (n_shots <= 0 || per_shot <= 0) return;
-    dequantize_int8_kernel<<<n_shots * per_shot, BOUNDARY_INT8_BLOCK, 0, stream>>>(
+    SWEEP_LAUNCH_ON(dequantize_int8_kernel, n_shots * per_shot, BOUNDARY_INT8_BLOCK, 0, stream,
         src, scale, dst, cells_per_shot, (unsigned int)per_shot);
 }
 
@@ -1083,7 +1095,7 @@ void launch_quantize_fp16(const float* src, __half* dst, float* scale,
 {
     int64_t per_shot = quant_blocks_per_shot(cells_per_shot);
     if (n_shots <= 0 || per_shot <= 0) return;
-    quantize_fp16_kernel<<<n_shots * per_shot, BOUNDARY_INT8_BLOCK, 0, stream>>>(
+    SWEEP_LAUNCH_ON(quantize_fp16_kernel, n_shots * per_shot, BOUNDARY_INT8_BLOCK, 0, stream,
         src, dst, scale, cells_per_shot, (unsigned int)per_shot);
 }
 
@@ -1093,6 +1105,125 @@ void launch_dequantize_fp16(const __half* src, const float* scale,
 {
     int64_t per_shot = quant_blocks_per_shot(cells_per_shot);
     if (n_shots <= 0 || per_shot <= 0) return;
-    dequantize_fp16_kernel<<<n_shots * per_shot, BOUNDARY_INT8_BLOCK, 0, stream>>>(
+    SWEEP_LAUNCH_ON(dequantize_fp16_kernel, n_shots * per_shot, BOUNDARY_INT8_BLOCK, 0, stream,
         src, scale, dst, cells_per_shot, (unsigned int)per_shot);
 }
+
+#else  // SWEEP_HOST_CORE: the host bodies of the four block-reduction launchers
+
+namespace {
+
+// Cells [base, end) of quant block ``blk``: block (blk % per_shot) of shot
+// (blk / per_shot), the device kernels' blockIdx.x, cut off at its shot's end.
+inline void host_block_range(int64_t blk, int64_t per_shot, int64_t cells_per_shot,
+                             int64_t& base, int64_t& end)
+{
+    const int64_t shot = blk / per_shot;
+    const int64_t local = (blk - shot * per_shot) * BOUNDARY_INT8_BLOCK;
+    base = shot * cells_per_shot + local;
+    end = shot * cells_per_shot + std::min<int64_t>(local + BOUNDARY_INT8_BLOCK, cells_per_shot);
+}
+
+// max|val| over one quant block; 0 for the empty tail beyond the shot's last
+// cell, exactly what the device kernel's padded shared-memory slots contribute.
+inline float host_block_max_abs(const float* src, int64_t base, int64_t end)
+{
+    float max_abs = 0.0f;
+    for (int64_t i = base; i < end; ++i) {
+        const float a = fabsf(src[i]);
+        if (a > max_abs) max_abs = a;
+    }
+    return max_abs;
+}
+
+// ``num / max_abs`` for one block, or 0 when the block reads as all zeros.
+// The device kernels guard with ``max_abs > 0`` -- and run with
+// --use_fast_math, i.e. denormals flushed to zero, so a block whose largest
+// value is denormal compares equal to 0 there and stores zeros.  With IEEE
+// denormals the same guard lets a denormal max through, the reciprocal
+// overflows to inf, and val * inf (0 * inf = NaN) lands in the payload --
+// measured as NaN gradients from elastic fp16 boundary saving, whose velocity
+// faces hold values that small.  These bodies run inside parallel_for's
+// DenormalsAsZero scope, which already makes the comparison the device's;
+// the guard keeps it so on an architecture without that mode.  A non-finite
+// reciprocal is the all-zero block the device sees; its stored scale is 0
+// too, so the dequantized face is exactly 0 on both.
+inline float host_block_reciprocal(float num, float& max_abs)
+{
+    const float inv = (max_abs > 0.0f) ? num / max_abs : 0.0f;
+    if (std::isfinite(inv))
+        return inv;
+    max_abs = 0.0f;
+    return 0.0f;
+}
+
+}  // namespace
+
+void launch_quantize_int8(const float* src, uint8_t* dst, float* scale,
+                          int64_t n_shots, int64_t cells_per_shot,
+                          cudaStream_t)
+{
+    const int64_t per_shot = quant_blocks_per_shot(cells_per_shot);
+    if (n_shots <= 0 || per_shot <= 0) return;
+    ::sweep::host::parallel_for(n_shots * per_shot, [&](int64_t blk) {
+        int64_t base, end;
+        host_block_range(blk, per_shot, cells_per_shot, base, end);
+        float max_abs = host_block_max_abs(src, base, end);
+        const float q_scale = host_block_reciprocal(127.0f, max_abs);
+        scale[blk] = max_abs;
+        for (int64_t i = base; i < end; ++i) {
+            int q = __float2int_rn(src[i] * q_scale) + 128;
+            if (q < 0) q = 0;
+            if (q > 255) q = 255;
+            dst[i] = (uint8_t)q;
+        }
+    });
+}
+
+void launch_dequantize_int8(const uint8_t* src, const float* scale,
+                            float* dst, int64_t n_shots,
+                            int64_t cells_per_shot, cudaStream_t)
+{
+    const int64_t per_shot = quant_blocks_per_shot(cells_per_shot);
+    if (n_shots <= 0 || per_shot <= 0) return;
+    ::sweep::host::parallel_for(n_shots * per_shot, [&](int64_t blk) {
+        int64_t base, end;
+        host_block_range(blk, per_shot, cells_per_shot, base, end);
+        const float s = scale[blk] * (1.0f / 127.0f);
+        for (int64_t i = base; i < end; ++i)
+            dst[i] = ((float)src[i] - 128.0f) * s;
+    });
+}
+
+void launch_quantize_fp16(const float* src, __half* dst, float* scale,
+                          int64_t n_shots, int64_t cells_per_shot,
+                          cudaStream_t)
+{
+    const int64_t per_shot = quant_blocks_per_shot(cells_per_shot);
+    if (n_shots <= 0 || per_shot <= 0) return;
+    ::sweep::host::parallel_for(n_shots * per_shot, [&](int64_t blk) {
+        int64_t base, end;
+        host_block_range(blk, per_shot, cells_per_shot, base, end);
+        float max_abs = host_block_max_abs(src, base, end);
+        const float inv = host_block_reciprocal(1.0f, max_abs);
+        scale[blk] = max_abs;
+        for (int64_t i = base; i < end; ++i)
+            dst[i] = __float2half(src[i] * inv);
+    });
+}
+
+void launch_dequantize_fp16(const __half* src, const float* scale,
+                            float* dst, int64_t n_shots,
+                            int64_t cells_per_shot, cudaStream_t)
+{
+    const int64_t per_shot = quant_blocks_per_shot(cells_per_shot);
+    if (n_shots <= 0 || per_shot <= 0) return;
+    ::sweep::host::parallel_for(n_shots * per_shot, [&](int64_t blk) {
+        int64_t base, end;
+        host_block_range(blk, per_shot, cells_per_shot, base, end);
+        for (int64_t i = base; i < end; ++i)
+            dst[i] = __half2float(src[i]) * scale[blk];
+    });
+}
+
+#endif  // SWEEP_HOST_CORE

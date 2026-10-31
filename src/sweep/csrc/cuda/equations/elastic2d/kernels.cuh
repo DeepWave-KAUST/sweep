@@ -1,5 +1,6 @@
 #pragma once
 #include "../../launch/by_order.cuh"
+#include "../../launch/cell_path.h"
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include "../../operators/staggered.cuh"
@@ -40,35 +41,24 @@
     SWEEP_LAUNCH_BY_ORDER(elastic_velocity_adjoint_apply_by_order, order, grid, block, __VA_ARGS__)
 
 
-// Forward velocity stencil launches with block(32,8)=256 threads.  Baseline
-// ~48 regs / ~53% occupancy on V100 (Volta) — register/occupancy-bound, not
-// spill-bound.  Capping at 256 threads/block with minBlocks=8 forces the
-// compiler to <=32 regs, lifting occupancy to ~90% (a measured forward win,
-// elastic2d 1.19->1.03 vs deepwave on V100).  Math-identical: no effect on
-// the adjoint or gradient.
-template<int Order>
-__global__ void __launch_bounds__(256, 8) elastic_velocity_kernel(
-    ElasticWavefieldPointer wf,
+// One cell of elastic_velocity_kernel: everything after the kernel's guards
+// (launch/cell_path.h).  Interior box: the in_pml test's interior, inside the
+// FS helpers' forward box (common/host_rows.h elastic_fs_box_2d); FS faces
+// as the ELASTIC_FS_Z / ELASTIC_FS_X flags; no optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_velocity_cell(
+    int ix, int iz, int b,
+    const ElasticWavefieldPointer& wf,
     const float* __restrict__ rho,
-
-    SGradParam grad_ctx,
-    ElasticCPMLPointer cpml,
-    SolverContext solver
+    const SGradParam& grad_ctx,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
-
     constexpr bool is_runtime = (Order == -1);
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
-
-    if (ix < halo || ix >= solver.nx - halo ||
-        iz < halo || iz >= solver.nz - halo)
-        return;
 
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
@@ -77,10 +67,10 @@ __global__ void __launch_bounds__(256, 8) elastic_velocity_kernel(
 
     const float* rho_b = rho + b * spatial_size;
 
-    float dsxx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD> (f.sxx, ix, iz, grad_ctx, solver, true);
-    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true, true);
-    float dsxz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true, true);
-    float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.szz, ix, iz, grad_ctx, solver, true);
+    float dsxx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD, Path> (f.sxx, ix, iz, grad_ctx, solver, true);
+    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(f.sxz, ix, iz, grad_ctx, solver, true, true);
+    float dsxz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD, Path>(f.sxz, ix, iz, grad_ctx, solver, true, true);
+    float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path> (f.szz, ix, iz, grad_ctx, solver, true);
 
     float inv_rho = 1.f / rho_b[idx];
 
@@ -92,10 +82,12 @@ __global__ void __launch_bounds__(256, 8) elastic_velocity_kernel(
     // (matches the backward kernels).  With cut_mask == 0 each ``!cut_*``
     // vanishes and this is exactly the per-edge band; with fs_faces == -1 on
     // top of that, the legacy symmetric split, bit-for-bit.
-    bool in_pml = (!solver.cut_x_lo() && ix < solver.padLo(2) + halo) ||
-                  (!solver.cut_x_hi() && ix >= solver.nx - solver.padHi(2) - halo) ||
-                  (!solver.cut_z_lo() && iz < solver.padLo(0) + halo) ||
-                  (!solver.cut_z_hi() && iz >= solver.nz - solver.padHi(0) - halo);
+    bool in_pml = false;
+    if constexpr (!interior_path<Path>)
+        in_pml = (!solver.cut_x_lo() && ix < solver.padLo(2) + halo) ||
+                 (!solver.cut_x_hi() && ix >= solver.nx - solver.padHi(2) - halo) ||
+                 (!solver.cut_z_lo() && iz < solver.padLo(0) + halo) ||
+                 (!solver.cut_z_hi() && iz >= solver.nz - solver.padHi(0) - halo);
 
     if (!in_pml) {
         f.vx[idx] += solver.dt * inv_rho * (dsxx_dx + dsxz_dz);
@@ -145,19 +137,16 @@ __global__ void __launch_bounds__(256, 8) elastic_velocity_kernel(
         (dsxz_dx + dszz_dz);
 }
 
-using elastic_velocity_kernel_fn = void (*)(ElasticWavefieldPointer, const float*,
-    SGradParam, ElasticCPMLPointer, SolverContext);
-SWEEP_BY_ORDER_DECL(elastic_velocity_kernel_fn, elastic_velocity_kernel_by_order);
-
-// Forward stress stencil: same block(32,8)=256, same register/occupancy
-// regime as elastic_velocity_kernel above.  Cap at 256/block, minBlocks=8
-// (<=32 regs) to lift occupancy.  Math-identical (forward-only change).
+// Forward velocity stencil launches with block(32,8)=256 threads.  Baseline
+// ~48 regs / ~53% occupancy on V100 (Volta) — register/occupancy-bound, not
+// spill-bound.  Capping at 256 threads/block with minBlocks=8 forces the
+// compiler to <=32 regs, lifting occupancy to ~90% (a measured forward win,
+// elastic2d 1.19->1.03 vs deepwave on V100).  Math-identical: no effect on
+// the adjoint or gradient.
 template<int Order>
-__global__ void __launch_bounds__(256, 8) elastic_stress_kernel(
+__global__ void __launch_bounds__(256, 8) elastic_velocity_kernel(
     ElasticWavefieldPointer wf,
-    const float* __restrict__ lambda,
-    const float* __restrict__ mu,
-    float* __restrict__ u_this,
+    const float* __restrict__ rho,
 
     SGradParam grad_ctx,
     ElasticCPMLPointer cpml,
@@ -178,49 +167,81 @@ __global__ void __launch_bounds__(256, 8) elastic_stress_kernel(
         iz < halo || iz >= solver.nz - halo)
         return;
 
+    elastic_velocity_cell<Order>(ix, iz, b, wf, rho, grad_ctx, cpml, solver);
+}
+
+using elastic_velocity_kernel_fn = void (*)(ElasticWavefieldPointer, const float*,
+    SGradParam, ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(elastic_velocity_kernel_fn, elastic_velocity_kernel_by_order);
+
+// One cell of elastic_stress_kernel: everything after the kernel's guards
+// (launch/cell_path.h).  Interior box: the in_pml test's interior, inside the
+// FS helpers' forward box (common/host_rows.h elastic_fs_box_2d, which also
+// keeps the surface rows/columns -- the traction BC -- out); FS faces as the
+// ELASTIC_FS_Z / ELASTIC_FS_X flags; optional output: u_this.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_stress_cell(
+    int ix, int iz, int b,
+    const ElasticWavefieldPointer& wf,
+    const float* __restrict__ lambda,
+    const float* __restrict__ mu,
+    float* __restrict__ u_this,
+    const SGradParam& grad_ctx,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver
+)
+{
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
 
     auto f = wf.offset(b, spatial_size);
-    float* u_this_b = u_this ? u_this + b * spatial_size : nullptr;
+    float* u_this_b = optional_output<Path>(u_this) ? u_this + b * spatial_size : nullptr;
 
     const float* lam_b = lambda + b * spatial_size;
     const float* mu_b  = mu     + b * spatial_size;
 
-    float dvx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD> (f.vx, ix, iz, grad_ctx, solver, true, true);
-    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true, true);
-    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.vx, ix, iz, grad_ctx, solver, false);
-    float dvz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD>  (f.vz, ix, iz, grad_ctx, solver, false);
+    float dvx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD, Path> (f.vx, ix, iz, grad_ctx, solver, true, true);
+    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(f.vz, ix, iz, grad_ctx, solver, true, true);
+    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path> (f.vx, ix, iz, grad_ctx, solver, false);
+    float dvz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD, Path>  (f.vz, ix, iz, grad_ctx, solver, false);
 
     float lam = lam_b[idx];
     float mu_ = mu_b[idx];
 
-    // PML / interior split.  Keep each active z free-surface row INSIDE the
-    // in_pml (full-path) zone so the traction BC (σzz=σxz=0, Robertsson σxx)
-    // fires after the PML update.
-    int z_lo = solver.fsLo(0) ? (solver.phys_z0() + 1) : (solver.padLo(0) + halo);
-    int z_hi = solver.fsHi(0) ? elastic_z_bottom_surface_row(solver)
-                              : (solver.nz - solver.padHi(0) - halo);
-    // Same treatment for the x (left/right) free-surface columns: keep the
-    // surface column INSIDE the in_pml (full-path) zone so the x-face traction
-    // BC (σxx=σxz=0, Robertsson σzz) fires.  Bit-identical to the old
-    // ``padLo(2)+halo`` / ``nx-padHi(2)-halo`` bounds when no x face is free.
-    int x_lo = solver.fsLo(2) ? (elastic_x_left_surface_col(solver) + 1)
-                              : (solver.padLo(2) + halo);
-    int x_hi = solver.fsHi(2) ? elastic_x_right_surface_col(solver)
-                              : (solver.nx - solver.padHi(2) - halo);
-    // A DD cut face carries no PML and no free surface, so it drops out of the
-    // test entirely; cut_mask == 0 leaves the per-edge bounds untouched.
-    bool in_pml = (!solver.cut_x_lo() && ix < x_lo) ||
-                  (!solver.cut_x_hi() && ix >= x_hi) ||
-                  (!solver.cut_z_lo() && iz < z_lo) ||
-                  (!solver.cut_z_hi() && iz >= z_hi);
+    bool in_pml = false;
+    if constexpr (!interior_path<Path>) {
+        // PML / interior split.  Keep each active z free-surface row INSIDE the
+        // in_pml (full-path) zone so the traction BC (σzz=σxz=0, Robertsson σxx)
+        // fires after the PML update.
+        int z_lo = solver.fsLo(0) ? (solver.phys_z0() + 1) : (solver.padLo(0) + halo);
+        int z_hi = solver.fsHi(0) ? elastic_z_bottom_surface_row(solver)
+                                  : (solver.nz - solver.padHi(0) - halo);
+        // Same treatment for the x (left/right) free-surface columns: keep the
+        // surface column INSIDE the in_pml (full-path) zone so the x-face traction
+        // BC (σxx=σxz=0, Robertsson σzz) fires.  Bit-identical to the old
+        // ``padLo(2)+halo`` / ``nx-padHi(2)-halo`` bounds when no x face is free.
+        int x_lo = solver.fsLo(2) ? (elastic_x_left_surface_col(solver) + 1)
+                                  : (solver.padLo(2) + halo);
+        int x_hi = solver.fsHi(2) ? elastic_x_right_surface_col(solver)
+                                  : (solver.nx - solver.padHi(2) - halo);
+        // A DD cut face carries no PML and no free surface, so it drops out of the
+        // test entirely; cut_mask == 0 leaves the per-edge bounds untouched.
+        in_pml = (!solver.cut_x_lo() && ix < x_lo) ||
+                 (!solver.cut_x_hi() && ix >= x_hi) ||
+                 (!solver.cut_z_lo() && iz < z_lo) ||
+                 (!solver.cut_z_hi() && iz >= z_hi);
+    }
 
     if (!in_pml) {
         f.sxx[idx] += solver.dt * ((lam + 2.f*mu_) * dvx_dx + lam * dvz_dz);
         f.szz[idx] += solver.dt * ((lam + 2.f*mu_) * dvz_dz + lam * dvx_dx);
         f.sxz[idx] += solver.dt * mu_ * (dvx_dz + dvz_dx);
-        if (u_this_b) {
+        if (optional_output<Path>(u_this_b)) {
             int comp_stride  = solver.B * spatial_size;
             u_this_b[0 * comp_stride + idx] = f.vx[idx];
             u_this_b[1 * comp_stride + idx] = f.vz[idx];
@@ -273,13 +294,13 @@ __global__ void __launch_bounds__(256, 8) elastic_stress_kernel(
     // σzz=σxz=0.  x faces (left/right): Robertsson σzz fix (x<->z swap), then
     // σxx=σxz=0.  Robertsson corrections first, zeroing after, so a z∩x corner
     // ends σxx=σzz=σxz=0 (matches the eager post-step zeroing order).
-    bool is_z_fs = elastic_is_top_free_surface_row(solver, iz);
-    bool is_x_fs = elastic_is_x_free_surface_col(solver, ix);
+    bool is_z_fs = elastic_is_top_free_surface_row<Path>(solver, iz);
+    bool is_x_fs = elastic_is_x_free_surface_col<Path>(solver, ix);
     if (is_z_fs) f.sxx[idx] += -solver.dt * lam * (lam / (lam + 2.f*mu_) * dvx_dx + dvz_dz);
     if (is_x_fs) f.szz[idx] += -solver.dt * lam * (lam / (lam + 2.f*mu_) * dvz_dz + dvx_dx);
     if (is_z_fs) f.szz[idx] = 0.f;                                   // normal stress: on-surface node
     if (is_x_fs) f.sxx[idx] = 0.f;
-    if (elastic_fs_zero_shear(solver, ix, iz)) f.sxz[idx] = 0.f;     // shear: high-side face only
+    if (elastic_fs_zero_shear<Path>(solver, ix, iz)) f.sxz[idx] = 0.f;     // shear: high-side face only
 
     if (u_this_b) {
         int comp_stride  = solver.B * spatial_size;
@@ -287,6 +308,38 @@ __global__ void __launch_bounds__(256, 8) elastic_stress_kernel(
         u_this_b[1 * comp_stride + idx] = f.vz[idx];
     }
 
+}
+
+// Forward stress stencil: same block(32,8)=256, same register/occupancy
+// regime as elastic_velocity_kernel above.  Cap at 256/block, minBlocks=8
+// (<=32 regs) to lift occupancy.  Math-identical (forward-only change).
+template<int Order>
+__global__ void __launch_bounds__(256, 8) elastic_stress_kernel(
+    ElasticWavefieldPointer wf,
+    const float* __restrict__ lambda,
+    const float* __restrict__ mu,
+    float* __restrict__ u_this,
+
+    SGradParam grad_ctx,
+    ElasticCPMLPointer cpml,
+    SolverContext solver
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
+    if (ix < halo || ix >= solver.nx - halo ||
+        iz < halo || iz >= solver.nz - halo)
+        return;
+
+    elastic_stress_cell<Order>(ix, iz, b, wf, lambda, mu, u_this, grad_ctx, cpml, solver);
 }
 
 using elastic_stress_kernel_fn = void (*)(ElasticWavefieldPointer, const float*,
@@ -303,6 +356,50 @@ __global__ void elastic_capture_strips_2d(
     float* __restrict__ fvx, float* __restrict__ fvz,
     int nx, int nz, int x0, int x1, int z0, int z1,
     int wxl, int wxh, int wzl, int wzh);
+
+// One cell of elastic_velocity_kernel_nopml: everything after the kernel's
+// guards (launch/cell_path.h).  Interior box: the guard box inside the FS
+// helpers' forward box (common/host_rows.h elastic_fs_box_2d); FS faces as the
+// ELASTIC_FS_Z / ELASTIC_FS_X flags; optional output: the carriers (fvx_prev
+// decides for both, as the kernel tests).
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_velocity_nopml_cell(
+    int ix, int iz, int b,
+    const ElasticWavefieldPointer& wf,
+    const float* __restrict__ rho,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver,
+    float* __restrict__ fvx_prev,
+    float* __restrict__ fvz_prev
+)
+{
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+
+    // Wavefields
+    auto f = wf.offset(b, spatial_size);
+
+    const float* rho_b = rho + b * spatial_size;
+
+    float dsxx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD, Path> (f.sxx, ix, iz, grad_ctx, solver, true);
+    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(f.sxz, ix, iz, grad_ctx, solver, true, true);
+    float dsxz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD, Path>(f.sxz, ix, iz, grad_ctx, solver, true, true);
+    float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path> (f.szz, ix, iz, grad_ctx, solver, true);
+
+    float inv_rho = 1.f / rho_b[idx];
+
+    if (optional_output<Path>(fvx_prev)) {
+        fvx_prev[b * spatial_size + idx] = f.vx[idx];
+        fvz_prev[b * spatial_size + idx] = f.vz[idx];
+    }
+
+    f.vx[idx] -= solver.dt * inv_rho *
+        (dsxx_dx + dsxz_dz);
+
+    f.vz[idx] -= solver.dt * inv_rho *
+        (dsxz_dx + dszz_dz);
+}
 
 template<int Order>
 __global__ void elastic_velocity_kernel_nopml(
@@ -344,36 +441,56 @@ __global__ void elastic_velocity_kernel_nopml(
     if (ix < x_lo || ix >= solver.nx - x_hi || iz < z_lo || iz >= solver.nz - z_hi)
         return;
 
+    elastic_velocity_nopml_cell<Order>(ix, iz, b, wf, rho, grad_ctx, solver, fvx_prev, fvz_prev);
+}
+
+using elastic_velocity_kernel_nopml_fn = void (*)(ElasticWavefieldPointer, const float*,
+    SGradParam, SolverContext, float*, float*);
+SWEEP_BY_ORDER_DECL(elastic_velocity_kernel_nopml_fn, elastic_velocity_kernel_nopml_by_order);
+
+// One cell of elastic_stress_kernel_nopml: everything after the kernel's
+// guards (launch/cell_path.h).  Interior box: the guard box inside the FS
+// helpers' forward box (common/host_rows.h elastic_fs_box_2d); FS faces as the
+// ELASTIC_FS_Z / ELASTIC_FS_X flags; no optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_stress_nopml_cell(
+    int ix, int iz, int b,
+    const ElasticWavefieldPointer& wf,
+    const float* __restrict__ lambda,
+    const float* __restrict__ mu,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
 
     // Wavefields
     auto f = wf.offset(b, spatial_size);
 
-    const float* rho_b = rho + b * spatial_size;
+    const float* lam_b = lambda + b * spatial_size;
+    const float* mu_b  = mu     + b * spatial_size;
 
-    float dsxx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD> (f.sxx, ix, iz, grad_ctx, solver, true);
-    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true, true);
-    float dsxz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true, true);
-    float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.szz, ix, iz, grad_ctx, solver, true);
+    float dvx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD, Path> (f.vx, ix, iz, grad_ctx, solver, true, true);
+    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(f.vz, ix, iz, grad_ctx, solver, true, true);
+    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path> (f.vx, ix, iz, grad_ctx, solver, false);
+    float dvz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD, Path>  (f.vz, ix, iz, grad_ctx, solver, false);
 
-    float inv_rho = 1.f / rho_b[idx];
+    float lam = lam_b[idx];
+    float mu_ = mu_b[idx];
 
-    if (fvx_prev != nullptr) {
-        fvx_prev[b * spatial_size + idx] = f.vx[idx];
-        fvz_prev[b * spatial_size + idx] = f.vz[idx];
-    }
+    f.sxx[idx] -= solver.dt *
+        ((lam + 2.f*mu_) * dvx_dx +
+         lam * dvz_dz);
 
-    f.vx[idx] -= solver.dt * inv_rho *
-        (dsxx_dx + dsxz_dz);
+    f.szz[idx] -= solver.dt *
+        ((lam + 2.f*mu_) * dvz_dz +
+         lam * dvx_dx);
 
-    f.vz[idx] -= solver.dt * inv_rho *
-        (dsxz_dx + dszz_dz);
+    f.sxz[idx] -= solver.dt *
+        mu_ * (dvx_dz + dvz_dx);
 }
-
-using elastic_velocity_kernel_nopml_fn = void (*)(ElasticWavefieldPointer, const float*,
-    SGradParam, SolverContext, float*, float*);
-SWEEP_BY_ORDER_DECL(elastic_velocity_kernel_nopml_fn, elastic_velocity_kernel_nopml_by_order);
 
 template<int Order>
 __global__ void elastic_stress_kernel_nopml(
@@ -413,80 +530,46 @@ __global__ void elastic_stress_kernel_nopml(
     if (ix < x_lo || ix >= solver.nx - x_hi || iz < z_lo || iz >= solver.nz - z_hi)
         return;
 
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-
-    // Wavefields
-    auto f = wf.offset(b, spatial_size);
-
-    const float* lam_b = lambda + b * spatial_size;
-    const float* mu_b  = mu     + b * spatial_size;
-
-    float dvx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD> (f.vx, ix, iz, grad_ctx, solver, true, true);
-    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true, true);
-    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.vx, ix, iz, grad_ctx, solver, false);
-    float dvz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD>  (f.vz, ix, iz, grad_ctx, solver, false);
-
-    float lam = lam_b[idx];
-    float mu_ = mu_b[idx];
-
-    f.sxx[idx] -= solver.dt *
-        ((lam + 2.f*mu_) * dvx_dx +
-         lam * dvz_dz);
-
-    f.szz[idx] -= solver.dt *
-        ((lam + 2.f*mu_) * dvz_dz +
-         lam * dvx_dx);
-
-    f.sxz[idx] -= solver.dt *
-        mu_ * (dvx_dz + dvz_dx);
+    elastic_stress_nopml_cell<Order>(ix, iz, b, wf, lambda, mu, grad_ctx, solver);
 }
 
 using elastic_stress_kernel_nopml_fn = void (*)(ElasticWavefieldPointer, const float*,
     const float*, SGradParam, SolverContext);
 SWEEP_BY_ORDER_DECL(elastic_stress_kernel_nopml_fn, elastic_stress_kernel_nopml_by_order);
 
-template<int Order>
-__global__ void elastic_stress_adjoint_prepare(
-    ElasticWavefieldPointer wf,
+// One cell of elastic_stress_adjoint_prepare: everything after the kernel's
+// bounds guard (launch/cell_path.h).  Interior box: the in_pml test's
+// interior, inside the FS helpers' forward box (common/host_rows.h
+// elastic_fs_box_2d: no surface row/column, so no traction transpose, and
+// the imaging stencils mirror nothing) and, with imaging, inside the physical
+// box; FS faces as the ELASTIC_FS_Z / ELASTIC_FS_X flags; optional output:
+// the fused imaging (grad_vp_out decides for all ten pointers).
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_stress_adjoint_prepare_cell(
+    int ix, int iz, int b,
+    const ElasticWavefieldPointer& wf,
     const float* __restrict__ lambda,
     const float* __restrict__ mu,
-    ElasticCPMLPointer cpml,
-    SolverContext solver,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver,
     float* __restrict__ qxx,
     float* __restrict__ qzz,
     float* __restrict__ qxz,
     float* __restrict__ qzx,
-    // grad_ctx is always forwarded (used only when imaging pointers below are
-    // non-null); harmless for bs/ckpt callers that pass null imaging args.
-    SGradParam grad_ctx,
-    // FUSED vp/vs/rho-gradient imaging (full-mode only).  When non-null, this
-    // kernel folds in the per-step gradient correlation that the standalone
-    // calculate_grad_elastic_nobs would otherwise compute in a separate
-    // full-grid pass.  At this kernel's entry the adjoint stress AND velocity
-    // are the un-mutated post-source adjoint[it] fields (velocity is only
-    // touched later by elastic_stress_adjoint_apply), so the operands match
-    // calculate_grad_elastic_nobs exactly.  No lag: in the full backward loop
-    // calculate_grad(it) ran immediately before apply_adjoint_step(it), and
-    // both consume the same post-source adjoint[it].  All-null (bs/ckpt).
-    const float* __restrict__ grad_fvx      = nullptr,  // u_forward[it]   vx
-    const float* __restrict__ grad_fvz      = nullptr,  // u_forward[it]   vz
-    const float* __restrict__ grad_fvx_prev = nullptr,  // u_forward[it+1] vx
-    const float* __restrict__ grad_fvz_prev = nullptr,  // u_forward[it+1] vz
-    const float* __restrict__ grad_vp_model = nullptr,  // vp    (B,nz,nx)
-    const float* __restrict__ grad_vs_model = nullptr,  // vs    (B,nz,nx)
-    const float* __restrict__ grad_rho_model= nullptr,  // rho   (B,nz,nx)
-    float* __restrict__ grad_vp_out         = nullptr,  // grad_vp accumulator
-    float* __restrict__ grad_vs_out         = nullptr,  // grad_vs accumulator
-    float* __restrict__ grad_rho_out        = nullptr   // grad_rho accumulator
+    const SGradParam& grad_ctx,
+    const float* __restrict__ grad_fvx,         // fused imaging: see the kernel
+    const float* __restrict__ grad_fvz,
+    const float* __restrict__ grad_fvx_prev,
+    const float* __restrict__ grad_fvz_prev,
+    const float* __restrict__ grad_vp_model,
+    const float* __restrict__ grad_vs_model,
+    const float* __restrict__ grad_rho_model,
+    float* __restrict__ grad_vp_out,
+    float* __restrict__ grad_vs_out,
+    float* __restrict__ grad_rho_out
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
-
     constexpr bool is_runtime = (Order == -1);
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
@@ -506,14 +589,14 @@ __global__ void elastic_stress_adjoint_prepare(
     float lam = lam_b[idx];
     float mu_ = mu_b[idx];
 
-    bool is_z_fs = elastic_is_top_free_surface_row(solver, iz);
-    bool is_x_fs = elastic_is_x_free_surface_col(solver, ix);
+    bool is_z_fs = elastic_is_top_free_surface_row<Path>(solver, iz);
+    bool is_x_fs = elastic_is_x_free_surface_col<Path>(solver, ix);
     float bar_sxx = f.sxx[idx];
     float bar_szz = f.szz[idx];
     float bar_sxz = f.sxz[idx];
     if (is_z_fs) { bar_szz = 0.f; f.szz[idx] = 0.f; }
     if (is_x_fs) { bar_sxx = 0.f; f.sxx[idx] = 0.f; }
-    if (elastic_fs_zero_shear(solver, ix, iz)) { bar_sxz = 0.f; f.sxz[idx] = 0.f; }  // shear: high-side only
+    if (elastic_fs_zero_shear<Path>(solver, ix, iz)) { bar_sxz = 0.f; f.sxz[idx] = 0.f; }  // shear: high-side only
 
     // --- FUSED gradient imaging (full-mode only) -----------------------------
     // Equivalent to a calculate_grad_elastic_nobs launch for this reverse step.
@@ -522,9 +605,14 @@ __global__ void elastic_stress_adjoint_prepare(
     // no gradient there).  bar_sxx/bar_szz/bar_sxz above already equal
     // calculate_grad's a.sxx[idx] / bar_szz / bar_sxz (same FS-row zeroing), and
     // f.vx[idx]/f.vz[idx] are the un-mutated post-source adjoint velocities.
-    if (grad_vp_out != nullptr &&
-        ix >= solver.phys_x0() && ix < solver.phys_x1() &&
-        iz >= solver.phys_z0() && iz < solver.phys_z1()) {   // physical box only
+    bool image;
+    if constexpr (interior_path<Path>)   // the box is inside the physical box
+        image = optional_output<Path>(grad_vp_out);
+    else
+        image = grad_vp_out != nullptr &&
+            ix >= solver.phys_x0() && ix < solver.phys_x1() &&
+            iz >= solver.phys_z0() && iz < solver.phys_z1();   // physical box only
+    if (image) {
         const float* fvx_b      = grad_fvx      + b * spatial_size;
         const float* fvz_b      = grad_fvz      + b * spatial_size;
         const float* fvx_prev_b = grad_fvx_prev + b * spatial_size;
@@ -536,10 +624,10 @@ __global__ void elastic_stress_adjoint_prepare(
         float* grad_vs_b        = grad_vs_out   + b * spatial_size;
         float* grad_rho_b       = grad_rho_out  + b * spatial_size;
 
-        float fvx_x = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD>(fvx_b, ix, iz, grad_ctx, solver, true, true);
-        float fvz_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(fvz_b, ix, iz, grad_ctx, solver, true, true);
-        float fvx_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (fvx_b, ix, iz, grad_ctx, solver, false);
-        float fvz_x = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD>(fvz_b, ix, iz, grad_ctx, solver, false);
+        float fvx_x = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD, Path>(fvx_b, ix, iz, grad_ctx, solver, true, true);
+        float fvz_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(fvz_b, ix, iz, grad_ctx, solver, true, true);
+        float fvx_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path> (fvx_b, ix, iz, grad_ctx, solver, false);
+        float fvz_x = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD, Path>(fvz_b, ix, iz, grad_ctx, solver, false);
 
         float grad_lambda, grad_mu;
         if (is_z_fs && is_x_fs) {
@@ -610,10 +698,12 @@ __global__ void elastic_stress_adjoint_prepare(
     // identity but not bitwise identical — q at cut-side halo cells feeds
     // owned cells through the apply stencil).  cut_mask == 0 leaves the
     // per-edge band untouched.
-    bool in_pml = (!solver.cut_x_lo() && ix < solver.padLo(2) + halo) ||
-                  (!solver.cut_x_hi() && ix >= solver.nx - solver.padHi(2) - halo) ||
-                  (!solver.cut_z_lo() && iz < solver.padLo(0) + halo) ||
-                  (!solver.cut_z_hi() && iz >= solver.nz - solver.padHi(0) - halo);
+    bool in_pml = false;
+    if constexpr (!interior_path<Path>)
+        in_pml = (!solver.cut_x_lo() && ix < solver.padLo(2) + halo) ||
+                 (!solver.cut_x_hi() && ix >= solver.nx - solver.padHi(2) - halo) ||
+                 (!solver.cut_z_lo() && iz < solver.padLo(0) + halo) ||
+                 (!solver.cut_z_hi() && iz >= solver.nz - solver.padHi(0) - halo);
     if (!in_pml) {
         qxx_b[idx] = bar_dvx_dx;
         qzz_b[idx] = bar_dvz_dz;
@@ -657,11 +747,93 @@ __global__ void elastic_stress_adjoint_prepare(
     }
 }
 
+
+template<int Order>
+__global__ void elastic_stress_adjoint_prepare(
+    ElasticWavefieldPointer wf,
+    const float* __restrict__ lambda,
+    const float* __restrict__ mu,
+    ElasticCPMLPointer cpml,
+    SolverContext solver,
+    float* __restrict__ qxx,
+    float* __restrict__ qzz,
+    float* __restrict__ qxz,
+    float* __restrict__ qzx,
+    // grad_ctx is always forwarded (used only when imaging pointers below are
+    // non-null); harmless for bs/ckpt callers that pass null imaging args.
+    SGradParam grad_ctx,
+    // FUSED vp/vs/rho-gradient imaging (full-mode only).  When non-null, this
+    // kernel folds in the per-step gradient correlation that the standalone
+    // calculate_grad_elastic_nobs would otherwise compute in a separate
+    // full-grid pass.  At this kernel's entry the adjoint stress AND velocity
+    // are the un-mutated post-source adjoint[it] fields (velocity is only
+    // touched later by elastic_stress_adjoint_apply), so the operands match
+    // calculate_grad_elastic_nobs exactly.  No lag: in the full backward loop
+    // calculate_grad(it) ran immediately before apply_adjoint_step(it), and
+    // both consume the same post-source adjoint[it].  All-null (bs/ckpt).
+    const float* __restrict__ grad_fvx      = nullptr,  // u_forward[it]   vx
+    const float* __restrict__ grad_fvz      = nullptr,  // u_forward[it]   vz
+    const float* __restrict__ grad_fvx_prev = nullptr,  // u_forward[it+1] vx
+    const float* __restrict__ grad_fvz_prev = nullptr,  // u_forward[it+1] vz
+    const float* __restrict__ grad_vp_model = nullptr,  // vp    (B,nz,nx)
+    const float* __restrict__ grad_vs_model = nullptr,  // vs    (B,nz,nx)
+    const float* __restrict__ grad_rho_model= nullptr,  // rho   (B,nz,nx)
+    float* __restrict__ grad_vp_out         = nullptr,  // grad_vp accumulator
+    float* __restrict__ grad_vs_out         = nullptr,  // grad_vs accumulator
+    float* __restrict__ grad_rho_out        = nullptr   // grad_rho accumulator
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    elastic_stress_adjoint_prepare_cell<Order>(ix, iz, b, wf, lambda, mu, cpml, solver, qxx, qzz,
+        qxz, qzx, grad_ctx, grad_fvx, grad_fvz, grad_fvx_prev, grad_fvz_prev, grad_vp_model,
+        grad_vs_model, grad_rho_model, grad_vp_out, grad_vs_out, grad_rho_out);
+}
+
 using elastic_stress_adjoint_prepare_fn = void (*)(ElasticWavefieldPointer,
     const float*, const float*, ElasticCPMLPointer, SolverContext, float*, float*,
     float*, float*, SGradParam, const float*, const float*, const float*, const float*,
     const float*, const float*, const float*, float*, float*, float*);
 SWEEP_BY_ORDER_DECL(elastic_stress_adjoint_prepare_fn, elastic_stress_adjoint_prepare_by_order);
+
+// One cell of elastic_stress_adjoint_apply: everything after the kernel's
+// guards (launch/cell_path.h).  Interior box: the halo box inside the FS
+// adjoint helpers' box (common/host_rows.h elastic_fs_box_2d, adjoint); FS
+// faces as the ELASTIC_FS_Z / ELASTIC_FS_X flags; no optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_stress_adjoint_apply_cell(
+    int ix, int iz, int b,
+    const ElasticWavefieldPointer& wf,
+    const float* __restrict__ qxx,
+    const float* __restrict__ qzz,
+    const float* __restrict__ qxz,
+    const float* __restrict__ qzx,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    int spatial_size = solver.nx * solver.nz;
+    auto f = wf.offset(b, spatial_size);
+
+    const float* qxx_b = qxx + b * spatial_size;
+    const float* qzz_b = qzz + b * spatial_size;
+    const float* qxz_b = qxz + b * spatial_size;
+    const float* qzx_b = qzx + b * spatial_size;
+
+    float dqxx_dx = elastic_fs_adjoint_sgradient_x_2d<Order, DIFF_BACKWARD, Path>(qxx_b, ix, iz, grad_ctx, solver, true, true);
+    float dqxz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD, Path> (qxz_b, ix, iz, grad_ctx, solver, false);
+    float dqzx_dx = elastic_fs_adjoint_sgradient_x_2d<Order, DIFF_FORWARD, Path>(qzx_b, ix, iz, grad_ctx, solver, false);
+    float dqzz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(qzz_b, ix, iz, grad_ctx, solver, true, true);
+
+    int idx = iz * solver.nx + ix;
+    f.vx[idx] += dqxx_dx + dqxz_dz;
+    f.vz[idx] += dqzx_dx + dqzz_dz;
+}
 
 template<int Order>
 __global__ void elastic_stress_adjoint_apply(
@@ -688,46 +860,30 @@ __global__ void elastic_stress_adjoint_apply(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.nz;
-    auto f = wf.offset(b, spatial_size);
-
-    const float* qxx_b = qxx + b * spatial_size;
-    const float* qzz_b = qzz + b * spatial_size;
-    const float* qxz_b = qxz + b * spatial_size;
-    const float* qzx_b = qzx + b * spatial_size;
-
-    float dqxx_dx = elastic_fs_adjoint_sgradient_x_2d<Order, DIFF_BACKWARD>(qxx_b, ix, iz, grad_ctx, solver, true, true);
-    float dqxz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD> (qxz_b, ix, iz, grad_ctx, solver, false);
-    float dqzx_dx = elastic_fs_adjoint_sgradient_x_2d<Order, DIFF_FORWARD>(qzx_b, ix, iz, grad_ctx, solver, false);
-    float dqzz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD>(qzz_b, ix, iz, grad_ctx, solver, true, true);
-
-    int idx = iz * solver.nx + ix;
-    f.vx[idx] += dqxx_dx + dqxz_dz;
-    f.vz[idx] += dqzx_dx + dqzz_dz;
+    elastic_stress_adjoint_apply_cell<Order>(ix, iz, b, wf, qxx, qzz, qxz, qzx, grad_ctx, solver);
 }
 
 using elastic_stress_adjoint_apply_fn = void (*)(ElasticWavefieldPointer, const float*,
     const float*, const float*, const float*, SGradParam, SolverContext);
 SWEEP_BY_ORDER_DECL(elastic_stress_adjoint_apply_fn, elastic_stress_adjoint_apply_by_order);
 
-template<int Order>
-__global__ void elastic_velocity_adjoint_prepare(
-    ElasticWavefieldPointer wf,
+// One cell of elastic_velocity_adjoint_prepare: everything after the
+// kernel's bounds guard (launch/cell_path.h).  Interior box: the in_pml
+// test's interior (no free-surface logic here); no optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_velocity_adjoint_prepare_cell(
+    int ix, int iz, int b,
+    const ElasticWavefieldPointer& wf,
     const float* __restrict__ rho,
-    ElasticCPMLPointer cpml,
-    SolverContext solver,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver,
     float* __restrict__ pxx,
     float* __restrict__ pzz,
     float* __restrict__ pxz,
     float* __restrict__ pzx
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
-
     constexpr bool is_runtime = (Order == -1);
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
@@ -754,10 +910,12 @@ __global__ void elastic_velocity_adjoint_prepare(
     // PML band, m_s* aux fields stay 0, so the four p* outputs collapse to
     // the bar_ds*_d* values and the four m_s* writes become 0 -> 0.
     // DD cut faces take the interior branch (see stress prepare above).
-    bool in_pml = (!solver.cut_x_lo() && ix < solver.padLo(2) + halo) ||
-                  (!solver.cut_x_hi() && ix >= solver.nx - solver.padHi(2) - halo) ||
-                  (!solver.cut_z_lo() && iz < solver.padLo(0) + halo) ||
-                  (!solver.cut_z_hi() && iz >= solver.nz - solver.padHi(0) - halo);
+    bool in_pml = false;
+    if constexpr (!interior_path<Path>)
+        in_pml = (!solver.cut_x_lo() && ix < solver.padLo(2) + halo) ||
+                 (!solver.cut_x_hi() && ix >= solver.nx - solver.padHi(2) - halo) ||
+                 (!solver.cut_z_lo() && iz < solver.padLo(0) + halo) ||
+                 (!solver.cut_z_hi() && iz >= solver.nz - solver.padHi(0) - halo);
     if (!in_pml) {
         pxx_b[idx] = bar_dsxx_dx;
         pxz_b[idx] = bar_dsxz_dz;
@@ -799,9 +957,66 @@ __global__ void elastic_velocity_adjoint_prepare(
     }
 }
 
+template<int Order>
+__global__ void elastic_velocity_adjoint_prepare(
+    ElasticWavefieldPointer wf,
+    const float* __restrict__ rho,
+    ElasticCPMLPointer cpml,
+    SolverContext solver,
+    float* __restrict__ pxx,
+    float* __restrict__ pzz,
+    float* __restrict__ pxz,
+    float* __restrict__ pzx
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    elastic_velocity_adjoint_prepare_cell<Order>(ix, iz, b, wf, rho, cpml, solver, pxx, pzz, pxz, pzx);
+}
+
 using elastic_velocity_adjoint_prepare_fn = void (*)(ElasticWavefieldPointer,
     const float*, ElasticCPMLPointer, SolverContext, float*, float*, float*, float*);
 SWEEP_BY_ORDER_DECL(elastic_velocity_adjoint_prepare_fn, elastic_velocity_adjoint_prepare_by_order);
+
+// One cell of elastic_velocity_adjoint_apply: everything after the kernel's
+// guards (launch/cell_path.h).  Interior box: the halo box inside the FS
+// adjoint helpers' box (common/host_rows.h elastic_fs_box_2d, adjoint); FS
+// faces as the ELASTIC_FS_Z / ELASTIC_FS_X flags; no optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void elastic_velocity_adjoint_apply_cell(
+    int ix, int iz, int b,
+    const ElasticWavefieldPointer& wf,
+    const float* __restrict__ pxx,
+    const float* __restrict__ pzz,
+    const float* __restrict__ pxz,
+    const float* __restrict__ pzx,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    int spatial_size = solver.nx * solver.nz;
+    auto f = wf.offset(b, spatial_size);
+
+    const float* pxx_b = pxx + b * spatial_size;
+    const float* pzz_b = pzz + b * spatial_size;
+    const float* pxz_b = pxz + b * spatial_size;
+    const float* pzx_b = pzx + b * spatial_size;
+
+    float dpxx_dx = elastic_fs_adjoint_sgradient_x_2d<Order, DIFF_FORWARD, Path>(pxx_b, ix, iz, grad_ctx, solver, true);
+    float dpzz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD, Path> (pzz_b, ix, iz, grad_ctx, solver, true);
+    float dpxz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(pxz_b, ix, iz, grad_ctx, solver, true, true);
+    float dpzx_dx = elastic_fs_adjoint_sgradient_x_2d<Order, DIFF_BACKWARD, Path>(pzx_b, ix, iz, grad_ctx, solver, true, true);
+
+    int idx = iz * solver.nx + ix;
+    f.sxx[idx] += dpxx_dx;
+    f.szz[idx] += dpzz_dz;
+    f.sxz[idx] += dpxz_dz + dpzx_dx;
+}
 
 template<int Order>
 __global__ void elastic_velocity_adjoint_apply(
@@ -828,28 +1043,89 @@ __global__ void elastic_velocity_adjoint_apply(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.nz;
-    auto f = wf.offset(b, spatial_size);
-
-    const float* pxx_b = pxx + b * spatial_size;
-    const float* pzz_b = pzz + b * spatial_size;
-    const float* pxz_b = pxz + b * spatial_size;
-    const float* pzx_b = pzx + b * spatial_size;
-
-    float dpxx_dx = elastic_fs_adjoint_sgradient_x_2d<Order, DIFF_FORWARD>(pxx_b, ix, iz, grad_ctx, solver, true);
-    float dpzz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD> (pzz_b, ix, iz, grad_ctx, solver, true);
-    float dpxz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD>(pxz_b, ix, iz, grad_ctx, solver, true, true);
-    float dpzx_dx = elastic_fs_adjoint_sgradient_x_2d<Order, DIFF_BACKWARD>(pzx_b, ix, iz, grad_ctx, solver, true, true);
-
-    int idx = iz * solver.nx + ix;
-    f.sxx[idx] += dpxx_dx;
-    f.szz[idx] += dpzz_dz;
-    f.sxz[idx] += dpxz_dz + dpzx_dx;
+    elastic_velocity_adjoint_apply_cell<Order>(ix, iz, b, wf, pxx, pzz, pxz, pzx, grad_ctx, solver);
 }
 
 using elastic_velocity_adjoint_apply_fn = void (*)(ElasticWavefieldPointer,
     const float*, const float*, const float*, const float*, SGradParam, SolverContext);
 SWEEP_BY_ORDER_DECL(elastic_velocity_adjoint_apply_fn, elastic_velocity_adjoint_apply_by_order);
+
+
+// One cell of calculate_grad_elastic_bs: everything after the kernel's guards
+// (launch/cell_path.h).  Interior box: the physical box inside the FS
+// helpers' forward box (common/host_rows.h elastic_fs_box_2d); FS faces as the
+// ELASTIC_FS_Z / ELASTIC_FS_X flags; no optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void calculate_grad_elastic_bs_cell(
+    int ix, int iz, int b,
+    const ElasticWavefieldPointer& forward,
+    const ElasticWavefieldPointer& adjoint,
+    const float* __restrict__ fvx_prev,
+    const float* __restrict__ fvz_prev,
+    const float* __restrict__ vp,
+    const float* __restrict__ vs,
+    const float* __restrict__ rho,
+    float* __restrict__ grad_vp,
+    float* __restrict__ grad_vs,
+    float* __restrict__ grad_rho,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+
+    const float* fvx_prev_b = fvx_prev + b * spatial_size;
+    const float* fvz_prev_b = fvz_prev + b * spatial_size;
+
+    auto f = forward.offset(b, spatial_size);
+    auto a = adjoint.offset(b, spatial_size);
+
+    const float* vp_b = vp + b * spatial_size;
+    const float* vs_b = vs + b * spatial_size;
+    const float* rho_b = rho + b * spatial_size;
+
+    float* gvp = grad_vp + b * spatial_size;
+    float* gvs = grad_vs + b * spatial_size;
+    float* grho = grad_rho + b * spatial_size;
+
+    float fvx_x = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD, Path>(f.vx, ix, iz, grad_ctx, solver, true, true);
+    float fvz_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(f.vz, ix, iz, grad_ctx, solver, true, true);
+    float fvx_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path> (f.vx, ix, iz, grad_ctx, solver, false);
+    float fvz_x = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD, Path>(f.vz, ix, iz, grad_ctx, solver, false);
+
+    bool is_z_fs = elastic_is_top_free_surface_row<Path>(solver, iz);
+    bool is_x_fs = elastic_is_x_free_surface_col<Path>(solver, ix);
+    float bar_sxx = is_x_fs ? 0.f : a.sxx[idx];               // x face zeroes sxx
+    float bar_szz = is_z_fs ? 0.f : a.szz[idx];               // z face zeroes szz
+    float bar_sxz = elastic_fs_zero_shear<Path>(solver, ix, iz) ? 0.f : a.sxz[idx];  // shear: high-side FS only
+    float grad_lambda, grad_mu;
+    if (is_z_fs && is_x_fs) {
+        grad_lambda = 0.f; grad_mu = 0.f;   // corner: sxx=szz=0 (shear via bar_sxz below)
+    } else if (is_z_fs || is_x_fs) {
+        // Robertsson material derivative: z face bar_sxx*dvx_dx, x face bar_szz*dvz_dz.
+        float vp2 = vp_b[idx] * vp_b[idx];
+        float vs2 = vs_b[idx] * vs_b[idx];
+        float vp4 = vp2 * vp2;
+        float a = is_z_fs ? (bar_sxx * fvx_x) : (bar_szz * fvz_z);
+        grad_lambda = a * 4.f * vs2 * vs2 / vp4;
+        grad_mu     = a * 4.f * (vp4 - 2.f * vp2 * vs2 + 2.f * vs2 * vs2) / vp4;
+    } else {
+        grad_lambda = (bar_sxx + bar_szz) * (fvx_x + fvz_z);
+        grad_mu = 2*(bar_sxx * fvx_x + bar_szz * fvz_z);
+    }
+    grad_mu += bar_sxz * (fvx_z + fvz_x);   // shear: 0 on high-side FS, live on low-side FS + interior
+
+    gvp[idx] +=   -2*rho_b[idx]*vp_b[idx]*grad_lambda* solver.dt;
+    gvs[idx] += -(-4*rho_b[idx]*vs_b[idx]*grad_lambda +
+                   2*rho_b[idx]*vs_b[idx]*grad_mu)* solver.dt;
+
+    grho[idx] += (a.vx[idx] * (f.vx[idx]-fvx_prev_b[idx]) + 
+                  a.vz[idx] * (f.vz[idx]-fvz_prev_b[idx])) / rho_b[idx];
+    grho[idx] -= grad_lambda * (vp_b[idx]*vp_b[idx] - 2*vs_b[idx]*vs_b[idx])* solver.dt +
+                 grad_mu     * (vs_b[idx]*vs_b[idx]) * solver.dt;
+}
 
 
 template<int Order>
@@ -891,33 +1167,66 @@ __global__ void calculate_grad_elastic_bs(
         iz < solver.phys_z0() || iz >= solver.phys_z1())
         return;
 
+    calculate_grad_elastic_bs_cell<Order>(ix, iz, b, forward, adjoint, fvx_prev, fvz_prev, vp, vs, rho,
+                                          grad_vp, grad_vs, grad_rho, grad_ctx, solver);
+}
+
+using calculate_grad_elastic_bs_fn = void (*)(ElasticWavefieldPointer,
+    ElasticWavefieldPointer, const float*, const float*, const float*, const float*,
+    const float*, float*, float*, float*, SGradParam, SolverContext);
+SWEEP_BY_ORDER_DECL(calculate_grad_elastic_bs_fn, calculate_grad_elastic_bs_by_order);
+
+// One cell of calculate_grad_elastic_nobs: everything after the kernel's
+// guards (launch/cell_path.h).  Interior box: the physical box inside the FS
+// helpers' forward box (common/host_rows.h elastic_fs_box_2d); FS faces as the
+// ELASTIC_FS_Z / ELASTIC_FS_X flags; no optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void calculate_grad_elastic_nobs_cell(
+    int ix, int iz, int b,
+    const ElasticWavefieldPointer& adjoint,
+    const float* __restrict__ fvx,
+    const float* __restrict__ fvz,
+    const float* __restrict__ fvx_prev,
+    const float* __restrict__ fvz_prev,
+    const float* __restrict__ vp,
+    const float* __restrict__ vs,
+    const float* __restrict__ rho,
+    float* __restrict__ grad_vp,
+    float* __restrict__ grad_vs,
+    float* __restrict__ grad_rho,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
 
+    const float* fvx_b = fvx + b * spatial_size;
+    const float* fvz_b = fvz + b * spatial_size;
     const float* fvx_prev_b = fvx_prev + b * spatial_size;
     const float* fvz_prev_b = fvz_prev + b * spatial_size;
 
-    auto f = forward.offset(b, spatial_size);
+    float*       grad_vp_b       = grad_vp       + b * spatial_size;
+    float*       grad_vs_b       = grad_vs       + b * spatial_size;
+    float*       grad_rho_b      = grad_rho      + b * spatial_size;
+
+    const float* vp_b         = vp         + b * spatial_size;
+    const float* vs_b         = vs         + b * spatial_size;
+    const float* rho_b        = rho        + b * spatial_size;
+
     auto a = adjoint.offset(b, spatial_size);
 
-    const float* vp_b = vp + b * spatial_size;
-    const float* vs_b = vs + b * spatial_size;
-    const float* rho_b = rho + b * spatial_size;
+    float fvx_x = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD, Path>(fvx_b, ix, iz, grad_ctx, solver, true, true);
+    float fvz_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(fvz_b, ix, iz, grad_ctx, solver, true, true);
+    float fvx_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path> (fvx_b, ix, iz, grad_ctx, solver, false);
+    float fvz_x = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD, Path>(fvz_b, ix, iz, grad_ctx, solver, false);
 
-    float* gvp = grad_vp + b * spatial_size;
-    float* gvs = grad_vs + b * spatial_size;
-    float* grho = grad_rho + b * spatial_size;
-
-    float fvx_x = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD>(f.vx, ix, iz, grad_ctx, solver, true, true);
-    float fvz_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true, true);
-    float fvx_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.vx, ix, iz, grad_ctx, solver, false);
-    float fvz_x = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD>(f.vz, ix, iz, grad_ctx, solver, false);
-
-    bool is_z_fs = elastic_is_top_free_surface_row(solver, iz);
-    bool is_x_fs = elastic_is_x_free_surface_col(solver, ix);
-    float bar_sxx = is_x_fs ? 0.f : a.sxx[idx];               // x face zeroes sxx
-    float bar_szz = is_z_fs ? 0.f : a.szz[idx];               // z face zeroes szz
-    float bar_sxz = elastic_fs_zero_shear(solver, ix, iz) ? 0.f : a.sxz[idx];  // shear: high-side FS only
+    bool is_z_fs = elastic_is_top_free_surface_row<Path>(solver, iz);
+    bool is_x_fs = elastic_is_x_free_surface_col<Path>(solver, ix);
+    float bar_sxx = is_x_fs ? 0.f : a.sxx[idx];
+    float bar_szz = is_z_fs ? 0.f : a.szz[idx];
+    float bar_sxz = elastic_fs_zero_shear<Path>(solver, ix, iz) ? 0.f : a.sxz[idx];  // shear: high-side FS only
     float grad_lambda, grad_mu;
     if (is_z_fs && is_x_fs) {
         grad_lambda = 0.f; grad_mu = 0.f;   // corner: sxx=szz=0 (shear via bar_sxz below)
@@ -935,20 +1244,17 @@ __global__ void calculate_grad_elastic_bs(
     }
     grad_mu += bar_sxz * (fvx_z + fvz_x);   // shear: 0 on high-side FS, live on low-side FS + interior
 
-    gvp[idx] +=   -2*rho_b[idx]*vp_b[idx]*grad_lambda* solver.dt;
-    gvs[idx] += -(-4*rho_b[idx]*vs_b[idx]*grad_lambda +
-                   2*rho_b[idx]*vs_b[idx]*grad_mu)* solver.dt;
+    grad_vp_b[idx] += -2*rho_b[idx]*vp_b[idx]*grad_lambda* solver.dt;
+    grad_vs_b[idx] += -(-4*rho_b[idx]*vs_b[idx]*grad_lambda +
+                         2*rho_b[idx]*vs_b[idx]*grad_mu)* solver.dt;
 
-    grho[idx] += (a.vx[idx] * (f.vx[idx]-fvx_prev_b[idx]) + 
-                  a.vz[idx] * (f.vz[idx]-fvz_prev_b[idx])) / rho_b[idx];
-    grho[idx] -= grad_lambda * (vp_b[idx]*vp_b[idx] - 2*vs_b[idx]*vs_b[idx])* solver.dt +
-                 grad_mu     * (vs_b[idx]*vs_b[idx]) * solver.dt;
+    grad_rho_b[idx] += (a.vx[idx] * (fvx_b[idx]-fvx_prev_b[idx]) +
+                        a.vz[idx] * (fvz_b[idx]-fvz_prev_b[idx])) / rho_b[idx];
+    grad_rho_b[idx] -= grad_lambda * (vp_b[idx]*vp_b[idx] - 2*vs_b[idx]*vs_b[idx])* solver.dt +
+                       grad_mu     * (vs_b[idx]*vs_b[idx]) * solver.dt;
+
 }
 
-using calculate_grad_elastic_bs_fn = void (*)(ElasticWavefieldPointer,
-    ElasticWavefieldPointer, const float*, const float*, const float*, const float*,
-    const float*, float*, float*, float*, SGradParam, SolverContext);
-SWEEP_BY_ORDER_DECL(calculate_grad_elastic_bs_fn, calculate_grad_elastic_bs_by_order);
 
 template<int Order>
 __global__ void calculate_grad_elastic_nobs(
@@ -992,60 +1298,8 @@ __global__ void calculate_grad_elastic_nobs(
         iz < solver.phys_z0() || iz >= solver.phys_z1())
         return;
 
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-
-    const float* fvx_b = fvx + b * spatial_size;
-    const float* fvz_b = fvz + b * spatial_size;
-    const float* fvx_prev_b = fvx_prev + b * spatial_size;
-    const float* fvz_prev_b = fvz_prev + b * spatial_size;
-
-    float*       grad_vp_b       = grad_vp       + b * spatial_size;
-    float*       grad_vs_b       = grad_vs       + b * spatial_size;
-    float*       grad_rho_b      = grad_rho      + b * spatial_size;
-
-    const float* vp_b         = vp         + b * spatial_size;
-    const float* vs_b         = vs         + b * spatial_size;
-    const float* rho_b        = rho        + b * spatial_size;
-
-    auto a = adjoint.offset(b, spatial_size);
-
-    float fvx_x = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD>(fvx_b, ix, iz, grad_ctx, solver, true, true);
-    float fvz_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(fvz_b, ix, iz, grad_ctx, solver, true, true);
-    float fvx_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (fvx_b, ix, iz, grad_ctx, solver, false);
-    float fvz_x = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD>(fvz_b, ix, iz, grad_ctx, solver, false);
-
-    bool is_z_fs = elastic_is_top_free_surface_row(solver, iz);
-    bool is_x_fs = elastic_is_x_free_surface_col(solver, ix);
-    float bar_sxx = is_x_fs ? 0.f : a.sxx[idx];
-    float bar_szz = is_z_fs ? 0.f : a.szz[idx];
-    float bar_sxz = elastic_fs_zero_shear(solver, ix, iz) ? 0.f : a.sxz[idx];  // shear: high-side FS only
-    float grad_lambda, grad_mu;
-    if (is_z_fs && is_x_fs) {
-        grad_lambda = 0.f; grad_mu = 0.f;   // corner: sxx=szz=0 (shear via bar_sxz below)
-    } else if (is_z_fs || is_x_fs) {
-        // Robertsson material derivative: z face bar_sxx*dvx_dx, x face bar_szz*dvz_dz.
-        float vp2 = vp_b[idx] * vp_b[idx];
-        float vs2 = vs_b[idx] * vs_b[idx];
-        float vp4 = vp2 * vp2;
-        float a = is_z_fs ? (bar_sxx * fvx_x) : (bar_szz * fvz_z);
-        grad_lambda = a * 4.f * vs2 * vs2 / vp4;
-        grad_mu     = a * 4.f * (vp4 - 2.f * vp2 * vs2 + 2.f * vs2 * vs2) / vp4;
-    } else {
-        grad_lambda = (bar_sxx + bar_szz) * (fvx_x + fvz_z);
-        grad_mu = 2*(bar_sxx * fvx_x + bar_szz * fvz_z);
-    }
-    grad_mu += bar_sxz * (fvx_z + fvz_x);   // shear: 0 on high-side FS, live on low-side FS + interior
-
-    grad_vp_b[idx] += -2*rho_b[idx]*vp_b[idx]*grad_lambda* solver.dt;
-    grad_vs_b[idx] += -(-4*rho_b[idx]*vs_b[idx]*grad_lambda +
-                         2*rho_b[idx]*vs_b[idx]*grad_mu)* solver.dt;
-
-    grad_rho_b[idx] += (a.vx[idx] * (fvx_b[idx]-fvx_prev_b[idx]) +
-                        a.vz[idx] * (fvz_b[idx]-fvz_prev_b[idx])) / rho_b[idx];
-    grad_rho_b[idx] -= grad_lambda * (vp_b[idx]*vp_b[idx] - 2*vs_b[idx]*vs_b[idx])* solver.dt +
-                       grad_mu     * (vs_b[idx]*vs_b[idx]) * solver.dt;
-
+    calculate_grad_elastic_nobs_cell<Order>(ix, iz, b, adjoint, fvx, fvz, fvx_prev, fvz_prev, vp, vs,
+                                            rho, grad_vp, grad_vs, grad_rho, grad_ctx, solver);
 }
 
 using calculate_grad_elastic_nobs_fn = void (*)(ElasticWavefieldPointer, const float*,

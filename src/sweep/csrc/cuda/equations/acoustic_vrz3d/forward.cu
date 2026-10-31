@@ -1,4 +1,5 @@
 #include <cuda_runtime.h>
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 
 #include "acoustic_vrz3d.h"
@@ -268,7 +269,7 @@ ForwardOutputCore forward_core(const ForwardInputCore& in)
             );
         }
 
-        add_source_3d<<<source_config.grid, source_config.block>>>(
+        SWEEP_LAUNCH(add_source_3d, source_config.grid, source_config.block,
             view.u_next,
             p.source.data_ptr<float>(),
             p.sources_loc.data_ptr<int>(),
@@ -277,7 +278,7 @@ ForwardOutputCore forward_core(const ForwardInputCore& in)
             ctx
         );
 
-        record_kernel_3d<<<record_config.grid, record_config.block>>>(
+        SWEEP_LAUNCH(record_kernel_3d, record_config.grid, record_config.block,
             view.u_next,
             record.data_ptr<float>(),
             p.receivers_loc.data_ptr<int>(),

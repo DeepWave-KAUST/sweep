@@ -115,7 +115,8 @@ def section_propjax(out):
         import sweep.propagator as p
         path = Path(p.__file__).with_name("jax.py")
         init = _ast_init_signature(path, "PropJax").replace("(self, ", "(")
-        fwd = "(wavelet, sources, receivers, models=None, return_wavefield=False, adj=False, **kwargs)"
+        fwd = ("(wavelet, sources, receivers, models=None, return_wavefield=False, adj=False, "
+               "wave_equation=None, aux_args=(), **kwargs)")
     from sweep.propagator.base import PropBase
     block(out, "PropJax(...)", f"PropJax{init}",
           "`*args`/`**kwargs` are the `PropBase.__init__` parameters listed under PropTorch. "
@@ -165,12 +166,21 @@ def yn(v):
     return "yes" if v else "no"
 
 
+def c_where(cls):
+    """`yes` (CUDA and the host core), `CUDA` (the host core lacks it) or `no`."""
+    from sweep.backend.c import hostcore
+    if not cls.supports_torch_binding():
+        return "no"
+    return "yes" if hostcore.equation_available(getattr(cls, "C_NAME", None)) else "CUDA"
+
+
 def section_equations(out):
     from sweep.equations import equation_classes
     out.write("## Finite-difference equations (`sweep.equations`)\n\n")
     out.write("Instantiated on the CPU with defaults (`backend='torch'`). `src`/`rec` = default "
               "`source_type`/`receiver_type`; `src ok`/`rec ok` = every field accepted. "
-              "`c` = compiled CUDA kernels exist (`impl='c'`). `FS` = free surface accepted; "
+              "`c` = compiled kernels exist (`impl='c'`): `yes` on CUDA and on the CPU (host "
+              "core), `CUDA` on CUDA only. `FS` = free surface accepted; "
               "`per-edge` = per-edge free surface on eager/c. `BS` = boundary saving on c/eager. "
               "`(B,...) models` = per-shot batched models on impl='c'.\n\n")
     rows, sigs, seen = [], [], set()
@@ -189,7 +199,7 @@ def section_equations(out):
         rows.append(
             f"| `{name}`{alias} | {dim} | `{list(eq.models)}` | `{list(eq.default_source_fields)}` | "
             f"`{src_ok}` | `{list(eq.default_receiver_fields)}` | `{rec_ok}` | "
-            f"`{eq.default_pml_type}` | {yn(cls.supports_torch_binding())} | "
+            f"`{eq.default_pml_type}` | {c_where(cls)} | "
             f"{yn(cls.supports_free_surface)} | "
             f"{yn(cls.supports_per_edge_free_surface)}/{yn(cls.supports_per_edge_free_surface_c)} | "
             f"{yn(cls.supports_boundary_saving_c)}/{yn(cls.supports_boundary_saving_eager)} | "

@@ -1,5 +1,7 @@
 #pragma once
 #include "../../launch/by_order.cuh"
+#include "../../launch/cell_path.h"
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -22,46 +24,46 @@
 #define LAUNCH_DAS3D_SECOND_ADJOINT(order, direction, grid, block, ...)       \
     do {                                                                      \
         if ((direction) == X) {                                                \
-            if      ((order) == 2) das3d_second_derivative_adjoint_kernel<2, X><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 4) das3d_second_derivative_adjoint_kernel<4, X><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 6) das3d_second_derivative_adjoint_kernel<6, X><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 8) das3d_second_derivative_adjoint_kernel<8, X><<<grid, block>>>(__VA_ARGS__); \
-            else                   das3d_second_derivative_adjoint_kernel<-1, X><<<grid, block>>>(__VA_ARGS__); \
+            if      ((order) == 2) SWEEP_LAUNCH((das3d_second_derivative_adjoint_kernel<2, X>), grid, block, __VA_ARGS__); \
+            else if ((order) == 4) SWEEP_LAUNCH((das3d_second_derivative_adjoint_kernel<4, X>), grid, block, __VA_ARGS__); \
+            else if ((order) == 6) SWEEP_LAUNCH((das3d_second_derivative_adjoint_kernel<6, X>), grid, block, __VA_ARGS__); \
+            else if ((order) == 8) SWEEP_LAUNCH((das3d_second_derivative_adjoint_kernel<8, X>), grid, block, __VA_ARGS__); \
+            else                   SWEEP_LAUNCH((das3d_second_derivative_adjoint_kernel<-1, X>), grid, block, __VA_ARGS__); \
         } else if ((direction) == Y) {                                         \
-            if      ((order) == 2) das3d_second_derivative_adjoint_kernel<2, Y><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 4) das3d_second_derivative_adjoint_kernel<4, Y><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 6) das3d_second_derivative_adjoint_kernel<6, Y><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 8) das3d_second_derivative_adjoint_kernel<8, Y><<<grid, block>>>(__VA_ARGS__); \
-            else                   das3d_second_derivative_adjoint_kernel<-1, Y><<<grid, block>>>(__VA_ARGS__); \
+            if      ((order) == 2) SWEEP_LAUNCH((das3d_second_derivative_adjoint_kernel<2, Y>), grid, block, __VA_ARGS__); \
+            else if ((order) == 4) SWEEP_LAUNCH((das3d_second_derivative_adjoint_kernel<4, Y>), grid, block, __VA_ARGS__); \
+            else if ((order) == 6) SWEEP_LAUNCH((das3d_second_derivative_adjoint_kernel<6, Y>), grid, block, __VA_ARGS__); \
+            else if ((order) == 8) SWEEP_LAUNCH((das3d_second_derivative_adjoint_kernel<8, Y>), grid, block, __VA_ARGS__); \
+            else                   SWEEP_LAUNCH((das3d_second_derivative_adjoint_kernel<-1, Y>), grid, block, __VA_ARGS__); \
         } else {                                                              \
-            if      ((order) == 2) das3d_second_derivative_adjoint_kernel<2, Z><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 4) das3d_second_derivative_adjoint_kernel<4, Z><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 6) das3d_second_derivative_adjoint_kernel<6, Z><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 8) das3d_second_derivative_adjoint_kernel<8, Z><<<grid, block>>>(__VA_ARGS__); \
-            else                   das3d_second_derivative_adjoint_kernel<-1, Z><<<grid, block>>>(__VA_ARGS__); \
+            if      ((order) == 2) SWEEP_LAUNCH((das3d_second_derivative_adjoint_kernel<2, Z>), grid, block, __VA_ARGS__); \
+            else if ((order) == 4) SWEEP_LAUNCH((das3d_second_derivative_adjoint_kernel<4, Z>), grid, block, __VA_ARGS__); \
+            else if ((order) == 6) SWEEP_LAUNCH((das3d_second_derivative_adjoint_kernel<6, Z>), grid, block, __VA_ARGS__); \
+            else if ((order) == 8) SWEEP_LAUNCH((das3d_second_derivative_adjoint_kernel<8, Z>), grid, block, __VA_ARGS__); \
+            else                   SWEEP_LAUNCH((das3d_second_derivative_adjoint_kernel<-1, Z>), grid, block, __VA_ARGS__); \
         }                                                                     \
     } while (0)
 
 #define LAUNCH_DAS3D_FIRST_ADJOINT(order, direction, grid, block, ...)        \
     do {                                                                      \
         if ((direction) == X) {                                                \
-            if      ((order) == 2) das3d_first_derivative_adjoint_kernel<2, X><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 4) das3d_first_derivative_adjoint_kernel<4, X><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 6) das3d_first_derivative_adjoint_kernel<6, X><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 8) das3d_first_derivative_adjoint_kernel<8, X><<<grid, block>>>(__VA_ARGS__); \
-            else                   das3d_first_derivative_adjoint_kernel<-1, X><<<grid, block>>>(__VA_ARGS__); \
+            if      ((order) == 2) SWEEP_LAUNCH((das3d_first_derivative_adjoint_kernel<2, X>), grid, block, __VA_ARGS__); \
+            else if ((order) == 4) SWEEP_LAUNCH((das3d_first_derivative_adjoint_kernel<4, X>), grid, block, __VA_ARGS__); \
+            else if ((order) == 6) SWEEP_LAUNCH((das3d_first_derivative_adjoint_kernel<6, X>), grid, block, __VA_ARGS__); \
+            else if ((order) == 8) SWEEP_LAUNCH((das3d_first_derivative_adjoint_kernel<8, X>), grid, block, __VA_ARGS__); \
+            else                   SWEEP_LAUNCH((das3d_first_derivative_adjoint_kernel<-1, X>), grid, block, __VA_ARGS__); \
         } else if ((direction) == Y) {                                         \
-            if      ((order) == 2) das3d_first_derivative_adjoint_kernel<2, Y><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 4) das3d_first_derivative_adjoint_kernel<4, Y><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 6) das3d_first_derivative_adjoint_kernel<6, Y><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 8) das3d_first_derivative_adjoint_kernel<8, Y><<<grid, block>>>(__VA_ARGS__); \
-            else                   das3d_first_derivative_adjoint_kernel<-1, Y><<<grid, block>>>(__VA_ARGS__); \
+            if      ((order) == 2) SWEEP_LAUNCH((das3d_first_derivative_adjoint_kernel<2, Y>), grid, block, __VA_ARGS__); \
+            else if ((order) == 4) SWEEP_LAUNCH((das3d_first_derivative_adjoint_kernel<4, Y>), grid, block, __VA_ARGS__); \
+            else if ((order) == 6) SWEEP_LAUNCH((das3d_first_derivative_adjoint_kernel<6, Y>), grid, block, __VA_ARGS__); \
+            else if ((order) == 8) SWEEP_LAUNCH((das3d_first_derivative_adjoint_kernel<8, Y>), grid, block, __VA_ARGS__); \
+            else                   SWEEP_LAUNCH((das3d_first_derivative_adjoint_kernel<-1, Y>), grid, block, __VA_ARGS__); \
         } else {                                                              \
-            if      ((order) == 2) das3d_first_derivative_adjoint_kernel<2, Z><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 4) das3d_first_derivative_adjoint_kernel<4, Z><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 6) das3d_first_derivative_adjoint_kernel<6, Z><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 8) das3d_first_derivative_adjoint_kernel<8, Z><<<grid, block>>>(__VA_ARGS__); \
-            else                   das3d_first_derivative_adjoint_kernel<-1, Z><<<grid, block>>>(__VA_ARGS__); \
+            if      ((order) == 2) SWEEP_LAUNCH((das3d_first_derivative_adjoint_kernel<2, Z>), grid, block, __VA_ARGS__); \
+            else if ((order) == 4) SWEEP_LAUNCH((das3d_first_derivative_adjoint_kernel<4, Z>), grid, block, __VA_ARGS__); \
+            else if ((order) == 6) SWEEP_LAUNCH((das3d_first_derivative_adjoint_kernel<6, Z>), grid, block, __VA_ARGS__); \
+            else if ((order) == 8) SWEEP_LAUNCH((das3d_first_derivative_adjoint_kernel<8, Z>), grid, block, __VA_ARGS__); \
+            else                   SWEEP_LAUNCH((das3d_first_derivative_adjoint_kernel<-1, Z>), grid, block, __VA_ARGS__); \
         }                                                                     \
     } while (0)
 
@@ -114,9 +116,29 @@ __device__ __forceinline__ void das3d_scatter_sgradient_adjoint(
     }
 }
 
+// Where das3d_first_derivatives_cell may run off its own path: the cells its
+// in_pml_3d(ix, iy, iz, halo) test puts outside the band (the physical box,
+// spelled with the same phys_*(halo) calls), inside the kernel's halo guard.
 template<int Order>
-__global__ void das3d_first_derivatives_kernel(
-    DasWavefieldPointer3D wf,
+__device__ __forceinline__
+CellBox3 das3d_first_interior_box(const SolverContext& solver)
+{
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int M_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+    return CellBox3{solver.phys_x0(halo), solver.phys_x1(halo), solver.phys_y0(halo),
+                    solver.phys_y1(halo), solver.phys_z0(halo), solver.phys_z1(halo)}
+        .intersect({halo, solver.nx - halo, halo, solver.ny - halo, halo, solver.nz - halo});
+}
+
+// One cell of das3d_first_derivatives_kernel: everything after the kernel's
+// guards (see launch/cell_path.h).  Interior box: das3d_first_interior_box();
+// no optional outputs.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void das3d_first_derivatives_cell(
+    int ix, int iy, int iz, int b,
+    const DasWavefieldPointer3D& wf,
     float* __restrict__ tmp_sxx_x,
     float* __restrict__ tmp_syy_y,
     float* __restrict__ tmp_szz_z,
@@ -126,28 +148,14 @@ __global__ void das3d_first_derivatives_kernel(
     float* __restrict__ tmp_tyy_z,
     float* __restrict__ tmp_tzz_x,
     float* __restrict__ tmp_tzz_y,
-    SGradParam grad_ctx,
-    ElasticCPMLPointer cpml,
-    SolverContext solver
+    const SGradParam& grad_ctx,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iy = blockIdx.y * blockDim.y + threadIdx.y;
-    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
-    int b = iz_global / solver.nz;
-    int iz = iz_global % solver.nz;
-
-    if (ix >= solver.nx || iy >= solver.ny || iz >= solver.nz || b >= solver.B) return;
-
     constexpr bool is_runtime = (Order == -1);
     constexpr int M_static = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
-
-    if (ix < halo || ix >= solver.nx - halo ||
-        iy < halo || iy >= solver.ny - halo ||
-        iz < halo || iz >= solver.nz - halo) {
-        return;
-    }
 
     int spatial_size = solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.ny * solver.nx + iy * solver.nx + ix;
@@ -176,7 +184,9 @@ __global__ void das3d_first_derivatives_kernel(
 
     // Interior fast-path: 9 aux fields all stay zero outside the PML band; just
     // pass the raw gradients through to the tmp_* arrays.
-    bool in_pml = solver.in_pml_3d(ix, iy, iz, halo);
+    bool in_pml = false;
+    if constexpr (!interior_path<Path>)
+        in_pml = solver.in_pml_3d(ix, iy, iz, halo);
 
     if (!in_pml) {
         tmp_sxx_x_b[idx] = dsxx_dx;
@@ -226,26 +236,18 @@ __global__ void das3d_first_derivatives_kernel(
     tmp_tzz_y_b[idx] = dtzz_dy + f.m_tzz_yf[idx];
 }
 
-using das3d_first_derivatives_kernel_fn = void (*)(DasWavefieldPointer3D, float*,
-    float*, float*, float*, float*, float*, float*, float*, float*, SGradParam,
-    ElasticCPMLPointer, SolverContext);
-SWEEP_BY_ORDER_DECL(das3d_first_derivatives_kernel_fn, das3d_first_derivatives_kernel_by_order);
-
 template<int Order>
-__global__ void das3d_update_kernel(
+__global__ void das3d_first_derivatives_kernel(
     DasWavefieldPointer3D wf,
-    const float* __restrict__ tmp_sxx_x,
-    const float* __restrict__ tmp_syy_y,
-    const float* __restrict__ tmp_szz_z,
-    const float* __restrict__ tmp_txx_y,
-    const float* __restrict__ tmp_txx_z,
-    const float* __restrict__ tmp_tyy_x,
-    const float* __restrict__ tmp_tyy_z,
-    const float* __restrict__ tmp_tzz_x,
-    const float* __restrict__ tmp_tzz_y,
-    const float* __restrict__ rho,
-    const float* __restrict__ lambda,
-    const float* __restrict__ mu,
+    float* __restrict__ tmp_sxx_x,
+    float* __restrict__ tmp_syy_y,
+    float* __restrict__ tmp_szz_z,
+    float* __restrict__ tmp_txx_y,
+    float* __restrict__ tmp_txx_z,
+    float* __restrict__ tmp_tyy_x,
+    float* __restrict__ tmp_tyy_z,
+    float* __restrict__ tmp_tzz_x,
+    float* __restrict__ tmp_tzz_y,
     SGradParam grad_ctx,
     ElasticCPMLPointer cpml,
     SolverContext solver
@@ -262,13 +264,70 @@ __global__ void das3d_update_kernel(
     constexpr bool is_runtime = (Order == -1);
     constexpr int M_static = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
-    int update_halo = 2 * halo;
 
-    if (ix < update_halo || ix >= solver.nx - update_halo ||
-        iy < update_halo || iy >= solver.ny - update_halo ||
-        iz < update_halo || iz >= solver.nz - update_halo) {
+    if (ix < halo || ix >= solver.nx - halo ||
+        iy < halo || iy >= solver.ny - halo ||
+        iz < halo || iz >= solver.nz - halo) {
         return;
     }
+
+    das3d_first_derivatives_cell<Order>(ix, iy, iz, b, wf, tmp_sxx_x, tmp_syy_y, tmp_szz_z, tmp_txx_y,
+                                        tmp_txx_z, tmp_tyy_x, tmp_tyy_z, tmp_tzz_x, tmp_tzz_y, grad_ctx,
+                                        cpml, solver);
+}
+
+using das3d_first_derivatives_kernel_fn = void (*)(DasWavefieldPointer3D, float*,
+    float*, float*, float*, float*, float*, float*, float*, float*, SGradParam,
+    ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(das3d_first_derivatives_kernel_fn, das3d_first_derivatives_kernel_by_order);
+
+// Where das3d_update_cell may run off its own path: the cells its
+// in_pml_3d(ix, iy, iz, update_halo) test puts outside the band, inside the
+// kernel's update_halo guard.
+template<int Order>
+__device__ __forceinline__
+CellBox3 das3d_update_interior_box(const SolverContext& solver)
+{
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int M_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+    int update_halo = 2 * halo;
+    return CellBox3{solver.phys_x0(update_halo), solver.phys_x1(update_halo),
+                    solver.phys_y0(update_halo), solver.phys_y1(update_halo),
+                    solver.phys_z0(update_halo), solver.phys_z1(update_halo)}
+        .intersect({update_halo, solver.nx - update_halo, update_halo, solver.ny - update_halo,
+                    update_halo, solver.nz - update_halo});
+}
+
+// One cell of das3d_update_kernel: everything after the kernel's guards (see
+// launch/cell_path.h).  Interior box: das3d_update_interior_box(); no optional
+// outputs.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void das3d_update_cell(
+    int ix, int iy, int iz, int b,
+    const DasWavefieldPointer3D& wf,
+    const float* __restrict__ tmp_sxx_x,
+    const float* __restrict__ tmp_syy_y,
+    const float* __restrict__ tmp_szz_z,
+    const float* __restrict__ tmp_txx_y,
+    const float* __restrict__ tmp_txx_z,
+    const float* __restrict__ tmp_tyy_x,
+    const float* __restrict__ tmp_tyy_z,
+    const float* __restrict__ tmp_tzz_x,
+    const float* __restrict__ tmp_tzz_y,
+    const float* __restrict__ rho,
+    const float* __restrict__ lambda,
+    const float* __restrict__ mu,
+    const SGradParam& grad_ctx,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver
+)
+{
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int M_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+    int update_halo = 2 * halo;
 
     int spatial_size = solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.ny * solver.nx + iy * solver.nx + ix;
@@ -305,7 +364,9 @@ __global__ void das3d_update_kernel(
 
     // Interior fast-path; update_halo widens the standard halo, so re-key the
     // PML check accordingly.
-    bool in_pml = solver.in_pml_3d(ix, iy, iz, update_halo);
+    bool in_pml = false;
+    if constexpr (!interior_path<Path>)
+        in_pml = solver.in_pml_3d(ix, iy, iz, update_halo);
 
     if (!in_pml) {
         float exx_new = f.exx[idx] + solver.dt * inv_rho *
@@ -389,36 +450,23 @@ __global__ void das3d_update_kernel(
     f.das54z[idx] = exx_new + eyy_new + 4.f * ezz_new;
 }
 
-using das3d_update_kernel_fn = void (*)(DasWavefieldPointer3D, const float*,
-    const float*, const float*, const float*, const float*, const float*, const float*,
-    const float*, const float*, const float*, const float*, const float*, SGradParam,
-    ElasticCPMLPointer, SolverContext);
-SWEEP_BY_ORDER_DECL(das3d_update_kernel_fn, das3d_update_kernel_by_order);
-
 template<int Order>
-__global__ void das3d_project_model_grad_kernel(
-    DasWavefieldPointer3D adjoint,
-    const float* __restrict__ exx_now,
-    const float* __restrict__ eyy_now,
-    const float* __restrict__ ezz_now,
-    const float* __restrict__ exx_prev,
-    const float* __restrict__ eyy_prev,
-    const float* __restrict__ ezz_prev,
-    const float* __restrict__ vp,
-    const float* __restrict__ vs,
+__global__ void das3d_update_kernel(
+    DasWavefieldPointer3D wf,
+    const float* __restrict__ tmp_sxx_x,
+    const float* __restrict__ tmp_syy_y,
+    const float* __restrict__ tmp_szz_z,
+    const float* __restrict__ tmp_txx_y,
+    const float* __restrict__ tmp_txx_z,
+    const float* __restrict__ tmp_tyy_x,
+    const float* __restrict__ tmp_tyy_z,
+    const float* __restrict__ tmp_tzz_x,
+    const float* __restrict__ tmp_tzz_y,
     const float* __restrict__ rho,
-    float* __restrict__ gvp,
-    float* __restrict__ gvs,
-    float* __restrict__ grho,
-    float* __restrict__ q_dxx_sxx,
-    float* __restrict__ q_dyy_syy,
-    float* __restrict__ q_dzz_szz,
-    float* __restrict__ q_dyy_txx,
-    float* __restrict__ q_dzz_txx,
-    float* __restrict__ q_dxx_tyy,
-    float* __restrict__ q_dzz_tyy,
-    float* __restrict__ q_dxx_tzz,
-    float* __restrict__ q_dyy_tzz,
+    const float* __restrict__ lambda,
+    const float* __restrict__ mu,
+    SGradParam grad_ctx,
+    ElasticCPMLPointer cpml,
     SolverContext solver
 )
 {
@@ -441,6 +489,63 @@ __global__ void das3d_project_model_grad_kernel(
         return;
     }
 
+    das3d_update_cell<Order>(ix, iy, iz, b, wf, tmp_sxx_x, tmp_syy_y, tmp_szz_z, tmp_txx_y, tmp_txx_z,
+                             tmp_tyy_x, tmp_tyy_z, tmp_tzz_x, tmp_tzz_y, rho, lambda, mu, grad_ctx, cpml,
+                             solver);
+}
+
+using das3d_update_kernel_fn = void (*)(DasWavefieldPointer3D, const float*,
+    const float*, const float*, const float*, const float*, const float*, const float*,
+    const float*, const float*, const float*, const float*, const float*, SGradParam,
+    ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(das3d_update_kernel_fn, das3d_update_kernel_by_order);
+
+// The cells das3d_project_model_grad_kernel updates: its update_halo guard box
+// (the body has no branch, so every cell of it may take the row path).
+template<int Order>
+__device__ __forceinline__
+CellBox3 das3d_update_halo_box(const SolverContext& solver)
+{
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int M_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+    int update_halo = 2 * halo;
+    return {update_halo, solver.nx - update_halo, update_halo, solver.ny - update_halo,
+            update_halo, solver.nz - update_halo};
+}
+
+// One cell of das3d_project_model_grad_kernel: everything after the kernel's
+// guards (see launch/cell_path.h).  Pointwise and straight-line, so every path
+// is the same code.  Interior box: das3d_update_halo_box().
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void das3d_project_model_grad_cell(
+    int ix, int iy, int iz, int b,
+    const DasWavefieldPointer3D& adjoint,
+    const float* __restrict__ exx_now,
+    const float* __restrict__ eyy_now,
+    const float* __restrict__ ezz_now,
+    const float* __restrict__ exx_prev,
+    const float* __restrict__ eyy_prev,
+    const float* __restrict__ ezz_prev,
+    const float* __restrict__ vp,
+    const float* __restrict__ vs,
+    const float* __restrict__ rho,
+    float* __restrict__ gvp,
+    float* __restrict__ gvs,
+    float* __restrict__ grho,
+    float* __restrict__ q_dxx_sxx,
+    float* __restrict__ q_dyy_syy,
+    float* __restrict__ q_dzz_szz,
+    float* __restrict__ q_dyy_txx,
+    float* __restrict__ q_dzz_txx,
+    float* __restrict__ q_dxx_tyy,
+    float* __restrict__ q_dzz_tyy,
+    float* __restrict__ q_dxx_tzz,
+    float* __restrict__ q_dyy_tzz,
+    const SolverContext& solver
+)
+{
     int spatial_size = solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.ny * solver.nx + iy * solver.nx + ix;
     int shift = b * spatial_size;
@@ -515,6 +620,58 @@ __global__ void das3d_project_model_grad_kernel(
     q_dzz_tyy[idx] = dt_over_rho * (bar_eyy + bar_ezz);
     q_dxx_tzz[idx] = dt_over_rho * (bar_exx + bar_ezz);
     q_dyy_tzz[idx] = dt_over_rho * (bar_eyy + bar_ezz);
+}
+
+template<int Order>
+__global__ void das3d_project_model_grad_kernel(
+    DasWavefieldPointer3D adjoint,
+    const float* __restrict__ exx_now,
+    const float* __restrict__ eyy_now,
+    const float* __restrict__ ezz_now,
+    const float* __restrict__ exx_prev,
+    const float* __restrict__ eyy_prev,
+    const float* __restrict__ ezz_prev,
+    const float* __restrict__ vp,
+    const float* __restrict__ vs,
+    const float* __restrict__ rho,
+    float* __restrict__ gvp,
+    float* __restrict__ gvs,
+    float* __restrict__ grho,
+    float* __restrict__ q_dxx_sxx,
+    float* __restrict__ q_dyy_syy,
+    float* __restrict__ q_dzz_szz,
+    float* __restrict__ q_dyy_txx,
+    float* __restrict__ q_dzz_txx,
+    float* __restrict__ q_dxx_tyy,
+    float* __restrict__ q_dzz_tyy,
+    float* __restrict__ q_dxx_tzz,
+    float* __restrict__ q_dyy_tzz,
+    SolverContext solver
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+    int b = iz_global / solver.nz;
+    int iz = iz_global % solver.nz;
+
+    if (ix >= solver.nx || iy >= solver.ny || iz >= solver.nz || b >= solver.B) return;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int M_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+    int update_halo = 2 * halo;
+
+    if (ix < update_halo || ix >= solver.nx - update_halo ||
+        iy < update_halo || iy >= solver.ny - update_halo ||
+        iz < update_halo || iz >= solver.nz - update_halo) {
+        return;
+    }
+
+    das3d_project_model_grad_cell<Order>(ix, iy, iz, b, adjoint, exx_now, eyy_now, ezz_now, exx_prev, eyy_prev,
+                                         ezz_prev, vp, vs, rho, gvp, gvs, grho, q_dxx_sxx, q_dyy_syy,
+                                         q_dzz_szz, q_dyy_txx, q_dzz_txx, q_dxx_tyy, q_dzz_tyy, q_dxx_tzz,
+                                         q_dyy_tzz, solver);
 }
 
 using das3d_project_model_grad_kernel_fn = void (*)(DasWavefieldPointer3D, const float*,

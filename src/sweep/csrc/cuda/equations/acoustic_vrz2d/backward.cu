@@ -1,4 +1,5 @@
 #include <algorithm>
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 #include "acoustic_vrz2d.h"
 #include "kernels.cuh"
@@ -236,7 +237,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
                                           inv_z.data_ptr<float>(), lap_ctx, grad_ctx, grad_ctx_x,
                                           grad_ctx_z, cpml, ctx);
 
-            add_source<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            SWEEP_LAUNCH(add_source, fwd_source_config.grid, fwd_source_config.block,
                 for_view.u_next,
                 p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
@@ -274,7 +275,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
                 adj_view.zetazn
             );
 
-            add_source_signed<<<adj_source_config.grid, adj_source_config.block>>>(
+            SWEEP_LAUNCH(add_source_signed, adj_source_config.grid, adj_source_config.block,
                 adj_view.u_next,
                 p.adjoint_source.data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
@@ -287,7 +288,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
             adjoint.swap_aux();   // rotate u AND the psi/zeta double-buffers
 
             // source-cell correction of the p_tt imaging (see driver_traits)
-            vrz2d_utt_source_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            SWEEP_LAUNCH(vrz2d_utt_source_correction, fwd_source_config.grid, fwd_source_config.block,
                 grad_vp.data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
                 vp.data_ptr<float>(),

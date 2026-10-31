@@ -1,5 +1,6 @@
 #pragma once
 #include "../../launch/by_order.cuh"
+#include "../../launch/cell_path.h"
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -30,7 +31,24 @@
 #define ACOUSTIC_BORN2D_ADJOINT(order, grid, block, ...) \
     SWEEP_LAUNCH_BY_ORDER(acoustic_born2nd_adjoint_exact_by_order, order, grid, block, __VA_ARGS__)
 
-template <int Order>
+// The four stencil kernels below are split per launch/cell_path.h: the
+// __global__ function keeps its index decode and guards and calls a _cell body
+// (the rest of the kernel, unchanged and in the same order), which the host
+// core's row launchers (kernels.cu) also run on an interior path.  The
+// interior boxes are spelled next to the launchers.
+//
+// The indices of one cell, as the kernels decode them, go to a _cell body in
+// one by-value struct rather than as three int parameters (see
+// elastic_tti_2nd2d/kernels.cuh CellIndex2): nvcc orders a compare's operands
+// by kind, and a bare int parameter would flip the cell's predicates.
+struct AcousticBorn2dCellIndex {
+    int ix, iz, b;
+};
+
+// ``Path`` (launch/cell_path.h): an interior path answers the in_cpml_2d test
+// -- the caller's box is that test's interior at ``halo`` -- so only the
+// laplacians are left.
+template <int Order, CellPath Path = CellPath::Any>
 __device__ inline float acoustic_cpml_update_2d(
     AcousticWavefieldPointer f,
     int ix,
@@ -51,7 +69,9 @@ __device__ inline float acoustic_cpml_update_2d(
     // and the aux fields psix/psiz/zetax/zetaz stay zero. Skip the loads/stores.
     // in_cpml: the band AND the cell past it, where dbxdx = np.gradient(bx)
     // is still nonzero (dropping it there reflected off the CPML).
-    bool in_pml = solver.in_cpml_2d(ix, iz, halo);
+    bool in_pml = false;
+    if constexpr (!interior_path<Path>)
+        in_pml = solver.in_cpml_2d(ix, iz, halo);
     if (!in_pml) return lap_x + lap_z;
 
     float ax_ = cpml.ax[ix];
@@ -85,6 +105,53 @@ __device__ inline float acoustic_cpml_update_2d(
     return w_sum;
 }
 
+// One cell of acoustic2d_single: everything after the kernel's bounds guards
+// (launch/cell_path.h).  Interior box: the interior of the in_cpml_2d test of
+// acoustic_cpml_update_2d inside the halo guard (kernels.cu
+// born2d_cpml_interior_box); optional output: u_this, which the kernel stores
+// only under save_all_wavefields as well (the host launcher folds the two
+// into one pointer).
+template <int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__ void acoustic_born2d_single_cell(
+    AcousticBorn2dCellIndex cell,
+    const AcousticWavefieldPointer& wf,
+    bool save_all_wavefields,
+    float* __restrict__ u_this,
+    const float* __restrict__ vp,
+    const LaplaceParam& lap_ctx,
+    const GradParam& grad_ctx,
+    const GradParam& grad_ctx_x,
+    const GradParam& grad_ctx_z,
+    const AcousticCPMLPointer& cpml,
+    const SolverContext& solver
+) {
+    const int ix = cell.ix, iz = cell.iz, b = cell.b;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int M_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+
+    auto f = wf.offset(b, spatial_size);
+    float* u_this_b = optional_output<Path>(u_this) ? u_this + b * spatial_size : nullptr;
+    const float* vp_b = vp + b * spatial_size;
+
+    float w_sum = acoustic_cpml_update_2d<Order, Path>(f, ix, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, solver, halo);
+    float v = vp_b[idx];
+    float utt = (v * v) * w_sum;
+
+    f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * utt;
+    if constexpr (interior_path<Path>) {
+        if (optional_output<Path>(u_this_b))
+            u_this_b[idx] = utt;
+    } else {
+        if (save_all_wavefields && u_this_b != nullptr)
+            u_this_b[idx] = utt;
+    }
+}
+
 template <int Order>
 __global__ void acoustic2d_single(
     AcousticWavefieldPointer wf,
@@ -111,26 +178,41 @@ __global__ void acoustic2d_single(
     if (ix < halo || ix >= solver.nx - halo || iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-
-    auto f = wf.offset(b, spatial_size);
-    float* u_this_b = u_this ? u_this + b * spatial_size : nullptr;
-    const float* vp_b = vp + b * spatial_size;
-
-    float w_sum = acoustic_cpml_update_2d<Order>(f, ix, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, solver, halo);
-    float v = vp_b[idx];
-    float utt = (v * v) * w_sum;
-
-    f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * utt;
-    if (save_all_wavefields && u_this_b != nullptr)
-        u_this_b[idx] = utt;
+    acoustic_born2d_single_cell<Order>(AcousticBorn2dCellIndex{ix, iz, b}, wf, save_all_wavefields,
+                                       u_this, vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml,
+                                       solver);
 }
 
 using acoustic2d_single_fn = void (*)(AcousticWavefieldPointer, bool, float*,
     const float*, LaplaceParam, GradParam, GradParam, GradParam, AcousticCPMLPointer,
     SolverContext);
 SWEEP_BY_ORDER_DECL(acoustic2d_single_fn, acoustic2d_single_by_order);
+
+// One cell of acoustic2d_single_nopml: everything after the kernel's bounds
+// guards (launch/cell_path.h).  Straight-line: every cell the guards let
+// through takes this one path, and there is no optional output (Path is
+// unused); the interior box is the guard box (kernels.cu born2d_nopml_box).
+template <int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__ void acoustic_born2d_single_nopml_cell(
+    AcousticBorn2dCellIndex cell,
+    const AcousticWavefieldPointer& wf,
+    const float* __restrict__ vp,
+    const LaplaceParam& lap_ctx,
+    const SolverContext& solver
+) {
+    const int ix = cell.ix, iz = cell.iz, b = cell.b;
+
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+    auto f = wf.offset(b, spatial_size);
+    const float* vp_b = vp + b * spatial_size;
+
+    float lap_x = laplace<2, Order, X>(f.u_now, ix, 0, iz, lap_ctx);
+    float lap_z = laplace<2, Order, Z>(f.u_now, ix, 0, iz, lap_ctx);
+    float w_sum = lap_x + lap_z;
+    float v = vp_b[idx];
+    f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * (v * v) * w_sum;
+}
 
 template <int Order>
 __global__ void acoustic2d_single_nopml(
@@ -160,16 +242,8 @@ __global__ void acoustic2d_single_nopml(
     if (ix < x_lo || ix >= solver.nx - x_hi || iz < z_lo || iz >= solver.nz - z_hi)
         return;
 
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-    auto f = wf.offset(b, spatial_size);
-    const float* vp_b = vp + b * spatial_size;
-
-    float lap_x = laplace<2, Order, X>(f.u_now, ix, 0, iz, lap_ctx);
-    float lap_z = laplace<2, Order, Z>(f.u_now, ix, 0, iz, lap_ctx);
-    float w_sum = lap_x + lap_z;
-    float v = vp_b[idx];
-    f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * (v * v) * w_sum;
+    acoustic_born2d_single_nopml_cell<Order>(AcousticBorn2dCellIndex{ix, iz, b}, wf, vp, lap_ctx,
+                                             solver);
 }
 
 using acoustic2d_single_nopml_fn = void (*)(AcousticWavefieldPointer, const float*,
@@ -206,26 +280,33 @@ __global__ void compute_v2_lambda_born2d(
 // read -- and the caller rotates with swap_aux().
 // Replaces the approximate adjoint that ran the FORWARD CPML in the band
 // (grad[mp] off by 1-10 % against the exact transpose).
-template <int Order>
-__global__ void acoustic_born2nd_adjoint_exact(
-    AcousticWavefieldPointer wf,
+//
+// One cell of acoustic_born2nd_adjoint_exact: everything after the kernel's
+// bounds guards (launch/cell_path.h).  Interior box: the cells neither of whose
+// tap tests (taps_in_cpml_x / _z) meets a band face's in_cpml cells, inside
+// the halo guard (kernels.cu born2d_adjoint_interior_box); no optional output.
+//
+// The CPML profiles stay in the AcousticCPMLPointer, by reference: this
+// kernel loads them as plain LDG.E (the struct members' __restrict__ does
+// not reach them here), and handed over as separate __restrict__ pointers,
+// as acoustic_vti_1st_2d does, they turned into LDG.E.CONSTANT -- a change
+// to the CUDA kernel (checked with cuobjdump, docs/dev/host_core.md rule 7).
+template <int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__ void acoustic_born2nd_adjoint_exact_cell(
+    AcousticBorn2dCellIndex cell,
+    const AcousticWavefieldPointer& wf,
     const float* __restrict__ v2l,
-    LaplaceParam lap_ctx,
-    GradParam grad_ctx_x,
-    GradParam grad_ctx_z,
-    AcousticCPMLPointer cpml,
-    SolverContext solver
+    const LaplaceParam& lap_ctx,
+    const GradParam& grad_ctx_x,
+    const GradParam& grad_ctx_z,
+    const AcousticCPMLPointer& cpml,
+    const SolverContext& solver
 ) {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b = blockIdx.z;
-    if (ix >= solver.nx || iz >= solver.nz) return;
+    const int ix = cell.ix, iz = cell.iz, b = cell.b;
 
     constexpr bool is_runtime = (Order == -1);
     constexpr int M_static = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
-    if (ix < halo || ix >= solver.nx - halo || iz < halo || iz >= solver.nz - halo)
-        return;
 
     const int sp = solver.nx * solver.nz;
     const int idx = iz * solver.nx + ix;
@@ -241,8 +322,11 @@ __global__ void acoustic_born2nd_adjoint_exact(
     const float invdz = 1.0f / lap_ctx.dz;
 
     // Does the tap range [i - M, i + M] meet a band face's in_cpml cells?
-    const bool xfull = solver.taps_in_cpml_x(ix, halo, halo);
-    const bool zfull = solver.taps_in_cpml_z(iz, halo, halo);
+    bool xfull = false, zfull = false;
+    if constexpr (!interior_path<Path>) {
+        xfull = solver.taps_in_cpml_x(ix, halo, halo);
+        zfull = solver.taps_in_cpml_z(iz, halo, halo);
+    }
 
     if (!xfull && !zfull) {
         // No tap in the CPML: L* = lap(v^2 . lambda), the transpose of the
@@ -311,9 +395,96 @@ __global__ void acoustic_born2nd_adjoint_exact(
     f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + (Lx + Lz - Dx_gg - Dz_gg);
 }
 
+template <int Order>
+__global__ void acoustic_born2nd_adjoint_exact(
+    AcousticWavefieldPointer wf,
+    const float* __restrict__ v2l,
+    LaplaceParam lap_ctx,
+    GradParam grad_ctx_x,
+    GradParam grad_ctx_z,
+    AcousticCPMLPointer cpml,
+    SolverContext solver
+) {
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b = blockIdx.z;
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int M_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+    if (ix < halo || ix >= solver.nx - halo || iz < halo || iz >= solver.nz - halo)
+        return;
+
+    acoustic_born2nd_adjoint_exact_cell<Order>(AcousticBorn2dCellIndex{ix, iz, b}, wf, v2l, lap_ctx,
+                                               grad_ctx_x, grad_ctx_z, cpml, solver);
+}
+
 using acoustic_born2nd_adjoint_exact_fn = void (*)(AcousticWavefieldPointer, const float*,
     LaplaceParam, GradParam, GradParam, AcousticCPMLPointer, SolverContext);
 SWEEP_BY_ORDER_DECL(acoustic_born2nd_adjoint_exact_fn, acoustic_born2nd_adjoint_exact_by_order);
+
+// One cell of acoustic_born2nd: everything after the kernel's bounds guards
+// (launch/cell_path.h).  Interior box: the interior of the in_cpml_2d test of
+// acoustic_cpml_update_2d (the same for both fields) inside the halo guard
+// (kernels.cu born2d_cpml_interior_box); optional outputs: bg_utt (0) and
+// sc_utt (1), which the kernel stores only under save_all_wavefields as well
+// (the host launcher folds the flag into both pointers).
+template <int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__ void acoustic_born2nd_cell(
+    AcousticBorn2dCellIndex cell,
+    const AcousticWavefieldPointer& bg,
+    const AcousticWavefieldPointer& sc,
+    bool save_all_wavefields,
+    float* __restrict__ bg_utt,
+    float* __restrict__ sc_utt,
+    const float* __restrict__ vp,
+    const float* __restrict__ mp,
+    const LaplaceParam& lap_ctx,
+    const GradParam& grad_ctx,
+    const GradParam& grad_ctx_x,
+    const GradParam& grad_ctx_z,
+    const AcousticCPMLPointer& cpml,
+    const SolverContext& solver
+) {
+    const int ix = cell.ix, iz = cell.iz, b = cell.b;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int M_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+
+    auto bg_f = bg.offset(b, spatial_size);
+    auto sc_f = sc.offset(b, spatial_size);
+    float* bg_utt_b = optional_output<Path, 0>(bg_utt) ? bg_utt + b * spatial_size : nullptr;
+    float* sc_utt_b = optional_output<Path, 1>(sc_utt) ? sc_utt + b * spatial_size : nullptr;
+    const float* vp_b = vp + b * spatial_size;
+    const float* mp_b = mp + b * spatial_size;
+
+    float bg_w_sum = acoustic_cpml_update_2d<Order, Path>(bg_f, ix, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, solver, halo);
+    float sc_w_sum = acoustic_cpml_update_2d<Order, Path>(sc_f, ix, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, solver, halo);
+
+    float v = vp_b[idx];
+    float bg_utt_val = (v * v) * bg_w_sum;
+    float sc_utt_val = (v * v) * sc_w_sum;
+
+    bg_f.u_next[idx] = 2.0f * bg_f.u_now[idx] - bg_f.u_prev[idx] + solver.dt * solver.dt * bg_utt_val;
+    sc_f.u_next[idx] = 2.0f * sc_f.u_now[idx] - sc_f.u_prev[idx] + solver.dt * solver.dt * (sc_utt_val + mp_b[idx] * bg_utt_val);
+
+    if constexpr (interior_path<Path>) {
+        if (optional_output<Path, 0>(bg_utt_b))
+            bg_utt_b[idx] = bg_utt_val;
+        if (optional_output<Path, 1>(sc_utt_b))
+            sc_utt_b[idx] = sc_utt_val;
+    } else {
+        if (save_all_wavefields && bg_utt_b != nullptr)
+            bg_utt_b[idx] = bg_utt_val;
+        if (save_all_wavefields && sc_utt_b != nullptr)
+            sc_utt_b[idx] = sc_utt_val;
+    }
+}
 
 template <int Order>
 __global__ void acoustic_born2nd(
@@ -344,30 +515,9 @@ __global__ void acoustic_born2nd(
     if (ix < halo || ix >= solver.nx - halo || iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-
-    auto bg_f = bg.offset(b, spatial_size);
-    auto sc_f = sc.offset(b, spatial_size);
-    float* bg_utt_b = bg_utt ? bg_utt + b * spatial_size : nullptr;
-    float* sc_utt_b = sc_utt ? sc_utt + b * spatial_size : nullptr;
-    const float* vp_b = vp + b * spatial_size;
-    const float* mp_b = mp + b * spatial_size;
-
-    float bg_w_sum = acoustic_cpml_update_2d<Order>(bg_f, ix, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, solver, halo);
-    float sc_w_sum = acoustic_cpml_update_2d<Order>(sc_f, ix, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, solver, halo);
-
-    float v = vp_b[idx];
-    float bg_utt_val = (v * v) * bg_w_sum;
-    float sc_utt_val = (v * v) * sc_w_sum;
-
-    bg_f.u_next[idx] = 2.0f * bg_f.u_now[idx] - bg_f.u_prev[idx] + solver.dt * solver.dt * bg_utt_val;
-    sc_f.u_next[idx] = 2.0f * sc_f.u_now[idx] - sc_f.u_prev[idx] + solver.dt * solver.dt * (sc_utt_val + mp_b[idx] * bg_utt_val);
-
-    if (save_all_wavefields && bg_utt_b != nullptr)
-        bg_utt_b[idx] = bg_utt_val;
-    if (save_all_wavefields && sc_utt_b != nullptr)
-        sc_utt_b[idx] = sc_utt_val;
+    acoustic_born2nd_cell<Order>(AcousticBorn2dCellIndex{ix, iz, b}, bg, sc, save_all_wavefields,
+                                 bg_utt, sc_utt, vp, mp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z,
+                                 cpml, solver);
 }
 
 using acoustic_born2nd_fn = void (*)(AcousticWavefieldPointer,
@@ -437,3 +587,34 @@ __global__ void calculate_grad_born_vp_2diff_2d(
     float* __restrict__ grad_vp, float* __restrict__ grad_iii,
     int nx, int nz
 );
+
+#if defined(SWEEP_HOST_CORE)
+// Host row launchers of the pointwise kernels above (kernels.cu; launched
+// through SWEEP_LAUNCH_ROWS in backward.cu).
+void calculate_grad_born_mp_rows(dim3 grid, dim3 block, const float* u_tt_bg,
+                                 const float* u_backward, const float* vp, float* grad_mp, int nx,
+                                 int nz, float dt);
+void calculate_grad_born_mp_utt_rows(dim3 grid, dim3 block, const float* u_forward_next,
+                                     const float* u_forward_now, const float* u_forward_prev,
+                                     const float* u_backward, const float* vp, float* grad_mp,
+                                     int nx, int nz, float dt);
+void compute_v2_lambda_born2d_rows(dim3 grid, dim3 block, const float* vp, const float* lambda,
+                                   float* v2_lambda, int nx, int nz, int B);
+void compute_v2_lambda_bg_born2d_rows(dim3 grid, dim3 block, const float* vp, const float* mp,
+                                      const float* lambda_bg, const float* lambda_sc,
+                                      float* v2_lambda, int nx, int nz, int B);
+void calculate_grad_born_vp_utt_rows(dim3 grid, dim3 block, const float* bg_utt,
+                                     const float* sc_utt, const float* lam_bg, const float* lam_sc,
+                                     const float* mp, const float* vp, float* grad_vp,
+                                     float* grad_iii, int nx, int nz, float dt);
+void add_born_scattered_coupling_2d_rows(dim3 grid, dim3 block, float* sc_next,
+                                         const float* bg_next, const float* bg_now,
+                                         const float* bg_prev, const float* mp, int nx, int nz,
+                                         int halo);
+void calculate_grad_born_vp_2diff_2d_rows(dim3 grid, dim3 block, const float* bg_prev,
+                                          const float* bg_now, const float* bg_next,
+                                          const float* sc_prev, const float* sc_now,
+                                          const float* sc_next, const float* lam_bg,
+                                          const float* lam_sc, const float* mp, const float* vp,
+                                          float* grad_vp, float* grad_iii, int nx, int nz);
+#endif

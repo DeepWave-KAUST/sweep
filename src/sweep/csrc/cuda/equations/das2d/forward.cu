@@ -1,4 +1,5 @@
 #include <cuda_runtime.h>
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 
 #include "das2d.h"
@@ -196,7 +197,7 @@ ForwardOutputCore forward_core(const ForwardInputCore& in)
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
             float* field = das2d_field_ptr(wf, source_fields[isrc]);
             if (field == nullptr) continue;
-            add_source<<<source_config.grid, source_config.block>>>(
+            SWEEP_LAUNCH(add_source, source_config.grid, source_config.block,
                 field,
                 p.source.data_ptr<float>(),
                 p.sources_loc.data_ptr<int>(),
@@ -242,7 +243,7 @@ ForwardOutputCore forward_core(const ForwardInputCore& in)
         for (int irec = 0; irec < nrec_fields; ++irec) {
             float* field = das2d_field_ptr(wf, receiver_fields[irec]);
             if (field == nullptr) continue;
-            record_kernel<<<record_config.grid, record_config.block>>>(
+            SWEEP_LAUNCH(record_kernel, record_config.grid, record_config.block,
                 field,
                 record.select(0, irec).data_ptr<float>(),
                 p.receivers_loc.data_ptr<int>(),

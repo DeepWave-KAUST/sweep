@@ -63,10 +63,10 @@ The backward needs the forward wavefield. Choose how it is kept with
 |---|---|---|---|---|
 | `Full()` | whole history (`nt` x grid), largest | fastest backward | `impl='c'` `ViscoAcoustic`, `DASZhao3D` | needed for eager snapshots and eager `register_gradient(mode="gradient")` |
 | `BoundarySaving(storage="gpu")` | CPML-ring strips per step | ~1 extra forward | `impl='c'` (others) | reconstructs the wavefield backwards in time |
-| `BoundarySaving(storage="cpu", pinned_memory=True)` / `"disk"` | ring in host RAM / files | slower | | `disk_dir=`, `disk_async_read=True` for disk |
+| `BoundarySaving(storage="cpu", pinned_memory=True)` / `"disk"` | ring in host RAM / files | slower | | `disk_dir=`, `disk_async_read=True` for disk; `impl='c'` on a CPU device refuses both (its ring is already in RAM) |
 | `BoundarySaving(storage_dtype="bf16"\|"fp16"\|"int8")` | 2x / ~2x / ~4x smaller ring | | | lossy: perturbs the gradient; validate before use |
 | `BoundarySaving(tail_steps=K)` | last K steps only | shorter backward | | `impl='c'` `Acoustic`/`Acoustic3D` only, steady-state (frequency-selection) losses only |
-| `Ckpt(mode="chunk", chunks=100)` | checkpoints every `chunks` steps | recomputes | eager / PropJax | `storage="cpu"` keeps checkpoints on the host (c) |
+| `Ckpt(mode="chunk", chunks=100)` | checkpoints every `chunks` steps | recomputes | eager / PropJax | `storage="cpu"` keeps checkpoints on the host (c on CUDA) |
 | `Ckpt(mode="recursive", count=n)` | fixed `n` checkpoints | most recompute | | `impl='c'` only |
 
 Rules: one strategy per propagator; contradictory requests (`memory=BoundarySaving(),

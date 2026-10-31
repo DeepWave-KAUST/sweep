@@ -58,6 +58,135 @@ def _equation_supports_c(equation):
     return callable(getattr(equation, "_C", None)) and bool(getattr(equation, "C_NAME", None))
 
 
+_HOST_BUILD_REMEDY = ("Use impl='eager' on the CPU, or get a host core (`python -m sweep.build --cpu` "
+                      "with g++) for the compiled path.")
+_HOST_OTHER_DEVICE_REMEDY = ("Use impl='eager' on the CPU, or run this equation on a CUDA device "
+                             "(dev='cuda').")
+
+
+def _pybind_shim_active():
+    """``sweep._C`` is the pybind shim -- ``SWEEP_JIT_FULL=1`` or an
+    ahead-of-time ``sweep._C`` extension -- rather than the ctypes layer.  The
+    shim reaches the CUDA core only; the per-call core choice that serves the
+    host core lives in the ctypes layer (``sweep.backend.c.entries``)."""
+    try:
+        import sweep
+        from sweep.backend.c import jit
+        return bool(jit.jit_full() or sweep._prebuilt_binding_present())
+    except Exception:  # pragma: no cover - a broken install
+        return False
+
+
+def _host_core_serves(equation):
+    """``(ok, why_not, remedy)`` for an explicit ``impl='c'`` on a CPU device:
+    a host core is at hand (the wheel's ``lib/cpu`` core, a cached local
+    build, or a C++ compiler to build one --
+    ``sweep.backend.c.hostcore.available``) and the equation is built into it.
+    The remedy names what would actually help: building a core when none is at
+    hand, eager or a CUDA device when the equation is not built into any host
+    core.  Loads and builds nothing."""
+    try:
+        from sweep.backend.c import hostcore
+    except Exception as exc:  # pragma: no cover - a broken install
+        return False, f"the host (CPU) core layer is unavailable ({exc})", _HOST_BUILD_REMEDY
+    if not hostcore.available():
+        return False, ("no host (CPU) core is at hand: the install ships none, no cached build "
+                       "is current and no C++ compiler (g++ >= 9 with OpenMP) was found to build one"
+                       ), _HOST_BUILD_REMEDY
+    c_name = getattr(equation, "C_NAME", None) if equation is not None else None
+    if not hostcore.equation_available(c_name):
+        return False, (f"equation '{type(equation).__name__}' is not built into the host (CPU) core "
+                       f"(sweep.backend.c.hostcore.HOST_UNPORTED)"), _HOST_OTHER_DEVICE_REMEDY
+    return True, "", ""
+
+
+def _host_core_ready(equation):
+    """Whether ``impl='auto'`` on a CPU device takes the host core: the
+    equation is built into it, and the core an explicit ``impl='c'`` runs on
+    (``hostcore.core_path``) comes up -- the shipped one (the wheel's
+    ``lib/cpu``, or ``SWEEP_CORE_CPU``), else a current cached build, else one
+    built here, once (~1-3 min), as a CUDA source install builds its core with
+    nvcc.  No core at hand and no compiler that builds one: eager, quietly, as
+    a CUDA install without nvcc is.  A build or a load that fails is reported
+    once, and the process stays on eager."""
+    global _HOST_CORE
+    try:
+        from sweep.backend.c import hostcore
+    except Exception:  # pragma: no cover - a broken install
+        return False
+    c_name = getattr(equation, "C_NAME", None) if equation is not None else None
+    if not hostcore.equation_available(c_name):
+        return False
+    if _HOST_CORE is None:
+        _HOST_CORE = _bring_up_host_core(hostcore)
+    return not _HOST_CORE
+
+
+_HOST_CORE = None      # None: not tried yet; '': loaded; else why 'auto' runs eager on the CPU
+
+
+def _bring_up_host_core(hostcore):
+    """'' once the host core is loaded -- built first when none is at hand --
+    else why not, with a warning unless there was nothing to try."""
+    def first_line(exc):
+        lines = str(exc).strip().splitlines()
+        return lines[0][:400] if lines else type(exc).__name__
+    try:
+        if not hostcore.available():
+            return "no host (CPU) core is at hand and no C++ compiler builds one"
+        so = hostcore.core_path(verbose=False)
+    except Exception as exc:
+        why = first_line(exc)
+        msg = (f"sweep's host (CPU) core is unavailable ({why}); impl='auto' runs eager on the "
+               "CPU.  Pass impl='eager' to say so; `python -m sweep.build --cpu` builds the core "
+               "with the compiler's output shown.")
+    else:
+        try:
+            from sweep.backend.c import loader
+            loader.core_lib("cpu")
+            return ""
+        except Exception as exc:
+            why = first_line(exc)
+            msg = (f"sweep's host (CPU) core {so} does not load ({why}); impl='auto' runs eager "
+                   "on the CPU.  Pass impl='eager' to say so, or point SWEEP_CORE_CPU at a host "
+                   "core that loads.")
+    warnings.warn(msg, UserWarning, stacklevel=5)
+    return why
+
+
+def _cpu_request_needs_eager(kwargs, backend_options, eager_options, memory, cuda_options):
+    """Whether what the caller passed keeps ``impl='auto'`` on eager on a CPU
+    device: eager options (``eager_options=``, or an eager knob at top level or
+    in ``backend_options``), or a memory request the host core refuses -- host
+    staging (``storage='cpu'`` / ``'disk'``), which has no second tier to go to
+    on a CPU device (the ``c@cpu`` row of ``check_memory_supported``).  Such a
+    caller ran eager before the host core and still does.  A request that does
+    not read is left to raise where PropTorch reads it."""
+    if eager_options is not None:
+        return True
+    try:
+        merged = _merge_option_dict(dict(kwargs), backend_options, label="backend_options")
+        if EAGER_OPTION_KEYS & set(merged):
+            return True
+        # warn=False: PropTorch reads the request again below, and a deprecated
+        # spelling warns once per process -- a first read here would use it up.
+        request = as_memory_strategy(memory if memory is not None
+                                     else getattr(cuda_options, "memory", None), warn=False)
+        strategy = resolve_memory_strategy("c", request, merged.get("use_ckpt"),
+                                           merged.get("boundary_saving_config"))
+        if request is None and strategy == "boundary":
+            cfg = dict(merged.get("boundary_saving_config") or {})
+            request = BoundarySaving(**_applicable_boundary_knobs(
+                {f.name: cfg[f.name]
+                 for f in dataclasses.fields(BoundaryOptions) if f.name in cfg}))
+        check_memory_supported("c", request, device="cpu")
+    except NotImplementedError:
+        return True
+    except (TypeError, ValueError):
+        return False
+    return False
+
+
 def _device_type(device):
     """``'cuda'`` / ``'cpu'`` / ... for a torch.device, a string (``'cuda:0'``)
     or an index; None when no device was given."""
@@ -71,15 +200,22 @@ def _device_type(device):
         return str(device).split(":", 1)[0].lower()
 
 
-def _resolve_impl_with_fallback(impl, *, explicit, equation=None, device=None):
+def _resolve_impl_with_fallback(impl, *, explicit, equation=None, device=None, eager_only=False):
     """Resolve 'auto' / 'c' to a concrete impl, falling back to 'eager' when
     the compiled binding is unavailable, the equation has no ``_C`` hook, or
-    the propagator is not on a CUDA device.
+    the propagator's device has no core.
 
-    The compiled backend runs on CUDA only, in every build (the ctypes layer
-    over the prebuilt core, the ``SWEEP_JIT_FULL=1`` pybind shim, an AOT-built
-    extension all reach the same CUDA core), so a CPU propagator -- or any
-    other device -- is eager.  No device given keeps the compiled path.
+    The CUDA core (the ctypes layer over the prebuilt core, the
+    ``SWEEP_JIT_FULL=1`` pybind shim and an AOT-built extension all reach it)
+    serves CUDA devices; no device given keeps that path.  The host core (the
+    same sources built for the CPU, ``sweep.backend.c.hostcore``) serves a CPU
+    device through the ctypes layer.  ``'auto'`` takes it when one comes up
+    -- shipped, cached, or built here once (``_host_core_ready``) -- the
+    equation is built into it and nothing the caller passed is eager's
+    (``eager_only``, from ``_cpu_request_needs_eager``): it is the faster CPU
+    path at 8 threads and more (docs/dev/host_core.md, section 4).  An
+    explicit ``impl='c'`` resolves the core the same way, and its first call
+    raises when the build fails.  Any other device is eager.
 
     When the user explicitly asked for 'c' but the path isn't available, emit
     a UserWarning so the slowdown is visible.
@@ -90,24 +226,48 @@ def _resolve_impl_with_fallback(impl, *, explicit, equation=None, device=None):
     device_ok = dtype is None or dtype == "cuda"
 
     if impl == "auto":
+        if dtype == "cpu":
+            # The pybind shim reaches the CUDA core only (see below).
+            return "c" if (equation_ok and not eager_only and not _pybind_shim_active()
+                           and _host_core_ready(equation)) else "eager"
         return "c" if (binding_ok and equation_ok and device_ok) else "eager"
+
+    host_reason = host_remedy = ""
+    if impl == "c" and explicit and dtype == "cpu" and equation_ok:
+        if _pybind_shim_active():
+            # The shim has no per-call core choice: every call it makes goes to
+            # the CUDA core, which refuses host tensors.  Checked here, not in
+            # _host_core_serves, so it holds whatever that probe says.
+            host_ok = False
+            host_reason = ("sweep._C is the pybind shim (SWEEP_JIT_FULL=1 or an ahead-of-time "
+                           "extension), which reaches the CUDA core only")
+            host_remedy = ("Unset SWEEP_JIT_FULL (or drop the prebuilt extension) so the ctypes "
+                           "layer, which serves the host core, is used; or use impl='eager' on the CPU.")
+        else:
+            host_ok, host_reason, host_remedy = _host_core_serves(equation)
+        if host_ok:
+            return "c"
 
     if impl == "c" and not (binding_ok and equation_ok and device_ok):
         if explicit:
             eq_name = type(equation).__name__ if equation is not None else "<unknown>"
-            if not device_ok:
-                reason = (f"the compiled backend runs on CUDA only and this propagator "
-                          f"is on {device}")
+            # Most specific cause first: an equation with no compiled kernels is
+            # eager on every device, so neither the device nor a core is why.
+            if not equation_ok:
+                reason = f"equation '{eq_name}' does not expose a compiled kernel"
+                remedy = "Use impl='eager' (or omit impl) for this equation."
+            elif dtype == "cpu":
+                reason, remedy = host_reason, host_remedy
+            elif not device_ok:
+                reason = (f"the compiled backend runs on CUDA and on the CPU (the host core) "
+                          f"and this propagator is on {device}")
                 remedy = "Move to a CUDA device (dev='cuda') for the compiled path."
-            elif not binding_ok:
+            else:
                 reason = "the compiled binding (sweep._C) is unavailable"
                 remedy = (
                     "Rebuild with `pip install -e .` in a CUDA-enabled env "
                     "to use the compiled path."
                 )
-            else:
-                reason = f"equation '{eq_name}' does not expose a compiled CUDA kernel"
-                remedy = "Use impl='eager' (or omit impl) for this equation."
             warnings.warn(
                 f"PropTorch(impl='c') requested but {reason}; falling back to "
                 f"impl='eager' (pure-PyTorch, ~5-20x slower). {remedy}",
@@ -118,7 +278,7 @@ def _resolve_impl_with_fallback(impl, *, explicit, equation=None, device=None):
     return impl
 
 
-def _normalize_backend_impl(backend, impl, *, equation=None, device=None):
+def _normalize_backend_impl(backend, impl, *, equation=None, device=None, eager_only=False):
     backend = str(backend).lower()
     if backend == "pytorch":
         backend = "torch"
@@ -140,7 +300,8 @@ def _normalize_backend_impl(backend, impl, *, equation=None, device=None):
         )
 
     normalized = _normalize_impl("auto" if impl is None else impl)
-    return backend, _resolve_impl_with_fallback(normalized, explicit=explicit_impl, equation=equation, device=device)
+    return backend, _resolve_impl_with_fallback(normalized, explicit=explicit_impl, equation=equation, device=device,
+                                                eager_only=eager_only)
 
 
 def _merge_option_dict(base, extra, *, label):
@@ -412,13 +573,20 @@ def _public_forward_signature(forward):
 
 class PropTorch(torch.nn.Module):
     """PyTorch propagator.  ``impl='eager'`` is pure torch (CPU or GPU);
-    ``impl='c'`` is the prebuilt CUDA core (``sweep/lib/cu<major>/libsweep_core.so``)
-    driven through the pure-Python ctypes layer ``sweep.backend.c`` -- CUDA GPU only,
-    nothing compiles after ``pip install``.  ``impl=None`` means ``'auto'``: ``'c'``
-    when ``sweep.is_torch_binding_available()``, the equation declares ``C_NAME``
-    and the propagator's device is CUDA (``device=``, else the equation's device),
-    else ``'eager'``; an explicit ``impl='c'`` that cannot be honoured falls back to
-    eager with a UserWarning.  ``backend=None`` inherits the equation's backend.
+    ``impl='c'`` is the compiled core driven through the pure-Python ctypes layer
+    ``sweep.backend.c``: on a CUDA device the prebuilt CUDA core
+    (``sweep/lib/cu<major>/libsweep_core.so``, nothing compiles after ``pip
+    install``); on a CPU device the host core, the same sources built for the CPU
+    (``sweep.backend.c.hostcore``: the wheel's ``lib/cpu`` core, else a
+    one-time local g++ build).  ``impl=None`` means ``'auto'``: ``'c'`` when
+    the equation declares ``C_NAME`` and the propagator's device (``device=``,
+    else the equation's device) is CUDA with
+    ``sweep.is_torch_binding_available()``, or the CPU with a host core that
+    builds the equation and comes up (shipped, cached or built here; a failed
+    build warns once and stays eager) and no eager option or host-staging
+    memory request passed; else ``'eager'``.  An explicit ``impl='c'`` that
+    cannot be honoured falls back to eager with a UserWarning.
+    ``backend=None`` inherits the equation's backend.
     ``cuda_options=`` applies to ``impl='c'`` only, ``eager_options=`` to
     ``impl='eager'``; ``memory=`` (``Full()`` / ``BoundarySaving()`` / ``Ckpt()``)
     is impl-agnostic (default: boundary saving on 'c' -- full storage for
@@ -442,7 +610,11 @@ class PropTorch(torch.nn.Module):
             # because its operators were already built against it.
             backend = getattr(equation, 'backend', 'torch')
         requested_impl = impl
-        backend, impl = _normalize_backend_impl(backend, impl, equation=equation, device=resolve_device(kwargs.get("device"), kwargs.get("dev"), equation))
+        _device = resolve_device(kwargs.get("device"), kwargs.get("dev"), equation)
+        eager_only = _device_type(_device) == "cpu" and _cpu_request_needs_eager(
+            kwargs, backend_options, eager_options, memory, cuda_options)
+        backend, impl = _normalize_backend_impl(backend, impl, equation=equation, device=_device,
+                                                eager_only=eager_only)
 
         # ``memory=`` is the impl-agnostic, dataclass-style memory-strategy API
         # (dict-style config still goes through boundary_saving_config=/use_ckpt=).
@@ -540,7 +712,7 @@ class PropTorch(torch.nn.Module):
             init_kwargs.get("boundary_saving_config"))
         # Refuse what this backend cannot honour BEFORE building it, so an
         # unsupported option is an error rather than a silent downgrade.
-        check_memory_supported(impl, _requested)
+        check_memory_supported(impl, _requested, device=_device)
         if _requested is None and strategy != "full":
             # The legacy dict/flag route resolved a strategy without a typed
             # request, which made the check above a no-op -- so eager plus
@@ -561,7 +733,7 @@ class PropTorch(torch.nn.Module):
                              count=max(1, int(init_kwargs.get("ckpt_num") or 1)))
             else:
                 probe = Ckpt(mode="chunk")
-            check_memory_supported(impl, probe)
+            check_memory_supported(impl, probe, device=_device)
 
         if impl == "eager":
             init_kwargs["use_ckpt"] = (strategy == "ckpt")

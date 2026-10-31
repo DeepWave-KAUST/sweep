@@ -1,5 +1,7 @@
 #pragma once
 #include "../../launch/by_order.cuh"
+#include "../../launch/cell_path.h"
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -31,34 +33,34 @@
 #define LAUNCH_DAS2D_SECOND_ADJOINT(order, direction, grid, block, ...)       \
     do {                                                                      \
         if ((direction) == X) {                                                \
-            if      ((order) == 2) das2d_second_derivative_adjoint_kernel<2, X><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 4) das2d_second_derivative_adjoint_kernel<4, X><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 6) das2d_second_derivative_adjoint_kernel<6, X><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 8) das2d_second_derivative_adjoint_kernel<8, X><<<grid, block>>>(__VA_ARGS__); \
-            else                   das2d_second_derivative_adjoint_kernel<-1, X><<<grid, block>>>(__VA_ARGS__); \
+            if      ((order) == 2) SWEEP_LAUNCH((das2d_second_derivative_adjoint_kernel<2, X>), grid, block, __VA_ARGS__); \
+            else if ((order) == 4) SWEEP_LAUNCH((das2d_second_derivative_adjoint_kernel<4, X>), grid, block, __VA_ARGS__); \
+            else if ((order) == 6) SWEEP_LAUNCH((das2d_second_derivative_adjoint_kernel<6, X>), grid, block, __VA_ARGS__); \
+            else if ((order) == 8) SWEEP_LAUNCH((das2d_second_derivative_adjoint_kernel<8, X>), grid, block, __VA_ARGS__); \
+            else                   SWEEP_LAUNCH((das2d_second_derivative_adjoint_kernel<-1, X>), grid, block, __VA_ARGS__); \
         } else {                                                              \
-            if      ((order) == 2) das2d_second_derivative_adjoint_kernel<2, Z><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 4) das2d_second_derivative_adjoint_kernel<4, Z><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 6) das2d_second_derivative_adjoint_kernel<6, Z><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 8) das2d_second_derivative_adjoint_kernel<8, Z><<<grid, block>>>(__VA_ARGS__); \
-            else                   das2d_second_derivative_adjoint_kernel<-1, Z><<<grid, block>>>(__VA_ARGS__); \
+            if      ((order) == 2) SWEEP_LAUNCH((das2d_second_derivative_adjoint_kernel<2, Z>), grid, block, __VA_ARGS__); \
+            else if ((order) == 4) SWEEP_LAUNCH((das2d_second_derivative_adjoint_kernel<4, Z>), grid, block, __VA_ARGS__); \
+            else if ((order) == 6) SWEEP_LAUNCH((das2d_second_derivative_adjoint_kernel<6, Z>), grid, block, __VA_ARGS__); \
+            else if ((order) == 8) SWEEP_LAUNCH((das2d_second_derivative_adjoint_kernel<8, Z>), grid, block, __VA_ARGS__); \
+            else                   SWEEP_LAUNCH((das2d_second_derivative_adjoint_kernel<-1, Z>), grid, block, __VA_ARGS__); \
         }                                                                     \
     } while (0)
 
 #define LAUNCH_DAS2D_FIRST_ADJOINT(order, direction, grid, block, ...)        \
     do {                                                                      \
         if ((direction) == X) {                                                \
-            if      ((order) == 2) das2d_first_derivative_adjoint_kernel<2, X><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 4) das2d_first_derivative_adjoint_kernel<4, X><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 6) das2d_first_derivative_adjoint_kernel<6, X><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 8) das2d_first_derivative_adjoint_kernel<8, X><<<grid, block>>>(__VA_ARGS__); \
-            else                   das2d_first_derivative_adjoint_kernel<-1, X><<<grid, block>>>(__VA_ARGS__); \
+            if      ((order) == 2) SWEEP_LAUNCH((das2d_first_derivative_adjoint_kernel<2, X>), grid, block, __VA_ARGS__); \
+            else if ((order) == 4) SWEEP_LAUNCH((das2d_first_derivative_adjoint_kernel<4, X>), grid, block, __VA_ARGS__); \
+            else if ((order) == 6) SWEEP_LAUNCH((das2d_first_derivative_adjoint_kernel<6, X>), grid, block, __VA_ARGS__); \
+            else if ((order) == 8) SWEEP_LAUNCH((das2d_first_derivative_adjoint_kernel<8, X>), grid, block, __VA_ARGS__); \
+            else                   SWEEP_LAUNCH((das2d_first_derivative_adjoint_kernel<-1, X>), grid, block, __VA_ARGS__); \
         } else {                                                              \
-            if      ((order) == 2) das2d_first_derivative_adjoint_kernel<2, Z><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 4) das2d_first_derivative_adjoint_kernel<4, Z><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 6) das2d_first_derivative_adjoint_kernel<6, Z><<<grid, block>>>(__VA_ARGS__); \
-            else if ((order) == 8) das2d_first_derivative_adjoint_kernel<8, Z><<<grid, block>>>(__VA_ARGS__); \
-            else                   das2d_first_derivative_adjoint_kernel<-1, Z><<<grid, block>>>(__VA_ARGS__); \
+            if      ((order) == 2) SWEEP_LAUNCH((das2d_first_derivative_adjoint_kernel<2, Z>), grid, block, __VA_ARGS__); \
+            else if ((order) == 4) SWEEP_LAUNCH((das2d_first_derivative_adjoint_kernel<4, Z>), grid, block, __VA_ARGS__); \
+            else if ((order) == 6) SWEEP_LAUNCH((das2d_first_derivative_adjoint_kernel<6, Z>), grid, block, __VA_ARGS__); \
+            else if ((order) == 8) SWEEP_LAUNCH((das2d_first_derivative_adjoint_kernel<8, Z>), grid, block, __VA_ARGS__); \
+            else                   SWEEP_LAUNCH((das2d_first_derivative_adjoint_kernel<-1, Z>), grid, block, __VA_ARGS__); \
         }                                                                     \
     } while (0)
 
@@ -108,32 +110,41 @@ __device__ __forceinline__ void das2d_scatter_sgradient_adjoint(
     }
 }
 
+// Where das2d_first_derivatives_cell may run off its own path: the cells its
+// in_pml_2d(ix, iz, halo) test puts outside the band (the physical box,
+// spelled with the same phys_*(halo) calls), inside the kernel's halo guard.
 template<int Order>
-__global__ void das2d_first_derivatives_kernel(
-    DasWavefieldPointer2D wf,
+__device__ __forceinline__
+CellBox das2d_first_interior_box(const SolverContext& solver)
+{
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int M_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+    return CellBox{solver.phys_x0(halo), solver.phys_x1(halo),
+                   solver.phys_z0(halo), solver.phys_z1(halo)}
+        .intersect({halo, solver.nx - halo, halo, solver.nz - halo});
+}
+
+// One cell of das2d_first_derivatives_kernel: everything after the kernel's
+// guards (see launch/cell_path.h).  Interior box: das2d_first_interior_box();
+// no optional outputs.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void das2d_first_derivatives_cell(
+    int ix, int iz, int b,
+    const DasWavefieldPointer2D& wf,
     float* __restrict__ tmp_sxx_x,
     float* __restrict__ tmp_szz_z,
     float* __restrict__ tmp_txx_z,
     float* __restrict__ tmp_tzz_x,
-    SGradParam grad_ctx,
-    ElasticCPMLPointer cpml,
-    SolverContext solver
+    const SGradParam& grad_ctx,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz || b >= solver.B) return;
-
     constexpr bool is_runtime = (Order == -1);
     constexpr int M_static = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
-
-    if (ix < halo || ix >= solver.nx - halo ||
-        iz < halo || iz >= solver.nz - halo) {
-        return;
-    }
 
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
@@ -151,7 +162,9 @@ __global__ void das2d_first_derivatives_kernel(
 
     // Interior fast-path: in PML-free region, axh/bxh/azh/bzh vanish, the
     // aux fields stay zero, and tmp_*_b just stores the raw gradient.
-    bool in_pml = solver.in_pml_2d(ix, iz, halo);
+    bool in_pml = false;
+    if constexpr (!interior_path<Path>)
+        in_pml = solver.in_pml_2d(ix, iz, halo);
 
     if (!in_pml) {
         tmp_sxx_x_b[idx] = dsxx_dx;
@@ -179,20 +192,13 @@ __global__ void das2d_first_derivatives_kernel(
     tmp_tzz_x_b[idx] = dtzz_dx + f.m_tzz_xf[idx];
 }
 
-using das2d_first_derivatives_kernel_fn = void (*)(DasWavefieldPointer2D, float*,
-    float*, float*, float*, SGradParam, ElasticCPMLPointer, SolverContext);
-SWEEP_BY_ORDER_DECL(das2d_first_derivatives_kernel_fn, das2d_first_derivatives_kernel_by_order);
-
 template<int Order>
-__global__ void das2d_update_kernel(
+__global__ void das2d_first_derivatives_kernel(
     DasWavefieldPointer2D wf,
-    const float* __restrict__ tmp_sxx_x,
-    const float* __restrict__ tmp_szz_z,
-    const float* __restrict__ tmp_txx_z,
-    const float* __restrict__ tmp_tzz_x,
-    const float* __restrict__ rho,
-    const float* __restrict__ lambda,
-    const float* __restrict__ mu,
+    float* __restrict__ tmp_sxx_x,
+    float* __restrict__ tmp_szz_z,
+    float* __restrict__ tmp_txx_z,
+    float* __restrict__ tmp_tzz_x,
     SGradParam grad_ctx,
     ElasticCPMLPointer cpml,
     SolverContext solver
@@ -207,12 +213,60 @@ __global__ void das2d_update_kernel(
     constexpr bool is_runtime = (Order == -1);
     constexpr int M_static = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
-    int update_halo = 2 * halo;
 
-    if (ix < update_halo || ix >= solver.nx - update_halo ||
-        iz < update_halo || iz >= solver.nz - update_halo) {
+    if (ix < halo || ix >= solver.nx - halo ||
+        iz < halo || iz >= solver.nz - halo) {
         return;
     }
+
+    das2d_first_derivatives_cell<Order>(ix, iz, b, wf, tmp_sxx_x, tmp_szz_z, tmp_txx_z, tmp_tzz_x,
+                                        grad_ctx, cpml, solver);
+}
+
+using das2d_first_derivatives_kernel_fn = void (*)(DasWavefieldPointer2D, float*,
+    float*, float*, float*, SGradParam, ElasticCPMLPointer, SolverContext);
+SWEEP_BY_ORDER_DECL(das2d_first_derivatives_kernel_fn, das2d_first_derivatives_kernel_by_order);
+
+// Where das2d_update_cell may run off its own path: the cells its
+// in_pml_2d(ix, iz, update_halo) test puts outside the band, inside the
+// kernel's update_halo guard.
+template<int Order>
+__device__ __forceinline__
+CellBox das2d_update_interior_box(const SolverContext& solver)
+{
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int M_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+    int update_halo = 2 * halo;
+    return CellBox{solver.phys_x0(update_halo), solver.phys_x1(update_halo),
+                   solver.phys_z0(update_halo), solver.phys_z1(update_halo)}
+        .intersect({update_halo, solver.nx - update_halo, update_halo, solver.nz - update_halo});
+}
+
+// One cell of das2d_update_kernel: everything after the kernel's guards (see
+// launch/cell_path.h).  Interior box: das2d_update_interior_box(); no optional
+// outputs.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void das2d_update_cell(
+    int ix, int iz, int b,
+    const DasWavefieldPointer2D& wf,
+    const float* __restrict__ tmp_sxx_x,
+    const float* __restrict__ tmp_szz_z,
+    const float* __restrict__ tmp_txx_z,
+    const float* __restrict__ tmp_tzz_x,
+    const float* __restrict__ rho,
+    const float* __restrict__ lambda,
+    const float* __restrict__ mu,
+    const SGradParam& grad_ctx,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver
+)
+{
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int M_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+    int update_halo = 2 * halo;
 
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
@@ -239,7 +293,9 @@ __global__ void das2d_update_kernel(
     // Interior fast-path: skip the four aux fields entirely when ax/bx vanish.
     // update_halo widens the bounds further than the standard halo, so we
     // re-key the PML check on the larger halo for safety.
-    bool in_pml = solver.in_pml_2d(ix, iz, update_halo);
+    bool in_pml = false;
+    if constexpr (!interior_path<Path>)
+        in_pml = solver.in_pml_2d(ix, iz, update_halo);
 
     if (!in_pml) {
         float shear_xz = dzz_txx + dxx_tzz;
@@ -291,10 +347,100 @@ __global__ void das2d_update_kernel(
     f.das54z[idx] = exx_new + 4.f * ezz_new;
 }
 
+template<int Order>
+__global__ void das2d_update_kernel(
+    DasWavefieldPointer2D wf,
+    const float* __restrict__ tmp_sxx_x,
+    const float* __restrict__ tmp_szz_z,
+    const float* __restrict__ tmp_txx_z,
+    const float* __restrict__ tmp_tzz_x,
+    const float* __restrict__ rho,
+    const float* __restrict__ lambda,
+    const float* __restrict__ mu,
+    SGradParam grad_ctx,
+    ElasticCPMLPointer cpml,
+    SolverContext solver
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz || b >= solver.B) return;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int M_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+    int update_halo = 2 * halo;
+
+    if (ix < update_halo || ix >= solver.nx - update_halo ||
+        iz < update_halo || iz >= solver.nz - update_halo) {
+        return;
+    }
+
+    das2d_update_cell<Order>(ix, iz, b, wf, tmp_sxx_x, tmp_szz_z, tmp_txx_z, tmp_tzz_x, rho, lambda,
+                             mu, grad_ctx, cpml, solver);
+}
+
 using das2d_update_kernel_fn = void (*)(DasWavefieldPointer2D, const float*,
     const float*, const float*, const float*, const float*, const float*, const float*,
     SGradParam, ElasticCPMLPointer, SolverContext);
 SWEEP_BY_ORDER_DECL(das2d_update_kernel_fn, das2d_update_kernel_by_order);
+
+// The cells of the three reconstruction kernels below: each has no PML branch,
+// so its interior box is its guard box -- the halo box (first derivatives) or
+// the update_halo box (reverse strain / stress).
+template<int Order>
+__device__ __forceinline__
+CellBox das2d_nopml_halo_box(const SolverContext& solver)
+{
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int M_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+    return {halo, solver.nx - halo, halo, solver.nz - halo};
+}
+
+template<int Order>
+__device__ __forceinline__
+CellBox das2d_update_halo_box(const SolverContext& solver)
+{
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int M_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+    int update_halo = 2 * halo;
+    return {update_halo, solver.nx - update_halo, update_halo, solver.nz - update_halo};
+}
+
+// One cell of das2d_first_derivatives_nopml_kernel: everything after the
+// kernel's guards (see launch/cell_path.h).  Straight-line, so every path is
+// the same code.  Interior box: das2d_nopml_halo_box().
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void das2d_first_derivatives_nopml_cell(
+    int ix, int iz, int b,
+    const DasWavefieldPointer2D& wf,
+    float* __restrict__ tmp_sxx_x,
+    float* __restrict__ tmp_szz_z,
+    float* __restrict__ tmp_txx_z,
+    float* __restrict__ tmp_tzz_x,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+    auto f = wf.offset(b, spatial_size);
+
+    float* tmp_sxx_x_b = tmp_sxx_x + b * spatial_size;
+    float* tmp_szz_z_b = tmp_szz_z + b * spatial_size;
+    float* tmp_txx_z_b = tmp_txx_z + b * spatial_size;
+    float* tmp_tzz_x_b = tmp_tzz_x + b * spatial_size;
+
+    tmp_sxx_x_b[idx] = sgradient<2, Order, X, DIFF_FORWARD>(f.sxx, ix, 0, iz, grad_ctx);
+    tmp_szz_z_b[idx] = sgradient<2, Order, Z, DIFF_FORWARD>(f.szz, ix, 0, iz, grad_ctx);
+    tmp_txx_z_b[idx] = sgradient<2, Order, Z, DIFF_FORWARD>(f.txx, ix, 0, iz, grad_ctx);
+    tmp_tzz_x_b[idx] = sgradient<2, Order, X, DIFF_FORWARD>(f.tzz, ix, 0, iz, grad_ctx);
+}
 
 template<int Order>
 __global__ void das2d_first_derivatives_nopml_kernel(
@@ -322,24 +468,57 @@ __global__ void das2d_first_derivatives_nopml_kernel(
         return;
     }
 
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-    auto f = wf.offset(b, spatial_size);
-
-    float* tmp_sxx_x_b = tmp_sxx_x + b * spatial_size;
-    float* tmp_szz_z_b = tmp_szz_z + b * spatial_size;
-    float* tmp_txx_z_b = tmp_txx_z + b * spatial_size;
-    float* tmp_tzz_x_b = tmp_tzz_x + b * spatial_size;
-
-    tmp_sxx_x_b[idx] = sgradient<2, Order, X, DIFF_FORWARD>(f.sxx, ix, 0, iz, grad_ctx);
-    tmp_szz_z_b[idx] = sgradient<2, Order, Z, DIFF_FORWARD>(f.szz, ix, 0, iz, grad_ctx);
-    tmp_txx_z_b[idx] = sgradient<2, Order, Z, DIFF_FORWARD>(f.txx, ix, 0, iz, grad_ctx);
-    tmp_tzz_x_b[idx] = sgradient<2, Order, X, DIFF_FORWARD>(f.tzz, ix, 0, iz, grad_ctx);
+    das2d_first_derivatives_nopml_cell<Order>(ix, iz, b, wf, tmp_sxx_x, tmp_szz_z, tmp_txx_z, tmp_tzz_x,
+                                              grad_ctx, solver);
 }
 
 using das2d_first_derivatives_nopml_kernel_fn = void (*)(DasWavefieldPointer2D, float*,
     float*, float*, float*, SGradParam, SolverContext);
 SWEEP_BY_ORDER_DECL(das2d_first_derivatives_nopml_kernel_fn, das2d_first_derivatives_nopml_kernel_by_order);
+
+// One cell of das2d_reverse_strain_nopml_kernel: everything after the
+// kernel's guards (see launch/cell_path.h).  Straight-line, so every path is
+// the same code.  Interior box: das2d_update_halo_box().
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void das2d_reverse_strain_nopml_cell(
+    int ix, int iz, int b,
+    const DasWavefieldPointer2D& wf,
+    const float* __restrict__ tmp_sxx_x,
+    const float* __restrict__ tmp_szz_z,
+    const float* __restrict__ tmp_txx_z,
+    const float* __restrict__ tmp_tzz_x,
+    const float* __restrict__ rho,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+    auto f = wf.offset(b, spatial_size);
+
+    const float* tmp_sxx_x_b = tmp_sxx_x + b * spatial_size;
+    const float* tmp_szz_z_b = tmp_szz_z + b * spatial_size;
+    const float* tmp_txx_z_b = tmp_txx_z + b * spatial_size;
+    const float* tmp_tzz_x_b = tmp_tzz_x + b * spatial_size;
+    const float* rho_b = rho + b * spatial_size;
+
+    float dxx_sxx = sgradient<2, Order, X, DIFF_BACKWARD>(tmp_sxx_x_b, ix, 0, iz, grad_ctx);
+    float dzz_szz = sgradient<2, Order, Z, DIFF_BACKWARD>(tmp_szz_z_b, ix, 0, iz, grad_ctx);
+    float dzz_txx = sgradient<2, Order, Z, DIFF_BACKWARD>(tmp_txx_z_b, ix, 0, iz, grad_ctx);
+    float dxx_tzz = sgradient<2, Order, X, DIFF_BACKWARD>(tmp_tzz_x_b, ix, 0, iz, grad_ctx);
+
+    float inv_rho = 1.f / rho_b[idx];
+    float shear_xz = dzz_txx + dxx_tzz;
+
+    float exx_prev = f.exx[idx] - solver.dt * inv_rho * (dxx_sxx + shear_xz);
+    float ezz_prev = f.ezz[idx] - solver.dt * inv_rho * (dzz_szz + shear_xz);
+    f.exx[idx] = exx_prev;
+    f.ezz[idx] = ezz_prev;
+    f.das35[idx] = exx_prev + ezz_prev;
+    f.das54x[idx] = 4.f * exx_prev + ezz_prev;
+    f.das54z[idx] = exx_prev + 4.f * ezz_prev;
+}
 
 template<int Order>
 __global__ void das2d_reverse_strain_nopml_kernel(
@@ -369,37 +548,45 @@ __global__ void das2d_reverse_strain_nopml_kernel(
         return;
     }
 
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-    auto f = wf.offset(b, spatial_size);
-
-    const float* tmp_sxx_x_b = tmp_sxx_x + b * spatial_size;
-    const float* tmp_szz_z_b = tmp_szz_z + b * spatial_size;
-    const float* tmp_txx_z_b = tmp_txx_z + b * spatial_size;
-    const float* tmp_tzz_x_b = tmp_tzz_x + b * spatial_size;
-    const float* rho_b = rho + b * spatial_size;
-
-    float dxx_sxx = sgradient<2, Order, X, DIFF_BACKWARD>(tmp_sxx_x_b, ix, 0, iz, grad_ctx);
-    float dzz_szz = sgradient<2, Order, Z, DIFF_BACKWARD>(tmp_szz_z_b, ix, 0, iz, grad_ctx);
-    float dzz_txx = sgradient<2, Order, Z, DIFF_BACKWARD>(tmp_txx_z_b, ix, 0, iz, grad_ctx);
-    float dxx_tzz = sgradient<2, Order, X, DIFF_BACKWARD>(tmp_tzz_x_b, ix, 0, iz, grad_ctx);
-
-    float inv_rho = 1.f / rho_b[idx];
-    float shear_xz = dzz_txx + dxx_tzz;
-
-    float exx_prev = f.exx[idx] - solver.dt * inv_rho * (dxx_sxx + shear_xz);
-    float ezz_prev = f.ezz[idx] - solver.dt * inv_rho * (dzz_szz + shear_xz);
-    f.exx[idx] = exx_prev;
-    f.ezz[idx] = ezz_prev;
-    f.das35[idx] = exx_prev + ezz_prev;
-    f.das54x[idx] = 4.f * exx_prev + ezz_prev;
-    f.das54z[idx] = exx_prev + 4.f * ezz_prev;
+    das2d_reverse_strain_nopml_cell<Order>(ix, iz, b, wf, tmp_sxx_x, tmp_szz_z, tmp_txx_z, tmp_tzz_x,
+                                           rho, grad_ctx, solver);
 }
 
 using das2d_reverse_strain_nopml_kernel_fn = void (*)(DasWavefieldPointer2D,
     const float*, const float*, const float*, const float*, const float*, SGradParam,
     SolverContext);
 SWEEP_BY_ORDER_DECL(das2d_reverse_strain_nopml_kernel_fn, das2d_reverse_strain_nopml_kernel_by_order);
+
+// One cell of das2d_reverse_stress_nopml_kernel: everything after the
+// kernel's guards (see launch/cell_path.h).  Pointwise and straight-line, so
+// every path is the same code.  Interior box: das2d_update_halo_box().
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void das2d_reverse_stress_nopml_cell(
+    int ix, int iz, int b,
+    const DasWavefieldPointer2D& wf,
+    const float* __restrict__ lambda,
+    const float* __restrict__ mu,
+    const SolverContext& solver
+)
+{
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+    auto f = wf.offset(b, spatial_size);
+
+    const float* lambda_b = lambda + b * spatial_size;
+    const float* mu_b = mu + b * spatial_size;
+
+    float lam = lambda_b[idx];
+    float mu_ = mu_b[idx];
+    float exx = f.exx[idx];
+    float ezz = f.ezz[idx];
+
+    f.sxx[idx] -= solver.dt * ((lam + 2.f * mu_) * exx + lam * ezz);
+    f.szz[idx] -= solver.dt * ((lam + 2.f * mu_) * ezz + lam * exx);
+    f.txx[idx] -= solver.dt * mu_ * exx;
+    f.tzz[idx] -= solver.dt * mu_ * ezz;
+}
 
 template<int Order>
 __global__ void das2d_reverse_stress_nopml_kernel(
@@ -425,31 +612,25 @@ __global__ void das2d_reverse_stress_nopml_kernel(
         return;
     }
 
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-    auto f = wf.offset(b, spatial_size);
-
-    const float* lambda_b = lambda + b * spatial_size;
-    const float* mu_b = mu + b * spatial_size;
-
-    float lam = lambda_b[idx];
-    float mu_ = mu_b[idx];
-    float exx = f.exx[idx];
-    float ezz = f.ezz[idx];
-
-    f.sxx[idx] -= solver.dt * ((lam + 2.f * mu_) * exx + lam * ezz);
-    f.szz[idx] -= solver.dt * ((lam + 2.f * mu_) * ezz + lam * exx);
-    f.txx[idx] -= solver.dt * mu_ * exx;
-    f.tzz[idx] -= solver.dt * mu_ * ezz;
+    das2d_reverse_stress_nopml_cell<Order>(ix, iz, b, wf, lambda, mu, solver);
 }
 
 using das2d_reverse_stress_nopml_kernel_fn = void (*)(DasWavefieldPointer2D,
     const float*, const float*, SolverContext);
 SWEEP_BY_ORDER_DECL(das2d_reverse_stress_nopml_kernel_fn, das2d_reverse_stress_nopml_kernel_by_order);
 
-template<int Order>
-__global__ void das2d_project_model_grad_kernel(
-    DasWavefieldPointer2D adjoint,
+// One cell of das2d_project_model_grad_kernel: everything after the kernel's
+// bounds guard (see launch/cell_path.h).  Interior box: the `active` box,
+// das2d_update_halo_box() -- an interior path skips the frame cells' das*
+// zeroing; no optional outputs.  ``solver`` is taken BY VALUE, unlike the
+// other cells: through a reference nvcc formed the `active` predicate chain
+// differently (one instruction fewer, a different opcode mix) from the
+// kernel it was split out of; by value the kernel keeps its SASS.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void das2d_project_model_grad_cell(
+    int ix, int iz, int b,
+    const DasWavefieldPointer2D& adjoint,
     const float* __restrict__ exx_now,
     const float* __restrict__ ezz_now,
     const float* __restrict__ exx_prev,
@@ -467,12 +648,6 @@ __global__ void das2d_project_model_grad_kernel(
     SolverContext solver
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz || b >= solver.B) return;
-
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
     auto a = adjoint.offset(b, spatial_size);
@@ -482,8 +657,10 @@ __global__ void das2d_project_model_grad_kernel(
     int halo = is_runtime ? solver.M : M_static;
     int update_halo = 2 * halo;
 
-    bool active = ix >= update_halo && ix < solver.nx - update_halo &&
-                  iz >= update_halo && iz < solver.nz - update_halo;
+    bool active = true;
+    if constexpr (!interior_path<Path>)
+        active = ix >= update_halo && ix < solver.nx - update_halo &&
+                 iz >= update_halo && iz < solver.nz - update_halo;
 
     if (!active) {
         a.das35[idx] = 0.f;
@@ -554,6 +731,37 @@ __global__ void das2d_project_model_grad_kernel(
     q_szz[idx] = solver.dt / rho_ * bar_ezz;
     q_txx[idx] = common;
     q_tzz[idx] = common;
+}
+
+template<int Order>
+__global__ void das2d_project_model_grad_kernel(
+    DasWavefieldPointer2D adjoint,
+    const float* __restrict__ exx_now,
+    const float* __restrict__ ezz_now,
+    const float* __restrict__ exx_prev,
+    const float* __restrict__ ezz_prev,
+    const float* __restrict__ vp,
+    const float* __restrict__ vs,
+    const float* __restrict__ rho,
+    float* __restrict__ grad_vp,
+    float* __restrict__ grad_vs,
+    float* __restrict__ grad_rho,
+    float* __restrict__ bar_dxx_sxx,
+    float* __restrict__ bar_dzz_szz,
+    float* __restrict__ bar_dzz_txx,
+    float* __restrict__ bar_dxx_tzz,
+    SolverContext solver
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz || b >= solver.B) return;
+
+    das2d_project_model_grad_cell<Order>(ix, iz, b, adjoint, exx_now, ezz_now, exx_prev, ezz_prev, vp,
+                                         vs, rho, grad_vp, grad_vs, grad_rho, bar_dxx_sxx, bar_dzz_szz,
+                                         bar_dzz_txx, bar_dxx_tzz, solver);
 }
 
 using das2d_project_model_grad_kernel_fn = void (*)(DasWavefieldPointer2D, const float*,

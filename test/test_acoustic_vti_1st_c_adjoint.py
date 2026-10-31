@@ -65,8 +65,19 @@ def _binding_ready():
         return False
 
 
-pytestmark = pytest.mark.skipif(not _binding_ready(),
-                                reason="CUDA + compiled sweep._C required")
+def _host_core():
+    import os
+    if os.environ.get("SWEEP_TEST_HOST_CORE", "1").lower() in ("0", "false", "no", "off"):
+        return False
+    from sweep.backend.c import hostcore
+    return hostcore.available()
+
+
+cuda_only = pytest.mark.skipif(not _binding_ready(), reason="CUDA + compiled sweep._C required")
+# The band tests also run on the host (CPU) core, whose pre-multiply rows leave
+# the band to the kernels (backward.cu vti2d/vti3d_premultiply_box).
+DEVICES = [pytest.param("cuda", marks=cuda_only),
+           pytest.param("cpu", marks=pytest.mark.skipif(not _host_core(), reason="no host (CPU) core at hand"))]
 
 
 from conftest import ricker
@@ -105,7 +116,7 @@ def _geometry(shape, abcn):
     return src, rec
 
 
-def _solver(shape, abcn, mode, source_type, receiver_type, nt=NT):
+def _solver(shape, abcn, mode, source_type, receiver_type, nt=NT, dev="cuda"):
     from sweep.propagator.options import (CkptOptions, CUDAOptions, EagerOptions,
                                           MemoryOptions)
     from sweep.propagator.torch import PropTorch
@@ -114,7 +125,7 @@ def _solver(shape, abcn, mode, source_type, receiver_type, nt=NT):
     else:
         from sweep.equations import AcousticVTI1st3D as EQ
 
-    dev = torch.device("cuda")
+    dev = torch.device(dev)
     eq = EQ(spatial_order=SO, device=dev, backend="torch")
     kw = dict(backend="torch", shape=shape, abcn=abcn, dh=DH, dt=DT, dev=dev,
               pml_type="cpmls", nt=nt, B=1, source_type=list(source_type),
@@ -162,6 +173,7 @@ NAMES = ("vp", "epsilon", "delta", "rho")
 COS_MIN, REL_MAX = 0.99999, 1e-3
 
 
+@cuda_only
 @pytest.mark.parametrize("mode", ["full", "bs", "ckpt"])
 @pytest.mark.parametrize("receiver_type", [["vz"], ["vx"], ["sH"], ["sV"],
                                            ["vx", "vz"]])
@@ -176,6 +188,7 @@ def test_vti2d_matches_eager(mode, source_type, receiver_type):
             f"(mode={mode}, src={source_type}, rec={receiver_type})")
 
 
+@cuda_only
 @pytest.mark.parametrize("mode", ["full", "bs", "ckpt"])
 @pytest.mark.parametrize("receiver_type", [["vz"], ["vy"], ["sH"]])
 def test_vti3d_matches_eager(mode, receiver_type):
@@ -225,10 +238,10 @@ def _band_geometry(shape):
     return src, np.stack([gx.ravel(), gy.ravel(), np.full(gx.size, 3)], -1)[None].astype(np.int64)
 
 
-def _band_grads(dim, mode):
+def _band_grads(dim, mode, dev):
     cfg = BAND[dim]
-    dev = torch.device("cuda")
-    solver = _solver(cfg["shape"], cfg["abcn"], mode, ["sH", "sV"], ["vz"], nt=cfg["nt"])
+    solver = _solver(cfg["shape"], cfg["abcn"], mode, ["sH", "sV"], ["vz"], nt=cfg["nt"], dev=dev)
+    assert solver.impl == ("eager" if mode == "eager" else "c")
     wavelet = torch.tensor(ricker(cfg["nt"], DT, FREQ, DELAY), device=dev)
     src, rec = _band_geometry(cfg["shape"])
     models = [torch.tensor(a, device=dev, requires_grad=True) for a in _models(cfg["shape"])]
@@ -236,11 +249,12 @@ def _band_grads(dim, mode):
     return [m.grad.detach().cpu() for m in models]
 
 
+@pytest.mark.parametrize("dev", DEVICES)
 @pytest.mark.parametrize("mode", ["full", "bs", "ckpt"])
 @pytest.mark.parametrize("dim", [2, 3])
-def test_adjoint_is_damped_in_the_absorbing_band(dim, mode):
-    ref = _band_grads(dim, "eager")
-    got = _band_grads(dim, mode)
+def test_adjoint_is_damped_in_the_absorbing_band(dim, mode, dev):
+    ref = _band_grads(dim, "eager", dev)
+    got = _band_grads(dim, mode, dev)
     for name, g, r in zip(NAMES, got, ref):
         cos, rel = _metrics(g, r)
         assert cos > COS_MIN and rel < REL_MAX, (

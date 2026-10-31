@@ -1,4 +1,5 @@
 #include <algorithm>
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 
 #include "acoustic_born2d.h"
@@ -156,7 +157,7 @@ static inline void run_born2d_adjoint_step(
     const std::vector<Buf>& workspace)
 {
     auto v2_lambda = pool_required(workspace, V2_LAMBDA, vp, "adjoint_workspace");   // vp^2 * lambda_now (fully overwritten each step)
-    compute_v2_lambda_born2d<<<grid, block>>>(
+    SWEEP_LAUNCH_ROWS(compute_v2_lambda_born2d, compute_v2_lambda_born2d_rows, grid, block,
         vp.data_ptr<float>(), adj_view.u_now, v2_lambda.data_ptr<float>(), ctx.nx, ctx.nz, ctx.B);
     ACOUSTIC_BORN2D_ADJOINT(order, grid, block,
         adj_view, v2_lambda.data_ptr<float>(), lap_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx);
@@ -201,7 +202,7 @@ void advance_forward_interval_2d(
             ctx
         );
 
-        add_source<<<source_grid, source_block>>>(
+        SWEEP_LAUNCH(add_source, source_grid, source_block,
             view.u_next,
             p.forward_source.data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(),
@@ -277,7 +278,7 @@ void process_recursive_interval_2d(
             ctx
         );
 
-        add_source<<<forward_source_grid, forward_source_block>>>(
+        SWEEP_LAUNCH(add_source, forward_source_grid, forward_source_block,
             fwd_view.u_next,
             p.forward_source.data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(),
@@ -293,7 +294,7 @@ void process_recursive_interval_2d(
             order, wave_grid, wave_block, adj_view,
             vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
-        add_source<<<adj_source_grid, adj_source_block>>>(
+        SWEEP_LAUNCH(add_source, adj_source_grid, adj_source_block,
             adj_view.u_next,
             p.adjoint_source.data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(),
@@ -304,7 +305,7 @@ void process_recursive_interval_2d(
 
         adjoint.swap_aux();   // rotate u, psi<->psin and zeta<->zetan (exact adjoint)
 
-        calculate_grad_born_mp<<<wave_grid, wave_block>>>(
+        SWEEP_LAUNCH_ROWS(calculate_grad_born_mp, calculate_grad_born_mp_rows, wave_grid, wave_block,
             bg_utt.data_ptr<float>(),
             adjoint.u_now_t.data_ptr<float>(),
             vp.data_ptr<float>(),
@@ -453,7 +454,7 @@ void run_full_imaging(const BackwardInputCore& p, Buf& grad_vp, Buf& grad_mp, fl
         // wrong time level (cos 0.88 vs eager instead of 1.0).
         if (rwi) {
             auto bg_adj_view = bg_adjoint.view();
-            compute_v2_lambda_bg_born2d<<<launch_config.grid, launch_config.block>>>(
+            SWEEP_LAUNCH_ROWS(compute_v2_lambda_bg_born2d, compute_v2_lambda_bg_born2d_rows, launch_config.grid, launch_config.block,
                 vp.data_ptr<float>(), mp.data_ptr<float>(),
                 bg_adjoint.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
                 v2lbg.data_ptr<float>(), nx, nz, B);
@@ -470,7 +471,7 @@ void run_full_imaging(const BackwardInputCore& p, Buf& grad_vp, Buf& grad_mp, fl
             order, launch_config.grid, launch_config.block, adj_view,
             vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
-        add_source<<<adj_source_config.grid, adj_source_config.block>>>(
+        SWEEP_LAUNCH(add_source, adj_source_config.grid, adj_source_config.block,
             adj_view.u_next,
             p.adjoint_source.data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(),
@@ -486,7 +487,7 @@ void run_full_imaging(const BackwardInputCore& p, Buf& grad_vp, Buf& grad_mp, fl
         auto u_fwd_it = p.u_forward.select(0, it);
         float* bg_utt = (rwi ? u_fwd_it.select(0, 0) : u_fwd_it).data_ptr<float>();
 
-        calculate_grad_born_mp<<<launch_config.grid, launch_config.block>>>(
+        SWEEP_LAUNCH_ROWS(calculate_grad_born_mp, calculate_grad_born_mp_rows, launch_config.grid, launch_config.block,
             bg_utt,
             adjoint.u_now_t.data_ptr<float>(),
             vp.data_ptr<float>(),
@@ -498,7 +499,7 @@ void run_full_imaging(const BackwardInputCore& p, Buf& grad_vp, Buf& grad_mp, fl
 
         if (rwi) {
             float* sc_utt = u_fwd_it.select(0, 1).data_ptr<float>();
-            calculate_grad_born_vp_utt<<<launch_config.grid, launch_config.block>>>(
+            SWEEP_LAUNCH_ROWS(calculate_grad_born_vp_utt, calculate_grad_born_vp_utt_rows, launch_config.grid, launch_config.block,
                 bg_utt, sc_utt,
                 bg_adjoint.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
                 mp.data_ptr<float>(), vp.data_ptr<float>(),
@@ -689,7 +690,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
         }
         const int cm = ctx.cut_mask();
         for (float* u : seeded)
-            set_boundary_zeros<<<launch_config.grid, launch_config.block>>>(
+            SWEEP_LAUNCH(set_boundary_zeros, launch_config.grid, launch_config.block,
                 u, ctx.abcn + ctx.M, nx, nz,
                 ctx.fsLo(0), ctx.fsHi(0), ctx.fsLo(2), ctx.fsHi(2), cm);
     }
@@ -744,7 +745,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
         // scattered step below.
         if (rwi) {
             auto bg_adj_view = bg_adjoint.view();
-            compute_v2_lambda_bg_born2d<<<launch_config.grid, launch_config.block>>>(
+            SWEEP_LAUNCH_ROWS(compute_v2_lambda_bg_born2d, compute_v2_lambda_bg_born2d_rows, launch_config.grid, launch_config.block,
                 vp.data_ptr<float>(), mp.data_ptr<float>(),
                 bg_adjoint.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
                 v2lbg.data_ptr<float>(), nx, nz, B);
@@ -760,7 +761,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
             order, launch_config.grid, launch_config.block, adj_view,
             vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
-        add_source<<<adj_source_config.grid, adj_source_config.block>>>(
+        SWEEP_LAUNCH(add_source, adj_source_config.grid, adj_source_config.block,
             adj_view.u_next,
             p.adjoint_source.data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(),
@@ -798,7 +799,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
         // until add_source, for_view_iter.u_next is the SOURCE-FREE bg[it-1], so
         // bg_{it-1} - 2 bg_it + bg_{it+1} = dt^2 vp^2 W(bg_it) exactly -- the
         // quantity both the scattered coupling and the vp imaging need.
-        sub_source_in_restore_strip<<<fwd_source_config.grid, fwd_source_config.block>>>(
+        SWEEP_LAUNCH(sub_source_in_restore_strip, fwd_source_config.grid, fwd_source_config.block,
             for_view_iter.u_next,
             p.forward_source.data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(),
@@ -815,7 +816,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
             ACOUSTIC_BORN2D_SINGLE_NOPML(
                 order, launch_config.grid, launch_config.block,
                 sc_view_iter, vp.data_ptr<float>(), lap_ctx, ctx);
-            add_born_scattered_coupling_2d<<<launch_config.grid, launch_config.block>>>(
+            SWEEP_LAUNCH_ROWS(add_born_scattered_coupling_2d, add_born_scattered_coupling_2d_rows, launch_config.grid, launch_config.block,
                 sc_view_iter.u_next, for_view_iter.u_next,
                 forward.u_now_t.data_ptr<float>(), forward.u_prev_t.data_ptr<float>(),
                 mp.data_ptr<float>(), nx, nz, M);
@@ -825,7 +826,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
         }
 
         // ---- imaging: mp (bg . lambda_sc), vp (bg . lambda_bg + sc . lambda_sc) ----
-        calculate_grad_born_mp_utt<<<launch_config.grid, launch_config.block>>>(
+        SWEEP_LAUNCH_ROWS(calculate_grad_born_mp_utt, calculate_grad_born_mp_utt_rows, launch_config.grid, launch_config.block,
             forward.u_prev_t.data_ptr<float>(),
             for_view_iter.u_next,
             forward.u_now_t.data_ptr<float>(),
@@ -836,7 +837,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
         );
 
         if (rwi)
-            calculate_grad_born_vp_2diff_2d<<<launch_config.grid, launch_config.block>>>(
+            SWEEP_LAUNCH_ROWS(calculate_grad_born_vp_2diff_2d, calculate_grad_born_vp_2diff_2d_rows, launch_config.grid, launch_config.block,
                 forward.u_prev_t.data_ptr<float>(),     // bg[it+1]
                 forward.u_now_t.data_ptr<float>(),      // bg[it]
                 for_view_iter.u_next,                   // bg[it-1], source-free
@@ -851,7 +852,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
             );
 
         // ---- re-inject the background forward source (the scattered field has none) ----
-        add_source<<<fwd_source_config.grid, fwd_source_config.block>>>(
+        SWEEP_LAUNCH(add_source, fwd_source_config.grid, fwd_source_config.block,
             for_view_iter.u_next,
             p.forward_source.data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(),
@@ -873,7 +874,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
             order, launch_config.grid, launch_config.block, adj_view,
             vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
-        add_source<<<adj_source_config.grid, adj_source_config.block>>>(
+        SWEEP_LAUNCH(add_source, adj_source_config.grid, adj_source_config.block,
             adj_view.u_next,
             p.adjoint_source.data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(),
@@ -1005,7 +1006,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
                 ctx
             );
 
-            add_source<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            SWEEP_LAUNCH(add_source, fwd_source_config.grid, fwd_source_config.block,
                 for_view.u_next,
                 p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
@@ -1024,7 +1025,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
                 order, launch_config.grid, launch_config.block, adj_view,
                 vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
-            add_source<<<adj_source_config.grid, adj_source_config.block>>>(
+            SWEEP_LAUNCH(add_source, adj_source_config.grid, adj_source_config.block,
                 adj_view.u_next,
                 p.adjoint_source.data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
@@ -1035,7 +1036,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 
             adjoint.swap_aux();   // rotate u, psi<->psin and zeta<->zetan (exact adjoint)
 
-            calculate_grad_born_mp<<<launch_config.grid, launch_config.block>>>(
+            SWEEP_LAUNCH_ROWS(calculate_grad_born_mp, calculate_grad_born_mp_rows, launch_config.grid, launch_config.block,
                 chunk_forward.select(0, it - start).data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
                 vp.data_ptr<float>(),

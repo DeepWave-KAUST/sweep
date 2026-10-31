@@ -314,6 +314,8 @@ def run_one(cfg: Cfg, device: str = "cuda") -> dict:
     else:
         topo = None
     if topo is not None:
+        sources = _below_surface(sources, topo)
+        receivers = _below_surface(receivers, topo)
         solver = _build_with_topo(S, spec, scenario, shape, device, args, cfg,
                                   topo, run_dir, case_key)
     elif cfg.impl == "eager":
@@ -359,6 +361,44 @@ def run_one(cfg: Cfg, device: str = "cuda") -> dict:
         "shape": tuple(int(s) for s in shape),
     }
     return out
+
+
+# How far below its column's surface a topography config's source or receiver
+# sits at least.
+_SURFACE_CLEARANCE = 2
+
+
+def _below_surface(points, topo):
+    """``points`` (..., ndim) in (x[, y], z) order with every z moved to at
+    least ``_SURFACE_CLEARANCE`` rows below the surface of its column.
+
+    The suite places receivers at a fixed depth (``spatial_order // 2``), which
+    on the hill and the stairs is ABOVE the surface for every 2-D receiver and
+    40 of the 49 3-D ones.  A receiver in the air records an identically-zero
+    trace, so five of the ten tier-T records were all-zero -- comparisons that
+    tested nothing -- and on impl='c' the zero traces still fed spurious
+    adjoint sources into the gradient (fixed since: propagator/_c.py
+    _drop_air_receivers; test/test_topography_air_receivers.py pins it).
+    Points already below the surface stay where they are.
+    """
+    pts = np.array(points, copy=True)
+    flat = pts.reshape(-1, pts.shape[-1])
+    for p in flat:
+        surface = topo[p[0]] if topo.ndim == 1 else topo[p[1], p[0]]
+        p[-1] = max(int(p[-1]), int(surface) + _SURFACE_CLEARANCE)
+    return pts
+
+
+def _trivial(entry: dict) -> str | None:
+    """Why a successful result compares nothing, or None."""
+    if "error" in entry:
+        return None
+    if not torch.any(entry["record"] != 0):
+        return "the record is identically zero"
+    grads = entry.get("grads") or {}
+    if grads and all(not torch.any(g != 0) for g in grads.values()):
+        return "every gradient is identically zero"
+    return None
 
 
 def _build_with_topo(S, spec, scenario, shape, device, args, cfg, topo,
@@ -496,6 +536,13 @@ def _cmp_entry(a: dict, b: dict, tol: float | None = None) -> list[str]:
         if a["error"] != b["error"]:
             fails.append(f"error text changed: {a['error']!r} -> {b['error']!r}")
         return fails
+    # Two all-zero records compare equal and prove nothing: a geometry that
+    # records nothing (receivers in the air of a topography model) passed here
+    # for months.
+    for side, entry in (("baseline", a), ("this run", b)):
+        why = _trivial(entry)
+        if why:
+            fails.append(f"{side}: {why} -- the comparison tests nothing")
     if a["record"].shape != b["record"].shape:
         fails.append(f"record shape {tuple(a['record'].shape)} -> "
                      f"{tuple(b['record'].shape)}")
@@ -591,11 +638,15 @@ def measure_noise(cfgs, inproc, out: Path, passes: int = 4) -> int:
     (lesson_bitexact_criterion_must_verify_attainable).
 
     ``passes`` defaults to 4 (6 pairings), not 2, because two runs measure ONE
-    sample of the spread and int8 storage in particular has a long tail: two
-    passes put acoustic_vti_1st_3d's int8 floor at 6.3e-05, while eight passes
-    showed its true spread reaching 1.1e-03 -- a factor of 18. A floor sampled
-    that far below the truth turns every later comparison into a false alarm,
-    which costs more than the extra passes do.
+    sample of the spread and a spread can have a long tail: two passes put
+    acoustic_vti_1st_3d's int8 floor at 6.3e-05, while eight passes showed its
+    true spread reaching 1.1e-03 -- a factor of 18. A floor sampled that far
+    below the truth turns every later comparison into a false alarm, which
+    costs more than the extra passes do.  (That tail was a race, not
+    quantisation: the 3-D compact restore wrote an edge/corner cell from
+    whichever band's thread ran last; boundary_kernel3d_compact_owned fixed it,
+    and those floors are null now.  Before accepting a floor, ask whether it is
+    a race.)
 
     Configs that ARE bit-stable are written as null, so the file is a census
     rather than an opt-in list of excuses.
@@ -686,7 +737,8 @@ def main() -> int:
                          "write each config's measured spread to this JSON.")
     ap.add_argument("--passes", type=int, default=4,
                     help="Passes for --measure-noise. 2 measures a single "
-                         "sample and reads int8 floors up to 18x too low.")
+                         "sample of the spread and can read a long-tailed one "
+                         "up to 18x too low.")
     ap.add_argument("--floors", type=Path,
                     default=HERE / "noise_floors.json",
                     help="Per-config gradient tolerances from --measure-noise. "
@@ -747,6 +799,13 @@ def main() -> int:
     nerr = sum(1 for v in res.values() if "error" in v)
     print(f"\nran {len(res)} configs, {nerr} errored")
 
+    trivial = {k: _trivial(v) for k, v in res.items() if _trivial(v)}
+    if trivial:
+        for k, why in trivial.items():
+            print(f"TRIVIAL  {k}: {why}")
+    if args.save and trivial:
+        print(f"refusing to save {args.save}: {len(trivial)} config(s) compare nothing")
+        return 1
     if args.save:
         args.save.parent.mkdir(parents=True, exist_ok=True)
         meta = {"tier": args.tier, "n": len(res),

@@ -1,5 +1,7 @@
 #pragma once
 #include "../../launch/by_order.cuh"
+#include "../../launch/cell_path.h"
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 #include <cuda.h>
 #include <cuda_runtime.h>
 
@@ -8,6 +10,21 @@
 #include "../../common/acoustic_vrz_fused.cuh"
 #include "../../operators/gradient.cuh"
 #include "../../operators/laplace.cuh"
+
+#if defined(SWEEP_HOST_CORE)
+// The host row launchers' unit-stride copy of the gradient parameters
+// (kernels.cu, forward_split.cu).  gradient<> steps x by the run-time
+// grad_ctx.sx, which every driver of this equation sets to 1 (GradParam{1, 0, nx, ...}).  A
+// stride the compiler cannot see turns the x taps of a row into strided
+// element loads, so the cells get a copy with sx = 1 written in (ix * 1 ==
+// ix * sx: the same indices); a launcher whose grad_ctx.sx is not 1 hands
+// launch_rows an empty span, and every cell runs through the kernel.
+inline GradParam vrz2d_unit_sx(GradParam g)
+{
+    g.sx = 1;
+    return g;
+}
+#endif
 
 // The VRZ2D forward and adjoint steps (forward_split.cu, adjoint_split.cu): the
 // interior box plus one launch over the CPML ring around it, every order
@@ -137,11 +154,11 @@ __global__ void calculate_grad_vrz2d(
 
 #define ACOUSTIC_VRZ2D_ADJOINT(order, grid, block, ...)                                      \
     do {                                                                                     \
-        if      ((order) == 2) acoustic_vrz2nd_adjoint<2><<<grid, block>>>(__VA_ARGS__);     \
-        else if ((order) == 4) acoustic_vrz2nd_adjoint<4><<<grid, block>>>(__VA_ARGS__);     \
-        else if ((order) == 6) acoustic_vrz2nd_adjoint<6><<<grid, block>>>(__VA_ARGS__);     \
-        else if ((order) == 8) acoustic_vrz2nd_adjoint<8><<<grid, block>>>(__VA_ARGS__);     \
-        else                   acoustic_vrz2nd_adjoint<-1><<<grid, block>>>(__VA_ARGS__);    \
+        if      ((order) == 2) SWEEP_LAUNCH((acoustic_vrz2nd_adjoint<2>), grid, block, __VA_ARGS__);     \
+        else if ((order) == 4) SWEEP_LAUNCH((acoustic_vrz2nd_adjoint<4>), grid, block, __VA_ARGS__);     \
+        else if ((order) == 6) SWEEP_LAUNCH((acoustic_vrz2nd_adjoint<6>), grid, block, __VA_ARGS__);     \
+        else if ((order) == 8) SWEEP_LAUNCH((acoustic_vrz2nd_adjoint<8>), grid, block, __VA_ARGS__);     \
+        else                   SWEEP_LAUNCH((acoustic_vrz2nd_adjoint<-1>), grid, block, __VA_ARGS__);    \
     } while (0)
 
 #define CALCULATE_GRAD_VRZ2D(order, grid, block, ...) \
@@ -152,11 +169,11 @@ __global__ void calculate_grad_vrz2d(
 
 #define BUILD_VRZ_ADJOINT_FIELDS(order, grid, block, ...)                                    \
     do {                                                                                     \
-        if      ((order) == 2) build_vrz_adjoint_fields<2><<<grid, block>>>(__VA_ARGS__);    \
-        else if ((order) == 4) build_vrz_adjoint_fields<4><<<grid, block>>>(__VA_ARGS__);    \
-        else if ((order) == 6) build_vrz_adjoint_fields<6><<<grid, block>>>(__VA_ARGS__);    \
-        else if ((order) == 8) build_vrz_adjoint_fields<8><<<grid, block>>>(__VA_ARGS__);    \
-        else                   build_vrz_adjoint_fields<-1><<<grid, block>>>(__VA_ARGS__);   \
+        if      ((order) == 2) SWEEP_LAUNCH((build_vrz_adjoint_fields<2>), grid, block, __VA_ARGS__);    \
+        else if ((order) == 4) SWEEP_LAUNCH((build_vrz_adjoint_fields<4>), grid, block, __VA_ARGS__);    \
+        else if ((order) == 6) SWEEP_LAUNCH((build_vrz_adjoint_fields<6>), grid, block, __VA_ARGS__);    \
+        else if ((order) == 8) SWEEP_LAUNCH((build_vrz_adjoint_fields<8>), grid, block, __VA_ARGS__);    \
+        else                   SWEEP_LAUNCH((build_vrz_adjoint_fields<-1>), grid, block, __VA_ARGS__);   \
     } while (0)
 
 template<int Order, int Direction>
@@ -272,8 +289,9 @@ __device__ __forceinline__ float vrz2d_split_grad_q_gradp(
 // keeps its cell at phys_*0() == M there and reconstructs it from the
 // exchanged halo.  Inset on a cut face as well, that cell was neither restored
 // nor reconstructed: it kept what the triple buffer held three steps earlier.
-// One definition for acoustic_vrz2nd_nopml and the fused step of
-// grad_tiled.cu; the 3-D twin is acoustic_vrz3d/forward_split.cu launch_nopml.
+// One definition for acoustic_vrz2nd_nopml, the fused step of grad_tiled.cu
+// and the host core's rows (kernels.cu vrz2d_nopml_box); the 3-D twin is
+// acoustic_vrz3d/forward_split.cu launch_nopml.
 struct Vrz2dReconBox { int x0, x1, z0, z1; };
 
 __host__ __device__ __forceinline__ Vrz2dReconBox vrz2d_recon_box(const SolverContext& s)
@@ -282,26 +300,22 @@ __host__ __device__ __forceinline__ Vrz2dReconBox vrz2d_recon_box(const SolverCo
             s.phys_z0() + (s.cut_z_lo() ? 0 : 1), s.phys_z1() - (s.cut_z_hi() ? 0 : 1)};
 }
 
-template<int Order>
-__global__ void acoustic_vrz2nd_nopml(
-    AcousticWavefieldPointer wf,
+// One cell of acoustic_vrz2nd_nopml: everything after the kernel's guards
+// (launch/cell_path.h).  Interior box: the guard's own box, vrz2d_recon_box
+// (kernels.cu vrz2d_nopml_box); the body has no run-time test, so every path
+// is the same code.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void acoustic_vrz2nd_nopml_cell(
+    int ix, int iz, int b,
+    const AcousticWavefieldPointer& wf,
     const float* __restrict__ vp,
     const float* __restrict__ z,
     const float* __restrict__ inv_z,
-    LaplaceParam lap_ctx,
-    GradParam grad_ctx,
-    SolverContext solver
+    const LaplaceParam& lap_ctx,
+    const GradParam& grad_ctx,
+    const SolverContext& solver
 ) {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
-
-    const Vrz2dReconBox r = vrz2d_recon_box(solver);
-    if (ix < r.x0 || ix >= r.x1 || iz < r.z0 || iz >= r.z1)
-        return;
-
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
 
@@ -330,6 +344,29 @@ __global__ void acoustic_vrz2nd_nopml(
     float rhs = kappa * (beta * (lap_x + lap_z) + dbdx * dudx + dbdz * dudz);
 
     f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * rhs;
+}
+
+template<int Order>
+__global__ void acoustic_vrz2nd_nopml(
+    AcousticWavefieldPointer wf,
+    const float* __restrict__ vp,
+    const float* __restrict__ z,
+    const float* __restrict__ inv_z,
+    LaplaceParam lap_ctx,
+    GradParam grad_ctx,
+    SolverContext solver
+) {
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    const Vrz2dReconBox r = vrz2d_recon_box(solver);
+    if (ix < r.x0 || ix >= r.x1 || iz < r.z0 || iz >= r.z1)
+        return;
+
+    acoustic_vrz2nd_nopml_cell<Order>(ix, iz, b, wf, vp, z, inv_z, lap_ctx, grad_ctx, solver);
 }
 
 using acoustic_vrz2nd_nopml_fn = void (*)(AcousticWavefieldPointer, const float*,
@@ -506,6 +543,47 @@ __global__ void acoustic_vrz2nd_adjoint(
     f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * rhs;
 }
 
+// One cell of build_vrz_grad_fields: everything after the kernel's guards
+// (launch/cell_path.h).  Interior box: the guard's own halo box (kernels.cu
+// vrz2d_halo_box); the body has no run-time test, so every path is the same
+// code.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void build_vrz_grad_fields_cell(
+    int ix, int iz, int b,
+    const float* __restrict__ f_u_now,
+    const float* __restrict__ lambda_now,
+    const float* __restrict__ vp,
+    const float* __restrict__ z,
+    float* __restrict__ c_x,
+    float* __restrict__ c_z,
+    float* __restrict__ e_x,
+    float* __restrict__ e_z,
+    const GradParam& grad_ctx,
+    const SolverContext& solver
+) {
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+    int gidx = b * spatial_size + idx;
+
+    const float* p_b = f_u_now + b * spatial_size;
+    const float* lam_b = lambda_now + b * spatial_size;
+    const float* vp_b = vp + b * spatial_size;
+    const float* z_b = z + b * spatial_size;
+
+    float dpdx = gradient<2, Order, X>(p_b, ix, 0, iz, grad_ctx);
+    float dpdz = gradient<2, Order, Z>(p_b, ix, 0, iz, grad_ctx);
+    float v = vp_b[idx];
+    float lam = lam_b[idx];
+    float lam_v = lam * v;
+    float lam_v2z = lam * v * v * z_b[idx];
+
+    c_x[gidx] = lam_v * dpdx;          // λ·vp·∂ₓp
+    c_z[gidx] = lam_v * dpdz;          // λ·vp·∂_z p
+    e_x[gidx] = lam_v2z * dpdx;        // λ·vp²·z·∂ₓp
+    e_z[gidx] = lam_v2z * dpdz;        // λ·vp²·z·∂_z p
+}
+
 template<int Order>
 __global__ void build_vrz_grad_fields(
     const float* __restrict__ f_u_now,
@@ -531,26 +609,8 @@ __global__ void build_vrz_grad_fields(
     if (ix < halo || ix >= solver.nx - halo || iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-    int gidx = b * spatial_size + idx;
-
-    const float* p_b = f_u_now + b * spatial_size;
-    const float* lam_b = lambda_now + b * spatial_size;
-    const float* vp_b = vp + b * spatial_size;
-    const float* z_b = z + b * spatial_size;
-
-    float dpdx = gradient<2, Order, X>(p_b, ix, 0, iz, grad_ctx);
-    float dpdz = gradient<2, Order, Z>(p_b, ix, 0, iz, grad_ctx);
-    float v = vp_b[idx];
-    float lam = lam_b[idx];
-    float lam_v = lam * v;
-    float lam_v2z = lam * v * v * z_b[idx];
-
-    c_x[gidx] = lam_v * dpdx;          // λ·vp·∂ₓp
-    c_z[gidx] = lam_v * dpdz;          // λ·vp·∂_z p
-    e_x[gidx] = lam_v2z * dpdx;        // λ·vp²·z·∂ₓp
-    e_z[gidx] = lam_v2z * dpdz;        // λ·vp²·z·∂_z p
+    build_vrz_grad_fields_cell<Order>(ix, iz, b, f_u_now, lambda_now, vp, z, c_x, c_z, e_x, e_z,
+                                      grad_ctx, solver);
 }
 
 using build_vrz_grad_fields_fn = void (*)(const float*, const float*, const float*,
@@ -565,6 +625,90 @@ SWEEP_BY_ORDER_DECL(build_vrz_grad_fields_fn, build_vrz_grad_fields_by_order);
 // The ∇·(...) divergences read the pre-computed c_d / e_d buffers (so the FD
 // gradient stencil — which is the transpose of the forward gradient — can read
 // neighbours).  The (-dt²) weight matches the forward u_next += dt²·rhs.
+//
+// One cell of calculate_grad_vrz2d: everything after the kernel's guards
+// (launch/cell_path.h).  Interior box: the guard's own halo box (kernels.cu
+// vrz2d_halo_box); its one run-time test is the optional input p_tt (slot 0:
+// present = the stored second time difference, absent = three time levels).
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void calculate_grad_vrz2d_cell(
+    int ix, int iz, int b,
+    const float* __restrict__ f_u_now,
+    const float* __restrict__ lambda_now,
+    const float* __restrict__ p_tt,
+    const float* __restrict__ p_prev,
+    const float* __restrict__ p_next,
+    const float* __restrict__ c_x,
+    const float* __restrict__ c_z,
+    const float* __restrict__ e_x,
+    const float* __restrict__ e_z,
+    const float* __restrict__ vp,
+    const float* __restrict__ z,
+    const float* __restrict__ inv_z,
+    float* __restrict__ grad_vp,
+    float* __restrict__ grad_z,
+    const GradParam& grad_ctx,
+    const SolverContext& solver
+) {
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+    int shift = b * spatial_size;
+
+    const float* p_b = f_u_now + shift;
+    const float* lambda_b = lambda_now + shift;
+    const float* cx_b = c_x + shift;
+    const float* cz_b = c_z + shift;
+    const float* ex_b = e_x + shift;
+    const float* ez_b = e_z + shift;
+    const float* vp_b = vp + shift;
+    const float* z_b = z + shift;
+    const float* inv_z_b = inv_z + shift;
+    float* grad_vp_b = grad_vp + shift;
+    float* grad_z_b = grad_z + shift;
+
+    // 2·v·λ·∇²p is replaced through the forward identity (same operators as
+    // the forward kernel, so exact in the interior up to rounding):
+    //   U_{it+1} − 2U_it + U_{it−1} = dt²·κ·(β·∇²p + ∇b·∇p)   (+ S at source cells)
+    //   => 2vλ∇²p = 2λ·p_tt/(dt²·v) − 2λ·∇p·∇vp − 2vzλ·∇p·∇(1/z)
+    // so grad_vp takes NO second spatial derivative of the stored /
+    // reconstructed field (the int8 rim came from exactly that).  The source
+    // term is removed by vrz2d_utt_source_correction.  p_tt is either
+    // precomputed (full store, slot 5 of u_forward) or formed here from the
+    // three time levels (bs, ckpt).
+    float ptt = optional_output<Path>(p_tt)
+        ? p_tt[shift + idx]
+        : (p_next[shift + idx] - 2.0f * p_b[idx] + p_prev[shift + idx]);
+
+    float dpdx = gradient<2, Order, X>(p_b, ix, 0, iz, grad_ctx);
+    float dpdz = gradient<2, Order, Z>(p_b, ix, 0, iz, grad_ctx);
+
+    float dvpdx = gradient<2, Order, X>(vp_b, ix, 0, iz, grad_ctx);
+    float dvpdz = gradient<2, Order, Z>(vp_b, ix, 0, iz, grad_ctx);
+    float z1x = gradient<2, Order, X>(inv_z_b, ix, 0, iz, grad_ctx);
+    float z1z = gradient<2, Order, Z>(inv_z_b, ix, 0, iz, grad_ctx);
+
+    // ∇·(c)  and  ∇·(e)  via the FD gradient stencil (transpose of forward grad).
+    float div_c = gradient<2, Order, X>(cx_b, ix, 0, iz, grad_ctx)
+                + gradient<2, Order, Z>(cz_b, ix, 0, iz, grad_ctx);
+    float div_e = gradient<2, Order, X>(ex_b, ix, 0, iz, grad_ctx)
+                + gradient<2, Order, Z>(ez_b, ix, 0, iz, grad_ctx);
+
+    float v = vp_b[idx];
+    float inv_z0 = inv_z_b[idx];
+    float lam = lambda_b[idx];
+
+    float dp_dvp   = dpdx * dvpdx + dpdz * dvpdz;   // ∇p·∇vp
+    float dp_dinvz = dpdx * z1x  + dpdz * z1z;      // ∇p·∇(1/z)
+
+    float dt2 = solver.dt * solver.dt;
+    // grad_vp += −dt²·[2λ·p_tt/(dt²·v) − λ·∇p·∇vp − ∇·(λ·vp·∇p)]
+    grad_vp_b[idx] += -2.0f * lam * ptt / v + dt2 * (lam * dp_dvp + div_c);
+    float g_z  = lam * v * v * dp_dinvz
+               + div_e * inv_z0 * inv_z0;           // ∇·(e)/z²
+    grad_z_b[idx]  += -dt2 * g_z;
+}
+
 template<int Order>
 __global__ void calculate_grad_vrz2d(
     const float* __restrict__ f_u_now,
@@ -598,62 +742,8 @@ __global__ void calculate_grad_vrz2d(
     if (ix < halo || ix >= solver.nx - halo || iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-    int shift = b * spatial_size;
-
-    const float* p_b = f_u_now + shift;
-    const float* lambda_b = lambda_now + shift;
-    const float* cx_b = c_x + shift;
-    const float* cz_b = c_z + shift;
-    const float* ex_b = e_x + shift;
-    const float* ez_b = e_z + shift;
-    const float* vp_b = vp + shift;
-    const float* z_b = z + shift;
-    const float* inv_z_b = inv_z + shift;
-    float* grad_vp_b = grad_vp + shift;
-    float* grad_z_b = grad_z + shift;
-
-    // 2·v·λ·∇²p is replaced through the forward identity (same operators as
-    // the forward kernel, so exact in the interior up to rounding):
-    //   U_{it+1} − 2U_it + U_{it−1} = dt²·κ·(β·∇²p + ∇b·∇p)   (+ S at source cells)
-    //   => 2vλ∇²p = 2λ·p_tt/(dt²·v) − 2λ·∇p·∇vp − 2vzλ·∇p·∇(1/z)
-    // so grad_vp takes NO second spatial derivative of the stored /
-    // reconstructed field (the int8 rim came from exactly that).  The source
-    // term is removed by vrz2d_utt_source_correction.  p_tt is either
-    // precomputed (full store, slot 5 of u_forward) or formed here from the
-    // three time levels (bs, ckpt).
-    float ptt = (p_tt != nullptr)
-        ? p_tt[shift + idx]
-        : (p_next[shift + idx] - 2.0f * p_b[idx] + p_prev[shift + idx]);
-
-    float dpdx = gradient<2, Order, X>(p_b, ix, 0, iz, grad_ctx);
-    float dpdz = gradient<2, Order, Z>(p_b, ix, 0, iz, grad_ctx);
-
-    float dvpdx = gradient<2, Order, X>(vp_b, ix, 0, iz, grad_ctx);
-    float dvpdz = gradient<2, Order, Z>(vp_b, ix, 0, iz, grad_ctx);
-    float z1x = gradient<2, Order, X>(inv_z_b, ix, 0, iz, grad_ctx);
-    float z1z = gradient<2, Order, Z>(inv_z_b, ix, 0, iz, grad_ctx);
-
-    // ∇·(c)  and  ∇·(e)  via the FD gradient stencil (transpose of forward grad).
-    float div_c = gradient<2, Order, X>(cx_b, ix, 0, iz, grad_ctx)
-                + gradient<2, Order, Z>(cz_b, ix, 0, iz, grad_ctx);
-    float div_e = gradient<2, Order, X>(ex_b, ix, 0, iz, grad_ctx)
-                + gradient<2, Order, Z>(ez_b, ix, 0, iz, grad_ctx);
-
-    float v = vp_b[idx];
-    float inv_z0 = inv_z_b[idx];
-    float lam = lambda_b[idx];
-
-    float dp_dvp   = dpdx * dvpdx + dpdz * dvpdz;   // ∇p·∇vp
-    float dp_dinvz = dpdx * z1x  + dpdz * z1z;      // ∇p·∇(1/z)
-
-    float dt2 = solver.dt * solver.dt;
-    // grad_vp += −dt²·[2λ·p_tt/(dt²·v) − λ·∇p·∇vp − ∇·(λ·vp·∇p)]
-    grad_vp_b[idx] += -2.0f * lam * ptt / v + dt2 * (lam * dp_dvp + div_c);
-    float g_z  = lam * v * v * dp_dinvz
-               + div_e * inv_z0 * inv_z0;           // ∇·(e)/z²
-    grad_z_b[idx]  += -dt2 * g_z;
+    calculate_grad_vrz2d_cell<Order>(ix, iz, b, f_u_now, lambda_now, p_tt, p_prev, p_next, c_x, c_z,
+                                     e_x, e_z, vp, z, inv_z, grad_vp, grad_z, grad_ctx, solver);
 }
 
 using calculate_grad_vrz2d_fn = void (*)(const float*, const float*, const float*,
@@ -725,7 +815,10 @@ SWEEP_BY_ORDER_DECL(build_vrz_adjoint_coeffs_fn, build_vrz_adjoint_coeffs_by_ord
 
 // Accessor recomputing c_d = λ·vp·∂_d p  (UseE=false) or e_d = λ·vp²·z·∂_d p
 // (UseE=true) at stencil tap `off` along Dir, matching build_vrz_grad_fields.
-template<int Order, int Dir, bool UseE>
+// On an interior Path (launch/cell_path.h) the cell is at least 2·halo from
+// every edge, so every tap is inside [halo, n - halo) and the tap test, false
+// for each of them, is not compiled.
+template<int Order, int Dir, bool UseE, CellPath Path = CellPath::Any>
 struct VrzGradAccessor2D {
     const float* __restrict__ p;
     const float* __restrict__ lam;
@@ -739,8 +832,10 @@ struct VrzGradAccessor2D {
         int jx = ix;
         int jz = iz;
         if constexpr (Dir & X) jx = ix + off; else jz = iz + off;
-        if (jx < halo || jx >= nx - halo || jz < halo || jz >= nz - halo)
-            return 0.f;
+        if constexpr (!interior_path<Path>) {
+            if (jx < halo || jx >= nx - halo || jz < halo || jz >= nz - halo)
+                return 0.f;
+        }
         int j = jz * nx + jx;
         float dpd = gradient<2, Order, Dir>(p, jx, 0, jz, grad_ctx);
         float lam_j = lam[j];
@@ -754,6 +849,93 @@ struct VrzGradAccessor2D {
         }
     }
 };
+
+// One cell of calculate_grad_vrz2d_fused: everything after the kernel's guards
+// (launch/cell_path.h).  Interior box: the guards' physical box, at least
+// 2·halo from every edge, so that no tap of the VrzGradAccessor2D stencils
+// meets their tap test (kernels.cu vrz2d_fused_grad_box); optional input p_tt
+// (slot 0).
+//
+// ``halo`` is the kernel's own, the value its halo guard tested, handed in
+// rather than recomputed: with a second solver.M load of its own the cell's
+// tap tests were formed in the other order at order -1 (the two compares of
+// ``jx < halo || jx >= nx - halo`` swapped, 16 lines of
+// calculate_grad_vrz2d_fused<-1> moved); with the guard's value the split
+// kernel keeps its SASS.  An interior path passes Order / 2, the same value.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void calculate_grad_vrz2d_fused_cell(
+    int ix, int iz, int b, int halo,
+    const float* __restrict__ f_u_now,
+    const float* __restrict__ lambda_now,
+    const float* __restrict__ p_tt,
+    const float* __restrict__ p_prev,
+    const float* __restrict__ p_next,
+    const float* __restrict__ vp,
+    const float* __restrict__ z,
+    const float* __restrict__ inv_z,
+    float* __restrict__ grad_vp,
+    float* __restrict__ grad_z,
+    const GradParam& grad_ctx,
+    const SolverContext& solver
+) {
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+    int shift = b * spatial_size;
+
+    const float* p_b = f_u_now + shift;
+    const float* lambda_b = lambda_now + shift;
+    const float* vp_b = vp + shift;
+    const float* z_b = z + shift;
+    const float* inv_z_b = inv_z + shift;
+    float* grad_vp_b = grad_vp + shift;
+    float* grad_z_b = grad_z + shift;
+
+    // 2·v·λ·∇²p is replaced through the forward identity (same operators as
+    // the forward kernel, so exact in the interior up to rounding):
+    //   U_{it+1} − 2U_it + U_{it−1} = dt²·κ·(β·∇²p + ∇b·∇p)   (+ S at source cells)
+    //   => 2vλ∇²p = 2λ·p_tt/(dt²·v) − 2λ·∇p·∇vp − 2vzλ·∇p·∇(1/z)
+    // so grad_vp takes NO second spatial derivative of the stored /
+    // reconstructed field (the int8 rim came from exactly that).  The source
+    // term is removed by vrz2d_utt_source_correction.  p_tt is either
+    // precomputed (full store, slot 5 of u_forward) or formed here from the
+    // three time levels (bs, ckpt).
+    float ptt = optional_output<Path>(p_tt)
+        ? p_tt[shift + idx]
+        : (p_next[shift + idx] - 2.0f * p_b[idx] + p_prev[shift + idx]);
+
+    float dpdx = gradient<2, Order, X>(p_b, ix, 0, iz, grad_ctx);
+    float dpdz = gradient<2, Order, Z>(p_b, ix, 0, iz, grad_ctx);
+
+    float dvpdx = gradient<2, Order, X>(vp_b, ix, 0, iz, grad_ctx);
+    float dvpdz = gradient<2, Order, Z>(vp_b, ix, 0, iz, grad_ctx);
+    float z1x = gradient<2, Order, X>(inv_z_b, ix, 0, iz, grad_ctx);
+    float z1z = gradient<2, Order, Z>(inv_z_b, ix, 0, iz, grad_ctx);
+
+    // ∇·(c) and ∇·(e) recomputed tap-by-tap (transpose of forward gradient).
+    VrzGradAccessor2D<Order, X, false, Path> cx{p_b, lambda_b, vp_b, z_b, ix, iz, solver.nx, solver.nz, halo, grad_ctx};
+    VrzGradAccessor2D<Order, Z, false, Path> cz{p_b, lambda_b, vp_b, z_b, ix, iz, solver.nx, solver.nz, halo, grad_ctx};
+    VrzGradAccessor2D<Order, X, true, Path>  ex{p_b, lambda_b, vp_b, z_b, ix, iz, solver.nx, solver.nz, halo, grad_ctx};
+    VrzGradAccessor2D<Order, Z, true, Path>  ez{p_b, lambda_b, vp_b, z_b, ix, iz, solver.nx, solver.nz, halo, grad_ctx};
+    float div_c = centered_gradient_stencil<Order>(cx, solver.M, grad_ctx.coeff, grad_ctx.dx)
+                + centered_gradient_stencil<Order>(cz, solver.M, grad_ctx.coeff, grad_ctx.dz);
+    float div_e = centered_gradient_stencil<Order>(ex, solver.M, grad_ctx.coeff, grad_ctx.dx)
+                + centered_gradient_stencil<Order>(ez, solver.M, grad_ctx.coeff, grad_ctx.dz);
+
+    float v = vp_b[idx];
+    float inv_z0 = inv_z_b[idx];
+    float lam = lambda_b[idx];
+
+    float dp_dvp   = dpdx * dvpdx + dpdz * dvpdz;
+    float dp_dinvz = dpdx * z1x  + dpdz * z1z;
+
+    float dt2 = solver.dt * solver.dt;
+    // grad_vp += −dt²·[2λ·p_tt/(dt²·v) − λ·∇p·∇vp − ∇·(λ·vp·∇p)]
+    grad_vp_b[idx] += -2.0f * lam * ptt / v + dt2 * (lam * dp_dvp + div_c);
+    float g_z  = lam * v * v * dp_dinvz
+               + div_e * inv_z0 * inv_z0;
+    grad_z_b[idx]  += -dt2 * g_z;
+}
 
 template<int Order>
 __global__ void calculate_grad_vrz2d_fused(
@@ -792,62 +974,8 @@ __global__ void calculate_grad_vrz2d_fused(
     if (ix < halo || ix >= solver.nx - halo || iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-    int shift = b * spatial_size;
-
-    const float* p_b = f_u_now + shift;
-    const float* lambda_b = lambda_now + shift;
-    const float* vp_b = vp + shift;
-    const float* z_b = z + shift;
-    const float* inv_z_b = inv_z + shift;
-    float* grad_vp_b = grad_vp + shift;
-    float* grad_z_b = grad_z + shift;
-
-    // 2·v·λ·∇²p is replaced through the forward identity (same operators as
-    // the forward kernel, so exact in the interior up to rounding):
-    //   U_{it+1} − 2U_it + U_{it−1} = dt²·κ·(β·∇²p + ∇b·∇p)   (+ S at source cells)
-    //   => 2vλ∇²p = 2λ·p_tt/(dt²·v) − 2λ·∇p·∇vp − 2vzλ·∇p·∇(1/z)
-    // so grad_vp takes NO second spatial derivative of the stored /
-    // reconstructed field (the int8 rim came from exactly that).  The source
-    // term is removed by vrz2d_utt_source_correction.  p_tt is either
-    // precomputed (full store, slot 5 of u_forward) or formed here from the
-    // three time levels (bs, ckpt).
-    float ptt = (p_tt != nullptr)
-        ? p_tt[shift + idx]
-        : (p_next[shift + idx] - 2.0f * p_b[idx] + p_prev[shift + idx]);
-
-    float dpdx = gradient<2, Order, X>(p_b, ix, 0, iz, grad_ctx);
-    float dpdz = gradient<2, Order, Z>(p_b, ix, 0, iz, grad_ctx);
-
-    float dvpdx = gradient<2, Order, X>(vp_b, ix, 0, iz, grad_ctx);
-    float dvpdz = gradient<2, Order, Z>(vp_b, ix, 0, iz, grad_ctx);
-    float z1x = gradient<2, Order, X>(inv_z_b, ix, 0, iz, grad_ctx);
-    float z1z = gradient<2, Order, Z>(inv_z_b, ix, 0, iz, grad_ctx);
-
-    // ∇·(c) and ∇·(e) recomputed tap-by-tap (transpose of forward gradient).
-    VrzGradAccessor2D<Order, X, false> cx{p_b, lambda_b, vp_b, z_b, ix, iz, solver.nx, solver.nz, halo, grad_ctx};
-    VrzGradAccessor2D<Order, Z, false> cz{p_b, lambda_b, vp_b, z_b, ix, iz, solver.nx, solver.nz, halo, grad_ctx};
-    VrzGradAccessor2D<Order, X, true>  ex{p_b, lambda_b, vp_b, z_b, ix, iz, solver.nx, solver.nz, halo, grad_ctx};
-    VrzGradAccessor2D<Order, Z, true>  ez{p_b, lambda_b, vp_b, z_b, ix, iz, solver.nx, solver.nz, halo, grad_ctx};
-    float div_c = centered_gradient_stencil<Order>(cx, solver.M, grad_ctx.coeff, grad_ctx.dx)
-                + centered_gradient_stencil<Order>(cz, solver.M, grad_ctx.coeff, grad_ctx.dz);
-    float div_e = centered_gradient_stencil<Order>(ex, solver.M, grad_ctx.coeff, grad_ctx.dx)
-                + centered_gradient_stencil<Order>(ez, solver.M, grad_ctx.coeff, grad_ctx.dz);
-
-    float v = vp_b[idx];
-    float inv_z0 = inv_z_b[idx];
-    float lam = lambda_b[idx];
-
-    float dp_dvp   = dpdx * dvpdx + dpdz * dvpdz;
-    float dp_dinvz = dpdx * z1x  + dpdz * z1z;
-
-    float dt2 = solver.dt * solver.dt;
-    // grad_vp += −dt²·[2λ·p_tt/(dt²·v) − λ·∇p·∇vp − ∇·(λ·vp·∇p)]
-    grad_vp_b[idx] += -2.0f * lam * ptt / v + dt2 * (lam * dp_dvp + div_c);
-    float g_z  = lam * v * v * dp_dinvz
-               + div_e * inv_z0 * inv_z0;
-    grad_z_b[idx]  += -dt2 * g_z;
+    calculate_grad_vrz2d_fused_cell<Order>(ix, iz, b, halo, f_u_now, lambda_now, p_tt, p_prev,
+                                           p_next, vp, z, inv_z, grad_vp, grad_z, grad_ctx, solver);
 }
 
 using calculate_grad_vrz2d_fused_fn = void (*)(const float*, const float*, const float*,

@@ -125,6 +125,35 @@ def _cuda_record_to_canonical(syn: torch.Tensor) -> torch.Tensor:
     )
 
 
+def _drop_air_receivers(adjoint_source: torch.Tensor, receivers_loc: torch.Tensor,
+                        topo_rows: torch.Tensor) -> torch.Tensor:
+    """``adjoint_source`` (canonical ``(B, nt, nrec, nfield)``) with the traces
+    of the receivers above the surface zeroed.
+
+    Under image topography the acoustic forward clears the vacuum above the
+    surface every step, before the record is taken, so a receiver there records
+    an identically-zero trace whatever the model: its cotangent reaches no
+    parameter.  Injected anyway, the adjoint kernels -- which neither update nor
+    clear air cells -- left it in the vacuum and the solid cells next to it read
+    it back, moving the gradient by 5-40% where eager moves it by nothing.
+    Zeroing it is the transpose of the forward's air clear.  ``receivers_loc``
+    is ``(B, nrec, ndim)`` in padded ``(x[, y], z)``; ``topo_rows`` the runtime
+    surface rows, ``(nx,)`` or ``(ny, nx)``.
+    """
+    loc = receivers_loc.to(device=topo_rows.device, dtype=torch.long)
+    x, z = loc[..., 0], loc[..., -1]
+    if topo_rows.ndim == 1:
+        surface = topo_rows[x.clamp(0, topo_rows.shape[0] - 1)]
+    else:
+        y = loc[..., 1]
+        surface = topo_rows[y.clamp(0, topo_rows.shape[0] - 1), x.clamp(0, topo_rows.shape[1] - 1)]
+    air = z < surface                                   # (B or 1, nrec)
+    if not bool(air.any()):
+        return adjoint_source
+    keep = (~air).to(device=adjoint_source.device, dtype=adjoint_source.dtype)
+    return adjoint_source * keep[:, None, :, None]
+
+
 def _canonical_to_cuda_record(grad: torch.Tensor, cuda_ndim: int) -> torch.Tensor:
     """Inverse of :func:`_cuda_record_to_canonical`.
 
@@ -562,6 +591,9 @@ class Wrapper(torch.autograd.Function):
         # layout that ``forward`` returned; permute it back to the raw CUDA
         # layout the C++ adjoint-source kernels expect.
         cuda_record_ndim = getattr(ctx, "cuda_record_ndim", None)
+        if cp.drop_air_receivers and cp.has_topo_param:
+            adjoint_source = _drop_air_receivers(adjoint_source, adjoint_sources_loc,
+                                                 cp.topo_rows_param)
         if cuda_record_ndim is None:
             params.adjoint_source = adjoint_source.contiguous()
         else:
@@ -787,16 +819,36 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     f"per-edge free surface on impl='c' is not implemented for "
                     f"{type(self.equation).__name__} yet; use impl='eager'."
                 )
-            if 'cuda' not in str(self.dev):
-                raise NotImplementedError(
-                    "per-edge free surface on impl='c' currently requires CUDA; "
-                    "use impl='eager' on CPU."
-                )
+            # (The host core runs these very kernels, so a CPU device is not
+            # refused here: the compiled path is the same source on both.)
             # All three CUDA backward memory modes — full, checkpointing, and
             # boundary saving — are gradient-consistent for every per-edge free
             # surface (cos=1.0 vs eager, all four faces + z∩x corners).  The bs
             # reverse reconstruction re-runs the (now per-edge-correct) forward
             # kernels, so no separate handling is needed.
+
+        # The host core computes on the host: 'cpu'/'disk' boundary staging and
+        # CPU checkpoint storage would copy host memory onto itself (and pin
+        # it), so a CPU device takes only on-device storage.  The typed memory
+        # API refuses this earlier (options.check_memory_supported, the 'c@cpu'
+        # row); this catches the legacy kwargs (ckpt_storage=) the typed probe
+        # does not see, and the core refuses the flags once more
+        # (core/compute_device.h refuse_host_staging).
+        if torch.device(self.dev).type == "cpu":
+            storage = self.boundary_saving_config.get("storage", "gpu")
+            if storage != "gpu":
+                raise NotImplementedError(
+                    f"impl='c' on a CPU device: boundary storage '{storage}' is a CUDA-core "
+                    "staging option; the boundary already lives on the compute device -- use "
+                    "storage='gpu' (the default) or impl='eager'.")
+            # The flag is inert without checkpointing (checkpoint_on_cpu is
+            # derived from use_ckpt and it); refusing it then would reject a
+            # call the CUDA core and eager both accept.
+            if self.use_ckpt and self.ckpt_storage != "gpu":
+                raise NotImplementedError(
+                    "impl='c' on a CPU device: ckpt_storage='cpu' is a CUDA-core staging "
+                    "option; the checkpoints already live on the compute device -- use "
+                    "ckpt_storage='gpu'.")
 
         # Topography on CUDA is the image method: a per-column staircase
         # (vacuum for Acoustic, Robertsson 1996 image method for Elastic),
@@ -1494,9 +1546,11 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         """Shapes of the forward state the backward rebuilds, handed over as
         ``forward_wavefields``: in bs mode ``cuda_layout.reconstruction_nvar``
         padded grids; in the checkpoint modes the replay state set -- the
-        forward slot list (slab-shaped CPML aux included) without the psi
-        double-buffer shadows, or ``checkpoint_state_nvar`` when declared --
-        repeated once per recursion level for a bisecting driver."""
+        forward slot list (slab-shaped CPML aux and the psi double-buffer
+        shadows included: the replay runs the forward kernel, which reads psi
+        at neighbouring cells and so must not update it in place), or
+        ``checkpoint_state_nvar`` when declared -- repeated once per recursion
+        level for a bisecting driver."""
         layout = self._cuda_layout()
         if mode == "bs":
             n = int(layout.reconstruction_nvar)
@@ -2168,6 +2222,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     adcig_max_lag=int(self.adcig_max_lag),
                     topo_rows_param=topo_rows_arg,
                     has_topo_param=has_topo_arg,
+                    drop_air_receivers=bool(has_topo_arg and getattr(
+                        self.equation, "air_cells_are_vacuum", False)),
                     fs_faces=self._fs_faces_c,
                     cut_face_mask=getattr(self, "_dd_cut_mask", 0),
                     eq_aux=tuple(self._c_eq_aux()),

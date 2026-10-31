@@ -384,7 +384,7 @@ def make_equation(case: Case, device: torch.device | None = None, config: RunCon
 
 
 def make_solver(case: Case, mode: str, device: torch.device | None = None, config: RunConfig = DEFAULT_CONFIG) -> PropTorch:
-    device = device or torch.device("cuda")      # impl="c" runs on CUDA only
+    device = device or torch.device("cuda")      # impl="c": the CUDA core; a CPU device runs the host core
     equation = make_equation(case, device, config)
     common = dict(
         shape=case.shape,
@@ -408,12 +408,17 @@ def make_solver(case: Case, mode: str, device: torch.device | None = None, confi
             **common,
         )
     if mode == "bs":
+        bs = {"enabled": True, "storage": "cpu", "transfer_interval": config.transfer_interval}
+        if device.type != "cuda":
+            # The CUDA matrix stages the ring through host RAM; on the host core
+            # the ring already lives on the compute device ('gpu' means on-device).
+            bs = {"enabled": True, "storage": "gpu"}
         return PropTorch(
             equation,
             backend="torch",
             impl="c",
             use_ckpt=False,
-            boundary_saving_config={"enabled": True, "storage": "cpu", "transfer_interval": config.transfer_interval},
+            boundary_saving_config=bs,
             **common,
         )
     if mode == "ckpt_chunk":

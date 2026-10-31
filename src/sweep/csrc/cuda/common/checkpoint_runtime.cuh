@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "cudautils.h"
+#include "../../core/compute_device.h"
 
 enum class CheckpointProfileKind {
     ForwardSave,
@@ -53,10 +54,14 @@ public:
         for (const auto& checkpoint : checkpoints_) {
             SWEEP_CHECK(checkpoint.defined(), label_, " checkpoint tensor must be defined");
             SWEEP_CHECK(checkpoint.is_contiguous(), label_, " checkpoint tensor must be contiguous");
+            // Host staging = "the other tier than the compute device".  On the
+            // CUDA core that is host memory; the host core refuses checkpoint_on_cpu
+            // before getting here (core/compute_device.h refuse_host_staging).
             if (checkpoint_on_cpu_) {
-                SWEEP_CHECK(!checkpoint.is_cuda(), label_, " CPU checkpoint storage expects CPU tensors");
+                SWEEP_CHECK(!sweep::on_compute_device(checkpoint), label_, " CPU checkpoint storage expects CPU tensors");
             } else {
-                SWEEP_CHECK(checkpoint.is_cuda(), label_, " GPU checkpoint storage expects CUDA tensors");
+                SWEEP_CHECK(sweep::on_compute_device(checkpoint), label_, " device checkpoint storage expects ",
+                            sweep::kComputeDeviceName, " tensors");
             }
         }
         if (recursive_) {

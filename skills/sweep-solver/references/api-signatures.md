@@ -50,7 +50,7 @@ Diagnostics for the compiled backend -- usable / why-not / nvcc / built.
 
 ## `sweep.propagator.torch.PropTorch`
 
-PyTorch propagator. ``impl='eager'`` is pure torch (CPU or GPU); ``impl='c'`` is the prebuilt CUDA core (``sweep/lib/cu<major>/libsweep_core.so``) driven through the pure-Python ctypes layer ``sweep.backend.c`` -- CUDA GPU only, nothing compiles after ``pip install``. ``impl=None`` means ``'auto'``: ``'c'`` when ``sweep.is_torch_binding_available()``, the equation declares ``C_NAME`` and the propagator's device is CUDA (``device=``, else the equation's device), else ``'eager'``; an explicit ``impl='c'`` that cannot be honoured falls back to eager with a UserWarning. ``backend=None`` inherits the equation's backend. ``cuda_options=`` applies to ``impl='c'`` only, ``eager_options=`` to ``impl='eager'``; ``memory=`` (``Full()`` / ``BoundarySaving()`` / ``Ckpt()``) is impl-agnostic (default: boundary saving on 'c' -- full storage for equations without compiled boundary saving -- and chunked ckpt on eager).
+PyTorch propagator. ``impl='eager'`` is pure torch (CPU or GPU); ``impl='c'`` is the compiled core driven through the pure-Python ctypes layer ``sweep.backend.c``: on a CUDA device the prebuilt CUDA core (``sweep/lib/cu<major>/libsweep_core.so``, nothing compiles after ``pip install``); on a CPU device the host core, the same sources built for the CPU (``sweep.backend.c.hostcore``: the wheel's ``lib/cpu`` core, else a one-time local g++ build). ``impl=None`` means ``'auto'``: ``'c'`` when the equation declares ``C_NAME`` and the propagator's device (``device=``, else the equation's device) is CUDA with ``sweep.is_torch_binding_available()``, or the CPU with a host core that builds the equation and comes up (shipped, cached or built here; a failed build warns once and stays eager) and no eager option or host-staging memory request passed; else ``'eager'``. An explicit ``impl='c'`` that cannot be honoured falls back to eager with a UserWarning. ``backend=None`` inherits the equation's backend. ``cuda_options=`` applies to ``impl='c'`` only, ``eager_options=`` to ``impl='eager'``; ``memory=`` (``Full()`` / ``BoundarySaving()`` / ``Ckpt()``) is impl-agnostic (default: boundary saving on 'c' -- full storage for equations without compiled boundary saving -- and chunked ckpt on eager).
 
 ### `PropTorch(...)`
 
@@ -132,8 +132,9 @@ Rematerialise the forward wavefield from checkpoints.
 ```text
 EagerOptions(use_compile: 'bool' = True, compile_mode: 'str' = 'default', compile_dynamic: 'bool' =
     False, compile_backend: 'str | None' = None, compile_fullgraph: 'bool' = False,
-    store_last_wavefield: 'bool' = False, cpml_strips: 'bool | None' = None, steps_per_call: 'int | None'
-    = None) -> None
+    store_last_wavefield: 'bool' = False, cpml_strips: 'bool | None' = None, steps_per_call: 'int |
+    None' = None, compile_cpp_wrapper: 'bool | None' = None, compile_combo_kernels: 'bool | None' =
+    None) -> None
 ```
 
 Options of ``impl='eager'``, passed as ``PropTorch(eager_options=...)``.
@@ -167,7 +168,8 @@ PropJax(*args, backend=None, memory=None, scan_unroll=1, **kwargs)
 ### `PropJax.forward / __call__`
 
 ```text
-forward(wavelet, sources, receivers, models=None, return_wavefield=False, adj=False, **kwargs)
+forward(wavelet, sources, receivers, models=None, return_wavefield=False, adj=False,
+    wave_equation=None, aux_args=(), **kwargs)
 ```
 
 ## `sweep.sem`
@@ -315,50 +317,50 @@ Slice a padded array back to the physical grid — loudly.
 
 ## Finite-difference equations (`sweep.equations`)
 
-Instantiated on the CPU with defaults (`backend='torch'`). `src`/`rec` = default `source_type`/`receiver_type`; `src ok`/`rec ok` = every field accepted. `c` = compiled CUDA kernels exist (`impl='c'`). `FS` = free surface accepted; `per-edge` = per-edge free surface on eager/c. `BS` = boundary saving on c/eager. `(B,...) models` = per-shot batched models on impl='c'.
+Instantiated on the CPU with defaults (`backend='torch'`). `src`/`rec` = default `source_type`/`receiver_type`; `src ok`/`rec ok` = every field accepted. `c` = compiled kernels exist (`impl='c'`): `yes` on CUDA and on the CPU (host core), `CUDA` on CUDA only. `FS` = free surface accepted; `per-edge` = per-edge free surface on eager/c. `BS` = boundary saving on c/eager. `(B,...) models` = per-shot batched models on impl='c'.
 
 | name | dim | models (order) | src | src ok | rec | rec ok | pml | c | FS | per-edge e/c | BS c/e | (B,...) models |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | `Acoustic` | 2 | `['vp']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | yes | yes | yes/yes | yes/yes | yes |
-| `Acoustic1st` | 2 | `['vp', 'rho']` | `['p']` | `['p']` | `['p']` | `['p', 'vx', 'vz']` | `cpmls` | no | yes | no/no | yes/yes | no |
+| `Acoustic1st` | 2 | `['vp', 'rho']` | `['p']` | `['p']` | `['p']` | `['p', 'vx', 'vz']` | `cpmls` | no | no | no/no | yes/yes | no |
 | `Acoustic3D` | 3 | `['vp']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | yes | yes | no/no | yes/yes | no |
 | `AcousticBorn` | 2 | `['vp', 'mp']` | `['h1']` | `['h1']` | `['sh1']` | `['sh1']` | `cpmlr` | yes | yes | no/no | yes/yes | no |
 | `AcousticBorn3D` | 3 | `['vp', 'mp']` | `['h1']` | `['h1']` | `['sh1']` | `['sh1']` | `cpmlr` | yes | yes | no/no | yes/yes | no |
 | `AcousticCurvilinear` | 2 | `['vp']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | no | yes | no/no | yes/yes | no |
-| `AcousticTTI` | 2 | `['vp', 'epsilon', 'delta', 'theta']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | yes | no | no/no | yes/no | no |
-| `AcousticTTIBorn` | 2 | `['vp', 'epsilon', 'delta', 'theta', 'mp']` | `['h1']` | `['h1']` | `['sh1']` | `['sh1']` | `cpmlr` | yes | no | no/no | yes/no | no |
-| `AcousticTTILiang` (= `qP_tti.AcousticTTI`) | 2 | `['vp', 'epsilon', 'delta', 'theta']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | yes | no | no/no | yes/no | no |
+| `AcousticTTI` | 2 | `['vp', 'epsilon', 'delta', 'theta']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | CUDA | no | no/no | yes/no | no |
+| `AcousticTTIBorn` | 2 | `['vp', 'epsilon', 'delta', 'theta', 'mp']` | `['h1']` | `['h1']` | `['sh1']` | `['sh1']` | `cpmlr` | CUDA | no | no/no | yes/no | no |
+| `AcousticTTILiang` (= `qP_tti.AcousticTTI`) | 2 | `['vp', 'epsilon', 'delta', 'theta']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | CUDA | no | no/no | yes/no | no |
 | `AcousticTariq` | 2 | `['vv', 'v', 'eta']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | no | no | no/no | yes/yes | no |
 | `AcousticVRR` | 2 | `['vp', 'rx', 'rz']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | no | yes | no/no | yes/yes | no |
 | `AcousticVRZ` | 2 | `['vp', 'z']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | yes | yes | no/no | yes/yes | no |
 | `AcousticVRZ3D` | 3 | `['vp', 'z']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | yes | yes | no/no | yes/yes | no |
-| `AcousticVTI` | 2 | `['vp', 'epsilon', 'delta']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | yes | no | no/no | yes/no | no |
+| `AcousticVTI` | 2 | `['vp', 'epsilon', 'delta']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | CUDA | no | no/no | yes/no | no |
 | `AcousticVTI1st` | 2 | `['vp', 'epsilon', 'delta', 'rho']` | `['sH', 'sV']` | `['sH', 'sV']` | `['vz']` | `['vx', 'vz', 'sH', 'sV']` | `cpmls` | yes | no | no/no | yes/yes | no |
 | `AcousticVTI1st3D` | 3 | `['vp', 'epsilon', 'delta', 'rho']` | `['sH', 'sV']` | `['sH', 'sV']` | `['vz']` | `['vx', 'vy', 'vz', 'sH', 'sV']` | `cpmls` | yes | no | no/no | yes/yes | no |
 | `AcousticVTIAlkhalifah` (= `qP_tariq.AcousticTariq`) | 2 | `['vv', 'v', 'eta']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | no | no | no/no | yes/yes | no |
-| `AcousticVTIBorn` | 2 | `['vp', 'epsilon', 'delta', 'mp']` | `['h1']` | `['h1']` | `['sh1']` | `['sh1']` | `cpmlr` | yes | no | no/no | yes/no | no |
-| `AcousticVTIDefault` (= `qP_vti.AcousticVTI`) | 2 | `['vp', 'epsilon', 'delta']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | yes | no | no/no | yes/no | no |
+| `AcousticVTIBorn` | 2 | `['vp', 'epsilon', 'delta', 'mp']` | `['h1']` | `['h1']` | `['sh1']` | `['sh1']` | `cpmlr` | CUDA | no | no/no | yes/no | no |
+| `AcousticVTIDefault` (= `qP_vti.AcousticVTI`) | 2 | `['vp', 'epsilon', 'delta']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | CUDA | no | no/no | yes/no | no |
 | `AcousticVTIDefault3D` (= `acoustic_vti_1st.AcousticVTI1st3D`) | 3 | `['vp', 'epsilon', 'delta', 'rho']` | `['sH', 'sV']` | `['sH', 'sV']` | `['vz']` | `['vx', 'vy', 'vz', 'sH', 'sV']` | `cpmls` | yes | no | no/no | yes/yes | no |
 | `AcousticVTIDuveneck` (= `acoustic_vti_1st.AcousticVTI1st`) | 2 | `['vp', 'epsilon', 'delta', 'rho']` | `['sH', 'sV']` | `['sH', 'sV']` | `['vz']` | `['vx', 'vz', 'sH', 'sV']` | `cpmls` | yes | no | no/no | yes/yes | no |
 | `AcousticVTIDuveneck3D` (= `acoustic_vti_1st.AcousticVTI1st3D`) | 3 | `['vp', 'epsilon', 'delta', 'rho']` | `['sH', 'sV']` | `['sH', 'sV']` | `['vz']` | `['vx', 'vy', 'vz', 'sH', 'sV']` | `cpmls` | yes | no | no/no | yes/yes | no |
-| `AcousticVTILiang` (= `qP_vti.AcousticVTI`) | 2 | `['vp', 'epsilon', 'delta']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | yes | no | no/no | yes/no | no |
+| `AcousticVTILiang` (= `qP_vti.AcousticVTI`) | 2 | `['vp', 'epsilon', 'delta']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | CUDA | no | no/no | yes/no | no |
 | `Biot` | 2 | `['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']` | `['sxx', 'szz']` | `['vx', 'vz', 'qx', 'qz', 'sxx', 'szz', 'sxz', 'p']` | `['vx', 'vz']` | `['vx', 'vz', 'qx', 'qz', 'sxx', 'szz', 'sxz', 'p']` | `cpmls` | no | yes | no/no | no/no | yes |
-| `DASElastic` (= `das.DASZhao`) | 2 | `['vp', 'vs', 'rho']` | `['sxx', 'szz']` | `['sxx', 'szz']` | `['exx_t', 'ezz_t']` | `['exx_t', 'ezz_t', 'sxx', 'szz', 'das35_t', 'das54x_t', 'das54z_t']` | `cpmls` | yes | yes | no/no | yes/yes | no |
-| `DASElastic3D` (= `das.DASZhao3D`) | 3 | `['vp', 'vs', 'rho']` | `['sxx', 'syy', 'szz']` | `['sxx', 'syy', 'szz']` | `['exx_t', 'eyy_t', 'ezz_t']` | `['exx_t', 'eyy_t', 'ezz_t', 'sxx', 'syy', 'szz', 'das35_t', 'das54x_t', 'das54y_t', 'das54z_t']` | `cpmls` | yes | yes | no/no | no/yes | no |
+| `DASElastic` (= `das.DASZhao`) | 2 | `['vp', 'vs', 'rho']` | `['sxx', 'szz']` | `['sxx', 'szz']` | `['exx_t', 'ezz_t']` | `['exx_t', 'ezz_t', 'sxx', 'szz', 'das35_t', 'das54x_t', 'das54z_t']` | `cpmls` | yes | no | no/no | yes/yes | no |
+| `DASElastic3D` (= `das.DASZhao3D`) | 3 | `['vp', 'vs', 'rho']` | `['sxx', 'syy', 'szz']` | `['sxx', 'syy', 'szz']` | `['exx_t', 'eyy_t', 'ezz_t']` | `['exx_t', 'eyy_t', 'ezz_t', 'sxx', 'syy', 'szz', 'das35_t', 'das54x_t', 'das54y_t', 'das54z_t']` | `cpmls` | yes | no | no/no | no/yes | no |
 | `DASMu` | 2 | `['vp', 'vs', 'rho']` | `['sxx', 'szz']` | `['vx', 'vz', 'sxx', 'szz', 'sxz', 'exx', 'ezz', 'exz']` | `['exx', 'ezz', 'exz']` | `['vx', 'vz', 'sxx', 'szz', 'sxz', 'exx', 'ezz', 'exz']` | `cpmls` | yes | yes | no/no | yes/yes | no |
 | `DASMu3D` | 3 | `['vp', 'vs', 'rho']` | `['sxx', 'syy', 'szz']` | `['vx', 'vy', 'vz', 'sxx', 'syy', 'szz', 'sxy', 'sxz', 'syz', 'exx', 'eyy', 'ezz', 'exy', 'exz', 'eyz']` | `['exx', 'eyy', 'ezz', 'exy', 'exz', 'eyz']` | `['vx', 'vy', 'vz', 'sxx', 'syy', 'szz', 'sxy', 'sxz', 'syz', 'exx', 'eyy', 'ezz', 'exy', 'exz', 'eyz']` | `cpmls` | yes | yes | no/no | yes/yes | no |
-| `DASZhao` | 2 | `['vp', 'vs', 'rho']` | `['sxx', 'szz']` | `['sxx', 'szz']` | `['exx_t', 'ezz_t']` | `['exx_t', 'ezz_t', 'sxx', 'szz', 'das35_t', 'das54x_t', 'das54z_t']` | `cpmls` | yes | yes | no/no | yes/yes | no |
-| `DASZhao3D` | 3 | `['vp', 'vs', 'rho']` | `['sxx', 'syy', 'szz']` | `['sxx', 'syy', 'szz']` | `['exx_t', 'eyy_t', 'ezz_t']` | `['exx_t', 'eyy_t', 'ezz_t', 'sxx', 'syy', 'szz', 'das35_t', 'das54x_t', 'das54y_t', 'das54z_t']` | `cpmls` | yes | yes | no/no | no/yes | no |
+| `DASZhao` | 2 | `['vp', 'vs', 'rho']` | `['sxx', 'szz']` | `['sxx', 'szz']` | `['exx_t', 'ezz_t']` | `['exx_t', 'ezz_t', 'sxx', 'szz', 'das35_t', 'das54x_t', 'das54z_t']` | `cpmls` | yes | no | no/no | yes/yes | no |
+| `DASZhao3D` | 3 | `['vp', 'vs', 'rho']` | `['sxx', 'syy', 'szz']` | `['sxx', 'syy', 'szz']` | `['exx_t', 'eyy_t', 'ezz_t']` | `['exx_t', 'eyy_t', 'ezz_t', 'sxx', 'syy', 'szz', 'das35_t', 'das54x_t', 'das54y_t', 'das54z_t']` | `cpmls` | yes | no | no/no | no/yes | no |
 | `Elastic` | 2 | `['vp', 'vs', 'rho']` | `['sxx', 'szz']` | `['vx', 'vz', 'sxx', 'szz', 'sxz']` | `['vx', 'vz']` | `['vx', 'vz', 'sxx', 'szz']` | `cpmls` | yes | yes | yes/yes | yes/yes | yes |
 | `Elastic3D` (= `elastic3d.Elastic`) | 3 | `['vp', 'vs', 'rho']` | `['sxx', 'syy', 'szz']` | `['vx', 'vy', 'vz', 'sxx', 'syy', 'szz', 'sxy', 'sxz', 'syz']` | `['vx', 'vy', 'vz']` | `['vx', 'vy', 'vz', 'sxx', 'syy', 'szz']` | `cpmls` | yes | yes | no/no | yes/yes | no |
-| `ElasticBorn` | 2 | `['vp', 'vs', 'rho', 'dvp', 'dvs', 'drho']` | `['sxx', 'szz']` | `['vx', 'vz', 'sxx', 'szz', 'sxz']` | `['svx', 'svz']` | `['vx', 'vz', 'sxx', 'szz', 'svx', 'svz', 'ssxx', 'sszz']` | `cpmls` | yes | yes | yes/yes | yes/yes | yes |
+| `ElasticBorn` | 2 | `['vp', 'vs', 'rho', 'dvp', 'dvs', 'drho']` | `['sxx', 'szz']` | `['vx', 'vz', 'sxx', 'szz', 'sxz']` | `['svx', 'svz']` | `['vx', 'vz', 'sxx', 'szz', 'svx', 'svz', 'ssxx', 'sszz']` | `cpmls` | CUDA | yes | yes/yes | yes/yes | yes |
 | `ElasticCurvilinear` | 2 | `['vp', 'vs', 'rho']` | `['sxx', 'szz']` | `['sxx', 'szz', 'sxz']` | `['vx', 'vz']` | `['vx', 'vz', 'sxx', 'szz']` | `cpmls` | no | yes | no/no | yes/yes | no |
 | `ElasticTTI` | 2 | `['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']` | `['sxx', 'szz']` | `['vx', 'vy', 'vz', 'sxx', 'szz', 'syz', 'sxz', 'sxy']` | `['vx', 'vz']` | `['vx', 'vy', 'vz', 'sxx', 'szz']` | `cpmlr` | no | no | no/no | yes/yes | no |
 | `ElasticTTI2nd` | 2 | `['vh', 'vs', 'rho', 'epsilon', 'eta', 'theta']` | `['uz']` | `['ux', 'uz']` | `['ux', 'uz']` | `['ux', 'uz']` | `cpmls` | yes | no | no/no | yes/yes | no |
 | `ElasticTTISG` | 2 | `['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']` | `['sxx', 'szz']` | `['vx', 'vy', 'vz', 'sxx', 'szz', 'syz', 'sxz', 'sxy']` | `['vx', 'vz']` | `['vx', 'vy', 'vz', 'sxx', 'szz']` | `cpmls` | yes | no | no/no | yes/yes | no |
 | `ElasticTTISG3D` | 3 | `['vp0', 'vs0', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']` | `['sxx', 'syy', 'szz']` | `['vx', 'vy', 'vz', 'sxx', 'syy', 'szz', 'sxy', 'sxz', 'syz']` | `['vx', 'vy', 'vz']` | `['vx', 'vy', 'vz', 'sxx', 'syy', 'szz']` | `cpmls` | yes | no | no/no | yes/yes | no |
 | `ElasticVRR` | 2 | `['vp', 'vs', 'Rp_x', 'Rp_z', 'Rs_x', 'Rs_z']` | `['sxx', 'szz']` | `['px', 'pz', 'sxx', 'szz', 'sxz']` | `['px', 'pz']` | `['px', 'pz', 'sxx', 'szz']` | `cpmls` | yes | yes | no/no | yes/yes | no |
-| `ViscoAcoustic` | 2 | `['vp', 'Q', 'omega']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | yes | yes | yes/yes | no/no | yes |
+| `ViscoAcoustic` | 2 | `['vp', 'Q', 'omega']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | CUDA | yes | yes/yes | no/no | yes |
 | `ViscoElastic` | 2 | `['vp', 'vs', 'rho', 'Qp', 'Qs']` | `['sxx', 'szz']` | `['vx', 'vz', 'sxx', 'szz', 'sxz']` | `['vx', 'vz']` | `['vx', 'vz', 'sxx', 'szz']` | `cpmls` | yes | yes | yes/yes | no/yes | no |
 
 ### Constructors

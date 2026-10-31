@@ -1,5 +1,6 @@
 #pragma once
 #include "../../launch/by_order.cuh"
+#include "../../launch/cell_path.h"
 #include <cuda.h>
 #include <cuda_runtime.h>
 
@@ -66,6 +67,100 @@ struct VTIWavefieldPointer {
 // CPML: half-step coefficients (axh/bxh, azh/bzh).
 // Reference: Duveneck et al. (2008), Eq (2).
 // ---------------------------------------------------------------------------
+
+// The halo guard of the stencil kernels below: [halo, n - halo) per axis.
+template<int Order>
+__device__ __forceinline__
+CellBox vti2d_halo_box(const SolverContext& solver)
+{
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+    return {halo, solver.nx - halo, halo, solver.nz - halo};
+}
+
+// Where velocity_kernel_cell / stress_kernel_cell may run off their own path:
+// past the halo guard and outside the PML band (solver.in_pml_2d false).
+template<int Order>
+__device__ __forceinline__
+CellBox vti2d_pml_interior_box(const SolverContext& solver)
+{
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+    return CellBox{solver.phys_x0(halo), solver.phys_x1(halo),
+                   solver.phys_z0(halo), solver.phys_z1(halo)}
+        .intersect(vti2d_halo_box<Order>(solver));
+}
+
+// One cell of velocity_kernel: everything after the kernel's bounds guards
+// (see launch/cell_path.h).  Interior box: vti2d_pml_interior_box().
+//
+// The CPML profiles come in as separate __restrict__ pointers, not as the
+// ElasticCPMLPointer: nvcc honours the __restrict__ of a struct MEMBER only
+// where it is loaded straight from the kernel parameter, so a cell handed the
+// struct (by reference or by value) loads the profiles without the read-only
+// cache (LDG.E instead of LDG.E.CONSTANT) -- a change to the CUDA kernel.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void velocity_kernel_cell(
+    int ix, int iz, int b,
+    const VTIWavefieldPointer& wf,
+    const float* __restrict__ inv_rho,
+    const SGradParam& grad_ctx,
+    const float* __restrict__ cpml_axh,
+    const float* __restrict__ cpml_bxh,
+    const float* __restrict__ cpml_azh,
+    const float* __restrict__ cpml_bzh,
+    const SolverContext& solver
+)
+{
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
+    long long spatial_size = (long long)solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+
+    auto f = wf.offset(b, spatial_size);
+    const float* inv_rho_b = inv_rho + b * spatial_size;
+
+    // Stress spatial derivatives at velocity locations.
+    //   ∂σ_H/∂x  : center→x-face  → forward staggered
+    //   ∂σ_V/∂z  : center→z-face  → forward staggered
+    float dsH_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.sH, ix, 0, iz, grad_ctx);
+    float dsV_dz = sgradient<2, Order, Z, DIFF_FORWARD>(f.sV, ix, 0, iz, grad_ctx);
+
+    float inv_rho_val = inv_rho_b[idx];
+
+    // PML / interior split — outside the PML the half-step coefficients
+    // axh/bxh/azh/bzh vanish so the memory variables remain zero.
+    bool in_pml = false;
+    if constexpr (!interior_path<Path>)
+        in_pml =
+            solver.in_pml_2d(ix, iz, halo);
+
+    if (!in_pml) {
+        f.vx[idx] += solver.dt * inv_rho_val * dsH_dx;
+        f.vz[idx] += solver.dt * inv_rho_val * dsV_dz;
+        return;
+    }
+
+    float axh = cpml_axh[ix];
+    float bxh = cpml_bxh[ix];
+    float azh = cpml_azh[iz];
+    float bzh = cpml_bzh[iz];
+
+    f.m_sHx[idx] = axh * f.m_sHx[idx] + bxh * dsH_dx;
+    dsH_dx     += f.m_sHx[idx];
+
+    f.m_sVz[idx] = azh * f.m_sVz[idx] + bzh * dsV_dz;
+    dsV_dz     += f.m_sVz[idx];
+
+    f.vx[idx] += solver.dt * inv_rho_val * dsH_dx;
+    f.vz[idx] += solver.dt * inv_rho_val * dsV_dz;
+}
+
 template<int Order>
 __global__ void velocity_kernel(
     VTIWavefieldPointer wf,
@@ -89,44 +184,8 @@ __global__ void velocity_kernel(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    long long spatial_size = (long long)solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-
-    auto f = wf.offset(b, spatial_size);
-    const float* inv_rho_b = inv_rho + b * spatial_size;
-
-    // Stress spatial derivatives at velocity locations.
-    //   ∂σ_H/∂x  : center→x-face  → forward staggered
-    //   ∂σ_V/∂z  : center→z-face  → forward staggered
-    float dsH_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.sH, ix, 0, iz, grad_ctx);
-    float dsV_dz = sgradient<2, Order, Z, DIFF_FORWARD>(f.sV, ix, 0, iz, grad_ctx);
-
-    float inv_rho_val = inv_rho_b[idx];
-
-    // PML / interior split — outside the PML the half-step coefficients
-    // axh/bxh/azh/bzh vanish so the memory variables remain zero.
-    bool in_pml =
-        solver.in_pml_2d(ix, iz, halo);
-
-    if (!in_pml) {
-        f.vx[idx] += solver.dt * inv_rho_val * dsH_dx;
-        f.vz[idx] += solver.dt * inv_rho_val * dsV_dz;
-        return;
-    }
-
-    float axh = cpml.axh[ix];
-    float bxh = cpml.bxh[ix];
-    float azh = cpml.azh[iz];
-    float bzh = cpml.bzh[iz];
-
-    f.m_sHx[idx] = axh * f.m_sHx[idx] + bxh * dsH_dx;
-    dsH_dx     += f.m_sHx[idx];
-
-    f.m_sVz[idx] = azh * f.m_sVz[idx] + bzh * dsV_dz;
-    dsV_dz     += f.m_sVz[idx];
-
-    f.vx[idx] += solver.dt * inv_rho_val * dsH_dx;
-    f.vz[idx] += solver.dt * inv_rho_val * dsV_dz;
+    velocity_kernel_cell<Order>(ix, iz, b, wf, inv_rho, grad_ctx,
+                                cpml.axh, cpml.bxh, cpml.azh, cpml.bzh, solver);
 }
 
 using velocity_kernel_fn = void (*)(VTIWavefieldPointer, const float*, SGradParam,
@@ -144,6 +203,73 @@ SWEEP_BY_ORDER_DECL(velocity_kernel_fn, velocity_kernel_by_order);
 // CPML: cell-centre coefficients (ax/bx, az/bz).
 // Reference: Duveneck et al. (2008), Eq (1)–(2).
 // ---------------------------------------------------------------------------
+
+// One cell of stress_kernel: everything after the kernel's bounds guards
+// (see launch/cell_path.h).  Interior box: vti2d_pml_interior_box().
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void stress_kernel_cell(
+    int ix, int iz, int b,
+    const VTIWavefieldPointer& wf,
+    const float* __restrict__ c11,
+    const float* __restrict__ c33,
+    const float* __restrict__ c13,
+    const SGradParam& grad_ctx,
+    const float* __restrict__ cpml_ax,
+    const float* __restrict__ cpml_bx,
+    const float* __restrict__ cpml_az,
+    const float* __restrict__ cpml_bz,
+    const SolverContext& solver
+)
+{
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
+    long long spatial_size = (long long)solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+
+    auto f = wf.offset(b, spatial_size);
+    const float* c11_b = c11 + b * spatial_size;
+    const float* c33_b = c33 + b * spatial_size;
+    const float* c13_b = c13 + b * spatial_size;
+
+    // Velocity spatial derivatives at stress locations (cell centre):
+    //   ∂v_x/∂x  : x-face→center → backward staggered
+    //   ∂v_z/∂z  : z-face→center → backward staggered
+    float dvx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.vx, ix, 0, iz, grad_ctx);
+    float dvz_dz = sgradient<2, Order, Z, DIFF_BACKWARD>(f.vz, ix, 0, iz, grad_ctx);
+
+    float C11 = c11_b[idx];
+    float C33 = c33_b[idx];
+    float C13 = c13_b[idx];
+
+    bool in_pml = false;
+    if constexpr (!interior_path<Path>)
+        in_pml =
+            solver.in_pml_2d(ix, iz, halo);
+
+    if (!in_pml) {
+        f.sH[idx] += solver.dt * (C11 * dvx_dx + C13 * dvz_dz);
+        f.sV[idx] += solver.dt * (C13 * dvx_dx + C33 * dvz_dz);
+        return;
+    }
+
+    float ax = cpml_ax[ix];
+    float bx = cpml_bx[ix];
+    float az = cpml_az[iz];
+    float bz = cpml_bz[iz];
+
+    f.m_vxx[idx] = ax * f.m_vxx[idx] + bx * dvx_dx;
+    dvx_dx     += f.m_vxx[idx];
+
+    f.m_vzz[idx] = az * f.m_vzz[idx] + bz * dvz_dz;
+    dvz_dz     += f.m_vzz[idx];
+
+    f.sH[idx] += solver.dt * (C11 * dvx_dx + C13 * dvz_dz);
+    f.sV[idx] += solver.dt * (C13 * dvx_dx + C33 * dvz_dz);
+}
+
 template<int Order>
 __global__ void stress_kernel(
     VTIWavefieldPointer wf,
@@ -169,46 +295,8 @@ __global__ void stress_kernel(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    long long spatial_size = (long long)solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-
-    auto f = wf.offset(b, spatial_size);
-    const float* c11_b = c11 + b * spatial_size;
-    const float* c33_b = c33 + b * spatial_size;
-    const float* c13_b = c13 + b * spatial_size;
-
-    // Velocity spatial derivatives at stress locations (cell centre):
-    //   ∂v_x/∂x  : x-face→center → backward staggered
-    //   ∂v_z/∂z  : z-face→center → backward staggered
-    float dvx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.vx, ix, 0, iz, grad_ctx);
-    float dvz_dz = sgradient<2, Order, Z, DIFF_BACKWARD>(f.vz, ix, 0, iz, grad_ctx);
-
-    float C11 = c11_b[idx];
-    float C33 = c33_b[idx];
-    float C13 = c13_b[idx];
-
-    bool in_pml =
-        solver.in_pml_2d(ix, iz, halo);
-
-    if (!in_pml) {
-        f.sH[idx] += solver.dt * (C11 * dvx_dx + C13 * dvz_dz);
-        f.sV[idx] += solver.dt * (C13 * dvx_dx + C33 * dvz_dz);
-        return;
-    }
-
-    float ax = cpml.ax[ix];
-    float bx = cpml.bx[ix];
-    float az = cpml.az[iz];
-    float bz = cpml.bz[iz];
-
-    f.m_vxx[idx] = ax * f.m_vxx[idx] + bx * dvx_dx;
-    dvx_dx     += f.m_vxx[idx];
-
-    f.m_vzz[idx] = az * f.m_vzz[idx] + bz * dvz_dz;
-    dvz_dz     += f.m_vzz[idx];
-
-    f.sH[idx] += solver.dt * (C11 * dvx_dx + C13 * dvz_dz);
-    f.sV[idx] += solver.dt * (C13 * dvx_dx + C33 * dvz_dz);
+    stress_kernel_cell<Order>(ix, iz, b, wf, c11, c33, c13, grad_ctx,
+                              cpml.ax, cpml.bx, cpml.az, cpml.bz, solver);
 }
 
 using stress_kernel_fn = void (*)(VTIWavefieldPointer, const float*, const float*,
@@ -226,6 +314,46 @@ SWEEP_BY_ORDER_DECL(stress_kernel_fn, stress_kernel_by_order);
 //   (b) `+= dt * ...` becomes `-= dt * ...` to step the forward state
 //       backward in time by one Δt.
 // ===========================================================================
+
+// The guard of both no-PML kernels -- the legacy abcn + M + 1 band on every
+// side -- and the box their cells run in: the body has no run-time test.
+template<int Order>
+__device__ __forceinline__
+CellBox vti2d_nopml_box(const SolverContext& solver)
+{
+    int M;
+    if constexpr (Order == -1) { M = solver.M; } else { M = Order / 2; }
+    int halo = solver.abcn + M + 1;
+    return {halo, solver.nx - halo, halo, solver.nz - halo};
+}
+
+// One cell of velocity_kernel_nopml: everything after the kernel's guards
+// (see launch/cell_path.h).  Interior box: vti2d_nopml_box(); no run-time
+// test, so every path is the same code.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void velocity_kernel_nopml_cell(
+    int ix, int iz, int b,
+    const VTIWavefieldPointer& wf,
+    const float* __restrict__ inv_rho,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    long long spatial_size = (long long)solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+
+    auto f = wf.offset(b, spatial_size);
+    const float* inv_rho_b = inv_rho + b * spatial_size;
+
+    float dsH_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.sH, ix, 0, iz, grad_ctx);
+    float dsV_dz = sgradient<2, Order, Z, DIFF_FORWARD>(f.sV, ix, 0, iz, grad_ctx);
+
+    float ir = inv_rho_b[idx];
+    // Time-reverse: subtract one forward step.
+    f.vx[idx] -= solver.dt * ir * dsH_dx;
+    f.vz[idx] -= solver.dt * ir * dsV_dz;
+}
 
 template<int Order>
 __global__ void velocity_kernel_nopml(
@@ -248,24 +376,45 @@ __global__ void velocity_kernel_nopml(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    long long spatial_size = (long long)solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-
-    auto f = wf.offset(b, spatial_size);
-    const float* inv_rho_b = inv_rho + b * spatial_size;
-
-    float dsH_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.sH, ix, 0, iz, grad_ctx);
-    float dsV_dz = sgradient<2, Order, Z, DIFF_FORWARD>(f.sV, ix, 0, iz, grad_ctx);
-
-    float ir = inv_rho_b[idx];
-    // Time-reverse: subtract one forward step.
-    f.vx[idx] -= solver.dt * ir * dsH_dx;
-    f.vz[idx] -= solver.dt * ir * dsV_dz;
+    velocity_kernel_nopml_cell<Order>(ix, iz, b, wf, inv_rho, grad_ctx, solver);
 }
 
 using velocity_kernel_nopml_fn = void (*)(VTIWavefieldPointer, const float*, SGradParam,
     SolverContext);
 SWEEP_BY_ORDER_DECL(velocity_kernel_nopml_fn, velocity_kernel_nopml_by_order);
+
+// One cell of stress_kernel_nopml (see velocity_kernel_nopml_cell).
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void stress_kernel_nopml_cell(
+    int ix, int iz, int b,
+    const VTIWavefieldPointer& wf,
+    const float* __restrict__ c11,
+    const float* __restrict__ c33,
+    const float* __restrict__ c13,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    long long spatial_size = (long long)solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+
+    auto f = wf.offset(b, spatial_size);
+    const float* c11_b = c11 + b * spatial_size;
+    const float* c33_b = c33 + b * spatial_size;
+    const float* c13_b = c13 + b * spatial_size;
+
+    float dvx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.vx, ix, 0, iz, grad_ctx);
+    float dvz_dz = sgradient<2, Order, Z, DIFF_BACKWARD>(f.vz, ix, 0, iz, grad_ctx);
+
+    float C11 = c11_b[idx];
+    float C33 = c33_b[idx];
+    float C13 = c13_b[idx];
+
+    // Time-reverse: subtract one forward step.
+    f.sH[idx] -= solver.dt * (C11 * dvx_dx + C13 * dvz_dz);
+    f.sV[idx] -= solver.dt * (C13 * dvx_dx + C33 * dvz_dz);
+}
 
 template<int Order>
 __global__ void stress_kernel_nopml(
@@ -290,24 +439,7 @@ __global__ void stress_kernel_nopml(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    long long spatial_size = (long long)solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-
-    auto f = wf.offset(b, spatial_size);
-    const float* c11_b = c11 + b * spatial_size;
-    const float* c33_b = c33 + b * spatial_size;
-    const float* c13_b = c13 + b * spatial_size;
-
-    float dvx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.vx, ix, 0, iz, grad_ctx);
-    float dvz_dz = sgradient<2, Order, Z, DIFF_BACKWARD>(f.vz, ix, 0, iz, grad_ctx);
-
-    float C11 = c11_b[idx];
-    float C33 = c33_b[idx];
-    float C13 = c13_b[idx];
-
-    // Time-reverse: subtract one forward step.
-    f.sH[idx] -= solver.dt * (C11 * dvx_dx + C13 * dvz_dz);
-    f.sV[idx] -= solver.dt * (C13 * dvx_dx + C33 * dvz_dz);
+    stress_kernel_nopml_cell<Order>(ix, iz, b, wf, c11, c33, c13, grad_ctx, solver);
 }
 
 using stress_kernel_nopml_fn = void (*)(VTIWavefieldPointer, const float*, const float*,
@@ -393,6 +525,56 @@ SWEEP_BY_ORDER_DECL(stress_kernel_nopml_fn, stress_kernel_nopml_by_order);
 // (elastic2d's stress_adjoint_prepare).  It runs exactly where the forward
 // kernel updates its memory -- inside the band, off the stencil halo -- so
 // elsewhere p_out = p and the interior is bit-identical to the plain adjoint.
+//
+// The two pre-multiply kernels are pointwise with no guard past the grid's
+// own; their cells' interior box is in_pml_2d's interior at halo M
+// (backward.cu vti2d_premultiply_box), where the band's transpose is dead
+// code, and the band and the grid's edge run through the kernels themselves.
+// The pointer structs and the context are taken by value, as the kernels take
+// them: through references nvcc schedules the CPML branch's address arithmetic
+// differently and the kernels' machine code would move.
+template<int Dummy, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void adjoint_premultiply_stress_cell(
+    int ix, int iz, int b,
+    VTIWavefieldPointer adj,
+    const float* __restrict__ c11,
+    const float* __restrict__ c33,
+    const float* __restrict__ c13,
+    float* __restrict__ px,
+    float* __restrict__ pz,
+    ElasticCPMLPointer cpml,
+    SolverContext solver
+)
+{
+    // No halo guard: the stencil in kernel A reads these cells, so they must be
+    // filled everywhere, not just where kernel A writes.
+    long long spatial_size = (long long)solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+    long long u_idx = (long long)b * spatial_size + idx;
+
+    auto a = adj.offset(b, spatial_size);
+    const float lSH = a.sH[idx];
+    const float lSV = a.sV[idx];
+    float p_x = c11[u_idx] * lSH + c13[u_idx] * lSV;
+    float p_z = c13[u_idx] * lSH + c33[u_idx] * lSV;
+
+    if constexpr (!interior_path<Path>) {
+        const int halo = solver.M;
+        if (ix >= halo && ix < solver.nx - halo && iz >= halo && iz < solver.nz - halo &&
+            solver.in_pml_2d(ix, iz, halo)) {
+            const float tx = a.m_vxx[idx] + p_x;
+            const float tz = a.m_vzz[idx] + p_z;
+            p_x += cpml.bx[ix] * tx;
+            p_z += cpml.bz[iz] * tz;
+            a.m_vxx[idx] = cpml.ax[ix] * tx;
+            a.m_vzz[idx] = cpml.az[iz] * tz;
+        }
+    }
+    px[u_idx] = p_x;
+    pz[u_idx] = p_z;
+}
+
 template<int Dummy>
 __global__ void adjoint_premultiply_stress_kernel(
     VTIWavefieldPointer adj,
@@ -410,30 +592,7 @@ __global__ void adjoint_premultiply_stress_kernel(
     int b  = blockIdx.z;
     if (ix >= solver.nx || iz >= solver.nz) return;
 
-    // No halo guard: the stencil in kernel A reads these cells, so they must be
-    // filled everywhere, not just where kernel A writes.
-    long long spatial_size = (long long)solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-    long long u_idx = (long long)b * spatial_size + idx;
-
-    auto a = adj.offset(b, spatial_size);
-    const float lSH = a.sH[idx];
-    const float lSV = a.sV[idx];
-    float p_x = c11[u_idx] * lSH + c13[u_idx] * lSV;
-    float p_z = c13[u_idx] * lSH + c33[u_idx] * lSV;
-
-    const int halo = solver.M;
-    if (ix >= halo && ix < solver.nx - halo && iz >= halo && iz < solver.nz - halo &&
-        solver.in_pml_2d(ix, iz, halo)) {
-        const float tx = a.m_vxx[idx] + p_x;
-        const float tz = a.m_vzz[idx] + p_z;
-        p_x += cpml.bx[ix] * tx;
-        p_z += cpml.bz[iz] * tz;
-        a.m_vxx[idx] = cpml.ax[ix] * tx;
-        a.m_vzz[idx] = cpml.az[iz] * tz;
-    }
-    px[u_idx] = p_x;
-    pz[u_idx] = p_z;
+    adjoint_premultiply_stress_cell<Dummy>(ix, iz, b, adj, c11, c33, c13, px, pz, cpml, solver);
 }
 
 
@@ -443,6 +602,42 @@ __global__ void adjoint_premultiply_stress_kernel(
 // Df_x(s) + m_sHx' with m_sHx' = axh * m_sHx + bxh * Df_x(s); its transpose is
 // the same three lines as in the stress pre-multiply, on the half-step
 // coefficients.
+template<int Dummy, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void adjoint_premultiply_vel_cell(
+    int ix, int iz, int b,
+    VTIWavefieldPointer adj,
+    const float* __restrict__ inv_rho,
+    float* __restrict__ qx,
+    float* __restrict__ qz,
+    ElasticCPMLPointer cpml,
+    SolverContext solver
+)
+{
+    long long spatial_size = (long long)solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+    long long u_idx = (long long)b * spatial_size + idx;
+
+    auto a = adj.offset(b, spatial_size);
+    float q_x = inv_rho[u_idx] * a.vx[idx];
+    float q_z = inv_rho[u_idx] * a.vz[idx];
+
+    if constexpr (!interior_path<Path>) {
+        const int halo = solver.M;
+        if (ix >= halo && ix < solver.nx - halo && iz >= halo && iz < solver.nz - halo &&
+            solver.in_pml_2d(ix, iz, halo)) {
+            const float tx = a.m_sHx[idx] + q_x;
+            const float tz = a.m_sVz[idx] + q_z;
+            q_x += cpml.bxh[ix] * tx;
+            q_z += cpml.bzh[iz] * tz;
+            a.m_sHx[idx] = cpml.axh[ix] * tx;
+            a.m_sVz[idx] = cpml.azh[iz] * tz;
+        }
+    }
+    qx[u_idx] = q_x;
+    qz[u_idx] = q_z;
+}
+
 template<int Dummy>
 __global__ void adjoint_premultiply_vel_kernel(
     VTIWavefieldPointer adj,
@@ -458,32 +653,42 @@ __global__ void adjoint_premultiply_vel_kernel(
     int b  = blockIdx.z;
     if (ix >= solver.nx || iz >= solver.nz) return;
 
-    long long spatial_size = (long long)solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-    long long u_idx = (long long)b * spatial_size + idx;
-
-    auto a = adj.offset(b, spatial_size);
-    float q_x = inv_rho[u_idx] * a.vx[idx];
-    float q_z = inv_rho[u_idx] * a.vz[idx];
-
-    const int halo = solver.M;
-    if (ix >= halo && ix < solver.nx - halo && iz >= halo && iz < solver.nz - halo &&
-        solver.in_pml_2d(ix, iz, halo)) {
-        const float tx = a.m_sHx[idx] + q_x;
-        const float tz = a.m_sVz[idx] + q_z;
-        q_x += cpml.bxh[ix] * tx;
-        q_z += cpml.bzh[iz] * tz;
-        a.m_sHx[idx] = cpml.axh[ix] * tx;
-        a.m_sVz[idx] = cpml.azh[iz] * tz;
-    }
-    qx[u_idx] = q_x;
-    qz[u_idx] = q_z;
+    adjoint_premultiply_vel_cell<Dummy>(ix, iz, b, adj, inv_rho, qx, qz, cpml, solver);
 }
 
 
 // Kernel A: λ_sH/λ_sV → contribute to λ_vx/λ_vz  (adjoint of stress update)
 //   λvx += -dt * Df_x(c11*λsH + c13*λsV)
 //   λvz += -dt * Df_z(c13*λsH + c33*λsV)
+//
+// Kernels A and B (and their cells) have no run-time test past the halo
+// guard -- the band's memory transpose is in the pre-multiplies -- so their
+// interior box is vti2d_halo_box() and every path is the same code.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void adjoint_stress_to_vel_cell(
+    int ix, int iz, int b,
+    const VTIWavefieldPointer& adj,
+    const float* __restrict__ px,
+    const float* __restrict__ pz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    long long spatial_size = (long long)solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+
+    auto a = adj.offset(b, spatial_size);
+    const float* px_b = px + b * spatial_size;
+    const float* pz_b = pz + b * spatial_size;
+
+    float dpx_dx = sgradient<2, Order, X, DIFF_FORWARD>(px_b, ix, 0, iz, grad_ctx);
+    float dpz_dz = sgradient<2, Order, Z, DIFF_FORWARD>(pz_b, ix, 0, iz, grad_ctx);
+
+    a.vx[idx] += -solver.dt * dpx_dx;
+    a.vz[idx] += -solver.dt * dpz_dz;
+}
+
 template<int Order>
 __global__ void adjoint_stress_to_vel_kernel(
     VTIWavefieldPointer adj,
@@ -507,18 +712,7 @@ __global__ void adjoint_stress_to_vel_kernel(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    long long spatial_size = (long long)solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-
-    auto a = adj.offset(b, spatial_size);
-    const float* px_b = px + b * spatial_size;
-    const float* pz_b = pz + b * spatial_size;
-
-    float dpx_dx = sgradient<2, Order, X, DIFF_FORWARD>(px_b, ix, 0, iz, grad_ctx);
-    float dpz_dz = sgradient<2, Order, Z, DIFF_FORWARD>(pz_b, ix, 0, iz, grad_ctx);
-
-    a.vx[idx] += -solver.dt * dpx_dx;
-    a.vz[idx] += -solver.dt * dpz_dz;
+    adjoint_stress_to_vel_cell<Order>(ix, iz, b, adj, px, pz, grad_ctx, solver);
 }
 
 using adjoint_stress_to_vel_kernel_fn = void (*)(VTIWavefieldPointer, const float*,
@@ -529,6 +723,31 @@ SWEEP_BY_ORDER_DECL(adjoint_stress_to_vel_kernel_fn, adjoint_stress_to_vel_kerne
 // Kernel B: λ_vx/λ_vz → contribute to λ_sH/λ_sV  (adjoint of velocity update)
 //   λsH += -dt * Db_x(inv_rho * λvx)
 //   λsV += -dt * Db_z(inv_rho * λvz)
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void adjoint_vel_to_stress_cell(
+    int ix, int iz, int b,
+    const VTIWavefieldPointer& adj,
+    const float* __restrict__ qx,
+    const float* __restrict__ qz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    long long spatial_size = (long long)solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+
+    auto a = adj.offset(b, spatial_size);
+    const float* qx_b = qx + b * spatial_size;
+    const float* qz_b = qz + b * spatial_size;
+
+    float dqx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(qx_b, ix, 0, iz, grad_ctx);
+    float dqz_dz = sgradient<2, Order, Z, DIFF_BACKWARD>(qz_b, ix, 0, iz, grad_ctx);
+
+    a.sH[idx] += -solver.dt * dqx_dx;
+    a.sV[idx] += -solver.dt * dqz_dz;
+}
+
 template<int Order>
 __global__ void adjoint_vel_to_stress_kernel(
     VTIWavefieldPointer adj,
@@ -552,18 +771,7 @@ __global__ void adjoint_vel_to_stress_kernel(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    long long spatial_size = (long long)solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-
-    auto a = adj.offset(b, spatial_size);
-    const float* qx_b = qx + b * spatial_size;
-    const float* qz_b = qz + b * spatial_size;
-
-    float dqx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(qx_b, ix, 0, iz, grad_ctx);
-    float dqz_dz = sgradient<2, Order, Z, DIFF_BACKWARD>(qz_b, ix, 0, iz, grad_ctx);
-
-    a.sH[idx] += -solver.dt * dqx_dx;
-    a.sV[idx] += -solver.dt * dqz_dz;
+    adjoint_vel_to_stress_cell<Order>(ix, iz, b, adj, qx, qz, grad_ctx, solver);
 }
 
 using adjoint_vel_to_stress_kernel_fn = void (*)(VTIWavefieldPointer, const float*,
@@ -595,13 +803,31 @@ SWEEP_BY_ORDER_DECL(adjoint_vel_to_stress_kernel_fn, adjoint_vel_to_stress_kerne
 // Outputs (accumulate into):
 //   grad_vp, grad_eps, grad_delta, grad_rho                         (B, nz, nx)
 // ---------------------------------------------------------------------------
+
+// Where calculate_grad_cell runs: the kernel's physical-box guard and its
+// halo guard both passed (no run-time test after them).
 template<int Order>
-__global__ void calculate_grad_kernel(
+__device__ __forceinline__
+CellBox vti2d_grad_box(const SolverContext& solver)
+{
+    return CellBox{solver.phys_x0(), solver.phys_x1(), solver.phys_z0(), solver.phys_z1()}
+        .intersect(vti2d_halo_box<Order>(solver));
+}
+
+// One cell of calculate_grad_kernel: everything after the kernel's guards
+// (see launch/cell_path.h).  Interior box: vti2d_grad_box().  The interior
+// path spells fmaxf(sqrt_d, 1e-12f) as the select it is for this constant
+// (equal for every sqrt_d, NaN included), which a SIMD loop can use and a
+// libm call it cannot.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void calculate_grad_cell(
+    int ix, int iz, int b,
     const float* __restrict__ fvx_now,
     const float* __restrict__ fvz_now,
     const float* __restrict__ fsH_prev,
     const float* __restrict__ fsV_prev,
-    VTIWavefieldPointer adj,
+    const VTIWavefieldPointer& adj,
     const float* __restrict__ vp,
     const float* __restrict__ epsilon,
     const float* __restrict__ delta,
@@ -610,32 +836,10 @@ __global__ void calculate_grad_kernel(
     float* __restrict__ grad_eps,
     float* __restrict__ grad_delta,
     float* __restrict__ grad_rho,
-    SGradParam grad_ctx,
-    SolverContext solver
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
-    // Image the PHYSICAL box only.  ``EdgePadding.backward`` crops the pad
-    // gradients on the way back to the model, so everything this kernel writes
-    // in the PML shell and the stencil halo is discarded -- it was read,
-    // multiplied and accumulated for nothing, once per time step.  The bounds
-    // come from the context and are CUT-AWARE: on a DD cut face phys_x0()
-    // collapses to the halo, so the cut-adjacent columns are still imaged.
-    if (ix < solver.phys_x0() || ix >= solver.phys_x1() ||
-        iz < solver.phys_z0() || iz >= solver.phys_z1()) return;
-
-    constexpr bool is_runtime = (Order == -1);
-    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
-    int halo = is_runtime ? solver.M : M_static;
-
-    if (ix < halo || ix >= solver.nx - halo ||
-        iz < halo || iz >= solver.nz - halo)
-        return;
-
     long long spatial_size = (long long)solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
 
@@ -699,8 +903,57 @@ __global__ void calculate_grad_kernel(
     float common_vp  = grad_c11 * one_p_2eps + grad_c33 + grad_c13 * sqrt_d;
     gvp_b[idx]  += 2.f * rho_v * vp_v * common_vp;
     geps_b[idx] += grad_c11 * 2.f * rho_v * vp2;
-    gdlt_b[idx] += grad_c13 * rho_v * vp2 / fmaxf(sqrt_d, 1e-12f);
+    if constexpr (interior_path<Path>)
+        gdlt_b[idx] += grad_c13 * rho_v * vp2 / (sqrt_d > 1e-12f ? sqrt_d : 1e-12f);
+    else
+        gdlt_b[idx] += grad_c13 * rho_v * vp2 / fmaxf(sqrt_d, 1e-12f);
     grho_b[idx] += vp2 * common_vp - grad_irho / (rho_v * rho_v);
+}
+
+template<int Order>
+__global__ void calculate_grad_kernel(
+    const float* __restrict__ fvx_now,
+    const float* __restrict__ fvz_now,
+    const float* __restrict__ fsH_prev,
+    const float* __restrict__ fsV_prev,
+    VTIWavefieldPointer adj,
+    const float* __restrict__ vp,
+    const float* __restrict__ epsilon,
+    const float* __restrict__ delta,
+    const float* __restrict__ rho,
+    float* __restrict__ grad_vp,
+    float* __restrict__ grad_eps,
+    float* __restrict__ grad_delta,
+    float* __restrict__ grad_rho,
+    SGradParam grad_ctx,
+    SolverContext solver
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+    // Image the PHYSICAL box only.  ``EdgePadding.backward`` crops the pad
+    // gradients on the way back to the model, so everything this kernel writes
+    // in the PML shell and the stencil halo is discarded -- it was read,
+    // multiplied and accumulated for nothing, once per time step.  The bounds
+    // come from the context and are CUT-AWARE: on a DD cut face phys_x0()
+    // collapses to the halo, so the cut-adjacent columns are still imaged.
+    if (ix < solver.phys_x0() || ix >= solver.phys_x1() ||
+        iz < solver.phys_z0() || iz >= solver.phys_z1()) return;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
+    if (ix < halo || ix >= solver.nx - halo ||
+        iz < halo || iz >= solver.nz - halo)
+        return;
+
+    calculate_grad_cell<Order>(ix, iz, b, fvx_now, fvz_now, fsH_prev, fsV_prev, adj, vp,
+                               epsilon, delta, rho, grad_vp, grad_eps, grad_delta, grad_rho,
+                               grad_ctx, solver);
 }
 
 using calculate_grad_kernel_fn = void (*)(const float*, const float*, const float*,

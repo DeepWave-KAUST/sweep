@@ -1,5 +1,6 @@
 #pragma once
 #include "../../launch/by_order.cuh"
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cufft.h>
@@ -112,7 +113,7 @@ inline void visco_acoustic2d_ring_store(const float* u_this, float* tail, int64_
                                         const SolverContext& ctx)
 {
     const int64_t R = visco_ring_floats(ctx.M, ctx.nz, ctx.nx);
-    visco_acoustic2d_ring_pack<<<dim3(static_cast<unsigned>((R + 255) / 256), ctx.B), 256>>>(
+    SWEEP_LAUNCH(visco_acoustic2d_ring_pack, dim3(static_cast<unsigned>((R + 255) / 256), ctx.B), 256,
         u_this, tail, step, ctx);
 }
 
@@ -120,7 +121,7 @@ inline void visco_acoustic2d_ring_restore(const float* tail, float* carrier, int
                                           const SolverContext& ctx)
 {
     const int64_t R = visco_ring_floats(ctx.M, ctx.nz, ctx.nx);
-    visco_acoustic2d_ring_unpack<<<dim3(static_cast<unsigned>((R + 255) / 256), ctx.B), 256>>>(
+    SWEEP_LAUNCH(visco_acoustic2d_ring_unpack, dim3(static_cast<unsigned>((R + 255) / 256), ctx.B), 256,
         tail, carrier, step, ctx);
 }
 
