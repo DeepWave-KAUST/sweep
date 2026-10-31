@@ -8,7 +8,9 @@ stability, and finite nonzero eager gradients for all six parameters
 CUDA (canonical 2-D grid 48x56, order 4, abcn 30): forward c-vs-eager,
 full backward c-vs-eager on all six parameter gradients, bs/ckpt against
 full, and a small multi-parameter FWI smoke that drives the misfit down
-with the compiled backend (forward + inversion round trip).
+with the compiled backend (forward + inversion round trip).  Boundary
+saving on a thin absorbing layer (21x23): the replay reads nothing outside
+its buffers, and with no layer at all it retraces the forward.
 """
 
 import numpy as np
@@ -350,6 +352,105 @@ def test_fwi_smoke_reduces_misfit():
     assert losses[-1] < 0.5 * losses[0], (
         f"FWI smoke failed to reduce misfit: {losses[0]:.3e} -> {losses[-1]:.3e}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Boundary saving on a thin absorbing layer
+# ---------------------------------------------------------------------------
+# The replay's stress kernel (tti2nd_stress_kernel_nopml) used to cover
+# [abcn + 1, n - abcn - 1) of the padded grid, and its forward-difference taps
+# reach M - 1 cells back and M forward: for abcn < M - 2 it read outside the
+# reconstruction buffers and the values reached every gradient (NaN on the
+# host core in one run, ~1e25 in the next).  The buffers are allocated by
+# propagator/_c.py _forward_state_buffers, so handing the core views into
+# larger tensors whose margins hold NaN shows any read outside them.
+
+_GUARD_CELLS = 4096
+
+
+def _guarded_state_buffers(fill, calls):
+    def make(shapes, device):
+        calls.append(len(shapes))
+        out = []
+        for s in shapes:
+            n = int(np.prod(s))
+            flat = torch.full((n + 2 * _GUARD_CELLS,), fill, device=device)
+            flat[_GUARD_CELLS:_GUARD_CELLS + n] = 0.0
+            out.append(flat[_GUARD_CELLS:_GUARD_CELLS + n].view(*s))
+        return out
+    return make
+
+
+def _thin_layer_run(order, abcn, memory, B=1, nt=30):
+    """Record and the six gradients on a random 21x23 TTI model."""
+    shape, dt = (21, 23), 1e-3
+    nz, nx = shape
+    rng = np.random.default_rng(1)
+    models = [
+        torch.tensor((base + span * rng.random(shape)).astype(np.float32),
+                     device="cuda", requires_grad=True)
+        for base, span in ((2400.0, 300.0), (1200.0, 150.0), (2000.0, 100.0),
+                           (0.10, 0.05), (0.05, 0.03), (0.3, 0.2))
+    ]
+    eq = ElasticTTI2nd(spatial_order=order, device="cuda", backend="torch")
+    prop = PropTorch(eq, shape, dh=10.0, dt=dt, nt=nt, abcn=abcn, device="cuda",
+                     impl="c", memory=memory,
+                     source_type=["ux", "uz"], receiver_type=["ux", "uz"])
+    src = np.array([[nx // 2 - 1, nz // 3], [nx // 3, nz // 2]], dtype=np.int64)[:B]   # (nshots, 2)
+    rx = np.arange(1, nx - 1, 2, dtype=np.int64)
+    rec = np.stack([np.stack([rx, np.full_like(rx, z)], axis=1) for z in (2, nz - 3)])[:B]
+    t = np.arange(nt, dtype=np.float32) * dt - 0.03
+    wavelet = torch.tensor(np.tile(_ricker(t, 15.0), (B, 1)).astype(np.float32), device="cuda")
+    record = prop(wavelet, src, rec, models=models)
+    weight = torch.linspace(-1.0, 1.0, record.numel(), device="cuda").reshape(record.shape)
+    loss = (record ** 2).sum() + (record * weight).sum()
+    grads = torch.autograd.grad(loss, models)
+    return [record.detach().cpu()] + [g.detach().cpu() for g in grads]
+
+
+@cuda_mark
+@pytest.mark.parametrize("order,abcn,B", [
+    (8, 0, 1), (8, 1, 1), (8, 1, 2), (6, 0, 1),
+    (12, 2, 1),   # above order 8: the runtime-order kernels
+])
+def test_cuda_bs_thin_layer_reads_stay_in_buffers(monkeypatch, order, abcn, B):
+    import sweep.propagator._c as c_prop
+    from sweep.propagator.options import BoundarySaving
+
+    calls = []
+    results = {}
+    for key, fill in (("nan", float("nan")), ("zero", 0.0)):
+        monkeypatch.setattr(c_prop, "_forward_state_buffers", _guarded_state_buffers(fill, calls))
+        results[key] = _thin_layer_run(order, abcn, BoundarySaving(), B=B)
+    # the reconstruction (ux, uz x now/pre/next) went through the guarded
+    # allocation in both runs -- otherwise this test checks nothing
+    assert calls.count(6) == 2, f"reconstruction buffers not seen: {calls}"
+    names = ["record"] + MODEL_NAMES
+    nonfinite = [n for n, a in zip(names, results["nan"]) if not torch.isfinite(a).all()]
+    assert not nonfinite, f"NaN outside the reconstruction buffers reached {nonfinite}"
+    changed = [n for n, a, b in zip(names, results["nan"], results["zero"]) if not torch.equal(a, b)]
+    assert not changed, f"result depends on memory outside the buffers: {changed}"
+
+
+@cuda_mark
+@pytest.mark.parametrize("order", [4, 8, 12])
+def test_cuda_bs_without_absorbing_layer_matches_full(order):
+    """abcn = 0: no CPML memory anywhere, so the time-reversed replay must
+    retrace the forward up to float32 rounding (~1e-6).  The replay used to
+    recompute stress in the outer M-cell halo, where the forward keeps it at
+    zero: 4.5e-2..7.7e-2 off at orders 4-8."""
+    from sweep.propagator.options import BoundarySaving, Full
+
+    full = _thin_layer_run(order, 0, Full(), nt=100)
+    bs = _thin_layer_run(order, 0, BoundarySaving(), nt=100)
+    assert torch.equal(full[0], bs[0]), "the boundary-saving forward changed the record"
+    failures = []
+    for name, gf, gb in zip(MODEL_NAMES, full[1:], bs[1:]):
+        rel_l2, cos, ref_l2 = _metrics(gf.double(), gb.double())
+        print(f"[bs-abcn0-o{order}] {name:8s} rel_l2={rel_l2:.3e} ref_l2={ref_l2:.3e}")
+        if not rel_l2 < 1e-5:
+            failures.append((name, rel_l2))
+    assert not failures, f"bs vs full with no absorbing layer: {failures}"
 
 
 # ---------------------------------------------------------------------------

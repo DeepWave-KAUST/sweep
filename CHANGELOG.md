@@ -10,6 +10,25 @@ and this project adheres to
 ## [Unreleased]
 
 ### Fixed
+- **`ElasticTTI2nd` boundary saving no longer reads outside its
+  reconstruction buffers on a thin absorbing layer.**  The replay's stress
+  kernel (`tti2nd_stress_kernel_nopml`) covered `[abcn + 1, n - abcn - 1)`,
+  and its forward-difference taps reach `M - 1` cells back and `M` forward,
+  so for `abcn <= M - 2` (`M = spatial_order // 2`) it read before / after
+  the buffers in z and into the neighbouring row in x.  Below `abcn = M - 2`
+  those values reached the gradients: guard regions of NaN around the buffers
+  made every gradient NaN; on the host core two identical runs gave NaN
+  against ~1e25; on CUDA the result depended on what the allocator had put
+  next to the buffers -- zeros in an isolated run, but inside the test suite
+  the order-8 gradients came out with a relative L2 error of 60-370.  At
+  `abcn = M - 2` the value read was unused (one row past the end;
+  compute-sanitizer still flags it).  The kernel now also skips the outer
+  `M`-cell halo, which the forward stress kernel never writes: no
+  out-of-bounds read at any `abcn`, and with `abcn = 0` the reconstruction
+  retraces the forward exactly (gradients vs `Full()` ~1e-6 relative; they
+  were up to 4.5e-2 off at order 4 and 7.7e-2 at order 8 over 100 steps on
+  a 21x23 grid, even where the stray reads found zeros).  Results for
+  `abcn >= M - 1` are bit-identical.
 - **Eager chunk checkpointing no longer slows calls down for nothing.** A
   solver built with `Ckpt(mode="chunk")` cut every rollout into chunks, also
   a call autograd does not record, and every chunk prepared the models again
