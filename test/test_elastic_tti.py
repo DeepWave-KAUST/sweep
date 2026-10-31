@@ -108,6 +108,78 @@ def test_elastic_tti_bond_rotation_preserves_vti_at_zero_tilt():
         assert torch.allclose(stiffness[key], reference, atol=1e-5)
 
 
+def _tensor_rotation_reference(C11, C13, C33, C44, C66, R):
+    """C'_ijkl = R_ip R_jq R_kr R_ls C_pqrs of the VTI tensor, float64 numpy, per cell."""
+    pairs = ((0, 0), (1, 1), (2, 2), (1, 2), (0, 2), (0, 1))
+    n = C11.size
+    V = np.zeros((n, 6, 6))
+    V[:, 0, 0] = V[:, 1, 1] = C11
+    V[:, 0, 1] = V[:, 1, 0] = C11 - 2.0 * C66
+    V[:, 0, 2] = V[:, 2, 0] = V[:, 1, 2] = V[:, 2, 1] = C13
+    V[:, 2, 2] = C33
+    V[:, 3, 3] = V[:, 4, 4] = C44
+    V[:, 5, 5] = C66
+    T = np.zeros((n, 3, 3, 3, 3))
+    for I, (a, b) in enumerate(pairs):
+        for J, (c, d) in enumerate(pairs):
+            for p, q in ((a, b), (b, a)):
+                for r, s in ((c, d), (d, c)):
+                    T[:, p, q, r, s] = V[:, I, J]
+    T = np.einsum("nip,njq,nkr,nls,npqrs->nijkl", R, R, R, R, T, optimize=True)
+    out = {}
+    for key in STIFFNESS_KEYS:
+        (i, j), (k, l) = pairs[int(key[1]) - 1], pairs[int(key[2]) - 1]
+        out[key] = T[:, i, j, k, l]
+    return out
+
+
+def test_elastic_tti_bond_rotation_matches_tensor_rotation():
+    rng = np.random.default_rng(0)
+    n = 64
+    C33 = rng.uniform(5.0, 20.0, n)
+    C44 = rng.uniform(1.0, 4.0, n)
+    C11 = C33 * rng.uniform(1.0, 1.4, n)
+    C66 = C44 * rng.uniform(1.0, 1.3, n)
+    C13 = rng.uniform(1.0, 6.0, n)
+    theta = rng.uniform(-1.5, 1.5, n)
+    phi = rng.uniform(-3.1, 3.1, n)
+    t = lambda a: torch.tensor(a, dtype=torch.float64)
+    got = ElasticTTI._bond_rotate(*(t(a) for a in (C11, C13, C33, C44, C66, theta, phi)))
+    R = ElasticTTI._bond_rotation_matrix_torch(t(theta), t(phi)).numpy()
+    ref = _tensor_rotation_reference(C11, C13, C33, C44, C66, R)
+    for key in STIFFNESS_KEYS:
+        np.testing.assert_allclose(got[key].numpy(), ref[key], rtol=0, atol=1e-12 * C11.max())
+
+
+def test_elastic_tti_bond_rotation_gradcheck():
+    g = torch.Generator().manual_seed(0)
+    lo_hi = ((10, 14), (2, 4), (8, 12), (2, 3), (3, 4), (0.2, 1.4), (-3.0, 3.0))
+    args = [(lo + (hi - lo) * torch.rand(5, generator=g, dtype=torch.float64)).requires_grad_(True)
+            for lo, hi in lo_hi]
+    assert torch.autograd.gradcheck(
+        lambda *a: torch.stack([v for _, v in sorted(ElasticTTI._bond_rotate(*a).items())]), args)
+
+
+def test_elastic_tti_bond_rotation_saves_at_most_6x6_per_cell():
+    """prepare_models rotates the whole padded grid on every propagator call, so
+    the rotation's autograd graph has to stay at the 6x6 Voigt size.  The rank-4
+    einsum it replaced saved the 3^4 tensor of every cell, and 3^8 intermediates
+    when torch contracted it without opt_einsum (about 20 s and 124 GB on a
+    2048^2 grid)."""
+    n = 50
+    g = torch.Generator().manual_seed(0)
+    args = [(1.0 + torch.rand(n, generator=g, dtype=torch.float64)).requires_grad_(True) for _ in range(7)]
+    saved = []
+
+    def pack(t):
+        saved.append(t.numel())
+        return t
+
+    with torch.autograd.graph.saved_tensors_hooks(pack, lambda t: t):
+        ElasticTTI._bond_rotate(*args)
+    assert max(saved) <= 36 * n
+
+
 def _elastic_tti_problem(equation_cls=ElasticTTI, *, free_surface=False):
     nt = 10
     dt = 5e-4
