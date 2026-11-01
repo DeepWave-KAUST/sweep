@@ -165,6 +165,26 @@ and this project adheres to
   two A100s the per-step cost of 2-D problems dropped by 40-60 % (3-D ones
   are compute-bound and gain a few per cent). Single-node CUDA tile groups
   only; it refuses, rather than falls back, where it cannot run.
+- **`sweep.autodiff`: Jacobian-, Gauss-Newton- and Hessian-vector products in
+  one call.** `jacobian_vector_product`, `gauss_newton_vector_product` and
+  `hessian_vector_product` take a propagator, its inputs, one direction per
+  model (`None` holds a model fixed: no gradient is taken of it, so the
+  background of an `impl='c'` Born equation stays detached) and any
+  twice-differentiable loss of the record. `route="auto"` takes the exact route
+  where there is one -- forward mode (reverse over forward for H h) on the
+  uncompiled eager step with `Full()` -- and a central difference of two
+  gradients (two forwards for J h) with every other impl and memory strategy and
+  with `ModelParallel`, whose ranks take one step; `route="double_backward"` or
+  `"difference"` forces one. One H h on a 100 x 200 grid with 1000 steps (4
+  shots, V100) took 70 s and 7.6 GiB by double backward, 28 s and 5.5 GiB by
+  reverse over forward (2.3e-6 off the exact product), 3.0 s and 119 MiB as a
+  difference with the eager defaults (compiled step, `Ckpt()`; 1.1e-3 off) and
+  0.13 s and 7 MiB with `impl='c'` and boundary saving (1.3e-3 off). The qP
+  equations refuse the Gauss-Newton and Hessian-vector products and differences
+  (new `curvature_refusal()` and `difference_refusal()` hooks): where epsilon
+  differs from delta their record and gradient are not smooth functions of the
+  model, and the `'exact'` gradient moves by tens of percent between float32
+  and float64.
 - **Forward-mode AD (Jacobian-vector products) through `impl='eager'`.** With
   `memory=Full()` and `EagerOptions(use_compile=False)`, models passed as dual
   tensors (`torch.autograd.forward_ad.make_dual(vp, h)`) give the record's
@@ -172,18 +192,21 @@ and this project adheres to
   Born equation and no autograd tape: `EdgePadding`, the receiver footprint
   gather and the `ViscoElastic` GSLS strengths gained their `jvp`. On a
   100 x 200 grid with 1000 steps (4 shots, V100) J h took 11 s and 32 MiB
-  (`Acoustic`; `Elastic` 14 s and 51 MiB), against 70 s and 7.8 GB (93 s and
-  18 GB) for reverse mode twice, the only eager route before. With the models
+  (`Acoustic`; `Elastic` 14 s and 51 MiB), against 70 s and 7.6 GiB (93 s and
+  17.6 GiB) for reverse mode twice, the only eager route before. With the models
   also requiring grad, the gradient of `<d, s.detach()> + <s, r.detach()>`
   (s = J h, r the residual) is the exact Hessian-vector product from first
   derivatives (`test/test_forward_mode_ad.py`). Like a difference of gradients,
-  forward mode differentiates the gradient the propagator returns; on the two
-  outermost model cells, whose gradient is the cropped one (`EdgePadding`),
-  double backward gives a different product, so keep a direction off them when
-  comparing the two. qP equations carry J h with `s_gradient='exact'`; with
+  forward mode differentiates the gradient the propagator returns; on the
+  outermost ring of model cells, whose gradient is the cropped one
+  (`EdgePadding`), it gives a product that is not symmetric and double backward
+  the symmetric one, so keep a direction off that ring when comparing the two.
+  `AcousticVTI` and `AcousticTTI` carry J h with `s_gradient='exact'`; with
   `'adjoint'` and `'frozen'` (whose tangent would be the linearisation with S_n
-  held fixed) they refuse a dual tensor. `ViscoAcoustic`'s Q tangent holds the
-  fractional exponent fixed, as its gradient does.
+  held fixed) they refuse a dual tensor, and their Born pair refuses one in
+  every mode (its scattered field takes S_n from its own gradient, so at mp = 0
+  a tangent would propagate it elliptically). `ViscoAcoustic`'s Q tangent holds
+  the fractional exponent fixed, as its gradient does.
 - **Notebook 46, Hessian-vector products**: the exact product by double
   backward (eager, uncompiled), the difference of two `impl='c'` boundary-saving
   gradients, the Gauss-Newton product from an `AcousticBorn` record, and the
@@ -1271,20 +1294,26 @@ and this project adheres to
   derivative of S_n = N / (D + 1e-26) overflows float32 where the wavefield
   is quiet) or not a Hessian (`'frozen'`). `'adjoint'` refuses
   `create_graph=True`; `'exact'` and `'frozen'` keep their `create_graph=True`
-  gradient for Jacobian-vector products by a derivative with respect to the
-  residual (a Gauss-Newton solver's double vjp) and refuse only a second
-  derivative with respect to the models or the wavelet. Equations declare
-  this through `second_derivative_refusal()`; first derivatives are
-  unchanged. Every eager refusal is raised on the input side of the rollout,
-  where a backward ends, so a script that catches it exits normally.
+  gradient for a derivative with respect to the residual (a Gauss-Newton
+  solver's double vjp: J h for `'exact'`, the linearisation with S_n held fixed
+  for `'frozen'`) and refuse only a second derivative with respect to the
+  models or the wavelet. Equations declare this through
+  `second_derivative_refusal()`; first derivatives are unchanged. A difference
+  of their gradients is no substitute -- S_n depends on the direction of a
+  field's own gradient, so where epsilon differs from delta the record and the
+  gradient are not smooth functions of the model -- and the eager and
+  `impl='c'` refusals say so. Every eager refusal is raised on the input side
+  of the rollout, where a backward ends, so a script that catches it exits
+  normally.
 - **Forward-mode AD no longer loses its tangent.** A dual tensor
   (`torch.autograd.forward_ad`) through the compiled eager step came back with
   a tangent of zero, and through `ModelParallel` with the tangent dropped, both
   without a word, and so did `PropSEM`'s compiled step (its default). The
   paths that cannot carry a tangent -- the compiled step, `Ckpt()`, eager
   `BoundarySaving()`, `impl='c'`, `ModelParallel`, `PropSEM`, registered
-  gradient-mode imaging conditions and the qP `'adjoint'` and `'frozen'` modes
-  -- now raise a `RuntimeError` that names the uncompiled `Full()` path.
+  gradient-mode imaging conditions, the qP `'adjoint'` and `'frozen'` modes and
+  the qP Born pair -- now raise a `RuntimeError` that names the uncompiled
+  `Full()` path.
 - **2-D `AcousticBorn` is the exact linearisation of 2-D `Acoustic`.**
   `Acoustic` takes spatial-order first-derivative kernels in its CPML and
   `AcousticBorn` took `torch.gradient` (second order), so the scattered

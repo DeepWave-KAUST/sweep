@@ -19,7 +19,8 @@ from sweep.sources.torch import SourceTorch, scatter_source
 from sweep.utils.torch import EdgePadding
 from sweep.propagator._second_order import (DIFFERENCE_ALTERNATIVES, JVP_ALTERNATIVES,
                                             CreateGraphGuard, has_tangent, refuse_create_graph,
-                                            refuse_forward_ad, refuse_second_derivative)
+                                            refuse_forward_ad, refuse_second_derivative,
+                                            substitute_for)
 from sweep.propagator._eager_boundary_saving import _EagerBoundarySavingMixin
 from sweep.propagator._torch_eager_custom_grad import _CustomGradientMixin
 
@@ -608,14 +609,15 @@ class _PropTorchEager(
             return tensors
         owner = weakref.ref(self)
         name = type(self.equation).__name__
+        instead = substitute_for(self.equation, DIFFERENCE_ALTERNATIVES)
 
         def check(ctx):
             if refusal is not None:
                 why, keeps_first_order_graph = refusal
                 if not keeps_first_order_graph:
-                    refuse_create_graph(name, why, instead=DIFFERENCE_ALTERNATIVES)
+                    refuse_create_graph(name, why, instead=instead)
                 elif getattr(ctx, "differentiated", False):
-                    refuse_second_derivative(name, why)
+                    refuse_second_derivative(name, why, instead=instead)
                 elif torch.is_grad_enabled():
                     ctx.differentiated = True
             if boundary:
@@ -648,8 +650,8 @@ class _PropTorchEager(
         refusal = refusal() if callable(refusal) else None
         if refusal is not None:
             what, why = type(self.equation).__name__, refusal
-            instead = ("A qP equation carries J h with s_gradient='exact' through the uncompiled "
-                       "step with memory=Full().")
+            instead = ("AcousticVTI and AcousticTTI carry J h with s_gradient='exact' through the "
+                       "uncompiled step with memory=Full().")
         elif custom_gradient:
             what, why = ("A registered gradient-mode imaging condition",
                          "it replaces the model derivative with a hook-accumulated gradient")

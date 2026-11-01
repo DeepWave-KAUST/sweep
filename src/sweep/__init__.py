@@ -34,6 +34,7 @@ from pathlib import Path
 
 
 _LAZY_SUBMODULES = {
+    "autodiff",
     "backend",
     "equations",
     "memory",

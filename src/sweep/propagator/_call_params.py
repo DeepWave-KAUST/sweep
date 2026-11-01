@@ -78,6 +78,9 @@ class CompiledCallParams:
     # this call's mode); allocated per call.
     derived_model_nvar_forward: int = 0
     derived_model_nvar_backward: int = 0
+    # What the create_graph=True refusal of the compiled backward recommends
+    # (None: the default alternatives).
+    create_graph_instead: Any = None
     # Full-mode history shape (cuda_layout.save_all_shape at this batch), or
     # None when the compiled forward allocates its own.
     u_allt_shape: tuple = None

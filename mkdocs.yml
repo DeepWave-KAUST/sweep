@@ -237,6 +237,7 @@ nav:
           - PropTorch: api/propagators/prop_torch.md
           - PropJax: api/propagators/prop_jax.md
       - Parallel (DD): api/parallel.md
+      - Derivative products: api/autodiff.md
       - Spectral element (SEM):
           - api/sem/index.md
           - PropSEM: api/sem/prop_sem.md

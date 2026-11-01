@@ -235,18 +235,39 @@ is read with `solver.imaging(wavelet, sources, receivers, models=..., observed=o
   `with torch.no_grad(), fwAD.dual_level(): d, jh = fwAD.unpack_dual(prop(w, src, rec,
   models=[fwAD.make_dual(vp, h)]))` (`import torch.autograd.forward_ad as fwAD`). Only
   `impl='eager'` + `Full()` + `EagerOptions(use_compile=False)`; compiled, `Ckpt`,
-  `BoundarySaving`, `impl='c'`, `ModelParallel`, `PropSEM` and qP 'adjoint'/'frozen'
-  raise. About 2x the forward's memory, 11-17x its time (uncompiled, V100). qP: J h with
+  `BoundarySaving`, `impl='c'`, `ModelParallel`, `PropSEM`, qP 'adjoint'/'frozen' and the
+  qP Born pair (every mode: at mp = 0 its scattered-field tangent is elliptic) raise. About
+  2x the forward's memory, 11-17x its time (uncompiled, V100). AcousticVTI/TTI: J h with
   `s_gradient='exact'` only; `ViscoAcoustic`'s Q tangent holds the fractional exponent
   fixed, as its gradient does.
   Without `no_grad` and with `vp.requires_grad_()`, `grad(<d,s.detach()> + <s,(d-d_obs).detach()>)`
   is the exact H h (reverse over forward).
 - The qP equations (AcousticVTI/TTI and their Born pair) refuse a second derivative in every
   `s_gradient` mode (off the tape / NaN / not a Hessian); 'exact' and 'frozen' still allow
-  `create_graph=True` for a derivative w.r.t. the residual (double-vjp J h); use differences.
-- Forward mode and differences differentiate the returned gradient; on the two outermost
-  model cells (cropped gradient) double backward differs -- compare routes with `h` off them.
+  `create_graph=True` for a derivative w.r.t. the residual (double vjp: J h for 'exact', the
+  S_n-frozen linearisation for 'frozen'). Differences are no substitute: S_n follows the
+  direction of a field's own gradient, so where eps != delta the record and gradient are not
+  smooth in the model (differences converge only at steps ~1e-5 of the model, below fp32's
+  reach), and the 'exact' gradient moves by tens of % fp32 vs fp64. `sweep.autodiff` refuses
+  their Gauss-Newton and H h products and differences; only J h along a smooth direction by
+  forward mode with `s_gradient='exact'` (AcousticVTI/TTI) holds.
+- Forward mode and differences differentiate the returned gradient; on the outermost ring
+  (cropped gradient) they give a non-symmetric product and double backward the symmetric one
+  -- compare routes, or build a symmetric operator, with `h` off that ring.
 - 2-D `AcousticBorn` uses `Acoustic`'s CPML stencils on every device, so its record is J h of
   `Acoustic` (eager). `impl='c'` 2-D Born still differs slightly in the CPML.
-- Keep `h` off the two outermost cells when checking against differences (Section 5).
+- One call: `from sweep.autodiff import hessian_vector_product, gauss_newton_vector_product,
+  jacobian_vector_product`; `(hv,) = hessian_vector_product(prop, w, src, rec, [vp], [h],
+  loss)` with `loss(record) -> scalar`. `route="auto"` takes forward mode on uncompiled eager
+  `Full()` (exact, not fastest), else a central difference (`rel_step`, default 1e-2 of each
+  model's peak; an all-zero model counts as 1; `ModelParallel` tiles share one step);
+  `route="double_backward"` / `"forward"` / `"difference"` force one. A `None` direction
+  holds a model fixed: no gradient taken (impl='c' ElasticBorn / qP Born backgrounds need
+  this), `None` returned; directions are cast to the model's dtype. 'auto' never picks
+  double backward (exact on uncompiled `Ckpt` too). V100, 100x200, nt 1000, 4 shots, one H h:
+  double backward 70 s / 7.6 GiB, reverse over forward 28 s, difference 6 s (uncompiled
+  `Full`) / 3 s, 119 MiB (eager defaults) / 0.13 s (c).
+- Reusing one eager propagator while an earlier graph is alive (e.g. `create_graph=True`,
+  then more forwards, then the Hv) works: each call starts from fresh zeros.
+- Keep `h` off the outermost ring when checking against differences (Section 5).
 - Notebook `46_hessian_vector_product.ipynb` compares the routes and assembles a small full Hessian.

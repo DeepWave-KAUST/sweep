@@ -25,13 +25,14 @@ def stop_gradient(x):
 
 # Why the qP equations refuse a second derivative in every s_gradient mode, and
 # whether their create_graph=True gradient is still a first-order graph (it is
-# for 'frozen' and 'exact', whose double-vjp J h a Gauss-Newton solver takes);
+# for 'frozen' and 'exact', whose double vjp a Gauss-Newton solver takes);
 # the eager propagator reads it through ``second_derivative_refusal``.
 _NO_SECOND_DERIVATIVE = {
     "adjoint": ("its s_gradient='adjoint' step is differentiated by a hand-written adjoint "
                 "off the autograd tape", False),
-    "frozen": ("s_gradient='frozen' holds S_n fixed, so its gradient is not the derivative of "
-               "the forward and differentiating it again gives no Hessian", True),
+    "frozen": ("s_gradient='frozen' holds S_n fixed, so its gradient is the adjoint of the "
+               "linearisation with S_n fixed, not the derivative of the forward, and "
+               "differentiating it again gives no Hessian", True),
     "exact": ("the second derivative of S_n = N / (D + 1e-26) overflows float32 where the "
               "wavefield is quiet (D ~ 0) and comes back as NaN", True),
 }
@@ -53,6 +54,43 @@ _NO_FORWARD_MODE = {
 
 def qp_forward_mode_refusal(equation):
     return _NO_FORWARD_MODE.get(equation.s_gradient)
+
+
+# Why sweep.autodiff refuses the qP curvature products and differences.  S_n
+# depends on the direction of a field's own gradient (the scattered field's too,
+# in the Born pair), which turns abruptly where that gradient nearly vanishes,
+# so where epsilon differs from delta the record and the gradients vary on scales
+# of about 1e-5 of the model.  In float64, on a model with ten cells per
+# wavelength, J h by central differences along vp still moved by 8% between
+# steps of 1e-4 and 1e-5 of vp (forward mode is its limit), and the difference
+# of 'adjoint' gradients grew as the step shrank.  The 'exact' gradient is
+# ill-conditioned in float32 (see the AcousticVTI docstring), and so is its
+# Gauss-Newton product.  Forward-mode J h along a smooth direction is the one
+# product that holds (float32 within 0.5% of float64).  The hooks do not look at
+# the models: an isotropic or elliptic one (epsilon = delta, S_n = 0) is as
+# smooth as Acoustic.
+_NOT_SMOOTH = ("S_n depends on the direction of a field's own gradient, which turns abruptly where "
+               "that gradient nearly vanishes, so where epsilon differs from delta the record and "
+               "its gradient are not smooth functions of the model")
+_ONLY_JH = ("J h along a smooth direction is reliable by forward mode, with s_gradient='exact', "
+            "memory=Full() and EagerOptions(use_compile=False)")
+_NO_CURVATURE = {
+    "adjoint": f"{_NOT_SMOOTH}; a difference of its gradients grows as the step shrinks",
+    "frozen": ("s_gradient='frozen' holds S_n fixed, so its gradient is not the derivative of the "
+               "record and differentiating it gives no Hessian"),
+    "exact": ("its gradient is ill-conditioned (in float32 it moves by tens of percent against "
+              "float64 where epsilon differs from delta), and so are its Gauss-Newton product and "
+              "its second derivative, which double backward returns as NaN"),
+}
+
+
+def qp_curvature_refusal(equation):
+    return f"{_NO_CURVATURE[equation.s_gradient]}. {_ONLY_JH}"
+
+
+def qp_difference_refusal(equation):
+    return (f"{_NOT_SMOOTH}: central differences converge only at steps of about 1e-5 of the "
+            f"model or below, where float32 round-off dominates. {_ONLY_JH}")
 
 
 def check_s_gradient(value, backend="torch"):
@@ -514,6 +552,12 @@ class AcousticVTI(SecondOrderEquation):
 
     def forward_mode_refusal(self):
         return qp_forward_mode_refusal(self)
+
+    def curvature_refusal(self):
+        return qp_curvature_refusal(self)
+
+    def difference_refusal(self):
+        return qp_difference_refusal(self)
 
     def check_stability(self, models, dt, spacing):
         """Warn once when ``dt`` breaks the scheme's stability condition

@@ -7,8 +7,9 @@ except ImportError:  # pragma: no cover - optional dependency
 from .base import SecondOrderEquation
 from .fields import FieldSpec, ModelSpec
 from .qP_vti import (adjoint_mode_step, check_qp_stability, check_s_gradient, qp_cuda_layout,
-                     qp_forward_mode_refusal, qp_second_derivative_refusal, refuse_boundary_saving,
-                     s_gradient_aux, s_operator, s_quotient, stop_gradient)
+                     qp_curvature_refusal, qp_difference_refusal, qp_forward_mode_refusal,
+                     qp_second_derivative_refusal, refuse_boundary_saving, s_gradient_aux,
+                     s_operator, s_quotient, stop_gradient)
 from ._registry import register_equation
 
 
@@ -259,6 +260,12 @@ class AcousticTTI(SecondOrderEquation):
 
     def forward_mode_refusal(self):
         return qp_forward_mode_refusal(self)
+
+    def curvature_refusal(self):
+        return qp_curvature_refusal(self)
+
+    def difference_refusal(self):
+        return qp_difference_refusal(self)
 
     def check_stability(self, models, dt, spacing):
         """Warn once when ``dt`` breaks the scheme's stability condition

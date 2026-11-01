@@ -90,6 +90,18 @@ def qp_born_cuda_layout():
     )
 
 
+# The scattered field evaluates S_n on its own gradient, so the record is not
+# linear in mp, and at mp = 0 -- where LSRTM starts -- the scattered field is zero
+# and S_n = 0 / (0 + 1e-26) has no derivative: a tangent there propagates the
+# scattered field elliptically (7-8% off the record of mp = h on a 48 x 56
+# model with epsilon 0.2, delta 0.1).
+_NO_BORN_TANGENT = ("the scattered field's S_n follows that field's own gradient, so at mp = 0, "
+                    "where the scattered field is zero, a tangent propagates it with S_n = 0 (an "
+                    "elliptic medium); the record with mp = h is the Born operator applied to h")
+_BORN_OPERATOR = ("For LSRTM, the record with mp = h is the Born operator applied to h, and the mp "
+                  "gradient its adjoint")
+
+
 class _QPBorn(SecondOrderEquation):
     """Shared step of the two Born classes."""
 
@@ -125,7 +137,14 @@ class _QPBorn(SecondOrderEquation):
         return _vti.qp_second_derivative_refusal(self)
 
     def forward_mode_refusal(self):
-        return _vti.qp_forward_mode_refusal(self)
+        return _NO_BORN_TANGENT
+
+    def curvature_refusal(self):
+        return f"{_vti._NO_CURVATURE[self.s_gradient]}. {_BORN_OPERATOR}"
+
+    def difference_refusal(self):
+        return (f"{_vti._NOT_SMOOTH}: central differences converge only at steps of about 1e-5 "
+                f"of the model or below, where float32 round-off dominates. {_BORN_OPERATOR}")
 
     def check_stability(self, models, dt, spacing):
         """Warn once when ``dt`` breaks the scheme's stability condition
