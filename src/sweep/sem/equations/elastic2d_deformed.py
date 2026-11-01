@@ -40,6 +40,7 @@ from ..cpml.elastic import ElasticCPMLProfile, build_elastic_cpml
 from ..fields import DerivedInitState, FieldSpec, check_element_arrays
 from ..mesh.domains import DomainMask, masked_inv_mass
 from ..mesh.quad9 import Quad9Mesh
+from ..receivers import solid_receivers
 
 
 _S_NAMES = ("Sx0", "Sx1", "Sx2", "Sz0", "Sz1", "Sz2", "La1", "La2", "La3", "La4")
@@ -95,6 +96,8 @@ class ElasticSEM2DDeformed(DerivedInitState):
 
     # FD-aligned receiver components: particle velocity from the displacement trace: v = u_dot.
     derived_receiver_types: ClassVar[dict] = {"vx": ("u_x", "velocity"), "vz": ("u_z", "velocity")}
+    # strain, rotation, pressure / particle motion at a point (sweep.sem.receivers)
+    spatial_receiver_types: ClassVar[dict] = solid_receivers(("u_x", "u_z"))
 
     mesh: Quad9Mesh
     vp_e: torch.Tensor                # (E, ngll, ngll)

@@ -94,6 +94,12 @@ the FD classes. `models=` per class: `api-signatures.md`.
   differs by `rho*c^2` at the source); `chi` is minus its double time integral. `p` (and
   `vx, vz` on the fluid-solid class) is what PropSEM records by default there.
   `p` is receiver-only.
+- Spatial-derivative receivers (both backends): strain `exx`/`ezz`/`exz` (3-D `eyy`/`exy`/`eyz`),
+  rotation `rot_y` (3-D `rot_x`/`rot_y`/`rot_z`, `curl(u)/2`), rates with `_t` (DAS: `exx_t`),
+  pressure `p = -kappa div u` on isotropic solids; `ux`/`vx`/`ax` (and z) = `grad(chi)/rho` and
+  its time derivatives on `AcousticPotentialSEM2D`. On `AcousticElasticSEM2D` each receiver takes
+  its element's medium (`vx`, `p` in water vs rock). On an element edge the derivative averages
+  the elements there by their shares (the gradient jumps there).
 - Elastic `source_type`: `["vz"]`/`["vx"]` = force along that axis (default: unit vertical
   force), `["sxx", "szz"]` = explosion (moment rate), `["sxz"]` = shear moment. Forces and
   stresses cannot be mixed in one call; in 3-D the stress names are `sxx, syy, szz, sxy, sxz,

@@ -49,6 +49,7 @@ from ..fields import DerivedInitState, DirichletNodes, FieldSpec
 from ..mesh.domains import DomainMask, masked_inv_mass
 from ..mesh.nodes import node_field
 from ..mesh.quad9 import Quad9Mesh
+from ..receivers import fluid_receivers
 
 
 @dataclass
@@ -70,6 +71,8 @@ class AcousticPotentialSEM2D(DerivedInitState, DirichletNodes):
 
     # FD-aligned receiver components: SPECFEM potential normalization: p = -chi_ddot (module docstring).
     derived_receiver_types: ClassVar[dict] = {"p": ("chi", "pressure")}
+    # strain, rotation, pressure / particle motion at a point (sweep.sem.receivers)
+    spatial_receiver_types: ClassVar[dict] = fluid_receivers("chi")
 
     # PropSEM's wavelet is the PRESSURE source, as on the pressure form and
     # PropTorch: the records are those of chi driven by minus its double time

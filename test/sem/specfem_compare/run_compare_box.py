@@ -380,10 +380,10 @@ def main():
             np.savez(args.out / f"sem_{case}_{eq.__name__}_{args.dtype}.npz", t_sem=t_sem,
                      t_ref=t_ref, **{f"sem_{k}": v for k, v in sem.items()},
                      **{f"ref_{k}": v for k, v in ref.items()})
-            # the components each group records: hydrophones the pressure, geophones the velocity
+            # every group records every component: in the water the pressure and the particle
+            # velocity grad(chi_dot) / rho, in the rock the velocity and the pressure
+            # -kappa div u, as SPECFEM2D records them (sweep.sem.receivers)
             comps = {True: list(sem), False: list(sem)}
-            if g["medium"]["kind"] == "coupled" or wet(g["medium"]):
-                comps = {True: ["PRE"], False: ["BXX", "BXZ"]}
             print(f"{case}, {eq.__name__} ({args.dtype}): shift-free, scale-free", flush=True)
             allo, allr = [], []
             for lab, grp, win in ((f"{lab0}, echo-free", True, True),

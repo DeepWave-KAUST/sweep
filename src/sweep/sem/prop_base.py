@@ -89,6 +89,7 @@ from .equations.acoustic_potential2d import AcousticPotentialSEM2D
 from .fields import (MESH_NDIM, format_field_specs, mesh_kind, model_names,
                      resolve_field_types)
 from .propagator import SEMPropagator, field_layouts, receiver_gather
+from .receivers import recipe_axes, recipe_fields
 
 
 
@@ -692,6 +693,17 @@ class _Acq:
 
 
 
+
+def _minus_kappa(eq):
+    """``-(lambda + 2 mu / 3)`` on a solid's elements: the factor of ``div u`` in the pressure
+    SPECFEM's seismograms take (plane strain in 2-D). The moduli the step uses, else from the
+    velocities (the fluid-solid form's solid is ``eq.el``)."""
+    el = getattr(eq, "el", eq)
+    if hasattr(el, "_lam") and hasattr(el, "_mu"):
+        return -(el._lam + (2.0 / 3.0) * el._mu)
+    return -el.rho_e * (el.vp_e ** 2 - (4.0 / 3.0) * el.vs_e ** 2)
+
+
 class PropSEM:
     """SEM propagator with the FD ``PropTorch`` constructor and call.
 
@@ -996,8 +1008,18 @@ class PropSEM:
         # list handed down; _recv_plan maps each requested component to its
         # base column and transform.
         derived = getattr(equation, "derived_receiver_types", {})
-        self._recv_base, self._recv_plan = [], []
+        spatial = getattr(equation, "spatial_receiver_types", {})
+        self._recv_base, self._recv_plan, self._spatial = [], [], {}
         for nm in self.receiver_type:
+            if nm in spatial:
+                # a spatial derivative (sweep.sem.receivers): its fields are recorded
+                # at the receivers' gradient stamps too (_with_gradients)
+                self._spatial[nm] = spatial[nm]
+                for base in recipe_fields(spatial[nm]):
+                    if base not in self._recv_base:
+                        self._recv_base.append(base)
+                self._recv_plan.append((None, ("spatial", nm)))
+                continue
             base, op = derived.get(nm, (nm, None))
             if base not in self._recv_base:
                 self._recv_base.append(base)
@@ -1007,8 +1029,10 @@ class PropSEM:
         # the way out even when nothing derived is asked for
         self._pressure_wavelet = bool(
             getattr(equation, "propsem_pressure_wavelet", False))
+        self._grad_axes = tuple(sorted(set().union(
+            *(recipe_axes(r) for r in self._spatial.values()))))
         self._recv_identity = (
-            not self._pressure_wavelet
+            not self._pressure_wavelet and not self._spatial
             and self._recv_base == self.receiver_type
             and all(op is None for _, op in self._recv_plan))
         # what return_wavefield=True copies out: the fields the receivers
@@ -1563,19 +1587,42 @@ class PropSEM:
         return torch.cat([torch.zeros_like(s[:, :1]), s[:, :-1]], 1)
 
     def _apply_derived_receivers(self, out, pressure_run=False):
-        """(nshots, nt, nrec, n_base) -> (nshots, nt, nrec, n_requested).
-        ``pressure_run``: ``out`` is the potential-form run driven by the
-        wavelet itself (:meth:`forward`)."""
-        if pressure_run:
-            return torch.stack([
-                self._trace_from_pressure_run(out[..., col], op, self.dt)
-                for col, op in self._recv_plan], -1)
+        """(nshots, nt, nrec, n_base) -> (nshots, nt, nrec, n_requested). With spatial
+        components the propagators recorded ``nrec`` more receivers per derivative axis
+        (:meth:`_with_gradients`), which these combine. ``pressure_run``: ``out`` is the
+        potential-form run driven by the wavelet itself (:meth:`forward`); a spatial
+        component then takes the base fields' conversion before its own operators (the
+        two commute: the equations are linear and time-invariant)."""
         if self._recv_identity:
             return out                    # bit-untouched default path
+        k = 2 ** self.ndim
+        nrec = out.shape[2] // (1 + len(self._grad_axes) * k)
+        real = out[:, :, :nrec]
+        grads = {}
+        if self._grad_axes:
+            receivers, eq, pershot = self._spatial_call
+            S = out.shape[0]
+            w = torch.stack([self._gradient_weights(
+                self._rec_row(receivers, b if receivers.shape[0] > 1 else 0),
+                pershot[b] if pershot is not None else eq) for b in range(S)]).to(out)
+            for i, a in enumerate(self._grad_axes):
+                blk = out[:, :, nrec * (1 + i * k):nrec * (1 + (i + 1) * k)]
+                blk = blk.reshape(S, out.shape[1], k, nrec, out.shape[3])
+                grads[a] = torch.einsum("stqjc,sjq->stjc", blk, w)
+        if pressure_run and self._spatial:
+            base = lambda t: self._trace_from_pressure_run(t, None, self.dt)
+            real_s, grads_s = base(real), {a: base(g) for a, g in grads.items()}
+        else:
+            real_s, grads_s = real, grads
         comps = []
         for col, op in self._recv_plan:
-            x = out[..., col]
-            if op == "velocity":
+            if isinstance(op, tuple):
+                comps.append(self._spatial_component(op[1], real_s, grads_s))
+                continue
+            x = real[..., col]
+            if pressure_run:
+                x = self._trace_from_pressure_run(x, op, self.dt)
+            elif op == "velocity":
                 x = self._trace_ddt(x, self.dt)
             elif op == "pressure":
                 x = self._trace_neg_d2dt2(x, self.dt)
@@ -1583,6 +1630,57 @@ class PropSEM:
                 raise AssertionError(f"unknown derived receiver op {op!r}")
             comps.append(x)
         return torch.stack(comps, -1)
+
+    def _spatial_component(self, name, real, grads):
+        """One spatial receiver component ``(nshots, nt, nrec)`` from the recorded fields
+        (``real``) and their derivatives (``grads``), with its material factor at every
+        receiver and its time operator (see :mod:`sweep.sem.receivers`)."""
+        from .propagator import build_point_stamps
+        receivers, eq, pershot = self._spatial_call
+        nshots = real.shape[0]
+        stamps = [build_point_stamps(self.mesh, self._rec_row(
+            receivers, b if receivers.shape[0] > 1 else 0)) for b in range(nshots)]
+        eqs = pershot if pershot is not None else [eq] * nshots
+
+        def shot_values(field_of):
+            # an element-local array at every receiver of every shot: (nshots, nrec)
+            return torch.stack([torch.stack([st.gather(field_of(e)[st.elem_id]) for st in sts])
+                                for e, sts in zip(eqs, stamps)])
+
+        def evaluate(r):
+            if r is None:
+                return torch.zeros_like(real[..., 0])
+            x = 0.0
+            for field, axis, coef in r["terms"]:
+                col = self._recv_base.index(field)
+                x = x + coef * (real if axis is None else grads[axis])[..., col]
+            scale = r.get("scale")
+            if scale == "inv_rho":
+                x = x * shot_values(lambda e: getattr(e, "ac", e)._inv_rho)[:, None, :].to(x)
+            elif scale == "minus_kappa":
+                x = x * shot_values(_minus_kappa)[:, None, :].to(x)
+            elif scale is not None:
+                raise AssertionError(f"unknown spatial receiver scale {scale!r}")
+            time = r.get("time")
+            if time == "velocity":
+                x = self._trace_ddt(x, self.dt)
+            elif time == "acceleration":
+                x = -self._trace_neg_d2dt2(x, self.dt)
+            elif time == "neg_acceleration":
+                x = self._trace_neg_d2dt2(x, self.dt)
+            elif time == "integral":
+                x = torch.cumsum(x, dim=1) * self.dt
+            elif time is not None:
+                raise AssertionError(f"unknown spatial receiver time operator {time!r}")
+            return x
+
+        recipe = self._spatial[name]
+        if "terms" in recipe:
+            return evaluate(recipe)
+        fluid = torch.stack([torch.tensor([not bool(e.domain.is_elastic[st.elem_id]) for st in sts])
+                             for e, sts in zip(eqs, stamps)]).to(real.device)
+        return torch.where(fluid[:, None, :], evaluate(recipe.get("fluid")),
+                           evaluate(recipe.get("solid")))
 
     def _default_source(self):
         """Is the source the equation's default -- the unit vertical force on
@@ -1795,6 +1893,10 @@ class PropSEM:
         # 3-D acoustic on CUDA: the single-strip DD driver, BEFORE any global
         # equation is built (that build is what it saves) -- see _forward_c_dd3d
         if self._use_c and self._dd3d_route(models):
+            if self._spatial:
+                raise NotImplementedError(
+                    f"receiver_type {sorted(self._spatial)} records spatial derivatives, "
+                    f"which the 3-D acoustic strip driver does not; use impl='eager'.")
             # NOTE bs_store_dtype_elem is not forwarded: this route rings
             # nodes only, and the element knob is refused there
             return self._forward_c_dd3d(acq.shot_src, acq.receivers,
@@ -1802,6 +1904,8 @@ class PropSEM:
 
         eq, pershot_eqs = self._resolve_model_batch(models)
         acq.check_pershot(pershot_eqs)
+        # what the spatial receivers' material factors are taken from (forward)
+        self._spatial_call = (acq.receivers, eq, pershot_eqs) if self._spatial else None
 
         if self._use_c:                                  # CUDA SEM backend
             # NOTE pml_guard is not forwarded: the C route locates its
@@ -1886,8 +1990,60 @@ class PropSEM:
                 receiver_xz=self._rec_row(acq.receivers, b),
                 receiver_type=self._recv_base,
                 pml_guard=pml_guard, **extra))
+            props[-1].receivers = self._with_gradients(props[-1].receivers,
+                                                       self._rec_row(acq.receivers, b))
             props[-1].grid_label = self._grid_label()
         return props
+
+    def _with_gradients(self, stamps, xz):
+        """The receivers' stamps followed, axis by axis, by their gradient stamps when a
+        spatial receiver component is asked for (see :mod:`sweep.sem.receivers`): the
+        propagators record every base field there as at any receiver, and
+        :meth:`_apply_derived_receivers` combines the derivatives. A field's gradient jumps
+        across element edges, so a receiver on one takes every element there, as a moment
+        source is stamped in each (:class:`~sweep.sem.propagator.EdgeStamp`): ``2**ndim``
+        slots per receiver and axis, the parts after the first repeated with no weight
+        (:meth:`_gradient_weights`), so that every shot has the same number."""
+        if not self._grad_axes:
+            return stamps
+        from .propagator import GradientStamp
+        parts = [self._edge_parts(c)[0] for c in xz]
+        k = 2 ** self.ndim
+        parts = [ps + [ps[-1]] * (k - len(ps)) for ps in parts]
+        return list(stamps) + [GradientStamp(ps[q], a) for a in self._grad_axes
+                               for q in range(k) for ps in parts]
+
+    def _edge_parts(self, xz):
+        """``(stamps, shares)`` of a receiver point: one stamp in its element inside it,
+        one in every element that meets at it on an edge or corner (their sector shares)."""
+        from .propagator import EdgeStamp, build_moment_stamp
+        st = build_moment_stamp(self.mesh, *xz)
+        if isinstance(st, EdgeStamp):
+            return list(st.parts), [float(w) for w in st.weights]
+        return [st], [1.0]
+
+    def _gradient_weights(self, xz, eq):
+        """``(nrec, 2**ndim)``: each gradient slot's share in its receiver's derivative. On
+        an edge, the elements of the receiver's own medium only (a fluid-solid form's other
+        field is dead there), renormalised."""
+        k = 2 ** self.ndim
+        domain = getattr(eq, "domain", None)
+        rows = []
+        for c, home in zip(xz, self._located(xz)):
+            parts, shares = self._edge_parts(c)
+            if domain is not None:
+                same = [bool(domain.is_elastic[p.elem_id]) == bool(domain.is_elastic[home])
+                        for p in parts]
+                shares = [w if ok else 0.0 for w, ok in zip(shares, same)]
+                total = sum(shares)
+                shares = [w / total for w in shares]
+            rows.append(shares + [0.0] * (k - len(shares)))
+        return torch.tensor(rows, dtype=torch.float64)
+
+    def _located(self, xz):
+        """The element every receiver point is located in (its plain stamp's)."""
+        from .propagator import build_point_stamps
+        return [st.elem_id for st in build_point_stamps(self.mesh, xz)]
 
     def _grid_label(self):
         """How compile notices name this problem's size: the model grid."""
@@ -2364,7 +2520,9 @@ class PropSEM:
             self._c_src_stamps = [[build_moment_stamp(self.mesh, *xz) for xz in s] for s in shot_src]
         else:
             self._c_src_stamps = [build_point_stamps(self.mesh, s) for s in shot_src]
-        row_cache = {row: build_point_stamps(self.mesh, self._rec_row(receivers, b))
+        row_cache = {row: self._with_gradients(
+                         build_point_stamps(self.mesh, self._rec_row(receivers, b)),
+                         self._rec_row(receivers, b))
                      for row, b in first.items()}     # dedupe expanded receiver rows
         self._c_rec_stamps = [row_cache[row] for row in rec_rows]
         self._c_stamp_key = key

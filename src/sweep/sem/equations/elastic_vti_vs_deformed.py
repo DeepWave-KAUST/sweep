@@ -37,6 +37,9 @@ class ElasticVTISEM2DDeformed(ElasticVSSEM2DDeformed):
     # Boundary saving: the model leaves are the Voigt cij (not the isotropic
     # Lamé params), so the per-step VJP substitutes / differentiates these.
     bs_model_attrs = ("_c11", "_c13", "_c33", "_c55")
+    # no isotropic bulk modulus, so no pressure receiver; strain and rotation as the parent's
+    spatial_receiver_types = {k: v for k, v in
+                              ElasticVSSEM2DDeformed.spatial_receiver_types.items() if k != "p"}
 
     @classmethod
     def build(

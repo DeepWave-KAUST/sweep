@@ -142,6 +142,20 @@ and this project adheres to
   raises); an `nt` that `K` does not divide is padded with zero-wavelet steps
   whose records are dropped. Records equal the full tape's; gradients agree to
   round-off.
+- **SEM receivers that record a spatial derivative**: the strain (`exx`, `ezz`, `exz`; 3-D
+  `eyy`, `exy`, `eyz` too), the rotation `curl(u) / 2` (`rot_y`; 3-D `rot_x`, `rot_y`, `rot_z`),
+  their rates (`_t`, what DAS records), the pressure `-kappa div u` in an isotropic solid (`p`)
+  and a potential fluid's particle displacement, velocity and acceleration (`ux`, `vx`, `ax`,
+  ...) -- SPECFEM2D's `seismotype` 1-5 in both media. A receiver takes the gradient of its
+  element's basis (`sweep.sem.GradientStamp`), so every backend, shot batch and memory mode
+  records it, and the gradient reaches the model through it and its material factor.
+  `AcousticElasticSEM2D`'s `vx`, `vz` and `p` take the medium of each receiver's element: the
+  particle velocity and the pressure are the water's above the sea floor and the rock's
+  below (before, `vx` read the dead solid field in the water and `p` the dead potential in the
+  rock). On an element edge, where the gradient jumps, a receiver takes the elements that meet
+  there by their shares, as a moment source is spread over them. Against SPECFEM2D inside an
+  element: round-off (4e-12..5e-12); on an edge SPECFEM2D takes one element (1e-4..2e-4).
+  `test/sem/test_sem_spatial_receivers.py`, notebook `47_sem_receivers`.
 
 ### Changed
 - The CPU test workflow runs as four parallel jobs (`sem-biot`, `sem`,

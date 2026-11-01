@@ -648,6 +648,41 @@ below PropSEM still take the wavelet as the chi source. Without a
 ``receiver_type`` PropSEM records ``p`` on the potential form and ``p``,
 ``vx``, ``vz`` on the fluid-solid class (PropTorch's defaults); ``chi`` is a
 near-DC tail, a poor record to fit -- ask for it by name.
+### Strain, rotation and pressure
+
+A receiver can also record a spatial derivative of the fields, the seismograms
+SPECFEM2D's `seismotype` 4 and 5 give and that DAS and rotational sensors
+record. It takes the gradient of its element's basis at its point
+(`sweep.sem.receivers`), so it runs on both backends, in shot batches and
+under every memory mode, and the gradient reaches the model through it:
+
+| `receiver_type` | on | records |
+| --- | --- | --- |
+| `exx`, `ezz`, `exz` (3-D also `eyy`, `exy`, `eyz`) | the elastic classes | the strain `(d_i u_j + d_j u_i) / 2` |
+| `rot_y` (3-D `rot_x`, `rot_y`, `rot_z`) | the elastic classes | the rotation `curl(u) / 2`, in the solver's axes (z down); in 2-D SPECFEM2D's curl seismogram |
+| the same with `_t` | the elastic classes | their rates (DAS records the strain rate `exx_t` along a horizontal fibre) |
+| `p` | the isotropic elastic classes | the pressure `-kappa div u`, `kappa = lambda + 2 mu / 3` at the receiver, as SPECFEM takes it (plane strain in 2-D) |
+| `ux`, `uz`; `vx`, `vz`; `ax`, `az` | `AcousticPotentialSEM2D` | the particle displacement `grad(chi) / rho`, its velocity and acceleration |
+
+On the velocity-stress classes, whose fields are the velocity, the strain is
+the running sum of its rate times `dt` -- the displacement their leapfrog
+integrates. On `AcousticElasticSEM2D` every receiver takes the medium its
+element holds: `vx`, `vz` (and `ux`, `ax`, ...) are the fluid's particle
+motion in the water and the displacement's in the rock, `p` is `-d2(chi)/dt2`
+in the water and `-kappa div u` in the rock, and the strain and rotation are
+zero in the water. The anisotropic classes have no `p`.
+
+The field's gradient jumps across element edges, and receivers on a regular
+line sit on them every few channels: a receiver on an edge takes every element
+that meets there by its share, as a moment source is spread over them
+(`EdgeStamp`), in its own medium on a fluid-solid form.
+
+Against SPECFEM2D, which records the same quantities, on the water over the
+rock (`test/sem/specfem_compare/run_compare_box.py`): inside an element the
+particle velocity at the hydrophones and the pressure at the geophones agree
+to round-off (4e-12..5e-12 on the curved sea floor). SPECFEM2D takes one
+element at an edge, so a receiver there differs by the gradient's jump: 1e-4
+to 2e-4 (median) on the flat sea floor, whose receivers all sit on edges.
 
 ## Source types
 

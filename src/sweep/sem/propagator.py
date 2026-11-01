@@ -557,6 +557,40 @@ class PointStamp3D:
         return self._outer().reshape(-1)
 
 
+@dataclass
+class GradientStamp:
+    """The derivative along ``axis`` (0 is x, 1 is y in 3-D, the last is z) of a field at a
+    point: the gradient of :class:`PointStamp`'s / :class:`PointStamp3D`'s basis, the pattern of
+    their moment-tensor stamps. A receiver made of it records the derivative through the same
+    weighted gather (:meth:`gather_weights`, aligned with ``ibool[elem]``) as a plain one records
+    the field, on either backend (:mod:`sweep.sem.receivers`)."""
+    point: object
+    axis: int
+
+    @property
+    def elem_id(self) -> int:
+        return self.point.elem_id
+
+    def _pattern(self) -> torch.Tensor:
+        p = self.point
+        if isinstance(p, PointStamp):
+            w_b_da = p.w_eta[:, None] * p.dw_xi[None, :]     # ∂/∂ξ pattern
+            w_da_b = p.dw_eta[:, None] * p.w_xi[None, :]     # ∂/∂η pattern
+            return (w_b_da * p.ixx + w_da_b * p.iex if self.axis == 0
+                    else w_b_da * p.ixz + w_da_b * p.iez)
+        g, e, x = p.w_gamma, p.w_eta, p.w_xi
+        d_ref = (g[:, None, None] * e[None, :, None] * p.dw_xi[None, None, :],
+                 g[:, None, None] * p.dw_eta[None, :, None] * x[None, None, :],
+                 p.dw_gamma[:, None, None] * e[None, :, None] * x[None, None, :])
+        return sum(d_ref[m] * p.inv[m][self.axis] for m in range(3))
+
+    def gather(self, field_e: torch.Tensor) -> torch.Tensor:
+        return (self._pattern() * field_e).sum()
+
+    def gather_weights(self) -> torch.Tensor:
+        return self._pattern().reshape(-1)
+
+
 def _cached_stamp(mesh, kind, coords, build):
     """``build(mesh, *coords)``, kept on the mesh: a point stamps the same way
     every time, and a survey's receivers are stamped again at every shot."""

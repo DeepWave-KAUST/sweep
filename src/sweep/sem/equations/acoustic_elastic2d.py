@@ -38,6 +38,7 @@ from ..coupling import FluidSolidInterface, InterfaceCPML
 from ..fields import DerivedInitState, FieldSpec
 from ..mesh.domains import DomainMask
 from ..mesh.quad9 import Quad9Mesh
+from ..receivers import fluid_receivers, solid_receivers
 from .acoustic_potential2d import AcousticPotentialSEM2D
 from .elastic2d_deformed import ElasticSEM2DDeformed
 
@@ -82,6 +83,17 @@ class AcousticElasticSEM2D(DerivedInitState):
     # FD-aligned receiver components: hydrophone p = -chi_ddot in the fluid; OBS vx/vz = u_dot in the solid.
     derived_receiver_types: ClassVar[dict] = {"p": ("chi", "pressure"), "vx": ("u_x", "velocity"),
         "vz": ("u_z", "velocity")}
+    # Each receiver in the medium of its element (sweep.sem.receivers): the particle motion is
+    # the potential's gradient over rho in the fluid and the displacement in the solid, the
+    # pressure -chi_ddot in the fluid and -kappa div u in the solid; strain and rotation are
+    # the solid's (zero in the fluid).
+    spatial_receiver_types: ClassVar[dict] = {
+        **{n: {"fluid": f, "solid": dict(terms=((u, None, 1.0),), time=f["time"])}
+           for n, f in fluid_receivers("chi").items() for u in ["u_" + n[1]]},
+        "p": {"fluid": dict(terms=(("chi", None, 1.0),), time="neg_acceleration"),
+              "solid": solid_receivers(("u_x", "u_z"))["p"]},
+        **{n: {"fluid": None, "solid": r} for n, r in solid_receivers(("u_x", "u_z")).items()
+           if n != "p"}}
 
     # PropSEM's wavelet is the PRESSURE source, as on the pressure form and
     # PropTorch: the records are those of chi driven by minus its double time

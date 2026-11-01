@@ -3,7 +3,8 @@
 The spectral-element solver, `sweep.sem.PropSEM`: `PropTorch`'s call on a
 Quad9 mesh that follows the free surface. Forward and backward on a two-layer
 model first, then topography against the finite-difference solvers, then FWI
-on Marmousi, one model and every shot's window in one batched call. The
+on Marmousi, one model and every shot's window in one batched call, and the
+receivers of a marine survey. The
 [SEM user guide](../../user-guide/sem.md) has the rest of the API.
 
 <div class="grid cards" markdown>
@@ -55,5 +56,17 @@ on Marmousi, one model and every shot's window in one batched call. The
     from a smooth start.
 
     [:material-notebook-outline: Open notebook](../../notebooks/44_sem_batched_local_window_fwi.ipynb)
+
+-   ![SEM receivers](../../figures/gallery/47_sem_receivers.png){ loading=lazy }
+
+    **Receivers · pressure, particle velocity, rotation, DAS**
+
+    ---
+
+    One marine run records every sensor where it sits: a dual-sensor streamer
+    in the water, nodes on the sea floor (velocity, pressure, rotation) and a
+    DAS fibre's strain rate, the gradient receivers checked against differences.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/47_sem_receivers.ipynb)
 
 </div>
