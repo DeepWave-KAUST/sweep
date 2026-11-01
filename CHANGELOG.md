@@ -26,6 +26,23 @@ and this project adheres to
   skill.  The docs page *AI assistants (Agent Skills)* covers the install,
   and `test/test_skill_snippets.py` runs every code block of the skill so
   its examples cannot fall behind the API.
+- **The nonlinear constant-Q fit, SPECFEM2D's `USE_SOLVOPT`: `fit="nonlinear"`** on
+  `ViscoElasticSEM2DDeformed` and `ViscoAcousticPotentialSEM2D` (`equation_options`). The
+  relaxation frequencies are fitted with the strengths, for each Q, both kept positive, by
+  the least squares of the linear fit's residual `Q Im M - Re M` at `4 n_sls` frequencies
+  (`n_fit=None`). Over SPECFEM2D's band at Q = 30 the largest error of `Q(f)` drops from 5.1%
+  (the linear fit at its `2 n_sls - 1` frequencies) to 3.3% with three mechanisms and from
+  3.4% to 0.7% with four; strengths stay positive down to Q = 1, where the linear fit refuses
+  Q below 1.5-1.8. Each node then has its own relaxation times, the bulk ones from `Qkappa`
+  and the shear ones from `Qmu`. `sweep.equations.gsls_nonlinear.GSLSNonlinearFit` solves the
+  fit by Levenberg-Marquardt at the Chebyshev nodes of `1 / Q` once per number of mechanisms,
+  band ratio and number of frequencies, and maps a model's Q through the Chebyshev series, so
+  Q stays differentiable and `Q = inf` gives zero strengths. Its mechanisms agree with those of
+  SPECFEM2D's own SolvOpt to 2.5e-4, which stops at four digits
+  (`test/sem/specfem_compare/specfem_solvopt_driver.f90`, `test/sem/test_sem_gsls_nonlinear.py`);
+  against SPECFEM2D run with `USE_SOLVOPT` the records differ by 1.8e-5, and agree to 6e-14 on
+  its own mechanisms.
+  `fit` also takes an object with `q_min` and `params(Q)`. Notebook 49.
 - **Illumination on the SEM: `PropSEM.compute_illumination`.** PropTorch's switch and pair,
   read back after a call: `source_illumination`, `sum_t |a|^2` with `a` the wavefields'
   second time derivative (the pseudo-Hessian of Shin et al. 2001, SPECFEM2D's first
@@ -43,8 +60,15 @@ and this project adheres to
   memories `e = A^2 e + B (s + A s_old)` of the dilatation, the deviatoric and the shear strain,
   and SPECFEM2D's defaults: the band `f_ref / 10 .. 10 f_ref`, the fit at `2 n_sls - 1`
   frequencies, and `vp`, `vs` read as unrelaxed (`"real_modulus"` is its
-  `READ_VELOCITIES_AT_f0`). The C-PML layer runs without attenuation. `Q = inf` is the elastic
-  step bit for bit, and all five models are differentiable. Against SPECFEM2D 8.1.0 the records
+  `READ_VELOCITIES_AT_f0`). The C-PML layer attenuates too, as SPECFEM2D's visco-elastic C-PML
+  does: there the memories take the stretched strains, a second copy of each on the band for
+  `sigma_zz` and `sigma_xz`, the relaxation run on the stretched strain where SPECFEM2D expands
+  the product in partial fractions (whose coefficients blow up where a relaxation frequency
+  meets a C-PML `alpha` or `beta`). With the layer elastic the jump of the modulus at its edge
+  reflected 5.1e-2 of the record (Qkappa 30, Qmu 20), attenuating 4.7e-4, below the elastic
+  medium's C-PML (1.0e-3); against SPECFEM2D's visco-elastic C-PML the records agree to 2.5e-7
+  and the two layers reflect alike, 9.3e-5 (`test/sem/specfem_compare/run_compare_absorb_visco.py`).
+  `Q = inf` is the elastic step bit for bit, and all five models are differentiable. Against SPECFEM2D 8.1.0 the records
   agree to 7e-14, with `Qkappa = Qmu = 30` read at 15 Hz and with `Qkappa = 60`, `Qmu = 20`
   read as unrelaxed, where the velocity-stress class keeps 2e-4. Eager, 2-D; no boundary saving
   (dissipative).

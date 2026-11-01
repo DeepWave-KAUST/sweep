@@ -16,6 +16,8 @@ Cases, a vertical point force (``*_force``) or an explosion (``*_explosion``, Mx
   ``ATTENUATION_VISCOELASTIC`` with three mechanisms and the velocities read at 15 Hz;
 * ``visco_km_force``: the rock with Qkappa = 60 and Qmu = 20, the velocities read as the
   unrelaxed ones (``READ_VELOCITIES_AT_f0`` off), a vertical force;
+* ``visco_solvopt_force``: the rock with Qkappa = 30 and Qmu = 10 and SPECFEM2D's nonlinear
+  fit (``USE_SOLVOPT``), otherwise as ``visco_km_force``;
 * ``water_pressure``: water (vp 1500, rho 1020) filling the box, a pressure source (SPECFEM2D's
   force in an acoustic element); every edge of a fluid element is pressure-free there;
 * ``water_visco_pressure``: the water with Qkappa = 30, SPECFEM2D's
@@ -61,6 +63,7 @@ WATER = dict(kind="acoustic", rho=1020.0, vp=1500.0)
 SEA = dict(kind="coupled", water=WATER, rock=ROCK, depth=600.0)
 VISCO = dict(ROCK, kind="visco", q=30.0, n_sls=3, f_ref=F0)
 VISCO_KM = dict(VISCO, q=60.0, qmu=20.0, at_f0=False)          # q is Qkappa
+VISCO_SOLVOPT = dict(VISCO, q=30.0, qmu=10.0, at_f0=False, solvopt=True)
 VISCO_WATER = dict(WATER, kind="visco_acoustic", q=30.0, n_sls=3, f_ref=F0)
 SH_ROCK = dict(ROCK, kind="sh")
 STIFF = dict(kind="isotropic", rho=2500.0, vp=4000.0, vs=2300.0)
@@ -79,6 +82,7 @@ CASES = {"iso_force": (ROCK, "force", None),
          "hill_explosion": (ROCK, "explosion", HILL),
          "visco_explosion": (VISCO, "explosion", None),
          "visco_km_force": (VISCO_KM, "force", None),
+         "visco_solvopt_force": (VISCO_SOLVOPT, "force", None),
          "water_pressure": (WATER, "pressure", None),
          "water_visco_pressure": (VISCO_WATER, "pressure", None),
          "sea_pressure": (SEA, "pressure", None),
@@ -183,7 +187,8 @@ for name, (medium, source, hill) in CASES.items():
         for k, v in (("ATTENUATION_VISCOELASTIC", ".true."), ("N_SLS", medium["n_sls"]),
                      ("ATTENUATION_f0_REFERENCE", dble(medium["f_ref"])),
                      ("READ_VELOCITIES_AT_f0", ".true." if medium.get("at_f0", True)
-                      else ".false."), ("USE_SOLVOPT", ".false.")):
+                      else ".false."),
+                     ("USE_SOLVOPT", ".true." if medium.get("solvopt") else ".false.")):
             par = setp(par, k, v)
     if medium["kind"] == "visco_acoustic":
         for k, v in (("ATTENUATION_VISCOACOUSTIC", ".true."), ("N_SLS", medium["n_sls"]),

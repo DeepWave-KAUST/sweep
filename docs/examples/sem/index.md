@@ -81,4 +81,16 @@ receivers of a marine survey. The
 
     [:material-notebook-outline: Open notebook](../../notebooks/48_sem_illumination.ipynb)
 
+-   ![SEM attenuation](../../figures/gallery/49_sem_attenuation.png){ loading=lazy }
+
+    **Attenuation · nonlinear Q fit, attenuating C-PML**
+
+    ---
+
+    SPECFEM2D's nonlinear constant-Q fit (`fit="nonlinear"`) against the
+    linear one, in Q(f) and in a strongly attenuated P wave, and the absorbing
+    layer that now attenuates as the medium does.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/49_sem_attenuation.ipynb)
+
 </div>

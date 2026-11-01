@@ -7,7 +7,10 @@ vertical point force of a 15 Hz Ricker 35 m below the top, dt = 2e-4 s, 6000 ste
 * ``absorb_pml``: the same box with its C-PML in the outer 10 elements of those three sides
   (its default parameters);
 * ``absorb_ref``: a 4800 m x 2400 m box with free edges, far enough that no echo of its edges
-  reaches a receiver within the record -- the response the two others should give.
+  reaches a receiver within the record -- the response the two others should give;
+* ``absorb_visco_pml`` and ``absorb_visco_ref``: the C-PML box and the reference with the rock
+  attenuating, Qkappa = 30 and Qmu = 20 (``ATTENUATION_VISCOELASTIC``, three mechanisms at
+  15 Hz, the velocities read as the unrelaxed ones): SPECFEM2D's visco-elastic C-PML.
 
 The box of the first two is the reference's interior, 2000 m x 1000 m, with the 100 m layer
 outside it, so both run on the same 220 x 110 elements; the reference holds that interior
@@ -29,8 +32,10 @@ H, DT, NSTEP, F0, FACTOR = 10.0, 2e-4, 6000, 15.0, 1e10
 ROCK = dict(rho=2400.0, vp=3000.0, vs=1500.0)
 W, D, LAYER, PAD = 2000.0, 1000.0, 100.0, 1400.0         # interior, layer, reference margin
 XS, ZS = LAYER + 1005.0, LAYER + D - 35.0                 # an element's centre, z up
-CASES = {"absorb_stacey": ("stacey", 0.0), "absorb_pml": ("pml", 0.0),
-         "absorb_ref": ("free", PAD - LAYER)}
+VISCO = dict(qkappa=30.0, qmu=20.0, n_sls=3, f_ref=F0)
+CASES = {"absorb_stacey": ("stacey", 0.0, None), "absorb_pml": ("pml", 0.0, None),
+         "absorb_ref": ("free", PAD - LAYER, None),
+         "absorb_visco_pml": ("pml", 0.0, VISCO), "absorb_visco_ref": ("free", PAD - LAYER, VISCO)}
 
 
 def setp(text, key, value):
@@ -52,8 +57,12 @@ for k, v in (("NPROC", 1), ("NSTEP", NSTEP), ("DT", dble(DT)), ("seismotype", 2)
              ("NTSTEP_BETWEEN_OUTPUT_IMAGES", 100000), ("nbmodels", 1), ("nbregions", 1),
              ("NELEM_PML_THICKNESS", int(LAYER / H))):
     par0 = setp(par0, k, v)
-mat = (f"1 1 {dble(ROCK['rho'])} {dble(ROCK['vp'])} {dble(ROCK['vs'])} 0 0 9999 9999 "
-       "0 0 0 0 0 0")
+
+def material(q):
+    qk, qmu = ("9999", "9999") if q is None else (dble(q["qkappa"]), dble(q["qmu"]))
+    return (f"1 1 {dble(ROCK['rho'])} {dble(ROCK['vp'])} {dble(ROCK['vs'])} 0 0 {qk} {qmu} "
+            "0 0 0 0 0 0")
+
 
 # receivers in the interior, z up, in the box of the first two cases
 line = [(LAYER + 50.0 + 100.0 * i, LAYER + D - 10.0) for i in range(20)]
@@ -62,7 +71,8 @@ side = [(LAYER + 50.0, LAYER + 100.0 * k) for k in range(1, 10)]
 groups = [["line 10 m below the top", len(line)], ["line 50 m above the layer", len(deep)],
           ["vertical line 50 m inside the left layer", len(side)]]
 
-for name, (kind, shift) in CASES.items():
+for name, (kind, shift, q) in CASES.items():
+    mat = material(q)
     L, Z = (W + 2.0 * LAYER, D + LAYER) if kind != "free" else (W + 2.0 * PAD, D + PAD)
     n, nz = int(round(L / H)), int(round(Z / H))
     par = setp(par0, "xmax", dble(L))
@@ -73,6 +83,11 @@ for name, (kind, shift) in CASES.items():
     par = setp(par, "absorbtop", ".false.")
     par = setp(par, "STACEY_ABSORBING_CONDITIONS", ".true." if kind == "stacey" else ".false.")
     par = setp(par, "PML_BOUNDARY_CONDITIONS", ".true." if kind == "pml" else ".false.")
+    if q is not None:
+        for k, v in (("ATTENUATION_VISCOELASTIC", ".true."), ("N_SLS", q["n_sls"]),
+                     ("ATTENUATION_f0_REFERENCE", dble(q["f_ref"])),
+                     ("READ_VELOCITIES_AT_f0", ".false."), ("USE_SOLVOPT", ".false.")):
+            par = setp(par, k, v)
     par = re.sub(r"^1 1 .*\n^2 2 .*\n^3 1 .*$", mat, par, count=1, flags=re.M)
     par = re.sub(r"^1 50 1   25 1\n^1 50 26  30 2\n^1 50 31  50 3$", f"1 {n} 1 {nz} 1", par,
                  count=1, flags=re.M)
@@ -92,5 +107,5 @@ for name, (kind, shift) in CASES.items():
                                         for i, (x, z) in enumerate(line + deep + side)))
     (d / "sweep_absorb.json").write_text(json.dumps(dict(
         ROCK, kind=kind, box=[L, Z], shift=shift, interior=[W, D], layer=LAYER,
-        source=[XS + shift, ZS + shift], f0=F0, groups=groups), indent=1) + "\n")
+        source=[XS + shift, ZS + shift], f0=F0, groups=groups, visco=q), indent=1) + "\n")
     print("wrote", d)

@@ -849,14 +849,81 @@ the shear and the bulk modulus at `f_ref`. The phase reading of the velocity-str
 offered. Read as unrelaxed, `vp` and `vs` are the speeds at infinite frequency, so a finite Q
 makes the waves of the band slower than those of the elastic class.
 
-The absorbing layer runs without attenuation. The strengths are zero on its elements, as
-SPECFEM2D skips its memory update in its PML elements; it runs a visco-elastic C-PML there
-instead, which this class does not have. All five models are differentiable, and element
-arrays of `Q = inf` give `ElasticSEM2DDeformed` bit for bit. Boundary saving is refused because
-the attenuation is dissipative, and the class runs on eager only.
+The absorbing layer attenuates too, as SPECFEM2D's visco-elastic C-PML does. There the
+stress is the C-PML's non-symmetric stress with the complex moduli,
+`sigma_xx = (kappa + mu)(w) (s_z / s_x) dux/dx + (kappa - mu)(w) duz/dz` and so on, and the
+memories take the stretched strains: those of `sigma_xx` the strains with `dux/dx` stretched,
+those of `sigma_zz` with `duz/dz` stretched, and the two shear stresses one set each. Each
+memory therefore has a second copy on the band elements. SPECFEM2D expands the product of the
+stretching and the relaxation in partial fractions, one recursion per pole; here the
+relaxation runs on the stretched strain. That is the same operator to second order in `dt`,
+and it has no two poles to meet: SPECFEM2D's coefficients grow without bound where a
+relaxation frequency equals a C-PML `alpha` or `beta`, and both vary across the layer. The
+memories load the layer's outer edge as well, so the step pins that edge again after adding
+them; unpinned, the outer-edge recursion integrates without damping and the run grows from
+round-off after a second or two.
+
+Without attenuation in the layer the medium's modulus would jump at its edge, by the
+dispersion over the band (a few percent at Q = 30), and the layer would reflect the jump. On a
+200 m x 400 m box with a free top, a 100 m layer, `Qkappa = 30` and `Qmu = 20`, the
+reflection is 5.1e-2 of the record with the layer elastic and 4.7e-4 with it attenuating; the
+elastic medium's C-PML gives 1.0e-3. Run for 8 s, the energy falls steadily to 4e-19 of its
+peak.
+
+Against SPECFEM2D's visco-elastic C-PML, on the absorbing-layer case of the elastic comparison
+with `Qkappa = 30` and `Qmu = 20` (a 2000 m x 1000 m interior, a 10-element layer, 6000 steps
+in double precision; `test/sem/specfem_compare/run_compare_absorb_visco.py`), the records agree
+to 2.5e-7 of the reference's norm, and the two layers reflect alike: 9.3e-5 of the record over
+every receiver, 2.4e-3 at most on a line 50 m above the layer. With the layer elastic the
+reflection was 5.3e-3 over every receiver and up to 0.11 on a line inside the left layer. Our
+run of the larger box agrees with SPECFEM2D's to 9e-14.
+
+All five models are differentiable, and element arrays of `Q = inf` give
+`ElasticSEM2DDeformed` bit for bit. Boundary saving is refused because the attenuation is
+dissipative, and the class runs on eager only.
 `test/sem/test_sem_visco_elastic_displacement.py` checks the elastic limit, the decay with
-distance, that `Qmu` takes the shear wave down while `Qk` leaves it alone, the layer, the
-gradients and the two readings.
+distance, that `Qmu` takes the shear wave down while `Qk` leaves it alone, the attenuating
+layer (its reflection, the pinned outer edge, the band split), the gradients and the two
+readings.
+
+### The nonlinear fit
+
+`equation_options={"fit": "nonlinear"}` is SPECFEM2D's `USE_SOLVOPT`: the relaxation
+frequencies are fitted with the strengths, for each Q. Both fits minimise the residual
+`Q Im M(w) - Re M(w)` at frequencies log-spaced over the band; the linear one keeps the
+relaxation times log-spaced over the band and solves for the strengths, the nonlinear one
+moves the relaxation times too and keeps both positive
+(`sweep.equations.gsls_nonlinear.GSLSNonlinearFit`). The largest error of `Q(f)` over
+SPECFEM2D's band:
+
+| Mechanisms, Q | linear, `2 n_sls - 1` frequencies | linear, 200 | nonlinear, `4 n_sls` |
+| --- | --- | --- | --- |
+| 3, Q = 30 | 5.1% | 4.9% | 3.3% |
+| 3, Q = 10 | 5.8% | 5.1% | 3.5% |
+| 3, Q = 3 | 8.5% | 6.7% | 5.0% |
+| 4, Q = 30 | 3.4% | 5.2% | 0.7% |
+| 4, Q = 10 | 4.0% | 6.1% | 0.8% |
+| 4, Q = 3 | 7.0% | 10.1% | 1.0% |
+
+The dense linear fit minimises the mean square, not the largest error. Below a Q of 1.5 (three
+mechanisms) or 1.8 (four) the linear fit needs a negative strength and is refused; the
+nonlinear fit keeps every strength positive down to `Q = 1`. Each node then has its own
+relaxation times, the bulk ones from `Qkappa` and the shear ones from `Qmu`. SPECFEM2D runs
+SolvOpt from the linear fit at every GLL point and stops at about four significant digits;
+here Levenberg-Marquardt runs to full precision at the Chebyshev nodes of `1 / Q` in
+`[0, 1]`, once per number of mechanisms, band ratio and number of frequencies (a fraction of a
+second), and a model's Q maps to its mechanisms through the Chebyshev series. Q stays a
+differentiable model, and `Q = inf` gives zero strengths. With one mechanism the optimum jumps
+between two branches as Q falls, so `fit="nonlinear"` needs `n_sls >= 2`. Against
+SPECFEM2D's own SolvOpt (`test/sem/specfem_compare/specfem_solvopt_driver.f90` links its
+`attenuation_model`), the mechanisms agree to 2.5e-4 for two to four mechanisms and Q from 2
+to 10^4, our residual a little lower; `test/sem/test_sem_gsls_nonlinear.py` checks that, the
+flatter `Q(f)`, the table against direct fits and the derivative in Q. Against SPECFEM2D run
+with `USE_SOLVOPT` (`Qkappa = 30`, `Qmu = 10`, a force in the free box of
+[Against SPECFEM2D](#against-specfem2d)) the records differ by 1.8e-5, which is that
+difference of the mechanisms; with SPECFEM2D's own mechanisms fed in they agree to 6e-14.
+`ViscoAcousticPotentialSEM2D` takes the same option; the velocity-stress classes keep one set
+of relaxation times for P and S and take no `fit`.
 
 ## SH waves
 
@@ -900,8 +967,11 @@ solver = PropSEM(ViscoAcousticPotentialSEM2D, shape=(nz, nx), dh=5.0, dt=5e-4,
 seis = solver(wavelet, sources, receivers, models=[vp, qk])
 ```
 
-`equation_options` take the visco-elastic class's `f_ref`, `f_band`, `n_sls`, `n_fit` and
-`velocities`. The default reading of `vp` is the phase velocity at `f_ref`. `"unrelaxed"`
+`equation_options` take the visco-elastic class's `f_ref`, `f_band`, `n_sls`, `n_fit`,
+`velocities` and `fit` (`"nonlinear"`, SPECFEM2D's `USE_SOLVOPT`, gives every node its own
+relaxation times, read from the same element copy as its strengths; see
+[The nonlinear fit](#the-nonlinear-fit)). The default reading of `vp` is the phase velocity
+at `f_ref`. `"unrelaxed"`
 reads it as the infinite-frequency velocity, which is how SPECFEM2D reads its input without
 `READ_VELOCITIES_AT_f0`; with that flag SPECFEM2D does not rebuild its acoustic mass matrix.
 All models are differentiable, and element arrays of `Qk = inf` give the potential step bit for
@@ -1635,6 +1705,7 @@ receivers):
 | `ElasticSHSEM2DDeformed` | SH, a force along y, flat and under the hill | 1e-13, 2e-12 |
 | `ViscoElasticVSSEM2DDeformed` | the rock with Q = 30, SPECFEM2D's conventions | 2e-4 |
 | `ViscoElasticSEM2DDeformed` | the rock with Qkappa = Qmu = 30 read at 15 Hz, an explosion; with Qkappa = 60, Qmu = 20 read as unrelaxed, a force | 7e-14 |
+| `ViscoElasticSEM2DDeformed`, `fit="nonlinear"` | Qkappa = 30, Qmu = 10 with SPECFEM2D's `USE_SOLVOPT`, a force | 2e-5; 6e-14 on SPECFEM2D's own mechanisms |
 | `ViscoAcousticPotentialSEM2D` | the water with Qkappa = 30, SPECFEM2D's conventions | 3e-2; 8e-13 with SPECFEM2D's memory-update line |
 
 Matching the two codes takes these conventions on our side:

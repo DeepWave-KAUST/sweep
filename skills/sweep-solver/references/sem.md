@@ -67,7 +67,7 @@ the FD classes. `models=` per class: `api-signatures.md`.
 |---|---|---|---|---|---|
 | `AcousticPotentialSEM2D` | quad9 | `vp` | yes (batched, BS) | yes | acoustic FWI workhorse; records `p` (default) or `chi` |
 | `AcousticSEM2D` / `AcousticSEM2DDeformed` | quad4 / quad9 | `vp` | no | yes | |
-| `ViscoAcousticPotentialSEM2D` | quad9 | `vp, Qk` (+ `density=`) | no | yes | SPECFEM2D's visco-acoustic potential form; no boundary saving |
+| `ViscoAcousticPotentialSEM2D` | quad9 | `vp, Qk` (+ `density=`) | no | yes | SPECFEM2D's visco-acoustic potential form; `fit="nonlinear"` (its `USE_SOLVOPT`); no boundary saving |
 | `AcousticSEM3D` / `AcousticSEM3DDeformed` | hex8 / hex27 | `vp` | yes | yes | 3-D acoustic (with topography for Deformed) |
 | `ElasticSEM2DDeformed` | quad9 | `vp, vs, rho` | yes | yes | 2-D elastic with topography |
 | `ElasticVSSEM2DDeformed` | quad9 | `vp, vs, rho` | no | yes | velocity-stress |
@@ -79,7 +79,7 @@ the FD classes. `models=` per class: `api-signatures.md`.
 | `ElasticVTISEM2DDeformed` | quad9 | `vp, vs, rho, epsilon, delta` | no | yes | VTI |
 | `ElasticTTISEM2DDeformed` | quad9 | `vp, vs, rho, epsilon, delta, theta` | no | yes | TTI: the VTI medium tilted by `theta` (radians, the FD `ElasticTTI2nd`'s tilt) |
 | `ViscoElasticVSSEM2DDeformed` | quad9 | `vp, vs, rho, Qp, Qs` | no | yes | GSLS attenuation; `f_ref`, `f_band`, `n_sls` via `equation_options`; no boundary saving |
-| `ViscoElasticSEM2DDeformed` | quad9 | `vp, vs, rho, Qk, Qmu` | no | yes | SPECFEM2D's visco-elastic displacement scheme (its defaults: `vp`, `vs` unrelaxed); no attenuation in the C-PML; no boundary saving |
+| `ViscoElasticSEM2DDeformed` | quad9 | `vp, vs, rho, Qk, Qmu` | no | yes | SPECFEM2D's visco-elastic displacement scheme (its defaults: `vp`, `vs` unrelaxed) and visco-elastic C-PML; `fit="nonlinear"` (its `USE_SOLVOPT`); no boundary saving |
 | `AcousticElasticSEM2D` | quad9 | `vp, vs, rho` | yes | yes | coupled fluid-solid (ocean over seabed); records `p, vx, vz` (default) or `chi, u_x, u_z` |
 | `BiotVSSEM2DDeformed`, `BiotAnisoPermSEM2DDeformed` | quad9 | Biot set | no | yes | poroelastic; no boundary saving |
 | `ViscoBiotVSSEM2DDeformed` | quad9 | Biot set + `Qp, Qs` | no | yes | Biot with a GSLS frame; no boundary saving |
