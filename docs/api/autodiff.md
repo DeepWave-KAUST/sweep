@@ -13,3 +13,4 @@ the routes compared in the
         - jacobian_vector_product
         - gauss_newton_vector_product
         - hessian_vector_product
+        - hessian_vector_products

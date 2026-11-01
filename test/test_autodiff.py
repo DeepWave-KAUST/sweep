@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from conftest import requires_binding
-from sweep.autodiff import (gauss_newton_vector_product, hessian_vector_product,
+from sweep.autodiff import (gauss_newton_vector_product, hessian_vector_product, hessian_vector_products,
                             jacobian_vector_product)
 from sweep.equations import Acoustic, AcousticBorn, AcousticVTI, AcousticVTIBorn, Elastic, ElasticBorn
 from sweep.propagator import BoundarySaving, Full
@@ -296,3 +296,147 @@ def test_impl_c_born_with_its_background_held_fixed():
     gn = gauss_newton_vector_product(elastic, _wavelet("cuda"), SRC, REC, background + perturbation,
                                      [None, None, None, h, h, h], loss)
     assert gn[:3] == [None, None, None] and all(torch.isfinite(x).all() for x in gn[3:])
+
+
+# --------------------------------------------------------------------------- #
+# K directions at once (hessian_vector_products)
+# --------------------------------------------------------------------------- #
+def _stack(k=3, device="cpu"):
+    """K directions off the outermost ring, stacked on a leading axis."""
+    inner = torch.zeros(SHAPE)
+    inner[1:-1, 1:-1] = 1.0
+    return (torch.randn(k, *SHAPE, generator=torch.Generator().manual_seed(1)) * inner).to(device)
+
+
+@pytest.mark.parametrize("route", ["double_backward", "forward", "difference"])
+def test_stacked_directions_give_the_products_one_at_a_time(route):
+    """The K directions run as copies of the survey in one call (a model per
+    shot, the copies' shots one after another) -- the products of K calls."""
+    prop = _prop()
+    v0, v_true, _ = _setup()
+    with torch.no_grad():
+        d_obs = prop(_wavelet(), SRC, REC, models=[v_true])
+    loss = LOSSES["cauchy"](d_obs)
+    hs = _stack()
+    (stacked,) = hessian_vector_products(prop, _wavelet(), SRC, REC, [v0], [hs], loss, route=route)
+    one = torch.stack([hessian_vector_product(prop, _wavelet(), SRC, REC, [v0], [h], loss, route=route)[0]
+                       for h in hs])
+    assert stacked.shape == hs.shape
+    assert _rel(stacked, one) < 1e-5
+
+
+def test_stacked_directions_in_batches_and_with_a_model_held_fixed():
+    prop = _prop(Elastic(spatial_order=4, device="cpu"))
+    z = torch.arange(SHAPE[0], dtype=torch.float32)[:, None] * torch.ones(SHAPE)
+    models = [1800.0 + 8.0 * z, 1000.0 + 4.0 * z, 2000.0 + 2.0 * z]
+    with torch.no_grad():
+        d_obs = prop(_wavelet(), SRC, REC, models=[models[0] * 1.03, models[1], models[2]])
+    loss = LOSSES["l2"](d_obs)
+    hs = _stack()
+    out = hessian_vector_products(prop, _wavelet(), SRC, REC, models, [hs, None, 0.5 * hs], loss,
+                                  route="double_backward", batch=2)
+    assert out[1] is None
+    for k, h in enumerate(hs):
+        one = hessian_vector_product(prop, _wavelet(), SRC, REC, models, [h, None, 0.5 * h], loss,
+                                     route="double_backward")
+        assert _rel(out[0][k], one[0]) < 1e-5 and _rel(out[2][k], one[2]) < 1e-5
+
+
+def test_stacked_directions_run_one_call_each_where_models_are_per_shot_already():
+    prop = _prop()
+    v0, v_true, _ = _setup()
+    with torch.no_grad():
+        d_obs = prop(_wavelet(), SRC, REC, models=[v_true])
+    loss = LOSSES["l2"](d_obs)
+    v0s = v0.expand(2, *SHAPE).clone()
+    hs = _stack()[:, None].expand(3, 2, *SHAPE).clone()
+    (stacked,) = hessian_vector_products(prop, _wavelet(), SRC, REC, [v0s], [hs], loss, route="double_backward")
+    one = torch.stack([hessian_vector_product(prop, _wavelet(), SRC, REC, [v0s], [h], loss,
+                                              route="double_backward")[0] for h in hs])
+    assert torch.equal(stacked, one)
+
+
+def test_stacked_directions_are_checked():
+    prop = _prop()
+    v0, _, h = _setup()
+    loss = LOSSES["l2"](torch.zeros(()))
+    with pytest.raises(ValueError, match="stacked on a leading axis"):
+        hessian_vector_products(prop, _wavelet(), SRC, REC, [v0], [h], loss)
+    with pytest.raises(ValueError, match="an earlier one"):
+        hessian_vector_products(prop, _wavelet(), SRC, REC, [v0, v0], [h[None], torch.stack([h, h])], loss)
+    with pytest.raises(ValueError, match="batch must be a positive"):
+        hessian_vector_products(prop, _wavelet(), SRC, REC, [v0], [h[None]], loss, batch=0)
+
+
+@requires_binding()
+def test_stacked_differences_on_impl_c():
+    """impl='c' runs the copies' gradients in one call too (per-shot models)."""
+    v0, v_true, _ = (t.cuda() for t in _setup())
+    c = _prop(impl="c", dev="cuda", memory=BoundarySaving())
+    with torch.no_grad():
+        d_obs = c(_wavelet("cuda"), SRC, REC, models=[v_true])
+    loss = LOSSES["l2"](d_obs)
+    hs = _stack(device="cuda")
+    (stacked,) = hessian_vector_products(c, _wavelet("cuda"), SRC, REC, [v0], [hs], loss)
+    one = torch.stack([hessian_vector_product(c, _wavelet("cuda"), SRC, REC, [v0], [h], loss)[0] for h in hs])
+    assert _rel(stacked, one) < 1e-4
+
+
+def test_slice_stencils_give_the_convolutions_values(monkeypatch):
+    """The double backward builds its graph with the stencils as slices
+    (slice_stencils); the record and the gradient are those of the convolutions."""
+    from sweep.operators import torch as ops
+
+    calls = []
+    apply_taps = ops._apply_taps
+    monkeypatch.setattr(ops, "_apply_taps", lambda u, taps: calls.append(1) or apply_taps(u, taps))
+    prop = _prop()
+    v0, v_true, _ = _setup()
+    with torch.no_grad():
+        d_obs = prop(_wavelet(), SRC, REC, models=[v_true])
+    loss = LOSSES["l2"](d_obs)
+
+    def value_and_grad():
+        v = v0.clone().requires_grad_(True)
+        record = prop(_wavelet(), SRC, REC, models=[v])
+        return record.detach(), torch.autograd.grad(loss(record), v)[0]
+
+    d0, g0 = value_and_grad()
+    assert not calls
+    with ops.slice_stencils():
+        d1, g1 = value_and_grad()
+    assert calls
+    # float32 round-off of another summation order (bit-identical on a V100); the
+    # residual is 1.5 % of the record here, so the gradient's share is ~70x larger
+    assert _rel(d1, d0) < 5e-6 and _rel(g1, g0) < 3e-4
+    with pytest.raises(RuntimeError, match="inside"):
+        with ops.slice_stencils():
+            raise RuntimeError("inside")
+    calls.clear()
+    value_and_grad()
+    assert not calls                      # off again after the exception
+
+
+
+def test_double_backward_keeps_the_convolutions_unless_asked(monkeypatch):
+    """The double backward builds its graph with the convolutions whatever the
+    number of shots or directions; slice_stencils() is the caller's choice,
+    and gives the same products."""
+    from sweep.operators import torch as ops
+
+    calls = []
+    apply_taps = ops._apply_taps
+    monkeypatch.setattr(ops, "_apply_taps", lambda u, taps: calls.append(1) or apply_taps(u, taps))
+    prop = _prop()
+    v0, v_true, h = _setup()
+    with torch.no_grad():
+        d_obs = prop(_wavelet(), SRC, REC, models=[v_true])
+    loss = LOSSES["l2"](d_obs)
+    hessian_vector_product(prop, _wavelet(), SRC, REC, [v0], [h], loss, route="double_backward")
+    (conv,) = hessian_vector_products(prop, _wavelet(), SRC, REC, [v0], [_stack()], loss, route="double_backward")
+    assert not calls
+    with ops.slice_stencils():
+        (sliced,) = hessian_vector_products(prop, _wavelet(), SRC, REC, [v0], [_stack()], loss,
+                                            route="double_backward")
+    assert calls
+    assert _rel(sliced, conv) < 1e-4

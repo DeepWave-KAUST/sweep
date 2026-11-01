@@ -516,10 +516,10 @@ with 1000 steps (4 shots, V100, `Acoustic`):
 
 | Route | Time | Peak memory | Off the exact product |
 | --- | --- | --- | --- |
-| double backward, uncompiled eager, `Full()` | 70 s | 7.6 GiB | (reference) |
-| reverse over forward, uncompiled eager, `Full()` (`"auto"`) | 28 s | 5.5 GiB | 2.3e-6 |
-| difference, uncompiled eager, `Full()` | 6.1 s | 2.8 GiB | 1.6e-3 |
-| difference, eager defaults: compiled step, `Ckpt()` (`"auto"`) | 3.0 s | 119 MiB | 1.1e-3 |
+| double backward, uncompiled eager, `Full()` | 7.3 s | 5.3 GiB | (reference) |
+| reverse over forward, uncompiled eager, `Full()` (`"auto"`) | 27 s | 3.3 GiB | 2.8e-6 |
+| difference, uncompiled eager, `Full()` | 5.4 s | 0.7 GiB | 1.6e-3 |
+| difference, eager defaults: compiled step, `Ckpt()` (`"auto"`) | 0.95 s | 127 MiB | 2.1e-3 |
 | difference, `impl="c"`, boundary saving (`"auto"`) | 0.13 s | 7 MiB | 1.3e-3 |
 
 On a direction that touches the outermost ring (a gradient does), a difference is about
@@ -543,6 +543,50 @@ The
 [Hessian-vector products notebook](../notebooks/46_hessian_vector_product.ipynb)
 compares the routes, shows how to choose `eps`, and assembles the full Hessian of a small
 model with the exact first-order route.
+
+**Many directions at once.** `hessian_vector_products` takes K directions stacked on a
+leading axis, `(K, *model.shape)` per model, and returns the K products stacked the same
+way -- what K calls of `hessian_vector_product` return. Where the equation takes a model per
+shot (`supports_batched_models`: the 2-D `Acoustic`, `Elastic`, `ElasticBorn`, `ViscoAcoustic`
+and `Biot`) and the models are shared, `batch` directions (all K by default) run as copies of
+the survey in one call, each copy with its own models: one forward and one double backward
+for the lot (one dual forward for `route="forward"`, one gradient of 2 x `batch` copies for
+`"difference"`, with every impl). A copy holds what one survey holds, so `batch` bounds the
+memory. Elsewhere the directions run one after another.
+
+```python
+from sweep.autodiff import hessian_vector_products
+
+eye = torch.eye(vp.numel(), device=vp.device).reshape(-1, *vp.shape)   # every unit direction
+(H,) = hessian_vector_products(prop, wavelet, sources, receivers, [vp], [eye], loss,
+                               route="double_backward", batch=150)
+H = H.reshape(vp.numel(), vp.numel())                                    # the full Hessian
+```
+
+All 600 columns of the Hessian of a 20 x 30 model (one shot, 400 steps, free surface, V100,
+`Acoustic`):
+
+| Route | Per column | 600 columns | Peak memory |
+| --- | --- | --- | --- |
+| `hessian_vector_product`, double backward, one call per column | 2.9 s | 29 min | 42 MiB |
+| `torch.autograd.grad(..., is_grads_batched=True)` on the double backward | 0.58 s | 5.8 min | 110 MiB |
+| `hessian_vector_products`, double backward, `batch=150` | 20 ms | 12 s | 6.0 GiB |
+| the same inside `slice_stencils()`, `batch=150` | 32 ms | 19 s | 1.6 GiB |
+| the same inside `slice_stencils()`, `batch=300` | 16 ms | 9.8 s | 3.1 GiB |
+| `hessian_vector_products`, reverse over forward, `batch=150` | 70 ms | 42 s | 3.8 GiB |
+| `hessian_vector_products`, difference, `impl="c"`, `batch=300` | 0.9 ms | 0.55 s | 78 MiB |
+
+PyTorch's own batching of directions, `torch.autograd.grad(..., is_grads_batched=True)` and
+`torch.autograd.functional.hessian(..., vectorize=True)`, does not batch the eager step: its
+legacy vmap has no batching rule for the convolutions' derivatives (nor for `copy_`,
+`zeros_like`, `index_select`), so it loops per direction inside them. The double backward
+builds its graph with the convolutions, whose backward keeps the kernel alone, so a second
+derivative is one more convolution. Inside `sweep.operators.torch.slice_stencils()` the
+uncompiled step runs its stencils as the shifted slices `torch.compile` runs: the same
+products (5e-7 apart), a graph three to four times smaller and 1.4 to 1.7 times the time at
+the same `batch`, so the batch can grow three to four times where memory is the limit (the
+`batch=300` row). Nothing switches to it by itself, and the slices carry no forward-mode
+tangent.
 
 ### Boundary tail truncation (`BoundarySaving.tail_steps`)
 
