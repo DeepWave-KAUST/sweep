@@ -34,6 +34,7 @@ mesher hands over unstructured CCW-numbered element pairs; we do not.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 
@@ -135,6 +136,126 @@ class FluidSolidInterface:
         """
         pw = self.weight * p[self.node_idx]
         return self._scatter(pw * self.nx, like), self._scatter(pw * self.nz, like)
+
+
+
+@dataclass(frozen=True)
+class InterfaceCPML:
+    """The interface terms' stretching on the points of Γ inside the absorbing bands.
+
+    The plain terms of :class:`FluidSolidInterface` are exact only outside the
+    bands. Inside, each domain's C-PML carries its own stretching into Γ:
+
+    * the solid's equation is SPECFEM2D's, scaled by ``s_x s_z``
+      (:mod:`~sweep.sem.cpml.elastic`), so integrating its stress divergence
+      by parts leaves ``s_z σ_x·n_x + s_x σ_z·n_z`` on Γ. With the traction
+      condition ``σ ñ = −p ñ`` in the stretched frame (``ñ ∝ (s_z n_x,
+      s_x n_z)``) the load becomes ``(s_z⋆p n_x, s_x⋆p n_z)``;
+    * the fluid's is the unscaled double-convolution form
+      (:mod:`~sweep.sem.cpml.acoustic`), whose flux enters inside the outer
+      ``1/s`` of each axis, so its load becomes
+      ``(1/s_x)⋆u_x n_x + (1/s_z)⋆u_z n_z``.
+
+    On a horizontal sea floor through a side band that is ``s_x⋆p`` on the
+    solid and the plain term on the fluid. SPECFEM2D scales its fluid as well
+    and applies ``s_x`` (``s_z`` in a bottom band) to both loads; its solid
+    side drops the convolution in a bottom band.
+
+    With ``p = −χ̈``, ``s⋆p = p − (σ χ̇ − ασ χ + α²σ (e^{−αt}⋆χ))`` and
+    ``(1/s)⋆u = u − σ (e^{−(α+σ)t}⋆u)``; ``χ̇`` is SPECFEM's corrected
+    Newmark velocity ``(χ − χ_prev)/Δt + Δt/2 χ̈`` (the one the solid's own
+    mass term centres its damping on), and the convolutions are SPECFEM's
+    second-order recursions. Each side takes its own profile at the node:
+    the solid's ``d``, ``α`` for the solid load, the fluid's for the fluid
+    load. The four memories live on ``nodes`` (unique, so autograd sees one
+    write per node); the loads go out per point.
+    """
+    nodes: torch.Tensor     # (n_u,) global node of each band interface node
+    pt: torch.Tensor        # (n_p,) position in ``nodes`` of each band point
+    pt_g: torch.Tensor      # (n_p,) global node of each band point
+    pt_flat: torch.Tensor   # (n_p,) the point's index in the flat ifc arrays
+    w_nx: torch.Tensor      # (n_p,) weight * n_x, weight * n_z
+    w_nz: torch.Tensor
+    solid: tuple            # per axis (x, z): (A, B, C, D, c0, c1, c2) on nodes
+    fluid: tuple            # per axis (x, z): (sigma, c0, c1, c2) on nodes
+
+    @classmethod
+    def build(cls, ifc: "FluidSolidInterface", mesh, domain, cpml_ac, cpml_el,
+              dt: float) -> "Optional[InterfaceCPML]":
+        """``None`` when no interface point sits in a band (the plain terms
+        are then the whole coupling)."""
+        from .cpml.elastic import _compute_coef_convolution as conv
+        if ifc.n_face == 0:
+            return None
+        if cpml_ac.sigma_x is None or cpml_el.d_x is None:
+            raise ValueError(
+                "the fluid-solid coupling needs the C-PML profiles' per-axis damping "
+                "(sigma_x/alpha_x on the acoustic profile, d_x/alpha_x on the elastic "
+                "one); build them with build_cpml / build_elastic_cpml")
+        g_all = ifc.node_idx.reshape(-1)
+        solid = domain.is_elastic
+        ib = mesh.ibool[solid].reshape(-1)
+        on_nodes = lambda t: torch.zeros(mesh.n_global, dtype=t.dtype, device=t.device
+                                         ).index_copy(0, ib, t[solid].reshape(-1))
+        el = [on_nodes(t) for t in (cpml_el.d_x, cpml_el.alpha_x, cpml_el.d_z, cpml_el.alpha_z)]
+        ac = [cpml_ac.sigma_x, cpml_ac.alpha_x, cpml_ac.sigma_z, cpml_ac.alpha_z]
+        live = (el[0] != 0) | (el[2] != 0) | (ac[0] != 0) | (ac[2] != 0)
+        keep = torch.nonzero(live[g_all]).reshape(-1)
+        if keep.numel() == 0:
+            return None
+        nodes, pt = torch.unique(g_all[keep], return_inverse=True)
+        el = [t[nodes] for t in el]
+        ac = [t[nodes] for t in ac]
+
+        def stretch(d, a):          # s⋆p - p = -(A χ̈ + B χ + C χ_prev + D r)
+            return (0.5 * dt * d, d / dt - a * d, -d / dt, a * a * d) + conv(a, dt)
+
+        def shrink(s, a):           # (1/s)⋆u - u = -s r, r = e^{-(α+σ)t}⋆u
+            return (s,) + conv(a + s, dt)
+
+        w = ifc.weight.reshape(-1)[keep]
+        return cls(nodes=nodes, pt=pt, pt_g=g_all[keep], pt_flat=keep,
+                   w_nx=w * ifc.nx.reshape(-1)[keep], w_nz=w * ifc.nz.reshape(-1)[keep],
+                   solid=(stretch(el[0], el[1]), stretch(el[2], el[3])),
+                   fluid=(shrink(ac[0], ac[1]), shrink(ac[2], ac[3])))
+
+    def table(self) -> torch.Tensor:
+        """``(n_p, 24)``: each band point's row for the CUDA kernels
+        (``sem2d_ifc_pml_ac`` in ``sem2d/kernels.cuh`` gives the layout):
+        ``w n_x, w n_z``, the solid's x and z stretch ``(A, B, C, D, c0, c1,
+        c2)``, the fluid's x and z ``(s, c0, c1, c2)``."""
+        cols = [self.w_nx, self.w_nz]
+        for part in self.solid + self.fluid:
+            cols += [c[self.pt] for c in part]
+        return torch.stack(cols, 1)
+
+    @staticmethod
+    def _recur(r, c0, c1, c2, now, prev, nodes):
+        return c0 * r[nodes] + c1 * now[nodes] + c2 * prev[nodes]
+
+    def solid_load(self, chi_dd, chi, chi_prev, r_x, r_z):
+        """The solid load's stretching ``(Δf_x, Δf_z)`` and the two memories at
+        this level, ``e^{−α_x t}⋆χ`` and ``e^{−α_z t}⋆χ`` on ``nodes``."""
+        n = self.nodes
+        d = []
+        for (A, B, C, D, c0, c1, c2), r in zip(self.solid, (r_x, r_z)):
+            rn = self._recur(r, c0, c1, c2, chi, chi_prev, n)
+            d.append((-(A * chi_dd[n] + B * chi[n] + C * chi_prev[n] + D * rn), rn))
+        (dp_x, rx), (dp_z, rz) = d
+        f_x = torch.zeros_like(chi).index_add(0, self.pt_g, self.w_nx * dp_z[self.pt])
+        f_z = torch.zeros_like(chi).index_add(0, self.pt_g, self.w_nz * dp_x[self.pt])
+        return f_x, f_z, r_x.index_copy(0, n, rx), r_z.index_copy(0, n, rz)
+
+    def fluid_load(self, u_x, u_z, u_x_prev, u_z_prev, q_x, q_z):
+        """The fluid load's stretching ``Δs_ac`` and the two memories at this
+        level, ``e^{−(α+σ)t}⋆u`` per axis on ``nodes``."""
+        n = self.nodes
+        (sx, *cx), (sz, *cz) = self.fluid
+        qx = self._recur(q_x, *cx, u_x, u_x_prev, n)
+        qz = self._recur(q_z, *cz, u_z, u_z_prev, n)
+        un = self.w_nx * (-sx * qx)[self.pt] + self.w_nz * (-sz * qz)[self.pt]
+        s = torch.zeros_like(u_x).index_add(0, self.pt_g, un)
+        return s, q_x.index_copy(0, n, qx), q_z.index_copy(0, n, qz)
 
 
 def assert_no_corner_pml_on_interface(ifc: "FluidSolidInterface", ac_profile):

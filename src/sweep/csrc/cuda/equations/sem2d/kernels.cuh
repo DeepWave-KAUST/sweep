@@ -2005,6 +2005,166 @@ static __global__ void sem2d_ifc_el(
     atomicAdd(&f_z[g], pw * nz[j]);
 }
 
+// ---- the interface loads' C-PML stretching (coupling.InterfaceCPML) ---------
+// One thread per (band interface point, shot). A point owns its four memories
+// (two for the solid load, e^{-a t}*chi per axis; two for the fluid load,
+// e^{-(a+s) t}*u per axis), so a node shared by two faces runs the same
+// recursion twice -- the eager per-node memory, point for point. Coefficient
+// row (IFC_PML_K floats):
+//   0 w*n_x  1 w*n_z
+//   2..8   solid, x stretch: A B C D c0 c1 c2   dp_x = -(A chi_dd + B chi + C chi_prev + D r_x)
+//   9..15  solid, z stretch                      dp_z likewise; f_x += w n_x dp_z, f_z += w n_z dp_x
+//   16..19 fluid, x: s c0 c1 c2                  s_ac -= w n_x s_x q_x + w n_z s_z q_z
+//   20..23 fluid, z
+// r = c0 r + c1 chi + c2 chi_prev and q = c0 q + c1 u + c2 u_prev at this
+// level. The tape slice (B, n_p, 3) takes this step's (fluid, solid x, solid z)
+// point loads; nullptr skips it.
+#define IFC_PML_K 24
+
+static __global__ void sem2d_ifc_pml_ac(
+    const float* __restrict__ ux, const float* __restrict__ uz,
+    const float* __restrict__ ux_prev, const float* __restrict__ uz_prev,
+    const long* __restrict__ gidx, const float* __restrict__ cf,
+    float* __restrict__ mem, float* __restrict__ s_ac, float* __restrict__ tape,
+    int n_p, int ng)
+{
+    const int j = blockIdx.x * blockDim.x + threadIdx.x;
+    const int b = blockIdx.y;
+    { const size_t fo = static_cast<size_t>(b) * ng;
+      ux += fo; uz += fo; ux_prev += fo; uz_prev += fo; s_ac += fo; }
+    if (j >= n_p) return;
+    const size_t pj = static_cast<size_t>(b) * n_p + j;
+    float* m = mem + pj * 4;
+    const float* c = cf + static_cast<size_t>(j) * IFC_PML_K;
+    const long g = gidx[j];
+    const float qx = c[17] * m[2] + c[18] * ux[g] + c[19] * ux_prev[g];
+    const float qz = c[21] * m[3] + c[22] * uz[g] + c[23] * uz_prev[g];
+    m[2] = qx; m[3] = qz;
+    const float ds = c[0] * (-c[16] * qx) + c[1] * (-c[20] * qz);
+    atomicAdd(&s_ac[g], ds);
+    if (tape) tape[pj * 3] = ds;
+}
+
+static __global__ void sem2d_ifc_pml_el(
+    const float* __restrict__ chi_dd, const float* __restrict__ chi,
+    const float* __restrict__ chi_prev,
+    const long* __restrict__ gidx, const float* __restrict__ cf,
+    float* __restrict__ mem, float* __restrict__ f_x, float* __restrict__ f_z,
+    float* __restrict__ tape, int n_p, int ng)
+{
+    const int j = blockIdx.x * blockDim.x + threadIdx.x;
+    const int b = blockIdx.y;
+    { const size_t fo = static_cast<size_t>(b) * ng;
+      chi_dd += fo; chi += fo; chi_prev += fo; f_x += fo; f_z += fo; }
+    if (j >= n_p) return;
+    const size_t pj = static_cast<size_t>(b) * n_p + j;
+    float* m = mem + pj * 4;
+    const float* c = cf + static_cast<size_t>(j) * IFC_PML_K;
+    const long g = gidx[j];
+    const float dd = chi_dd[g], ch = chi[g], cp = chi_prev[g];
+    const float rx = c[6] * m[0] + c[7] * ch + c[8] * cp;
+    const float rz = c[13] * m[1] + c[14] * ch + c[15] * cp;
+    m[0] = rx; m[1] = rz;
+    const float dpx = -(c[2] * dd + c[3] * ch + c[4] * cp + c[5] * rx);
+    const float dpz = -(c[9] * dd + c[10] * ch + c[11] * cp + c[12] * rz);
+    const float fx = c[0] * dpz, fz = c[1] * dpx;
+    atomicAdd(&f_x[g], fx);
+    atomicAdd(&f_z[g], fz);
+    if (tape) { tape[pj * 3 + 1] = fx; tape[pj * 3 + 2] = fz; }
+}
+
+// out0[g] += tape[slot0], out1[g] += tape[slot1] (out1 may be null): the
+// forward's point loads back into a recomputed s_ac or solid force
+static __global__ void sem2d_ifc_pml_tape_add(
+    const float* __restrict__ tape, const long* __restrict__ gidx,
+    float* __restrict__ out0, int slot0, float* __restrict__ out1, int slot1,
+    int n_p, int ng)
+{
+    const int j = blockIdx.x * blockDim.x + threadIdx.x;
+    const int b = blockIdx.y;
+    if (j >= n_p) return;
+    const size_t pj = static_cast<size_t>(b) * n_p + j;
+    const size_t fo = static_cast<size_t>(b) * ng;
+    const long g = gidx[j];
+    atomicAdd(&out0[fo + g], tape[pj * 3 + slot0]);
+    if (out1) atomicAdd(&out1[fo + g], tape[pj * 3 + slot1]);
+}
+
+// Adjoint of sem2d_ifc_pml_el. lambda_f = -y (y = -dt2 invM g), so
+// lambda_dp_z = -w n_x y_x[g], lambda_dp_x = -w n_z y_z[g]; lmem[0..1] carry
+// the memories' adjoints (Lambda^k = -D lambda_dp + c0 Lambda^(k+1)). Writes
+// lchidd[g] += -(A_x l_x + A_z l_z) and leaves this point's chi^k adjoint in
+// scr[0] (its own plus the chi^k part step k+1 left in scr[1]) and its
+// chi^(k-1) adjoint in scr[1], for sem2d_ifc_pml_scr_add.
+static __global__ void sem2d_ifc_pml_el_T(
+    const float* __restrict__ y_x, const float* __restrict__ y_z,
+    const long* __restrict__ gidx, const float* __restrict__ cf,
+    float* __restrict__ lmem, float* __restrict__ lchidd, float* __restrict__ scr,
+    int n_p, int ng)
+{
+    const int j = blockIdx.x * blockDim.x + threadIdx.x;
+    const int b = blockIdx.y;
+    { const size_t fo = static_cast<size_t>(b) * ng;
+      y_x += fo; y_z += fo; lchidd += fo; }
+    if (j >= n_p) return;
+    const size_t pj = static_cast<size_t>(b) * n_p + j;
+    float* L = lmem + pj * 4;
+    float* sc = scr + pj * 2;
+    const float* c = cf + static_cast<size_t>(j) * IFC_PML_K;
+    const long g = gidx[j];
+    const float lpz = -c[0] * y_x[g], lpx = -c[1] * y_z[g];
+    const float Lx = -c[5] * lpx + c[6] * L[0];
+    const float Lz = -c[12] * lpz + c[13] * L[1];
+    L[0] = Lx; L[1] = Lz;
+    atomicAdd(&lchidd[g], -(c[2] * lpx + c[9] * lpz));
+    const float l_now = -(c[3] * lpx + c[10] * lpz) + c[7] * Lx + c[14] * Lz;
+    const float l_prev = -(c[4] * lpx + c[11] * lpz) + c[8] * Lx + c[15] * Lz;
+    sc[0] = l_now + sc[1];
+    sc[1] = l_prev;
+}
+
+// lchi_G[g] += scr[0]: the chi^k adjoint of the solid load, before the fluid
+// combine (and, on DD, before lchi_G's exchange)
+static __global__ void sem2d_ifc_pml_scr_add(
+    const float* __restrict__ scr, const long* __restrict__ gidx,
+    float* __restrict__ lchi_G, int n_p, int ng)
+{
+    const int j = blockIdx.x * blockDim.x + threadIdx.x;
+    const int b = blockIdx.y;
+    if (j >= n_p) return;
+    const size_t pj = static_cast<size_t>(b) * n_p + j;
+    atomicAdd(&lchi_G[static_cast<size_t>(b) * ng + gidx[j]], scr[pj * 2]);
+}
+
+// Adjoint of sem2d_ifc_pml_ac: lambda_s_ac = invM o lchidd (chi_dd = ... +
+// invM s_ac); lmem[2..3] carry the memories' adjoints. The u^k adjoint goes
+// to sc_now, the u^(k-1) one to sc_prev (the scatter carried to step k-1).
+static __global__ void sem2d_ifc_pml_ac_T(
+    const float* __restrict__ lchidd, const float* __restrict__ inv_M,
+    const long* __restrict__ gidx, const float* __restrict__ cf,
+    float* __restrict__ lmem,
+    float* __restrict__ sc_now_x, float* __restrict__ sc_now_z,
+    float* __restrict__ sc_prev_x, float* __restrict__ sc_prev_z, int n_p, int ng)
+{
+    const int j = blockIdx.x * blockDim.x + threadIdx.x;
+    const int b = blockIdx.y;
+    { const size_t fo = static_cast<size_t>(b) * ng;
+      lchidd += fo; sc_now_x += fo; sc_now_z += fo; sc_prev_x += fo; sc_prev_z += fo; }
+    if (j >= n_p) return;
+    const size_t pj = static_cast<size_t>(b) * n_p + j;
+    float* L = lmem + pj * 4;
+    const float* c = cf + static_cast<size_t>(j) * IFC_PML_K;
+    const long g = gidx[j];
+    const float ls = inv_M[g] * lchidd[g];
+    const float Qx = -c[0] * c[16] * ls + c[17] * L[2];
+    const float Qz = -c[1] * c[20] * ls + c[21] * L[3];
+    L[2] = Qx; L[3] = Qz;
+    atomicAdd(&sc_now_x[g], c[18] * Qx);
+    atomicAdd(&sc_now_z[g], c[22] * Qz);
+    atomicAdd(&sc_prev_x[g], c[19] * Qx);
+    atomicAdd(&sc_prev_z[g], c[23] * Qz);
+}
+
 // chi_dd = kappa*w_sum + inv_M*(pat*wav[n] + s_ac)   (post-inversion fluid accel)
 static __global__ void sem2d_fs_chidd(
     const float* __restrict__ kappa, const float* __restrict__ w_sum,

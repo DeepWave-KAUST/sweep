@@ -834,6 +834,35 @@ carries 4.3%, against FD's 4.2%. A node on the model edge counts as inside, on
 both elements that share it, which is what keeps the eager and `impl='c'`
 gradients equal.
 
+## A sea floor through the absorbing layer
+
+On `AcousticElasticSEM2D` a sea floor runs through the side bands of the C-PML, where
+each domain's absorbing form carries its stretching into the interface terms. The solid's
+form (SPECFEM2D's) is scaled by `s_x s_z`, so its load from the water is
+`(s_z*p n_x, s_x*p n_z)`. The fluid's double-convolution form is not scaled, and its load
+from the rock is `(1/s_x)*u_x n_x + (1/s_z)*u_z n_z`. On a horizontal floor through a side
+band that is `s_x*p` on the solid and the plain term on the fluid. The interface points
+inside a band carry the four convolution memories (`sweep.sem.coupling.InterfaceCPML`), on
+both backends, in the shot batch, under boundary saving and on domain decomposition.
+
+With the plain terms the floor reflected several times what the layer does on the rock
+alone. With 200 m of water over rock, a 10 Hz source 20 m above the floor, 20 m elements and
+a ten-element layer, against a box with no boundary within reach (relative L2 per receiver,
+the largest):
+
+| Receivers | Plain terms | Stretched | The rock alone |
+| --- | --- | --- | --- |
+| 10 m above the floor | 9.0e-3 | 1.3e-3 | 2.4e-3 |
+| 10 m below the floor | 7.8e-3 | 2.2e-3 | 2.3e-3 |
+| 300 m below the floor | 3.9e-2 | 3.8e-3 | 3.8e-3 |
+
+SPECFEM2D stretches both loads by `s_x` (`compute_coupling_viscoelastic_ac`,
+`compute_coupling_acoustic_el`). That is right for its fluid, whose form it scales too, but
+on ours the `s_x` on the fluid load brings the largest error back to 1.3e-2.
+`PropSEM` extends the interfaces flat across the lateral pads, so its floor is horizontal
+in the bands. A sloped one, through the low-level `AcousticElasticSEM2D.build`, takes all
+four terms. A band corner on the interface is still refused, as in SPECFEM2D.
+
 ## Domain decomposition (multi-GPU, phase 1)
 
 `sweep.sem.dd` splits the model domain into **x strips** across ranks on

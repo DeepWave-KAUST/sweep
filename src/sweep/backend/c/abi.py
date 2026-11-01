@@ -805,6 +805,10 @@ class SemFluidSolidForwardInputCore(Structure):
         ("band_scale", Buf),
         ("band_scale_e", Buf),
         ("band_kind_e", c_int32),
+        ("ifc_pml_g", Buf),
+        ("ifc_pml_cf", Buf),
+        ("ifc_pml_mem", Buf),
+        ("ifc_pml_tape", Buf),
     ]
 
 
@@ -1039,6 +1043,11 @@ class SemFluidSolidBackwardInputCore(Structure):
         ("band_scale", Buf),
         ("band_scale_e", Buf),
         ("band_kind_e", c_int32),
+        ("ifc_pml_g", Buf),
+        ("ifc_pml_cf", Buf),
+        ("ifc_pml_tape", Buf),
+        ("ifc_pml_lmem", Buf),
+        ("ifc_pml_scr", Buf),
     ]
 
 
@@ -2563,6 +2572,10 @@ FIELDS = {
         ("band_scale", "Buf", None),
         ("band_scale_e", "Buf", None),
         ("band_kind_e", "int", 0),
+        ("ifc_pml_g", "Buf", None),
+        ("ifc_pml_cf", "Buf", None),
+        ("ifc_pml_mem", "Buf", None),
+        ("ifc_pml_tape", "Buf", None),
     ],
     "SemFluidSolidBackwardInputCore": [
         ("ibool", "Buf", None),
@@ -2794,6 +2807,11 @@ FIELDS = {
         ("band_scale", "Buf", None),
         ("band_scale_e", "Buf", None),
         ("band_kind_e", "int", 0),
+        ("ifc_pml_g", "Buf", None),
+        ("ifc_pml_cf", "Buf", None),
+        ("ifc_pml_tape", "Buf", None),
+        ("ifc_pml_lmem", "Buf", None),
+        ("ifc_pml_scr", "Buf", None),
     ],
     "SemElasticCpmlBackwardInputCore": [
         ("ibool", "Buf", None),
@@ -4320,6 +4338,10 @@ LAYOUT_PROBE = [
     ("SemFluidSolidForwardInputCore", "band_scale"),
     ("SemFluidSolidForwardInputCore", "band_scale_e"),
     ("SemFluidSolidForwardInputCore", "band_kind_e"),
+    ("SemFluidSolidForwardInputCore", "ifc_pml_g"),
+    ("SemFluidSolidForwardInputCore", "ifc_pml_cf"),
+    ("SemFluidSolidForwardInputCore", "ifc_pml_mem"),
+    ("SemFluidSolidForwardInputCore", "ifc_pml_tape"),
     ("SemFluidSolidBackwardInputCore", None),
     ("SemFluidSolidBackwardInputCore", "ibool"),
     ("SemFluidSolidBackwardInputCore", "D"),
@@ -4550,6 +4572,11 @@ LAYOUT_PROBE = [
     ("SemFluidSolidBackwardInputCore", "band_scale"),
     ("SemFluidSolidBackwardInputCore", "band_scale_e"),
     ("SemFluidSolidBackwardInputCore", "band_kind_e"),
+    ("SemFluidSolidBackwardInputCore", "ifc_pml_g"),
+    ("SemFluidSolidBackwardInputCore", "ifc_pml_cf"),
+    ("SemFluidSolidBackwardInputCore", "ifc_pml_tape"),
+    ("SemFluidSolidBackwardInputCore", "ifc_pml_lmem"),
+    ("SemFluidSolidBackwardInputCore", "ifc_pml_scr"),
     ("SemElasticCpmlBackwardInputCore", None),
     ("SemElasticCpmlBackwardInputCore", "ibool"),
     ("SemElasticCpmlBackwardInputCore", "D"),

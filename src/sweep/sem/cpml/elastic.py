@@ -44,6 +44,7 @@ Region constants (implicit in ``d_x>0`` / ``d_z>0``) match SPECFEM2D
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 import torch
@@ -249,6 +250,15 @@ class ElasticCPMLProfile:
 
     # Multiaxial-PML cross-damping fraction (0 = classical uniaxial C-PML).
     mpml_ratio: float = 0.0
+    # The time step the coefficients were built for, and the per-axis damping
+    # and frequency shift they were built from (after the corner separation
+    # and any M-PML cross-damping), which the fluid-solid coupling stretches
+    # its interface load with.
+    dt: Optional[float] = None
+    d_x: Optional[torch.Tensor] = None
+    alpha_x: Optional[torch.Tensor] = None
+    d_z: Optional[torch.Tensor] = None
+    alpha_z: Optional[torch.Tensor] = None
 
 
 def build_elastic_cpml(
@@ -372,7 +382,8 @@ def build_elastic_cpml(
         Sz0=Sz0, Sz1=Sz1, Sz2=Sz2, xz1=_mask(xz1), xz2=_mask(xz2),
         La1=La1, La2=La2, La3=La3, La4=La4, l1=_mask(l1), l2=_mask(l2),
         outer_edge_idx=outer_pml_edge_nodes(mesh, sides),
-        mpml_ratio=float(mpml_ratio),
+        mpml_ratio=float(mpml_ratio), dt=float(dt),
+        d_x=d_x, alpha_x=alpha_x, d_z=d_z, alpha_z=alpha_z,
     )
 
 
@@ -405,5 +416,7 @@ def mask_elastic_profile(profile: ElasticCPMLProfile,
         La3=profile.La3 * mf, La4=profile.La4 * mf,
         l1=mask_t(profile.l1), l2=mask_t(profile.l2),
         outer_edge_idx=profile.outer_edge_idx,
-        mpml_ratio=profile.mpml_ratio,
+        mpml_ratio=profile.mpml_ratio, dt=profile.dt,
+        d_x=profile.d_x, alpha_x=profile.alpha_x,
+        d_z=profile.d_z, alpha_z=profile.alpha_z,
     )

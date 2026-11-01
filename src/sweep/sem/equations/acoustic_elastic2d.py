@@ -34,7 +34,7 @@ from typing import ClassVar, Optional
 
 import torch
 
-from ..coupling import FluidSolidInterface
+from ..coupling import FluidSolidInterface, InterfaceCPML
 from ..fields import DerivedInitState, FieldSpec
 from ..mesh.domains import DomainMask
 from ..mesh.quad9 import Quad9Mesh
@@ -70,6 +70,13 @@ class AcousticElasticSEM2D(DerivedInitState):
         FieldSpec("r_duz_dz", internal=True, boundary_related=True, layout="element2"),
         FieldSpec("r_displ_x", internal=True, boundary_related=True, layout="element2"),
         FieldSpec("r_displ_z", internal=True, boundary_related=True, layout="element2"),
+        # the interface load's C-PML memories, (n_global,), live on the band
+        # interface nodes only (coupling.InterfaceCPML): e^{-a t}*chi per axis
+        # for the solid load, e^{-(a+s) t}*u per axis for the fluid load
+        FieldSpec("r_ifc_px", internal=True, boundary_related=True),
+        FieldSpec("r_ifc_pz", internal=True, boundary_related=True),
+        FieldSpec("r_ifc_ux", internal=True, boundary_related=True),
+        FieldSpec("r_ifc_uz", internal=True, boundary_related=True),
     ]
 
     # FD-aligned receiver components: hydrophone p = -chi_ddot in the fluid; OBS vx/vz = u_dot in the solid.
@@ -91,6 +98,7 @@ class AcousticElasticSEM2D(DerivedInitState):
     domain: DomainMask
     mass: torch.Tensor            # device/dtype ref for the framework
     cpml: Optional[object] = None      # (ac_profile, el_profile) or None
+    ifc_cpml: Optional[InterfaceCPML] = None   # the interface load's stretching
 
     # The two absorbing profiles this equation's build() takes, keyed by their
     # keyword. PropSEM reads this to construct BOTH from one abcn_elements --
@@ -107,9 +115,9 @@ class AcousticElasticSEM2D(DerivedInitState):
         """``domain`` defaults to SPECFEM's rule: an element is acoustic iff
         vs==0. ``cpml_ac`` (acoustic :class:`CPMLProfile`) and ``cpml_el``
         (:class:`ElasticCPMLProfile`) enable the absorbing bands — both or
-        neither. The interface may cross an X-only or Z-only band (plain
-        coupling term there, SPECFEM-style); a corner region touching the
-        interface is rejected at build time."""
+        neither. The interface may cross an X-only or Z-only band, where its
+        two loads carry the bands' stretching (:class:`InterfaceCPML`); a
+        corner region touching the interface is rejected at build time."""
         if (cpml_ac is None) != (cpml_el is None):
             raise ValueError("pass both cpml_ac and cpml_el, or neither")
         if domain is None:
@@ -120,12 +128,17 @@ class AcousticElasticSEM2D(DerivedInitState):
         el = ElasticSEM2DDeformed.build(mesh, vp_e, vs_e, rho_e,
                                         cpml=cpml_el, domain=domain)
         ifc = FluidSolidInterface.detect(mesh, domain)
+        ifc_cpml = None
         if cpml_ac is not None:
             from ..coupling import assert_no_corner_pml_on_interface
             assert_no_corner_pml_on_interface(ifc, cpml_ac)
+            if cpml_el.dt is None:
+                raise ValueError("cpml_el carries no dt: build it with build_elastic_cpml")
+            ifc_cpml = InterfaceCPML.build(ifc, mesh, domain, cpml_ac, cpml_el, cpml_el.dt)
         return cls(mesh=mesh, ac=ac, el=el, ifc=ifc, domain=domain,
                    mass=ac.mass,
-                   cpml=None if cpml_ac is None else (cpml_ac, cpml_el))
+                   cpml=None if cpml_ac is None else (cpml_ac, cpml_el),
+                   ifc_cpml=ifc_cpml)
 
     # ------------------------------------------------------------------ #
     def accelerations(self, chi, u_x, u_z, b_chi, b_ux, b_uz):
@@ -152,7 +165,8 @@ class AcousticElasticSEM2D(DerivedInitState):
     def step(self, fields: tuple, src, dt: float) -> tuple:
         (chi, chi_prev, u_x, u_z, u_x_prev, u_z_prev,
          psi_x, psi_z, zeta_x, zeta_z,
-         r_dux_dx, r_dux_dz, r_duz_dx, r_duz_dz, r_displ_x, r_displ_z) = fields
+         r_dux_dx, r_dux_dz, r_duz_dx, r_duz_dz, r_displ_x, r_displ_z,
+         r_px, r_pz, r_ux, r_uz) = fields
         b_chi, b_ux, b_uz = src[0], src[1], src[2]
         dt2 = dt * dt
 
@@ -166,24 +180,31 @@ class AcousticElasticSEM2D(DerivedInitState):
             return (chi_next, chi, ux_next, uz_next, u_x, u_z,
                     psi_x, psi_z, zeta_x, zeta_z,
                     r_dux_dx, r_dux_dz, r_duz_dx, r_duz_dz,
-                    r_displ_x, r_displ_z)
+                    r_displ_x, r_displ_z, r_px, r_pz, r_ux, r_uz)
 
         # ---- CPML on both sides; ordering identical to `accelerations` ---- #
-        # 1. fluid: stretched stiffness (w_sum) + PLAIN coupling S^ac into the
-        #    pre-inversion residual (SPECFEM-style — the plain term inside an
-        #    X-only band costs absorption at Γ, not stability).
+        # 1. fluid: stretched stiffness (w_sum) + coupling S^ac into the
+        #    pre-inversion residual, stretched on the band points of Γ
         w_sum, psi_x, psi_z, zeta_x, zeta_z = self.ac.step_cpml(
             chi, psi_x, psi_z, zeta_x, zeta_z)
         s_ac = self.ifc.apply_ac(u_x, u_z, chi)
+        ic = self.ifc_cpml
+        if ic is not None:
+            ds, r_ux, r_uz = ic.fluid_load(u_x, u_z, u_x_prev, u_z_prev, r_ux, r_uz)
+            s_ac = s_ac + ds
         # 2. χ̈ POST-inversion, same level; κ rides the stretched part, M_κ⁻¹
         #    the surface/source terms (exactly the bare path's split).
         chi_dd = (self.ac.kappa_node * w_sum
                   + self.ac._inv_M * (b_chi + s_ac))
         # 3. triple point: the free surface wins over the coupling.
         (chi_dd,) = self.ac._apply_dirichlet(chi_dd)
-        # 4. p = −χ̈ → solid surface force, injected through the elastic CPML
-        #    step's body-force slot (it adds b at the final update).
+        # 4. p = −χ̈ → solid surface force (stretched on the band points),
+        #    injected through the elastic CPML step's body-force slot (it adds
+        #    b at the final update).
         s_x, s_z = self.ifc.apply_el(-chi_dd, chi)
+        if ic is not None:
+            df_x, df_z, r_px, r_pz = ic.solid_load(chi_dd, chi, chi_prev, r_px, r_pz)
+            s_x, s_z = s_x + df_x, s_z + df_z
         (ux_next, uz_next, r_dux_dx, r_dux_dz, r_duz_dx, r_duz_dz,
          r_displ_x, r_displ_z) = self.el._step_cpml(
             u_x, u_z, u_x_prev, u_z_prev,
@@ -203,7 +224,7 @@ class AcousticElasticSEM2D(DerivedInitState):
         return (chi_next, chi, ux_next, uz_next, u_x, u_z,
                 psi_x, psi_z, zeta_x, zeta_z,
                 r_dux_dx, r_dux_dz, r_duz_dx, r_duz_dz,
-                r_displ_x, r_displ_z)
+                r_displ_x, r_displ_z, r_px, r_pz, r_ux, r_uz)
 
     # ================================================================== #
     # Boundary-saving hooks — swap2nd on BOTH domains at once.
@@ -242,7 +263,7 @@ class AcousticElasticSEM2D(DerivedInitState):
         ng = self.mesh.ngll
         z = lambda: torch.zeros_like(like)
         r = lambda: like.new_zeros((self.mesh.n_elements, ng, ng, 2))
-        return (z(), z(), z(), z(), r(), r(), r(), r(), r(), r())
+        return (z(), z(), z(), z(), r(), r(), r(), r(), r(), r(), z(), z(), z(), z())
 
     def reverse_step(self, fields, src, dt):
         chi_n, chi_p, ux_n, uz_n, ux_p, uz_p = fields[:6]    # levels (i+1, i)

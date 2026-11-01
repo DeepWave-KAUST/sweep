@@ -289,6 +289,21 @@ and this project adheres to
   hill on a 1000 m model). Every grid line now takes its own coordinates, in 2-D and 3-D
   (`sweep.sem.cpml._axis.gradient_along`); flat meshes are unchanged bit for bit
   (`test/sem/test_sem_acoustic_cpml_profile.py`).
+- **`AcousticElasticSEM2D`: a sea floor through a side C-PML band absorbs like the rock
+  alone.** The coupling took its plain terms inside the bands, where each domain's C-PML
+  carries its stretching into the interface: the solid's form is scaled by `s_x s_z`, so its
+  load is `(s_z*p n_x, s_x*p n_z)`, and the fluid's double-convolution form leaves
+  `(1/s_x)*u_x n_x + (1/s_z)*u_z n_z` -- on a horizontal sea floor, `s_x*p` on the solid and
+  the plain term on the fluid. With 200 m of water over rock, 10 Hz, 20 m elements and a
+  ten-element layer, the records 10 m above and below the floor and 300 m below it differed
+  from a box with no boundary within reach by up to 9e-3, 8e-3 and 4e-2; with the stretched
+  loads 1.3e-3, 2.2e-3 and 3.8e-3, the C-PML's own level on the rock alone (2.4e-3, 2.3e-3,
+  3.8e-3). SPECFEM2D stretches both loads by `s_x` (`compute_coupling_viscoelastic_ac`,
+  `compute_coupling_acoustic_el`), right for its fluid, which it scales as well; on ours the
+  `s_x` on the fluid load brings the error back to 1.3e-2. The interface points in a band
+  carry four memories each (`sweep.sem.coupling.InterfaceCPML`, the profiles' new per-axis
+  `sigma_*`/`d_*` and `alpha_*`), on both backends, the shot batch, boundary saving and
+  domain decomposition (`test/sem/test_sem_fs_cpml_interface.py`).
 
 ## [0.3.6] - 2026-10-29
 

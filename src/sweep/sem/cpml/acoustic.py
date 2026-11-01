@@ -28,6 +28,7 @@ graded columns of a topography or interfaces mesh.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 import torch
@@ -50,6 +51,12 @@ class CPMLProfile:
     a_z: torch.Tensor              # (n_global,)
     b_z: torch.Tensor              # (n_global,)
     dbz_dz: torch.Tensor           # (n_global,)
+    # the damping and frequency shift a/b are built from, (n_global,) each;
+    # the fluid-solid coupling stretches its interface load with them
+    sigma_x: Optional[torch.Tensor] = None
+    alpha_x: Optional[torch.Tensor] = None
+    sigma_z: Optional[torch.Tensor] = None
+    alpha_z: Optional[torch.Tensor] = None
 
 
 def build_cpml(
@@ -139,4 +146,6 @@ def build_cpml(
         pml_thickness=max(Lx, Lz),
         a_x=a_x.to(dtype),  b_x=b_x.to(dtype),  dbx_dx=dbx_dx,
         a_z=a_z.to(dtype),  b_z=b_z.to(dtype),  dbz_dz=dbz_dz,
+        sigma_x=sigma_x.to(dtype), alpha_x=alpha_x.to(dtype),
+        sigma_z=sigma_z.to(dtype), alpha_z=alpha_z.to(dtype),
     )
