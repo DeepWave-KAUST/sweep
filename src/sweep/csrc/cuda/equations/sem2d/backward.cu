@@ -336,6 +336,7 @@ void acoustic_cpml_backward(const SemAcousticCpmlBackwardInputCore& in) {
                         cudaMemcpyDeviceToDevice, stream);
     }
 
+    double* illum = in.illum.numel() ? in.illum.data_ptr<double>() : nullptr;
     for (int mm = nt; mm >= 1; --mm) {
         const int k = mm - 1;
         // data + dirichlet^T on gA and the carried memory adjoints
@@ -345,6 +346,8 @@ void acoustic_cpml_backward(const SemAcousticCpmlBackwardInputCore& in) {
             sem2d_dirichlet_fill5<<<gD, TPB, 0, stream>>>(
                 gA, lpx, lpz, lzx, lzz,
                 nullptr, nullptr, nullptr, nullptr, nullptr, didx, kdir, ng);
+        if (illum)      // gA is now the whole adjoint of chi^{k+1}
+            sem2d_illum_rec<<<gN, TPB, 0, stream>>>(gA, inv_M, msn, illum, ng);
         sem2d_scale2_b<<<gN, TPB, 0, stream>>>(kappa, gA, dt2, gw, ng, msn);   // gw = dt2 kappa gA
 
         if (k >= 1) {
@@ -867,7 +870,12 @@ void elastic_cpml_backward(const SemElasticCpmlBackwardInputCore& in) {
         cudaMemcpyAsync(u_lo_z, in.fin_uz_prev.data_ptr<float>(), ngb, cudaMemcpyDeviceToDevice, stream);
     }
 
+    double* illum = in.illum.numel() ? in.illum.data_ptr<double>() : nullptr;
     for (int n = nt - 1; n >= 0; --n) {
+        if (illum) {    // lam1 is the whole adjoint of u^{n+1}
+            sem2d_illum_rec<<<gN, TPB, 0, stream>>>(lam1_x, inv_M, 0, illum, ng);
+            sem2d_illum_rec<<<gN, TPB, 0, stream>>>(lam1_z, inv_M, 0, illum, ng);
+        }
         if (bs) {
             // swap2nd reverse of forward iteration n: feed u^{n+1} as the "prev"
             // level with the CPML memories zeroed. Exact in the reversible
@@ -2120,6 +2128,7 @@ void fluid_solid_backward(const SemFluidSolidBackwardInputCore& in) {
     const size_t Em = static_cast<size_t>(E) * m;
     const dim3 gE(E, B), gN(nb, B), gJ(rj, B), gD(db, B), gP(pb, B), gI(ib, B);
     const dim3 gPP(npp > 0 ? (npp + TPB - 1) / TPB : 0, B);
+    double* fs_illum = in.illum.numel() ? in.illum.data_ptr<double>() : nullptr;
 
     const dim3 gBN(bs ? (nbn + TPB - 1) / TPB : 0, B);
     const dim3 gBE(bs ? (nbe * m + TPB - 1) / TPB : 0, B);
@@ -2197,6 +2206,11 @@ void fluid_solid_backward(const SemFluidSolidBackwardInputCore& in) {
             } else {
                 sem2d_dirichlet_fill<<<db, TPB, 0, stream>>>(gA, didx, kdir);
             }
+        }
+        if (fs_illum) { // gA, lam1: the whole adjoints of chi^{k+1}, u^{k+1}
+            sem2d_illum_rec<<<gN, TPB, 0, stream>>>(gA, in.ac_inv_M.data_ptr<float>(), 0, fs_illum, ng);
+            sem2d_illum_rec<<<gN, TPB, 0, stream>>>(lam1_x, in.el_inv_M.data_ptr<float>(), 0, fs_illum, ng);
+            sem2d_illum_rec<<<gN, TPB, 0, stream>>>(lam1_z, in.el_inv_M.data_ptr<float>(), 0, fs_illum, ng);
         }
         // ---- solid: g = Pin(lam1), y = -dt2 invM g, lambda(force) = -y ---- //
         cudaMemcpyAsync(g_x, lam1_x, ngb, cudaMemcpyDeviceToDevice, stream);

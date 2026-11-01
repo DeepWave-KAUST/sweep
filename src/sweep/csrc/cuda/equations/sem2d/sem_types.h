@@ -158,6 +158,11 @@ struct SemAcousticCpmlForwardInput {
     // B gives every shot its own inv_rho/kappa/inv_M/inv_Mg. The C-PML profile
     // and the mesh geometry are per-mesh, never per-shot.
     int B = 1, Bm = 1;
+    // The illumination accumulator (additive; sweep.sem.illumination): (B,
+    // n_global) fp64, zeroed. The forward adds the wavefields' squared second
+    // time derivative every step, the backward the squared adjoint wavefield
+    // M^-1 lambda. EMPTY = off.
+    torch::Tensor illum;
 };
 
 // Backward input for the 2-D acoustic-potential SEM adjoint WITH C-PML (P3b).
@@ -217,6 +222,11 @@ struct SemAcousticCpmlBackwardInput {
     int nt = 0, ngll = 0, n_elements = 0, n_global = 0, n_rec = 0, ndim = 2;
     // Shot/model batch, same semantics as the forward struct (additive).
     int B = 1, Bm = 1;
+    // The illumination accumulator (additive; sweep.sem.illumination): (B,
+    // n_global) fp64, zeroed. The forward adds the wavefields' squared second
+    // time derivative every step, the backward the squared adjoint wavefield
+    // M^-1 lambda. EMPTY = off.
+    torch::Tensor illum;
 };
 
 // Forward input for the 2-D elastic SEM WITH SPECFEM2D-style 2nd-order C-PML
@@ -285,6 +295,11 @@ struct SemElasticCpmlForwardInput {
     // buys most of the memory at the cheap error. Defaults to
     // band_kind, so an unset field keeps the old all-or-nothing.
     int band_kind_e = 0;
+    // The illumination accumulator (additive; sweep.sem.illumination): (B,
+    // n_global) fp64, zeroed. The forward adds the wavefields' squared second
+    // time derivative every step, the backward the squared adjoint wavefield
+    // M^-1 lambda. EMPTY = off.
+    torch::Tensor illum;
 };
 
 // Forward input for the 2-D coupled fluid-solid SEM (P4): SPECFEM potential
@@ -394,6 +409,11 @@ struct SemFluidSolidForwardInput {
     torch::Tensor ifc_pml_g, ifc_pml_cf;     // (n_p,) int64, (n_p, IFC_PML_K)
     torch::Tensor ifc_pml_mem;               // (B, n_p, 4), zeroed
     torch::Tensor ifc_pml_tape;
+    // The illumination accumulator (additive; sweep.sem.illumination): (B,
+    // n_global) fp64, zeroed. The forward adds the wavefields' squared second
+    // time derivative every step, the backward the squared adjoint wavefield
+    // M^-1 lambda. EMPTY = off.
+    torch::Tensor illum;
 };
 
 // Backward input for the coupled fluid-solid adjoint (P4). Interleaves the
@@ -492,6 +512,11 @@ struct SemFluidSolidBackwardInput {
     torch::Tensor ifc_pml_g, ifc_pml_cf, ifc_pml_tape;
     torch::Tensor ifc_pml_lmem;              // (B, n_p, 4), zeroed
     torch::Tensor ifc_pml_scr;               // (B, n_p, 2), zeroed
+    // The illumination accumulator (additive; sweep.sem.illumination): (B,
+    // n_global) fp64, zeroed. The forward adds the wavefields' squared second
+    // time derivative every step, the backward the squared adjoint wavefield
+    // M^-1 lambda. EMPTY = off.
+    torch::Tensor illum;
 };
 
 // Backward input for the 2-D elastic SEM adjoint WITH C-PML (P3e). The mu_*
@@ -568,6 +593,11 @@ struct SemElasticCpmlBackwardInput {
     // buys most of the memory at the cheap error. Defaults to
     // band_kind, so an unset field keeps the old all-or-nothing.
     int band_kind_e = 0;
+    // The illumination accumulator (additive; sweep.sem.illumination): (B,
+    // n_global) fp64, zeroed. The forward adds the wavefields' squared second
+    // time derivative every step, the backward the squared adjoint wavefield
+    // M^-1 lambda. EMPTY = off.
+    torch::Tensor illum;
 };
 
 // Backward input for the 2-D elastic SEM adjoint (P2, save-all). Returns

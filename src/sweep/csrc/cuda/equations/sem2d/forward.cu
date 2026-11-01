@@ -264,6 +264,7 @@ void acoustic_cpml_forward(const SemAcousticCpmlForwardInputCore& in) {
     // one memset for all 6 grad fields when Python allocated them contiguously
     const bool contig6 = (gz == gx + ngB && kx == gx + 2 * ngB && kz == gx + 3 * ngB
                           && gax == gx + 4 * ngB && gaz == gx + 5 * ngB);
+    double* illum = in.illum.numel() ? in.illum.data_ptr<double>() : nullptr;
 
     for (int n = 0; n < nt; ++n) {
         if (contig6) {
@@ -294,6 +295,8 @@ void acoustic_cpml_forward(const SemAcousticCpmlForwardInputCore& in) {
                 save ? save_wf + o : nullptr, ssave ? save_px + o : nullptr,
                 ssave ? save_pz + o : nullptr, ssave ? save_zx + o : nullptr,
                 ssave ? save_zz + o : nullptr, didx, kdir, ng);
+        if (illum)
+            sem2d_illum_src<<<gN, TPB, 0, stream>>>(chi_next, chi, chi_prev, 1.f / dt2, illum, ng);
         if (nrec > 0)
             sem2d_record<<<gR, TPB, 0, stream>>>(chi_next, rec_G, rec_W, seis, n, nt, nrec, m, ng);
         if (bs && nband > 0) {
@@ -549,6 +552,7 @@ void elastic_cpml_forward(const SemElasticCpmlForwardInputCore& in) {
     const size_t ngb = ngB * sizeof(float);
     const long Em = static_cast<long>(E) * m;
     const dim3 gE(E, B), gN(nb, B), gR(rb, B), gP(pb, B);
+    double* illum = in.illum.numel() ? in.illum.data_ptr<double>() : nullptr;
 
     for (int n = 0; n < nt; ++n) {
         cudaMemsetAsync(Acc_x, 0, ngb, stream);
@@ -566,6 +570,10 @@ void elastic_cpml_forward(const SemElasticCpmlForwardInputCore& in) {
         if (kpin > 0) {   // rigid-wall PML termination: pin u=0 on the outer edge
             sem2d_dirichlet_fill_b<<<gP, TPB, 0, stream>>>(ux_next, pin_idx, kpin, ng);
             sem2d_dirichlet_fill_b<<<gP, TPB, 0, stream>>>(uz_next, pin_idx, kpin, ng);
+        }
+        if (illum) {
+            sem2d_illum_src<<<gN, TPB, 0, stream>>>(ux_next, ux, ux_prev, 1.f / dt2, illum, ng);
+            sem2d_illum_src<<<gN, TPB, 0, stream>>>(uz_next, uz, uz_prev, 1.f / dt2, illum, ng);
         }
         if (nrec > 0) {
             sem2d_record<<<gR, TPB, 0, stream>>>(ux_next, rec_G, rec_W, seis_x, n, nt, nrec, m, ng);
@@ -1263,6 +1271,7 @@ void fluid_solid_forward(const SemFluidSolidForwardInputCore& in) {
     const long Em = static_cast<long>(E) * m;
     const dim3 gE(E, B), gN(nb, B), gR(rb, B), gD(db, B), gP(pb, B), gI(ib, B);
     const dim3 gPP(npp > 0 ? (npp + TPB - 1) / TPB : 0, B);
+    double* fs_illum = in.illum.numel() ? in.illum.data_ptr<double>() : nullptr;
 
     for (int n = 0; n < nt; ++n) {
         float* pml_tn = pml_tape ? pml_tape + static_cast<size_t>(n) * B * npp * 3 : nullptr;
@@ -1339,6 +1348,11 @@ void fluid_solid_forward(const SemFluidSolidForwardInputCore& in) {
             } else {
                 sem2d_dirichlet_fill<<<db, TPB, 0, stream>>>(chi_next, didx, kdir);
             }
+        }
+        if (fs_illum) {
+            sem2d_illum_src<<<gN, TPB, 0, stream>>>(chi_next, chi, chi_prev, 1.f / dt2, fs_illum, ng);
+            sem2d_illum_src<<<gN, TPB, 0, stream>>>(ux_next, ux, ux_prev, 1.f / dt2, fs_illum, ng);
+            sem2d_illum_src<<<gN, TPB, 0, stream>>>(uz_next, uz, uz_prev, 1.f / dt2, fs_illum, ng);
         }
         if (nrec > 0) {
             sem2d_record<<<gR, TPB, 0, stream>>>(chi_next, rec_G, rec_W, seis_chi, n, nt, nrec, m, ng);

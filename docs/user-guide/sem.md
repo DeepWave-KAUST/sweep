@@ -1182,6 +1182,56 @@ snapshot at its grid point. `impl='c'` keeps no intermediate state and refuses
 snapshots, as do an explicit `BoundarySaving()` and `Ckpt()`; the default
 strategy gives way to the full tape for them.
 
+## Illumination
+
+`compute_illumination = True` gives PropTorch's pair after a call and its backward:
+
+```python
+solver.compute_illumination = True
+syn = solver(wavelet, sources, receivers, models=[vp])
+(syn * obs).sum().backward()
+image = vp.grad / (solver.source_illumination + eps)
+solver.receiver_illumination           # after the backward
+```
+
+- **`source_illumination`** is `sum_t |a|^2` at every GLL node, summed over the
+  shots. `a` is the second time derivative of the field the gradient is built
+  from: `chi_tt = -p` on the potential forms, `u_tt` on the displacement forms
+  and `v_t` on the velocity-stress forms. It is the pseudo-Hessian of Shin et al.
+  (2001) and SPECFEM2D's first approximate Hessian (`APPROXIMATE_HESS_KL`,
+  `b_accel . b_accel`).
+- **`receiver_illumination`** is `sum_t |lambda|^2`, where the adjoint wavefield
+  `lambda = M^-1 dL/df` is the field's gradient mapped back through the mass the
+  step inverts.
+
+Both come out shaped like the call's models, the way the gradient does. Each
+element's GLL nodes take their node's value times `w |J|`, the factor every
+model value's gradient carries, and a grid model takes the transpose of its
+interpolation. So `grad / illumination` divides out the quadrature and the
+interpolation.
+
+On `AcousticElasticSEM2D` the fluid's and the solid's fields add on the
+interface nodes. Their units differ there, so compensate each domain apart. The
+switch does not change the gradient.
+
+It runs on `impl='eager'` (on the full tape, shot by shot: an explicit
+`BoundarySaving()` or `Ckpt()` is refused, the default strategy gives way) and on
+`impl='c'` for the three 2-D C-PML paths: `AcousticPotentialSEM2D`,
+`ElasticSEM2DDeformed` and `AcousticElasticSEM2D`. On `impl='c'` it also covers the
+shot batch and boundary saving, and the eager and CUDA values agree to 1e-5. The sums are
+kept in fp64 and returned as fp64: the receiver term reaches 1e43 on notebook 48's model,
+out of fp32's range.
+
+Record the field itself when you want the receiver term. A derived receiver such as
+`p = -chi_tt` differentiates the residual twice in the adjoint, which weights it by
+`omega^4` toward frequencies the mesh does not resolve. The receiver illumination then
+follows that part. In notebook 48 recording `p` instead of `chi` steps it by 3x at the
+first reflector and puts the mesh's lines into it; the source term and the image are
+unaffected.
+`impl='c'` without a C-PML, the 3-D paths and domain decomposition refuse it, as
+do the Biot classes, whose solid and fluid velocities share a 2x2 mass
+(`test/sem/test_sem_illumination.py`).
+
 ## The model edge
 
 The absorbing layer reads the model's edge values, as FD's edge padding

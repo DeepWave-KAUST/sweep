@@ -26,6 +26,17 @@ and this project adheres to
   skill.  The docs page *AI assistants (Agent Skills)* covers the install,
   and `test/test_skill_snippets.py` runs every code block of the skill so
   its examples cannot fall behind the API.
+- **Illumination on the SEM: `PropSEM.compute_illumination`.** PropTorch's switch and pair,
+  read back after a call: `source_illumination`, `sum_t |a|^2` with `a` the wavefields'
+  second time derivative (the pseudo-Hessian of Shin et al. 2001, SPECFEM2D's first
+  `APPROXIMATE_HESS_KL` kernel), and after its backward `receiver_illumination`,
+  `sum_t |M^-1 dL/df|^2` (the adjoint wavefield). Both are shaped like the models, the way
+  the gradient is: `w |J|` at each element node, and the interpolation's transpose for a
+  grid model. On `impl='eager'` on the full tape, and on `impl='c'` for the 2-D C-PML paths
+  (`AcousticPotentialSEM2D`, `ElasticSEM2DDeformed`, `AcousticElasticSEM2D`), there in the
+  shot batch and under boundary saving, too. The eager and CUDA values agree to 1e-5; the
+  sums are fp64. Turning it on does not move the gradient (`test/sem/test_sem_illumination.py`).
+  Notebook 48 compensates an RTM image under a hill with it.
 - **`ViscoElasticSEM2DDeformed`: SPECFEM2D's visco-elastic displacement scheme on the SEM.**
   `ElasticSEM2DDeformed` with SPECFEM2D's `ATTENUATION_VISCOELASTIC` as its Newmark path runs
   it: mechanisms on the bulk and the shear modulus (models `vp, vs, rho, Qk, Qmu`), element

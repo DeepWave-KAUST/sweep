@@ -69,4 +69,16 @@ receivers of a marine survey. The
 
     [:material-notebook-outline: Open notebook](../../notebooks/47_sem_receivers.ipynb)
 
+-   ![SEM illumination](../../figures/gallery/48_sem_illumination.png){ loading=lazy }
+
+    **Illumination · RTM under a hill**
+
+    ---
+
+    An RTM image under a hill, compensated by the source illumination
+    (`compute_illumination`, the pseudo-Hessian), with the receiver
+    illumination beside it.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/48_sem_illumination.ipynb)
+
 </div>

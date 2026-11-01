@@ -816,6 +816,23 @@ class PropSEM:
 
         self._construct_mesh(equation, shape, self.n_order, self.topography,
                              dtype, self.dev)
+        # PropTorch's illumination switch (sweep.sem.illumination): off by
+        # default; when on, each call's source / receiver illumination is read
+        # back from source_illumination / receiver_illumination
+        self.compute_illumination = False
+        self._illumination = None
+
+    @property
+    def source_illumination(self):
+        """The last call's ``sum_t |a|^2`` in its models' shape, or ``None``
+        (see :mod:`sweep.sem.illumination`)."""
+        return None if self._illumination is None else self._illumination.source()
+
+    @property
+    def receiver_illumination(self):
+        """The last call's ``sum_t |lambda|^2`` once its backward has run, or
+        ``None`` (see :mod:`sweep.sem.illumination`)."""
+        return None if self._illumination is None else self._illumination.receiver()
 
     def _resolve_memory(self, memory, bs_store_dtype_elem):
         """``memory`` as PropTorch takes it -> the three run knobs the paths
@@ -1895,10 +1912,15 @@ class PropSEM:
                                              snapshot_times, snapshot_interval)
         acq = _Acq(self, wavelet, sources, receivers, source_vector,
                    potential_wavelet=self._pressure_wavelet and return_wavefield)
+        self._illumination = self._illumination_for(models, snap_steps)
 
         # 3-D acoustic on CUDA: the single-strip DD driver, BEFORE any global
         # equation is built (that build is what it saves) -- see _forward_c_dd3d
         if self._use_c and self._dd3d_route(models):
+            if self._illumination is not None:
+                raise NotImplementedError(
+                    "compute_illumination is not wired on the 3-D acoustic strip "
+                    "driver; use impl='eager'.")
             if self._spatial:
                 raise NotImplementedError(
                     f"receiver_type {sorted(self._spatial)} records spatial derivatives, "
@@ -1936,7 +1958,19 @@ class PropSEM:
                                    memory=self._memory,
                                    compile_options=compile_options,
                                    checkpoint_chunk=self._ckpt_chunk,
-                                   store_dtype=self._bs_store)
+                                   store_dtype=self._bs_store,
+                                   illumination=self._illumination)
+
+    def _illumination_for(self, models, snap_steps):
+        """This call's illumination holder, or ``None`` when it is off."""
+        if not self.compute_illumination:
+            return None
+        if snap_steps is not None:
+            raise ValueError("compute_illumination and return_wavefield are exclusive.")
+        from .illumination import Illumination
+        s = tuple(models[0].shape)
+        grid = s == tuple(self.shape) or s[1:] == tuple(self.shape)
+        return Illumination(self, gll_native=not grid)
 
     # ------------------------------------------------------------------ #
     # The eager propagator factory: acquisition -> one SEMPropagator per shot
@@ -2171,7 +2205,7 @@ class PropSEM:
     # ------------------------------------------------------------------ #
     def _forward_eager(self, eq, pershot_eqs, props, acq, *, memory=None,
                        compile_options=None, checkpoint_chunk=None,
-                       store_dtype=None):
+                       store_dtype=None, illumination=None):
         """Run the built props under one memory mode -> ``(nshots, nt, nrec,
         ncomp)``. Reads like ``prop_c.sem_c_forward_shot_batch``: the props carry
         the acquisition, the keywords carry the mode, and the body is the runner
@@ -2202,6 +2236,20 @@ class PropSEM:
         """
         recv_idxs = self._recv_idxs(eq)
         nshots = acq.nshots
+
+        if illumination is not None:
+            # the adjoint wavefield is read off the tape: the full one, shot by
+            # shot. The default strategy gives way, as for snapshots.
+            if (memory == "boundary" or checkpoint_chunk) and self._memory_explicit:
+                raise ValueError(
+                    "compute_illumination on impl='eager' reads the adjoint wavefield "
+                    "off the full tape: it is not available with memory="
+                    f"{'BoundarySaving' if memory == 'boundary' else 'Ckpt'}() there "
+                    "(impl='c' keeps it under boundary saving).")
+            return torch.stack([props[b].forward(acq.wav_per_shot[b],
+                                                 compile_options=compile_options,
+                                                 illumination=illumination)
+                                for b in range(nshots)], 0)
 
         if memory == "boundary":
             if nshots == 1:                          # single shot: no vmap overhead
@@ -2554,12 +2602,14 @@ class PropSEM:
             kind, payload = "moment_tensor", self._src_moment
         else:
             kind, payload = "force", sv
-        return SEMCudaPropagator(
+        prop = SEMCudaPropagator(
             eq=eq, dt=self.dt, nt=self.nt, sources=srcs,
             receivers=self._c_rec_stamps[b],
             source_kinds=[kind] * len(srcs),
             source_payloads=[payload] * len(srcs),
             receiver_type=self._recv_base)
+        prop.illumination = self._illumination
+        return prop
 
     def _forward_c_batched(self, eq, nsh, wav_per_shot, sv, memory,
                            store_dtype, store_dtype_elem):

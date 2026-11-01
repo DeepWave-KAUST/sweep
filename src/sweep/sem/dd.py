@@ -1785,6 +1785,10 @@ class SEMModelParallel:
         the setting that actually pays there. Refused on paths that ring nodes
         only."""
         p = self.prop
+        if getattr(p, "compute_illumination", False):
+            raise NotImplementedError(
+                "compute_illumination is not wired on domain decomposition; run the "
+                "shot on one GPU (impl='c') or on impl='eager'.")
         p._set_nt(wavelet)
         # Flat 3-D acoustic: build the compact source instead of the global
         # equation. Same numbers (the consts contract test pins bit-identity),

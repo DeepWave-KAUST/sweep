@@ -1262,6 +1262,7 @@ class SEMPropagator:
         memory: str | None = None,
         bs_store_dtype=None,
         checkpoint_chunk: int | None = None,
+        illumination=None,
     ):
         """Run the time loop.
 
@@ -1298,6 +1299,10 @@ class SEMPropagator:
         equation, so acoustic gives ``ncomp = 1`` and elastic gives 2 (2-D) or
         3 (3-D).
 
+        ``illumination`` (a :class:`sweep.sem.illumination.Illumination`)
+        accumulates this shot's source illumination as it steps and hooks its
+        wavefields for the receiver one; full tape only.
+
         With ``record_field_every=k`` it returns ``(seis, snaps)`` instead --
         the same shape as FD/JAX's ``(record, wavefield)`` pair -- where
         ``snaps`` is ``(nsnap, ncomp, n_global)`` sampled at time steps
@@ -1314,6 +1319,9 @@ class SEMPropagator:
         layouts = field_layouts(self.eq, recv)
         source_spec, like = self._source_term(per_source, device, dtype)
         step_fn = self._step_fn(compile_options)
+        if illumination is not None and (checkpoint_chunk or memory == "boundary"):
+            raise ValueError("illumination reads the full tape: no checkpointing or "
+                             "boundary saving with it.")
 
         if checkpoint_chunk:
             return self._run_checkpointed(
@@ -1331,6 +1339,8 @@ class SEMPropagator:
                   receiver_gather(self.eq.mesh, self.receivers, lay)[0].to(device)
                   for i, lay in zip(recv, layouts)} if n_rec else {}
         state = self.eq.init_state(self.dt, device, dtype)     # positional tuple
+        sink = (illumination.sink(self.eq, self.dt, state[0])
+                if illumination is not None else None)
         seis = {i: torch.zeros(n_rec, self.nt, dtype=dtype, device=device)
                 for i in recv}
         snaps = {i: [] for i in recv}
@@ -1344,7 +1354,9 @@ class SEMPropagator:
                 s_val = source_wavelet[n]
                 src = [p * s_val for p in source_spec]
             step = step_fn if settled.compiled(n, state) else self.eq.step
-            state = step(state, src, self.dt)
+            old, state = state, step(state, src, self.dt)
+            if sink is not None:
+                sink.after_step(old, state)
 
             if n_rec > 0:
                 for i in recv:

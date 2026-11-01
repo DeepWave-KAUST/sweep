@@ -150,8 +150,11 @@ def _session_handle(what: str, name: str, val):
 # SEM drivers read each with its element type -- int64 / int32 index tables,
 # float32 fields, the bf16 / int8 band rings (whose kind travels as band_kind).
 # The dtype set is what makes the drivers' width checks exact: an 8-byte
-# buffer here is int64, never float64.
+# buffer here is int64, never float64 -- except the fields named in
+# _SEM_FP64_FIELDS, which the drivers read as double: the illumination
+# accumulators, sums of squares over every step (sweep.sem.illumination).
 _sem_dtypes = None
+_SEM_FP64_FIELDS = ("illum",)
 
 
 def _check_sem_dtype(struct_name: str, name: str, t) -> None:
@@ -160,7 +163,8 @@ def _check_sem_dtype(struct_name: str, name: str, t) -> None:
         import torch
         _sem_dtypes = {torch.float32, torch.bfloat16, torch.float16, torch.int8,
                        torch.uint8, torch.int32, torch.int64}
-    if t.dtype not in _sem_dtypes:
+    if t.dtype not in _sem_dtypes and not (name in _SEM_FP64_FIELDS
+                                           and str(t.dtype) == "torch.float64"):
         raise RuntimeError(
             f"{struct_name}.{name}: a {t.dtype} tensor; the SEM drivers read float32, "
             "bfloat16, float16, int8, uint8, int32 or int64 only")

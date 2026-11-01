@@ -118,6 +118,31 @@ EL_CPML_FLAT = EL_CPML_FIELDS + tuple(
 AC_CPML_FIELDS = ("a_x", "b_x", "dbx_dx", "a_z", "b_z", "dbz_dz")
 
 
+def illum_alloc(c, A):
+    """The illumination accumulator a driver hands its entry: zeroed when the
+    call asked for it (``c["illum"]``, a :class:`sweep.sem.illumination.
+    Illumination`), else the empty tensor that switches it off."""
+    if c.get("illum") is None:
+        return A.empty
+    return torch.zeros(A.n, dtype=torch.float64, device=A.dev)   # sums of squares: fp64
+
+
+def illum_source(c, acc, B, ng):
+    """Give the forward's accumulator, summed over the shots, to the call's
+    holder; returns the part its backward fills (``None`` when off)."""
+    holder = c.get("illum")
+    if holder is None:
+        return None
+    return holder.add_nodes(src=acc.reshape(B, ng).sum(0))
+
+
+def illum_receiver(part, acc, B, ng):
+    """The backward's accumulator into the part its forward left."""
+    if part is not None:
+        part.rec = acc.reshape(B, ng).sum(0)
+        part.rec_seen = True
+
+
 def fill(s, c, keys):
     """Copy the constant tables ``keys`` of the consts dict onto the struct."""
     for k in keys:

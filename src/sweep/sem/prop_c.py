@@ -130,7 +130,7 @@ def sem_c_forward_shot_batch(props, wavelet, materials=None, memory=None,
                 "per-shot materials are not wired for the elastic batch "
                 "(its kernels always share one model across the batch)")
         c = _stack_patterns(p0._elastic_cpml_consts(), props, ("pat_x", "pat_z"))
-        c.update(B=B, **flags())
+        c.update(B=B, illum=p0.illumination, **flags())
         comps = _SEMElasticCpmlC.apply(
             t(eq._lam), t(eq._mu), t(eq._lam2mu), t(eq._inv_M),
             t(eq._w_rho_J), wav, c)
@@ -140,7 +140,7 @@ def sem_c_forward_shot_batch(props, wavelet, materials=None, memory=None,
             raise NotImplementedError(
                 "per-shot materials are not wired for the fluid-solid batch "
                 "(the coupled path always shares one model across the batch)")
-        c = _fs_batch_consts(props, memory)
+        c = dict(_fs_batch_consts(props, memory), illum=p0.illumination)
         ac, el = eq.ac, eq.el
         comps = _SEMFluidSolidC.apply(
             t(ac._inv_rho), t(ac._inv_M), t(ac.kappa_node),
@@ -148,7 +148,7 @@ def sem_c_forward_shot_batch(props, wavelet, materials=None, memory=None,
             t(el._w_rho_J), wav, c)
         return _select_components(p0, comps)
     c = _stack_patterns(p0._cpml_consts(), props, ("src_pattern",))
-    c.update(B=B, **flags())
+    c.update(B=B, illum=p0.illumination, **flags())
     if materials is None:
         c["Bm"] = 1
         inv_rho, inv_M, kappa = t(eq._inv_rho), t(eq._inv_M), t(eq.kappa_node)
@@ -373,6 +373,9 @@ _C_ROUTES = (
                              "_forward_acoustic3d_deformed"),
     (AcousticSEM3D,          "_forward_acoustic3d_cpml", "_forward_acoustic3d"),
 )
+# the forward methods whose drivers accumulate the illumination
+# (sweep.sem.illumination); the rest refuse PropSEM.compute_illumination
+_ILLUM_ROUTES = ("_forward_acoustic_cpml", "_forward_elastic_cpml", "_forward_fluid_solid")
 
 # Equations the CUDA dispatch handles: the table's own keys. PropSEM reads
 # THIS to decide whether impl='c' is available. It used to be a second
@@ -693,6 +696,9 @@ def c_boundary_saving_supported(equation, has_cpml) -> bool:
 class SEMCudaPropagator(SEMPropagator):
     """``impl='c'`` propagator (acoustic-potential + elastic; forward + adjoint)."""
 
+    # the call's sweep.sem.illumination.Illumination, set by PropSEM; None = off
+    illumination = None
+
     def _recv_gather(self, m):
         """``(nrec, rec_G, rec_W)`` with the zero-receiver fallback.
 
@@ -829,6 +835,12 @@ class SEMCudaPropagator(SEMPropagator):
                         f"{type(self.eq).__name__} "
                         f"{'with' if cpml is not None else 'without'} a C-PML "
                         f"has no impl='c' kernel; use impl='eager'.")
+                if self.illumination is not None and name not in _ILLUM_ROUTES:
+                    raise NotImplementedError(
+                        f"compute_illumination is not wired on impl='c' for "
+                        f"{type(self.eq).__name__} "
+                        f"{'with' if cpml is not None else 'without'} a C-PML; "
+                        "use impl='eager'.")
                 return getattr(self, name)(wav)
         raise NotImplementedError(
             f"SEM impl='c' supports acoustic-potential, elastic, coupled "
@@ -887,7 +899,7 @@ class SEMCudaPropagator(SEMPropagator):
         Function. ``memory='boundary'`` switches the save-all histories to the
         CPML-band ring (exact reconstruction; gradient identical)."""
         eq = self.eq
-        c = self._stamp_bs(self._cpml_consts())
+        c = dict(self._stamp_bs(self._cpml_consts()), illum=self.illumination)
         inv_rho = eq._inv_rho.to("cuda", torch.float32)
         inv_M = eq._inv_M.to("cuda", torch.float32)
         kappa = eq.kappa_node.to("cuda", torch.float32)
@@ -948,7 +960,7 @@ class SEMCudaPropagator(SEMPropagator):
 
     def _forward_elastic_cpml(self, wav):
         eq = self.eq
-        c = self._stamp_bs(self._elastic_cpml_consts())
+        c = dict(self._stamp_bs(self._elastic_cpml_consts()), illum=self.illumination)
         lam = eq._lam.to("cuda", torch.float32)
         mu = eq._mu.to("cuda", torch.float32)
         lam2mu = eq._lam2mu.to("cuda", torch.float32)
@@ -1176,7 +1188,7 @@ class SEMCudaPropagator(SEMPropagator):
 
     def _forward_fluid_solid(self, wav):
         eq = self.eq
-        c = self._stamp_bs(self._fluid_solid_consts())
+        c = dict(self._stamp_bs(self._fluid_solid_consts()), illum=self.illumination)
         # The band indices are geometry of the ABSORBING LAYER, so the
         # condition is "is there one", not "is this boundary saving" -- the
         # elastic path already builds them that way (_elastic_cpml_consts is
