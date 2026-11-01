@@ -732,11 +732,13 @@ class ModelParallel:
         # dtype-tolerant (_repad_runtime_model casts each tile to the runtime
         # buffer's dtype), so a caller may hand a float64 model to any call
         # after the first; a promotion re-capture that inherited that dtype
-        # would build a float64 probe and the C kernel would reject it
-        # ("expected scalar type Float but found Double"). Pinning the dtype
+        # would build a float64 probe and the forward would refuse it
+        # (impl='c' takes float32 models). Pinning the dtype
         # makes a promoted instance land in exactly the state it would have
         # reached had it been gradient-capable from its first call. None on the
-        # first capture, so that one still infers from the tile as before.
+        # first capture, so that one still infers from the tile as before, and
+        # pinned only once a capture has run: a refused float64 first call that
+        # pinned float64 would rebuild that probe for every float32 call after.
         # The probe asks for exactly the gradients the caller asked for when the
         # compiled layout depends on them (cuda_layout_for_grads), so it binds
         # that layout; every other equation keeps the all-models probe.
@@ -744,7 +746,6 @@ class ModelParallel:
         models = [torch.tensor(t, device=self.dev, dtype=self._model_dtype,
                                requires_grad=need_adjoint and (not per_model or self._grad_mask[i]))
                   for i, t in enumerate(tiles)]
-        self._model_dtype = models[0].dtype
         # The ADJOINT probe is differentiated to grab the backward params, so it
         # needs grad MODE even when the caller has switched it off — but it only
         # ever runs once a gradient has actually been asked for, so the textbook
@@ -779,6 +780,7 @@ class ModelParallel:
         finally:
             impl.forward_func, impl.backward_bs_func = f_orig, b_orig
 
+        self._model_dtype = models[0].dtype
         self.fp, self.bp = cap["fp"], cap.get("bp")
         # The slot table of the layout the probe bound: per call for an equation
         # with cuda_layout_for_grads (AcousticBorn reconstructs 3 grids without

@@ -204,7 +204,8 @@ is read with `solver.imaging(wavelet, sources, receivers, models=..., observed=o
 
 ## 7. Precision
 
-- Everything runs in float32; `impl='c'` refuses float64 models. Accumulate scalar misfits over
+- Everything runs in float32; `impl='c'` refuses any model that is not float32 (`TypeError`),
+  `impl='eager'` casts it. Accumulate scalar misfits over
   many shots in float64 when comparing runs.
 - Eager on Ampere+ GPUs: TF32 convolutions move 3-D gradients by 1e-2..1e-1 relative unless
   `torch.backends.cudnn.allow_tf32 = False` (sweep warns once).

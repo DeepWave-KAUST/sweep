@@ -293,6 +293,23 @@ def _create_disk_files(disk_dir, specs):
             handle.truncate(nbytes)
         files.append(path)
     return root, tuple(files)
+def _require_float32_models(models, names):
+    """Refuse a model that is not float32, by index and name, before anything
+    is built from it. The compiled kernels read every model as float32 and
+    nothing past this point asks: the core's buffer check spoke only of a
+    "boundary storage tag" (float64, int64), a float16 or bfloat16 model tripped
+    an assertion that aborted the process, and an int32 one -- as wide as
+    float32 -- was read as float bits without a word. Refused rather than cast
+    like the wavelet: a float64 model asks for a precision this path does not
+    have, and a cast would hide that."""
+    for i, m in enumerate(models):
+        if torch.is_tensor(m) and m.dtype != torch.float32:
+            name = f" ({names[i]!r})" if i < len(names) else ""
+            raise TypeError(
+                f"impl='c' computes in float32 and takes float32 models; models[{i}]{name} "
+                f"is {m.dtype}. Cast it before the call with .float(). (A NumPy array is "
+                "float64 unless made float32, and np.linspace(a, b, n, np.float32) is "
+                "float64 too: its fourth positional argument is endpoint.)")
 
 
 class Wrapper(torch.autograd.Function):
@@ -1881,7 +1898,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             wavelet: Source wavelet (numpy or torch).
             sources: Source coordinates.
             receivers: Receiver coordinates.
-            models: List of model parameters (must be ``torch.Tensor``).
+            models: List of model parameters, float32 ``torch.Tensor``; any
+                other dtype is a ``TypeError`` (the kernels compute in float32).
         """
 
         boundary_saving_config = self._merge_legacy_call_kwargs(
@@ -1956,6 +1974,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         # Get the model parameters
 
         models = list(models if models is not None else self.parameters())
+        _require_float32_models(models, self.model_names)
         unpadded_models = models
         models = [EdgePadding.apply(para, padding) for para in models]
         self.models_padded = models
