@@ -152,6 +152,30 @@ class SettledSteps:
         return False
 
 
+def init_cuda_before_checkpoint():
+    """Bring CUDA up now if a GPU is visible. Call it before entering a
+    ``torch.utils.checkpoint`` whose forward may run a compiled step.
+
+    Dynamo saves and restores the CUDA RNG state around every trace when
+    ``torch.cuda.is_available()`` (``torch._dynamo.convert_frame.preserve_global_state``),
+    which initializes CUDA on the first trace of the process -- of a step on CPU tensors
+    too. A checkpoint (``preserve_rng_state=True``) refuses that in its forward: with CPU
+    tensors only it watches CUDA, its default device type, and raises "PyTorch's device
+    state was initialized in the forward pass of a Checkpoint". Every later call finds
+    CUDA up and passes, and so does the first wherever something asked for the GPU before
+    -- a shipped core's fit check does -- but a tree without a core, with
+    TORCH_CUDA_ARCH_LIST set, asks nothing. This does the trace's initialization one step
+    early; without a GPU, or with CUDA up (a rollout on the GPU), it does nothing. Where
+    CUDA cannot come up -- a fork of a process that had it up -- it leaves things as they
+    were: a trace there fails as it did, and a step compiled before the fork, which does
+    not trace again, runs as it did."""
+    if not torch.cuda.is_initialized() and torch.cuda.is_available():
+        try:
+            torch.cuda.init()
+        except RuntimeError:
+            pass
+
+
 def _resolve_is_compiling():
     """The "is Dynamo tracing this?" probe: ``torch.compiler.is_compiling``, or on
     older 2.x (2.1 has ``torch.compiler`` without it) ``torch._dynamo``'s (the same

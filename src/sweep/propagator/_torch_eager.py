@@ -9,7 +9,8 @@ from torch.utils.checkpoint import checkpoint as ckpt_torch
 
 
 from sweep._compile import (SettledSteps as _SettledSteps, compile_notice,
-                            compiler_failures as _compiler_failures, compiler_hint, failure_reason)
+                            compiler_failures as _compiler_failures, compiler_hint, failure_reason,
+                            init_cuda_before_checkpoint)
 from sweep.propagator.base import PropBase
 from sweep.propagator.options import EAGER_DEFAULTS, _check_steps_per_call
 from sweep.equations._cpml import StripLayout
@@ -856,6 +857,10 @@ class _PropTorchEager(
                 compiled = n == k and settled.first is not None
                 chunk_records.append(block)
                 start += n
+        if self.use_compile:
+            # The first compile of the process initializes CUDA, which the
+            # checkpointed forward it runs in refuses (sweep._compile).
+            init_cuda_before_checkpoint()
 
         for start_t in range(start, nt, chunk_size):
 
