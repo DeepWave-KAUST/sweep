@@ -471,8 +471,8 @@ __global__ void acoustic_vrz2nd_adjoint(
         const float* aq0_b = aq0 + b * spatial_size;
         const float* aqx_b = aqx + b * spatial_size;
         const float* aqz_b = aqz + b * spatial_size;
-        float lap_x = laplace<2, Order, X>(aq0_b, ix, 0, iz, lap_ctx);
-        float lap_z = laplace<2, Order, Z>(aq0_b, ix, 0, iz, lap_ctx);
+        float lap_x = laplace_diff<2, Order, X>(aq0_b, ix, 0, iz, lap_ctx);
+        float lap_z = laplace_diff<2, Order, Z>(aq0_b, ix, 0, iz, lap_ctx);
         float gx = gradient<2, Order, X>(aqx_b, ix, 0, iz, grad_ctx);
         float gz = gradient<2, Order, Z>(aqz_b, ix, 0, iz, grad_ctx);
         float rhs = (lap_x + lap_z) - gx - gz;
@@ -486,8 +486,8 @@ __global__ void acoustic_vrz2nd_adjoint(
     const float* z_b = z + b * spatial_size;
     const float* inv_z_b = inv_z + b * spatial_size;
 
-    float lap_x = laplace<2, Order, X>(f.u_now, ix, 0, iz, lap_ctx);
-    float lap_z = laplace<2, Order, Z>(f.u_now, ix, 0, iz, lap_ctx);
+    float lap_x = laplace_diff<2, Order, X>(f.u_now, ix, 0, iz, lap_ctx);
+    float lap_z = laplace_diff<2, Order, Z>(f.u_now, ix, 0, iz, lap_ctx);
 
     float dqdx = gradient<2, Order, X>(f.u_now, ix, 0, iz, grad_ctx);
     float dqdz = gradient<2, Order, Z>(f.u_now, ix, 0, iz, grad_ctx);

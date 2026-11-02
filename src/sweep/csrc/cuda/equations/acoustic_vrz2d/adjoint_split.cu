@@ -143,7 +143,7 @@ __global__ void __launch_bounds__(256) vrz2d_adj_ring(
     const int sz = solver.nx;
     const float dt2 = solver.dt * solver.dt;
 
-    const float* lc = lap_ctx.coeff;    // [c0(centre), c1..cM]
+    const float* lc = lap_ctx.coeff;    // [c0 (centre, unused), c1..cM]
     const float* gc = grad_ctx.coeff;   // [_, c1..cM] (antisymmetric)
     const float invdx2 = 1.0f / (lap_ctx.dx * lap_ctx.dx);
     const float invdz2 = 1.0f / (lap_ctx.dz * lap_ctx.dz);
@@ -175,7 +175,8 @@ __global__ void __launch_bounds__(256) vrz2d_adj_ring(
     #define VRZ_GTMP_Z(n, niz) ( cpml.bz[niz] * f.zetaz[n] + (1.0f + cpml.bz[niz]) * VRZ_GW(n) )
 
     // X: L((1+b)·gtmp), D(b·ψ* + db·gtmp + (1+b)·Cx·dt²·λ), D(a·gtmp)
-    float Lx_gl = -lc[0] * ((1.0f + bx_) * gtmpx0);
+    const float lx0 = (1.0f + bx_) * gtmpx0;   // centre tap, difference form
+    float Lx_gl = 0.0f;
     float Dx_gg = 0.0f, Dx_gq = 0.0f;
     #pragma unroll
     for (int k = 1; k <= halo; ++k) {
@@ -186,7 +187,7 @@ __global__ void __launch_bounds__(256) vrz2d_adj_ring(
         float bxp = cpml.bx[nixp], bxm = cpml.bx[nixm];
         float dbp = Pp ? cpml.dbxdx[nixp] : 0.0f, dbm = Pm ? cpml.dbxdx[nixm] : 0.0f;
         float ap  = Pp ? cpml.ax[nixp]    : 0.0f, am  = Pm ? cpml.ax[nixm]    : 0.0f;
-        Lx_gl += lc[k] * ((1.0f + bxp) * tp + (1.0f + bxm) * tm);
+        Lx_gl += lc[k] * (tap_diff((1.0f + bxp) * tp, lx0) + tap_diff((1.0f + bxm) * tm, lx0));
         Dx_gg += gc[k] * ((bxp * f.psix[np] + dbp * tp + (1.0f + bxp) * Cx_b[np] * dt2 * lam[np])
                         - (bxm * f.psix[nm] + dbm * tm + (1.0f + bxm) * Cx_b[nm] * dt2 * lam[nm]));
         Dx_gq += gc[k] * (ap * tp - am * tm);
@@ -194,7 +195,8 @@ __global__ void __launch_bounds__(256) vrz2d_adj_ring(
     Lx_gl *= invdx2; Dx_gg *= invdx; Dx_gq *= invdx;
 
     // Z
-    float Lz_gl = -lc[0] * ((1.0f + bz_) * gtmpz0);
+    const float lz0 = (1.0f + bz_) * gtmpz0;   // centre tap, difference form
+    float Lz_gl = 0.0f;
     float Dz_gg = 0.0f, Dz_gq = 0.0f;
     #pragma unroll
     for (int k = 1; k <= halo; ++k) {
@@ -205,7 +207,7 @@ __global__ void __launch_bounds__(256) vrz2d_adj_ring(
         float bzp = cpml.bz[nizp], bzm = cpml.bz[nizm];
         float dbp = Pp ? cpml.dbzdz[nizp] : 0.0f, dbm = Pm ? cpml.dbzdz[nizm] : 0.0f;
         float ap  = Pp ? cpml.az[nizp]    : 0.0f, am  = Pm ? cpml.az[nizm]    : 0.0f;
-        Lz_gl += lc[k] * ((1.0f + bzp) * tp + (1.0f + bzm) * tm);
+        Lz_gl += lc[k] * (tap_diff((1.0f + bzp) * tp, lz0) + tap_diff((1.0f + bzm) * tm, lz0));
         Dz_gg += gc[k] * ((bzp * f.psiz[np] + dbp * tp + (1.0f + bzp) * Cz_b[np] * dt2 * lam[np])
                         - (bzm * f.psiz[nm] + dbm * tm + (1.0f + bzm) * Cz_b[nm] * dt2 * lam[nm]));
         Dz_gq += gc[k] * (ap * tp - am * tm);

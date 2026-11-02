@@ -1204,6 +1204,21 @@ and this project adheres to
   and the constants of its order 4, 6 and 8 kernels: 4.2e-5 at 1.25 m and
   1.8e-5 at 0.625 m (eager 4.1e-5 and 1.3e-5), with every kernel's registers
   unchanged.  At ~20 points per wavelength records move by 1e-5.
+- **`impl='c'` takes the second derivative in difference form.** Summed as
+  `c_k (u_k + u_-k) - c0 u0`, the partial sums climb to `~c0 u0` before the
+  centre comes off, and their float32 rounding set a floor on fine grids: at
+  `dh` 0.625 m (Courant 0.2) records stopped at 4.3e-5, 5.7e-5 and 2.7e-4 at
+  orders 6, 8 and 10, and adjoint records (read through the wavelet gradient)
+  at 7.3e-4 to 8.5e-4 at every order.  As `c_k ((u_k - u0) + (u_-k - u0))`
+  records reach 1.7e-5 to 1.8e-5 (eager 1.5e-5 to 2.0e-5), adjoint records
+  1.7e-5 to 2.1e-5 at orders 6-10 and 1.4e-4 at order 4.  Two forwards keep
+  the summed form, bit for bit as before: order 4, where at small Courant
+  numbers the difference form loses what the order-4 stencil adds to the
+  order-2 one (3.2e-5 against 1.8e-5 summed), and the qP family (`AcousticVTI`,
+  `AcousticTTI` and their Born pair) at every order, whose forward ran up to 6%
+  slower in difference form on a V100.  Other forwards move by less than 2%;
+  the backward is 3-7% faster for the 3-D acoustic and Born equations and up
+  to 3% slower in 2-D (acoustic order 8, VRZ order 6).
 - `PropSEM(memory=BoundarySaving(storage_dtype='fp16'))` is refused on both
   backends. The eager ring stored a plain fp16 cast, which flushes the SEM's
   small field values to zero: 2-D elastic gradients came out 15% and 2-D
