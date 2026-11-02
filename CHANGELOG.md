@@ -26,6 +26,29 @@ and this project adheres to
   skill.  The docs page *AI assistants (Agent Skills)* covers the install,
   and `test/test_skill_snippets.py` runs every code block of the skill so
   its examples cannot fall behind the API.
+- **Plane-wave incidence on the SEM, SPECFEM2D's `initialfield`: `sweep.sem.PlaneWave` in
+  place of the source coordinates** (`prop(wavelet, PlaneWave("SV", 30.0), receivers, ...)`).
+  A plane P or SV wave from below at any angle, a Rayleigh wave along the surface, or a plane
+  SH wave, with the half-space's reflected and converted waves under a free top, the incident
+  wave alone under an absorbing one. On `ElasticSEM2DDeformed`, `ViscoElasticSEM2DDeformed`
+  and `ElasticSHSEM2DDeformed`, `impl='eager'`, every memory mode. The wave enters through a
+  band of elements one element thick around a box (the domain reduction method; the loads
+  `-K_be u0_e` and `K_eb u0_b` on the band's nodes): inside the box the run carries the whole
+  field, from the band out only what the box scatters, which the C-PML absorbs. SPECFEM2D
+  feeds the wave through its Stacey edges instead (Bielak's conditions). The plane wave is
+  computed in the frequency domain from the wavelet's samples, one traction-free solve below,
+  at and past the critical angle (where the reflected P wave is evanescent);
+  `PropSEM.free_field` gives it at any points. Inside the box the medium is free (a
+  topography, a basin, attenuation); outside it must be the uniform elastic background under a
+  flat surface, and anything else is refused, as are `impl='c'` (one wavelet per shot) and a
+  wave already on the band at the first step. In a flat half-space the records inside the box
+  are the plane wave to the leapfrog's error. Against SPECFEM2D 8.1.0 (double precision,
+  `test/sem/specfem_compare/run_compare_planewave.py`): in a domain whose Stacey edges are far
+  from the receivers the two agree to 1.3e-4 to 2.5e-4, under a soft basin too; in a small one
+  SPECFEM2D's edges put 2e-3 to 5e-3 of their own into its records, where ours meet the plane
+  wave to 1.6e-4 to 4.2e-4, past the critical angle and for the Rayleigh wave as well. In SH
+  SPECFEM2D's Stacey edges take no Bielak terms, and its records near them miss the plane wave
+  by up to 20% (`test/sem/test_sem_plane_wave.py`). Notebook 50.
 - **The nonlinear constant-Q fit, SPECFEM2D's `USE_SOLVOPT`: `fit="nonlinear"`** on
   `ViscoElasticSEM2DDeformed` and `ViscoAcousticPotentialSEM2D` (`equation_options`). The
   relaxation frequencies are fitted with the strengths, for each Q, both kept positive, by

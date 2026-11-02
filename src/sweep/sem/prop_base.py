@@ -694,6 +694,16 @@ class _Acq:
 
 
 
+class _PlaneWaveShot:
+    """The acquisition of a plane-wave call, as the eager runners read an :class:`_Acq`:
+    one shot, the band's loads its per-source wavelet."""
+
+    __slots__ = ("receivers", "nshots", "wav_per_shot")
+
+    def __init__(self, receivers, loads):
+        self.receivers, self.nshots, self.wav_per_shot = receivers, 1, [loads]
+
+
 def _minus_kappa(eq):
     """``-(lambda + 2 mu / 3)`` on a solid's elements: the factor of ``div u`` in the pressure
     SPECFEM's seismograms take (plane strain in 2-D). The moduli the step uses, else from the
@@ -987,6 +997,8 @@ class PropSEM:
         # the FD ``source_type`` / ``receiver_type`` convention.
         _stamp = getattr(equation, "propsem_source", None)
         n_src = sum(f.supports_source for f in equation.field_specs)
+        # a plane wave carries its own load, which a source_type would not reach
+        self._source_type_given = source_type is not None
         # the vector equations (a force with one component per axis) also
         # take the FD names; see _resolve_vector_source
         self._src_force_axes, self._src_moment = None, None
@@ -1910,6 +1922,10 @@ class PropSEM:
         self._set_nt(wavelet)
         snap_steps = _resolve_snapshot_steps(self.nt, return_wavefield,
                                              snapshot_times, snapshot_interval)
+        from .plane_wave import PlaneWave
+        if isinstance(sources, PlaneWave):
+            return self._forward_plane_wave(wavelet, sources, receivers, models, snap_steps,
+                                            source_vector=source_vector, pml_guard=pml_guard)
         acq = _Acq(self, wavelet, sources, receivers, source_vector,
                    potential_wavelet=self._pressure_wavelet and return_wavefield)
         self._illumination = self._illumination_for(models, snap_steps)
@@ -1956,6 +1972,118 @@ class PropSEM:
                                            compile_options=compile_options)
         return self._forward_eager(eq, pershot_eqs, props, acq,
                                    memory=self._memory,
+                                   compile_options=compile_options,
+                                   checkpoint_chunk=self._ckpt_chunk,
+                                   store_dtype=self._bs_store,
+                                   illumination=self._illumination)
+
+    # ------------------------------------------------------------------ #
+    # Plane-wave incidence (sweep.sem.plane_wave): one shot whose source is the
+    # band's nodal loads, a time series per node and component
+    # ------------------------------------------------------------------ #
+    def _plane_wave_band(self, eq, wave):
+        """The injection band of ``wave`` on ``eq``: its box (model grid units, on element
+        edges; default one element in from the model's edges, from the top down when the
+        top is free) as element ranges of the padded mesh."""
+        from .plane_wave import injection_band
+        if self.ndim != 2:
+            raise NotImplementedError("plane-wave incidence is wired for the 2-D SEM")
+        no, (pz, px), (nz, nx) = self.n_order, self._pad0, self.shape
+        # the top is free unless an absorbing layer sits on it (abcn=0: every side is)
+        top_free = "top" in self.free_surface or self.abcn_elements == 0
+        if wave.box is None:
+            (x0, z0), (x1, z1) = (no, 0 if top_free else no), (nx - 1 - no, nz - 1 - no)
+        else:
+            (x0, z0), (x1, z1) = wave.box
+
+        def edge(v, pad, name):
+            k = (float(v) + pad) / no
+            if abs(k - round(k)) > 1e-9:
+                raise ValueError(
+                    f"the plane wave's box has {name} = {v}, not on an element edge (a "
+                    f"multiple of n_order = {no} in model grid units)")
+            return int(round(k))
+
+        ex0, ex1 = edge(x0, px, "x0"), edge(x1, px, "x1")
+        ez0, ez1 = edge(z0, pz, "z0"), edge(z1, pz, "z1")
+        # the model's elements, [lo, hi) per axis: the band must lie among them
+        lo_x, lo_z = px // no, pz // no
+        hi_x, hi_z = lo_x + (nx - 1) // no, lo_z + (nz - 1) // no
+        if not (ex0 - 1 >= lo_x and ex1 + 1 <= hi_x and ez1 + 1 <= hi_z
+                and (ez0 == 0 or ez0 - 1 >= lo_z) and ex0 < ex1 and ez0 < ez1):
+            raise ValueError(
+                f"the plane wave's box {((x0, z0), (x1, z1))} leaves no room for its band "
+                f"(one element around it) inside the model {self.shape}")
+        origin = None if wave.origin is None else self._coords(wave.origin)
+        return injection_band(eq, wave, rows=(ez0, ez1), cols=(ex0, ex1),
+                              nex=self._elems_pad[-1], top_free=top_free, origin=origin)
+
+    def free_field(self, wavelet, wave, points, models):
+        """The plane wave ``wave`` of the background ``models`` have outside its box --
+        what the records inside the box would be with nothing there to scatter -- at
+        ``points`` ``(n, 2)`` (model grid units, x first): the displacement ``(n, nt, 2)``
+        (z down; SH's ``u_y``: ``(n, nt, 1)``; float64) at the records' times."""
+        if self._use_c:
+            raise NotImplementedError("plane-wave incidence runs on impl='eager'")
+        self._set_nt(wavelet)
+        eq, pershot = self._resolve_model_batch(models)
+        if pershot is not None:
+            raise ValueError("free_field takes one model, not a per-shot batch")
+        free = self._plane_wave_band(eq, wave).free
+        xz = torch.tensor([self._coords(q) for q in torch.as_tensor(points).reshape(-1, 2)],
+                          dtype=torch.float64)
+        w = torch.as_tensor(wavelet).to(device=self.dev, dtype=torch.float64)
+        # the record of step n is the state it makes, at (n + 1) dt
+        u = free.displacement(xz[:, 0], xz[:, 1], w, self.dt, self.nt, t0=self.dt)
+        return u.transpose(1, 2)
+
+    def _forward_plane_wave(self, wavelet, wave, receivers, models, snap_steps, *,
+                            source_vector=None, pml_guard="warn"):
+        """``_forward_fields`` for a :class:`~sweep.sem.plane_wave.PlaneWave`: one shot,
+        the band's loads as per-source series on its nodes, through the eager runners."""
+        from .plane_wave import band_injection
+        from .propagator import _check_pml_placement, build_point_stamps, locate_points
+        if self._use_c:
+            raise NotImplementedError(
+                "plane-wave incidence runs on impl='eager': its loads are a time series per "
+                "band node, and the C kernels take one shared wavelet")
+        if source_vector is not None:
+            raise ValueError("source_vector is a point force's direction; a plane wave "
+                             "carries its own load")
+        if self._source_type_given:
+            raise ValueError(
+                f"source_type={self.source_type} is what a point source drives; a plane wave "
+                "carries its own load (forces on its band): build the propagator without "
+                "source_type for it")
+        wavelet = torch.as_tensor(wavelet)
+        if wavelet.dim() != 1:
+            raise ValueError(f"a plane wave takes one (nt,) wavelet; got "
+                             f"{tuple(wavelet.shape)}")
+        receivers = torch.as_tensor(receivers)
+        if receivers.dim() != 3 or receivers.shape[0] != 1 or receivers.shape[2] != 2:
+            raise ValueError(f"a plane wave is one shot: receivers must be (1, nrec, 2); "
+                             f"got {tuple(receivers.shape)}")
+        eq, pershot = self._resolve_model_batch(models)
+        if pershot is not None and len(pershot) != 1:
+            raise ValueError(f"a plane wave is one shot; the per-shot models carry "
+                             f"B={len(pershot)}")
+        inj = band_injection(eq, self._plane_wave_band(eq, wave), wavelet, self.dt, self.nt)
+
+        xz = self._rec_row(receivers, 0)
+        _check_pml_placement(eq, [], xz, pml_guard)
+        locate_points(eq.mesh, xz)
+        prop = inj.propagator(eq, self.dt, self.nt,
+                              self._with_gradients(build_point_stamps(eq.mesh, xz), xz),
+                              receiver_type=list(self._recv_base))
+        prop.grid_label = self._grid_label()
+        acq = _PlaneWaveShot(receivers, inj.wavelet(self.dtype))
+        self._spatial_call = (receivers, eq, pershot) if self._spatial else None
+        self._illumination = self._illumination_for(models, snap_steps)
+        compile_options = self._compile_options()
+        if snap_steps is not None:
+            return self._forward_snapshots([prop], acq, snap_steps,
+                                           compile_options=compile_options)
+        return self._forward_eager(eq, pershot, [prop], acq, memory=self._memory,
                                    compile_options=compile_options,
                                    checkpoint_chunk=self._ckpt_chunk,
                                    store_dtype=self._bs_store,

@@ -64,10 +64,12 @@ from .propagator import (SEMPropagator, PointStamp, PointStamp3D, EdgeStamp, Gra
                          build_point_stamp, build_point_stamps, build_moment_stamp,
                          locate_points)
 from .prop_base import PropSEM
+from .plane_wave import PlaneWave
 from .boundary_saving import run_boundary_saved
 from .discretization import suggest_discretization, SEMDiscretization
 
 __all__ = [
+    "PlaneWave",
     "gll_nodes_weights",
     "lagrange_derivative_matrix",
     "Quad4Mesh",

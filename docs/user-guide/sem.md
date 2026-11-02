@@ -729,6 +729,120 @@ solid angles there. A force needs none of this; its stamp has no derivative.
 the point load, the shares, the mirror symmetry of an explosion on a corner and
 Hex27 against Hex8.
 
+## Plane-wave incidence
+
+`sources` may be a `PlaneWave`: a plane P, SV or SH wave from below, or a Rayleigh wave along
+the surface, SPECFEM2D's `initialfield`. P, SV and Rayleigh waves run on
+`ElasticSEM2DDeformed` and `ViscoElasticSEM2DDeformed`, SH waves on `ElasticSHSEM2DDeformed`,
+on `impl='eager'`:
+
+```python
+from sweep.sem import ElasticSEM2DDeformed, PlaneWave, PropSEM
+
+prop = PropSEM(ElasticSEM2DDeformed, shape=(201, 401), dh=10.0, dt=1e-3, free_surface=True,
+               impl="eager", receiver_type=["u_x", "u_z"])
+wave = PlaneWave("SV", 25.0)                # 25 degrees from the vertical, towards +x
+seis = prop(wavelet, wave, receivers, models=[vp, vs, rho])
+free = prop.free_field(wavelet, wave, receivers[0], [vp, vs, rho])   # the plane wave alone
+```
+
+| `PlaneWave` | the wave | the wavelet is | SPECFEM2D `source_type` |
+| --- | --- | --- | --- |
+| `("P", a)` | a plane P wave `a` degrees from the vertical, towards +x for `a > 0` | the incident displacement along the propagation direction | 1 |
+| `("SV", a)` | a plane SV wave; past the critical angle its reflected P wave is evanescent | the incident displacement along `(cos a, sin a)` (x, z down), its mirror image for `a < 0` | 2 |
+| `("SH", a)` | a plane SH wave, reflected whole by the free surface | the incident `u_y` | 2 with `P_SV = .false.` |
+| `("Rayleigh", 90)`, `("Rayleigh", -90)` | a Rayleigh wave along the surface, towards +x or -x | the horizontal displacement on the surface | 3 |
+| any, under an absorbing top | the whole-space wave, without the surface's reflections | as above | 4, 5 |
+
+The wave enters through a band of elements one element thick around a box: the domain
+reduction method (Bielak et al., 2003). Inside the box the run carries the whole field, the
+plane wave of the background and what the medium in the box scatters. From the band out it
+carries only the scattered field, which the C-PML absorbs. With `u0` the plane wave, `b` the
+box's boundary nodes and `e` the band's other nodes, the band's elements are loaded with
+`P_b = -K_be u0_e` and `P_e = K_eb u0_b`, `K` their stiffness; the mass is diagonal, so no
+mass term enters. SPECFEM2D starts its run with the plane wave in the mesh and feeds it
+through its Stacey edges instead (Bielak's conditions, which its code ties to Stacey).
+
+Inside the box the medium is free: a topography, layers, a basin, attenuation. Outside it --
+the band, any margin and the absorbing layer -- it must be the uniform elastic background
+under a flat free surface, the plane wave's half-space; anything else is refused, as is a band
+that reaches into the absorbing layer.
+
+- **The plane wave.** With a free top it carries the half-space's reflected and converted
+  waves; under an absorbing top, the incident wave alone. It is computed in the frequency
+  domain from the wavelet's samples, so a delay is the band-limited one. One traction-free
+  solve gives the reflections at any angle: past the critical angle the reflected P wave is
+  evanescent, and a Rayleigh wave is two evanescent waves, each decaying with depth at a rate
+  set by the frequency. Below the critical angle it is SPECFEM2D's formulas to 2e-14
+  (`test/sem/test_sem_plane_wave.py`); past it, and as a Rayleigh wave, it solves the wave
+  equation with a free surface, and its Rayleigh speed is SPECFEM2D's to 1e-15.
+- **`origin`** (model grid units, x first) is where the wavelet is the incident displacement.
+  The default is the band's node the wave reaches first, so a wavelet that starts at rest
+  starts the run at rest. A run must start at rest: a wave already on the band at the first
+  step (more than 1e-3 of its peak) is refused. A Rayleigh wave's vertical motion, like an
+  evanescent wave's, is the wavelet's Hilbert transform, whose tails run ahead of the pulse;
+  a Ricker needs about 4.5 periods of delay there instead of 1.5.
+- **`box`** is `((x0, z0), (x1, z1))` in model grid units, on element edges. The default is one
+  element in from the model's edges, from the top down when the top is free. With a
+  topography the element rows follow the surface, and `z0`, `z1` count them (`n_order` grid
+  rows each).
+- **The records.** Inside the box they carry the whole field, in the band a mix, outside it the
+  scattered field alone. `free_field(wavelet, wave, points, models)` gives the plane wave at any
+  points on the records' times: in a flat half-space the records inside the box are that, to
+  the run's own error.
+- **Gradients.** The loads are a fixed source computed from the background, with no gradient
+  to the model through them; the model inside the box takes its gradient as with any source.
+  The loads are linear in the wavelet and carry its gradient.
+- **Cost.** The loads are a time series per band node and component, `2 n_band nt` values
+  (half that in SH): 160 MB in fp64 for 5000 band nodes over 2000 steps. Every eager memory mode runs them (`Full()`,
+  `Ckpt()`, `BoundarySaving()`). `impl='c'` takes one wavelet per shot and refuses them.
+
+The run's error inside the box is the leapfrog's error in time. In a flat half-space (an SV
+wave at 20 degrees, 10 Hz, 20 m elements: 8 points per wavelength at 25 Hz) it is 1.4e-3 of the
+peak with a 0.4 ms step and 4.1e-4 with 0.2 ms, the leak outside the band falling from 1.6e-4
+to 3.9e-5; halving the elements then moves it to 3.5e-4. Against SPECFEM2D:
+
+`test/sem/specfem_compare/run_compare_planewave.py` runs the cases of
+`make_specfem_planewave_cases.py`: the rock vp 2, vs 1, rho 1 (no dimensions, as SPECFEM2D's
+own plane-wave examples), elements of 0.1, a Ricker of f0 = 1, dt = 2^-9, SPECFEM2D 8.1.0 in
+double precision with its Stacey edges and Bielak's conditions on the sides and bottom. Ours
+starts earlier, at rest, and the records are aligned on the plane wave's time. Relative L2 over
+all receivers and components:
+
+| Case (domain) | ours vs the plane wave | SPECFEM2D vs the plane wave | ours vs SPECFEM2D |
+| --- | --- | --- | --- |
+| P at 30° (8 x 4) | 2.0e-4 | 2.9e-3 | 3.0e-3 |
+| SV at 20° (8 x 4) | 3.7e-4 | 2.3e-3 | 2.3e-3 |
+| SV at 40°, past the critical angle (8 x 4) | 4.2e-4 | 2.0e-3 | 2.0e-3 |
+| Rayleigh (8 x 4) | 4.0e-4 | 2.5e-3 | 2.7e-3 |
+| SH at 30° (8 x 4) | 3.9e-4 | 1.0e-1 | 1.0e-1 |
+| P at 20° in a whole space (8 x 4, Stacey on all four sides) | 1.6e-4 | 4.7e-3 | 4.8e-3 |
+| P at 30° (24 x 12) | 2.4e-4 | 2.5e-4 | 1.3e-4 |
+| SV at 20° (24 x 12) | 4.6e-4 | 2.4e-4 | 2.4e-4 |
+| SH at 30° (24 x 12) | 4.8e-4 | 2.7e-4 | 2.3e-4 |
+| SV at 20° under a soft basin (24 x 12) | — | — | 2.5e-4 |
+
+- SPECFEM2D starts with the exact plane wave in its mesh; ours is the one the mesh carried in
+  from the band. Each run is off the plane wave by its own discretization error.
+- In the small domain SPECFEM2D's Stacey edges, 1 to 3 from the receivers, add 2e-3 to 5e-3
+  of their own. In the large one they are far from the receivers, and the two runs agree to
+  1.3e-4 to 2.5e-4, under the basin (vs 0.5, 2 wide and 0.4 deep) as well.
+- SPECFEM2D's amplitude conventions, which the script also fits: below the critical angle
+  the incident displacement at its reference point is the Ricker `R(t - t0)` (fitted 0.999996
+  to 1.0002). Past it and for the Rayleigh wave it is
+  `-0.5 R(t - 1.2 / f0)`, from its frequency-domain field (`paco_beyond_critical`; fitted
+  -0.50007 and -0.50028). In SH it is `cos(a) R`, the x component of its SV polarization
+  (0.866027 at 30°).
+- In SH, SPECFEM2D's Stacey edges take no Bielak terms: the SH branch of
+  `compute_stacey_elastic.f90` damps `rho vs v_y` alone, so the incident wave is not fed in
+  there and the records near the edges miss the plane wave by up to 20% of the peak.
+- SPECFEM2D computes its frequency-domain field point by point, at 32768 frequencies in the
+  large domain, which made those cases too slow to run (under 500 of 460000 points in ten
+  minutes). The past-critical and Rayleigh cases are compared in the small domain only.
+
+Notebook 50 runs an SV wave in the flat half-space, past the critical angle, a Rayleigh wave,
+a hill and a canyon, and a soft basin.
+
 ## Anisotropic media
 
 `ElasticVTISEM2DDeformed` is the velocity-stress elastic SEM in a VTI medium, one with a
@@ -1707,6 +1821,7 @@ receivers):
 | `ViscoElasticSEM2DDeformed` | the rock with Qkappa = Qmu = 30 read at 15 Hz, an explosion; with Qkappa = 60, Qmu = 20 read as unrelaxed, a force | 7e-14 |
 | `ViscoElasticSEM2DDeformed`, `fit="nonlinear"` | Qkappa = 30, Qmu = 10 with SPECFEM2D's `USE_SOLVOPT`, a force | 2e-5; 6e-14 on SPECFEM2D's own mechanisms |
 | `ViscoAcousticPotentialSEM2D` | the water with Qkappa = 30, SPECFEM2D's conventions | 3e-2; 8e-13 with SPECFEM2D's memory-update line |
+| `ElasticSEM2DDeformed`, `ElasticSHSEM2DDeformed`, a `PlaneWave` | plane P, SV and SH waves and an SV wave under a soft basin, SPECFEM2D's `initialfield` far from its Stacey edges | 1.3e-4 to 2.5e-4, each run's own error (see [Plane-wave incidence](#plane-wave-incidence)) |
 
 Matching the two codes takes these conventions on our side:
 

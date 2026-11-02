@@ -104,6 +104,14 @@ the FD classes. `models=` per class: `api-signatures.md`.
   force), `["sxx", "szz"]` = explosion (moment rate), `["sxz"]` = shear moment. Forces and
   stresses cannot be mixed in one call; in 3-D the stress names are `sxx, syy, szz, sxy, sxz,
   syz`.
+- Plane waves (SPECFEM2D's `initialfield`): pass `sweep.sem.PlaneWave("P"|"SV"|"SH"|"Rayleigh",
+  angle)` as `sources` (`impl='eager'`; `ElasticSEM2DDeformed`, `ViscoElasticSEM2DDeformed`;
+  SH on `ElasticSHSEM2DDeformed`). The wavelet is the incident displacement where the wave first
+  reaches the injection band (`origin`); the band rings a `box` (default one element in from the
+  model's edges). Outside the box the medium must be the uniform elastic background under a flat
+  surface; inside it anything goes. `prop.free_field(wavelet, wave, points, models)` gives the
+  plane wave alone. Build the propagator without `source_type`; a Rayleigh wave needs ~4.5
+  periods of wavelet delay.
 
 ## 6. Memory, batching, multi-GPU
 
