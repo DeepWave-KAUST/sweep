@@ -917,6 +917,12 @@ class DASZhao(FirstOrderEquation):
 
     default_pml_type = "cpmls"  # staggered-grid CPML: step_das_zhao_2d unpacks 8 profiles
     takes_invariants = True
+    # The step has no free-surface treatment (eager or CUDA): a free surface
+    # would only drop the top PML and leave the bare grid edge.
+    supports_free_surface = False
+    free_surface_unsupported_reason = (
+        "its step has no free-surface boundary condition (only the top PML "
+        "would be dropped); for DAS under a free surface use DASMu")
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch"):
         """Build the 2-D Zhao DAS equation operator.
@@ -1061,6 +1067,11 @@ class DASZhao3D(FirstOrderEquation):
 
     default_pml_type = "cpmls"  # staggered-grid CPML: step_das_zhao_3d unpacks 12 profiles
     takes_invariants = True
+    # No free-surface treatment in the step (eager or CUDA); see DASZhao.
+    supports_free_surface = False
+    free_surface_unsupported_reason = (
+        "its step has no free-surface boundary condition (only the top PML "
+        "would be dropped); for DAS under a free surface use DASMu3D")
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch"):
         """Build the 3-D Zhao DAS equation operator.

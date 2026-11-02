@@ -171,7 +171,8 @@ fastest backward), `BoundarySaving(storage="gpu"|"cpu"|"disk", storage_dtype=...
     (measured). Use `Acoustic` / `Elastic` for free-surface work. Also: its default
     `backend` is `'jax'`; pass `backend='torch'` for PropTorch.
 13. **Anisotropic equations refuse any free surface** (`NotImplementedError`), including the one
-    implied by `topography=`.
+    implied by `topography=`. So do `DASZhao`/`DASElastic` (2-D and 3-D, no free-surface
+    condition in their step); use `DASMu`/`DASMu3D` for DAS under a free surface.
 14. **Wavelet sign vs deepwave:** for the same wavelet sweep's `Acoustic` record is the
     negative of `deepwave.scalar`'s (correlation -0.997 measured) and amplitudes are scaled
     differently. Negate the wavelet when porting, and calibrate amplitudes.

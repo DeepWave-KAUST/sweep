@@ -160,6 +160,8 @@ be combined with `topography=`.
 ## 6. What is refused (raises rather than running the wrong physics)
 
 - Free surface on anisotropic equations, including via `topography=`.
+- Free surface on `DASZhao`/`DASElastic` and their 3-D forms (no free-surface condition in the
+  step); `DASMu`/`DASMu3D` have one.
 - Per-edge free surface / per-face `abcn` on 3-D or on equations other than 2-D
   `Acoustic`/`Elastic`/`ViscoAcoustic`/`ViscoElastic`; per-face `abcn` on `impl='c'`.
 - `topo_method='apm'` (removed); anything except `'auto'`/`'image'`.
