@@ -118,7 +118,9 @@ EQUATIONS = [
     pytest.param(Elastic, (40, 44), {}, id="elastic2d"),
     pytest.param(Elastic, (40, 44), {"free_surface": True}, id="elastic2d_free_surface"),
     # Small enough that the wave reaches the bottom and both sides in 60 steps.
-    pytest.param(Elastic, (10, 14), {"free_surface": ["bottom", "left", "right"]},
+    # A closed box: free bottom + left + right with a PML only on top is a plate
+    # layout, which the propagator refuses for a solid.
+    pytest.param(Elastic, (10, 14), {"free_surface": ["top", "bottom", "left", "right"]},
                  id="elastic2d_per_edge_free_surface"),
     pytest.param(Elastic3D, (16, 14, 12), {}, id="elastic3d"),
     pytest.param(ElasticTTI, (40, 44), {}, id="elastic_tti_rsg"),

@@ -11,12 +11,15 @@ unchanged), and per-edge correctness:
   edge).  A staggered free surface is an O(h) boundary condition, so the low vs
   high sides are different-but-valid discretisations and are NOT bit-symmetric;
   correctness is asserted via the adjoint and the reflection, not bit-symmetry.
+* Solids refuse a PML between two free faces (a plate whose backward Lamb modes
+  the PML amplifies), and the 10 s run behind that refusal.
 """
 import numpy as np
 import pytest
 import torch
 
-from sweep.equations import Acoustic, Elastic
+from sweep.equations import Acoustic, Elastic, ElasticBorn, ViscoAcoustic, ViscoElastic
+from sweep.equations._registry import equation_classes
 from sweep.equations._edges import (
     normalize_free_surface, normalize_pad, is_top_only_or_none, torch_pad_order,
 )
@@ -240,6 +243,86 @@ def test_elastic_edge_reflects(fs, src_xz, rec_xz, rc):
     e_pml = late(False)
     e_fs = late(fs)
     assert e_fs > 15 * max(e_pml, 1e-30), f"{fs}: E_fs/E_pml={e_fs / max(e_pml, 1e-30):.1f}"
+
+
+# ---------------------------------------------------------------------------
+# A PML between two free faces: refused for solids
+# ---------------------------------------------------------------------------
+# The solid between two free faces of one axis is a plate; a PML on the other
+# axis amplifies the plate's backward-propagating Lamb modes (Loh et al. 2009).
+# test_boundary_spec_resolution pins the layout rule; these pin which equations
+# apply it and the long run that motivates it.
+SOLIDS = (Elastic, ElasticBorn, ViscoElastic)
+FLUIDS = (Acoustic, ViscoAcoustic)
+
+
+def _plate_prop(cls, fs, **kw):
+    eq = cls(device=DEV)
+    return PropTorch(eq, shape=(20, 20), free_surface=fs, abcn=8, dh=DH, dt=DT,
+                     use_ckpt=False, impl="eager", **kw)
+
+
+@pytest.mark.parametrize("cls", SOLIDS, ids=lambda c: c.__name__)
+def test_solids_refuse_a_pml_between_two_free_faces(cls):
+    for fs in (["top", "bottom"], ["top", "left", "right"]):
+        with pytest.raises(ValueError, match="plate"):
+            _plate_prop(cls, fs)
+    _plate_prop(cls, ["top", "left"])            # one free face per axis
+    _plate_prop(cls, ["top", "bottom", "left", "right"])   # closed box, no PML
+
+
+@pytest.mark.parametrize("cls", FLUIDS, ids=lambda c: c.__name__)
+def test_fluids_accept_a_pml_between_two_free_faces(cls):
+    _plate_prop(cls, ["top", "bottom"])
+    _plate_prop(cls, ["top", "left", "right"])
+
+
+def test_every_per_edge_equation_says_whether_it_has_a_solid():
+    """A plate can only form where per-edge free surfaces are allowed.  An
+    equation newly opted in to them must be classified here, so a solid cannot
+    arrive without the refusal."""
+    per_edge = {c for c in equation_classes(method="fd").values()
+                if getattr(c, "supports_per_edge_free_surface", False)}
+    assert per_edge == set(SOLIDS) | set(FLUIDS), sorted(c.__name__ for c in per_edge)
+    assert all(c.free_plate_unstable for c in SOLIDS)
+    assert not any(c.free_plate_unstable for c in FLUIDS)
+
+
+def _plate_record(fs, nt, dt):
+    """Elastic run with the refusal switched off for this instance, so the
+    refused layout can be run at all.  A 200 m box on a coarse 20 m grid keeps
+    10 s of eager CPU time short; the impl='c' test repeats it on a 5 m grid."""
+    N = 11
+    eq = Elastic(spatial_order=SO, device=DEV, backend="torch")
+    eq.free_plate_unstable = False
+    prop = PropTorch(eq, shape=(N, N), free_surface=fs, abcn=6, dh=20.0, dt=dt,
+                     use_ckpt=False, impl="eager", eager_options=UNCOMPILED,
+                     source_type=["sxx", "szz"], receiver_type=["vz"])
+    t = np.arange(nt, dtype=np.float32) * dt - 0.1
+    wav = torch.tensor((1e3 * ricker(t, f=8.0)).astype(np.float32))
+    src = torch.tensor([[N // 2, 3]], dtype=torch.int64)
+    rec = torch.tensor([[[N // 2, 5]]], dtype=torch.int64)
+    models = [torch.full((N, N), v) for v in (3210.0, 1792.0, 2192.0)]
+    with torch.no_grad():
+        return prop(wav, src, rec, models=models)[0, :, 0, 0]
+
+
+def test_elastic_pml_between_two_free_faces_grows_over_10_s():
+    """Why the refusal exists.  Free top, left and right with the PML at the
+    bottom only: the record leaves the direct wave behind by orders of magnitude
+    within 10 s (or overflows).  Giving the right face the PML instead leaves
+    one free face per axis, and the same run decays."""
+    dt = 3e-3
+    nt, win = int(round(10.0 / dt)), int(round(1.25 / dt))   # 10 s, 1.25 s windows
+    plate = _plate_record(["top", "left", "right"], nt, dt)
+    side = _plate_record(["top", "left"], nt, dt)
+    direct = side[:win].abs().max().item()
+    late_plate = plate[-win:].abs().max().item()
+    late_side = side[-win:].abs().max().item()
+    assert not np.isfinite(late_plate) or late_plate > 1e3 * direct, (
+        f"plate layout did not grow: {late_plate:.2e} vs direct {direct:.2e}")
+    assert late_side < 1e-3 * direct, (
+        f"one free face per axis did not decay: {late_side:.2e} vs direct {direct:.2e}")
 
 
 # --- half-cell image for the staggered +h/2 fields -------------------------

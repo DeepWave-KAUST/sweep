@@ -92,6 +92,7 @@ class ElasticBorn(FirstOrderEquation):
     default_pml_type = "cpmls"
     supports_per_edge_free_surface = True
     supports_per_edge_free_surface_c = True
+    free_plate_unstable = True
     supports_bs_free_surface = True
     supports_batched_models = True
     image_topography_hint = (

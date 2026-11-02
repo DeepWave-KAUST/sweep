@@ -67,6 +67,9 @@ class Elastic(FirstOrderEquation):
     # faces (top/bottom/left/right, incl. z∩x corners) via the generalized image
     # mirror + hand-written adjoint (z and x) in ``elastic_free_surface.cuh``.
     supports_per_edge_free_surface_c = True
+    # A PML between two free faces bounds a plate whose backward Lamb modes it
+    # amplifies: the propagator refuses that layout.
+    free_plate_unstable = True
     # interior_substeps carry the free-surface BC, so eager boundary saving may
     # run with free_surface=True (the propagator's guard skips this equation).
     supports_bs_free_surface = True

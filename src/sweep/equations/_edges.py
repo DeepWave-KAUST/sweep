@@ -157,6 +157,45 @@ def normalize_pad(abcn, fs_faces: tuple[bool, ...], ndim: int) -> tuple[int, ...
     return tuple(0 if fs_faces[i] else widths[i] for i in range(n))
 
 
+def refuse_free_plate(fs_faces: tuple[bool, ...], pad: tuple[int, ...], ndim: int,
+                      who: str) -> None:
+    """Refuse a PML that runs between two faces of another axis which have no
+    PML (``pad`` 0), at least one of them a free surface.
+
+    The solid between those faces is a plate, whose backward-propagating Lamb
+    modes -- phase and group velocity opposite -- every PML amplifies instead of
+    absorbing (Loh et al. 2009, PRE 79, 065601).  Measured on the 2-D elastic
+    solvers, eager and CUDA: the record grows by orders of magnitude every
+    1.25 s from a few seconds on, and under grid refinement the growth converges
+    to a non-zero rate at the plate's S1 zero-group-velocity frequency, so no
+    PML width, CFS shift or damping strength cures it.  A face with ``abcn`` 0
+    and no free surface counts as unabsorbed: opposite a free surface it grows
+    the same way; two of them face to face do not.  Only equations with a solid
+    call this (``free_plate_unstable``): a fluid layer has no backward modes.
+    """
+    names = edge_names(ndim)
+    for band in range(ndim):
+        pml = [names[i] for i in (2 * band, 2 * band + 1) if pad[i] > 0]
+        if not pml:
+            continue
+        for other in range(ndim):
+            lo, hi = 2 * other, 2 * other + 1
+            if other == band or pad[lo] > 0 or pad[hi] > 0:
+                continue
+            if not (fs_faces[lo] or fs_faces[hi]):
+                continue
+            pair = [f"'{names[i]}' ({'free surface' if fs_faces[i] else 'abcn=0'})"
+                    for i in (lo, hi)]
+            raise ValueError(
+                f"{who}: the PML on {pml} runs between the {pair[0]} and {pair[1]} "
+                f"faces, neither of which absorbs. The solid between them is a plate, "
+                f"whose backward-propagating (Lamb) modes a PML amplifies instead of "
+                f"absorbing: the run grows without bound after a few seconds, whatever "
+                f"the PML width. Give '{names[lo]}' or '{names[hi]}' a PML (a free "
+                f"surface on one of them only), or make every face free (a closed box "
+                f"has no PML).")
+
+
 def is_top_only_or_none(fs_faces: tuple[bool, ...]) -> bool:
     """True when ``fs_faces`` is the historical default: no face, or the top
     (z-min) face alone.  Anything else is a genuine per-edge configuration."""

@@ -95,6 +95,18 @@ widths are eager-only -- ``impl='c'`` raises ``NotImplementedError`` for them
 -- and, like per-edge free surfaces, 2-D ``Acoustic`` / ``Elastic`` /
 ``ViscoAcoustic`` only.
 
+A solid refuses one family of layouts: a PML that runs between two faces of
+the other axis that have no PML, one of them free -- ``["top", "bottom"]``,
+``["top", "left", "right"]`` and the like, or a free face opposite an ``abcn``
+0 face.  ``Elastic``, ``ElasticBorn`` and ``ViscoElastic`` raise ``ValueError``
+for it.  The solid between those faces is a plate, and a PML amplifies its
+backward-propagating Lamb modes instead of absorbing them (Loh et al. 2009,
+*Phys. Rev. E* 79, 065601): such a run grows without bound after a few
+seconds, and a thicker or retuned PML only changes how fast.  Keep one face of
+the pair absorbing, or free all four faces (a closed box has no PML).  Fluids
+have no backward modes, so ``Acoustic`` and ``ViscoAcoustic`` accept every
+layout.
+
 ``boundary_buffer=`` (default ``None``) puts that many sigma=0 cells between
 the physical box and the PML ramp on every absorbing face.  Boundary saving
 stores a shell ``M + 1`` cells wide, which is all the reverse time step needs;
