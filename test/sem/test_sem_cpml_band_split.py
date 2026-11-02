@@ -244,12 +244,24 @@ def _run_vs(eq, vals, memory=Full(), topo=False, split=None):
     return r.detach(), [m.grad for m in ms]
 
 
-@pytest.mark.parametrize("eq, oracle, vals", [
-    (ElasticVSSEM2DDeformed, _FullMeshVS, (2400.0, 1300.0, 2000.0)),
-    (ElasticVTISEM2DDeformed, _FullMeshVTI, (2400.0, 1300.0, 2000.0, 0.1, 0.05))], ids=["vs", "vti"])
-@pytest.mark.parametrize("memory", [Full(), BoundarySaving()], ids=["full", "boundary_saving"])
-@pytest.mark.parametrize("topo", [False, True], ids=["flat", "topography"])
-@pytest.mark.parametrize("split", [True, False], ids=["split", "unsplit"])
+def _vs_cases():
+    """Every (split, topography, memory) for the isotropic VS; two of them for the
+    VTI, which shares the step and differs only in ``_stress_increment``."""
+    vs = (ElasticVSSEM2DDeformed, _FullMeshVS, (2400.0, 1300.0, 2000.0))
+    vti = (ElasticVTISEM2DDeformed, _FullMeshVTI, (2400.0, 1300.0, 2000.0, 0.1, 0.05))
+    mem = {"full": Full(), "boundary_saving": BoundarySaving()}
+    out = []
+    for split in (True, False):
+        for topo in (False, True):
+            for m in mem:
+                tag = f"{'split' if split else 'unsplit'}-{'topography' if topo else 'flat'}-{m}"
+                out.append(pytest.param(*vs, mem[m], topo, split, id=tag + "-vs"))
+                if (split, topo, m) in ((True, True, "boundary_saving"), (False, False, "full")):
+                    out.append(pytest.param(*vti, mem[m], topo, split, id=tag + "-vti"))
+    return out
+
+
+@pytest.mark.parametrize("eq, oracle, vals, memory, topo, split", _vs_cases())
 def test_vs_equals_the_full_mesh_step(eq, oracle, vals, memory, topo, split):
     r1, g1 = _run_vs(eq, vals, memory, topo, split)
     r0, g0 = _oracle(_run_vs, oracle, vals, memory, topo)

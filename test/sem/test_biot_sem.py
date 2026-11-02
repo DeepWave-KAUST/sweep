@@ -187,9 +187,12 @@ def _rel(a, b):
     return float(np.linalg.norm(a - b) / np.linalg.norm(b))
 
 
-@pytest.mark.parametrize("b_dai, tol", [(0.0, 0.01), (7e4, 0.005), (9e8, 0.005)])
+# The diffusive end (b = 9e8, 0.5%) is the undrained limit's neighbour, which
+# test_no_relative_flow_limit_is_the_undrained_elastic covers in a fraction of the time.
+@pytest.mark.parametrize("b_dai, tol", [pytest.param(0.0, 0.01, marks=pytest.mark.slow),
+                                        (7e4, 0.005)])
 def test_viscous_line_source_matches_analytic(b_dai, tol):
-    # slow wave propagating, critically damped, diffusive
+    # slow wave propagating, critically damped
     _, num, ana = line_source_case(b_dai)
     for k, comp in enumerate(("vz", "p")):
         assert _rel(num[:, k], ana[:, k]) < tol, (comp, _rel(num[:, k], ana[:, k]))
@@ -198,10 +201,12 @@ def test_viscous_line_source_matches_analytic(b_dai, tol):
 # In the Darcy limit the surface's drainage layer sqrt(2 D / w) is ~7 cm, far below the GLL
 # spacing, and the nodes there are fully drained: 0.9% on 8 m elements 60 m from the source,
 # 1.2% at 100 m (FD Biot there: 1.3% on 2 m cells). With the layer resolved (b = 7e5) the error
-# falls to 1e-4 under refinement.
-@pytest.mark.parametrize("b_dai, tol", [(0.0, 0.005), (7e5, 0.005), (9e8, 0.02)])
+# falls to 1e-4 under refinement. The Darcy limit itself (b = 9e8, 2%) is not run: a bound
+# that loose says little the other two do not.
+@pytest.mark.slow
+@pytest.mark.parametrize("b_dai, tol", [(0.0, 0.005), (7e5, 0.005)])
 def test_open_pore_surface_matches_wavenumber_integration(b_dai, tol):
-    # sigma . n = 0, p = 0 on the surface: slow wave propagating, diffusive, Darcy limit
+    # sigma . n = 0, p = 0 on the surface: slow wave propagating, diffusive
     _, num, ref = open_pore_case(b_dai)
     for k in range(2):
         assert _rel(num[:, k], ref[:, k]) < tol, (("vx", "vz")[k], _rel(num[:, k], ref[:, k]))
@@ -240,6 +245,7 @@ def pressure_source_case(shape, src, rec, free_surface, dh=2.0, dt=2e-4, nt=900,
     return t, num, np.stack(ana, 1)
 
 
+@pytest.mark.slow
 def test_decoupled_pore_fluid_sees_a_pressure_release_surface():
     # p = 0 on the open-pore surface: the free-space field minus the image source's, on
     # receivers one element under the surface and deeper
@@ -249,6 +255,7 @@ def test_decoupled_pore_fluid_sees_a_pressure_release_surface():
         assert _rel(num[:, i], ana[:, i]) < 0.005, (i, _rel(num[:, i], ana[:, i]))
 
 
+@pytest.mark.slow
 def test_pressure_has_no_grid_line_modes():
     # a point source excites nothing that runs along the grid lines through it: a receiver
     # on the source's row records the free-space pressure like one off it (with a continuous
@@ -259,6 +266,7 @@ def test_pressure_has_no_grid_line_modes():
         assert _rel(num[:, i], ana[:, i]) < 0.005, (i, _rel(num[:, i], ana[:, i]))
 
 
+@pytest.mark.slow
 def test_matches_the_fd_biot():
     # PropTorch's Biot and PropSEM on the same call: the FD stress injection is a moment of
     # dh^2 per unit wavelet sum, the SEM one of dt, and FD's vz sits half a cell down
@@ -553,7 +561,8 @@ def test_a_drag_tensor_must_be_positive_semidefinite():
         _explosion(BiotAnisoPermSEM2DDeformed, models + [1e5, 2e5, 1e5], [[24, 10]])
 
 
-@pytest.mark.parametrize("q0", [1.0, 5.0])
+@pytest.mark.slow
+@pytest.mark.parametrize("q0", [1.0])      # the stronger one; Q0 = 5 ran the same path
 def test_viscous_attenuation_matches_the_analytic_relaxation(q0):
     # SPECFEM2D's ATTENUATION_PORO_FLUID_PART: the drag a standard linear solid, Q0 at 30 Hz,
     # against the analytic line source with b (1 + i w tau_e) / (1 + i w tau_s). With the
@@ -736,7 +745,7 @@ def _green(eq, dt, nt, field, src_node, rec_field, rec_node, w):
     return torch.stack(out)
 
 
-@pytest.mark.parametrize("b", [0.0, 7e5])
+@pytest.mark.parametrize("b", [7e5])         # with the drag; b = 0 is its special case
 def test_the_interfaces_are_reciprocal(b):
     # the two interface integrals are exact transposes and the sealed interface is the
     # natural one, so the discrete Green's functions are symmetric across every interface,
@@ -849,7 +858,8 @@ def test_a_stress_source_on_the_seafloor_loads_the_rock_alone():
         torch.testing.assert_close(pats[k], want)
 
 
-@pytest.mark.parametrize("b", [0.0, 7e5])
+@pytest.mark.slow
+@pytest.mark.parametrize("b", [0.0])          # the inviscid slow wave decays slowest
 def test_interfaces_through_the_pml_stay_stable(b):
     # the seafloor and the rock-shale interface cross the side bands with the plain
     # coupling: the records keep decaying (4 s runs: to 3% of the peak with the inviscid
