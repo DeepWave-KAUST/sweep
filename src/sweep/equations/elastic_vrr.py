@@ -194,9 +194,12 @@ def vr_momentum_substep(
     dsxz_dx = pd.x_backward(sxz)   # sxz (i+1/2, j+1/2)  -> (i, j+1/2)   feeds pz
     # z-derivatives of stress: image-method mirror at the top free surface
     # (odd parity, mirroring _elastic_step_core txz_z/tzz_z), else plain FD.
+    # sxz sits at z=+h/2, so its image reflects about halo-1/2 (half=True);
+    # szz is on the surface plane and keeps the integer-grid mirror.
     if free_surface:
         dszz_dz = _fs_deriv(szz, pd.z_forward, _pd2.z_forward if _pd2 else None, top_halo, True, -2, _n_o2)
-        dsxz_dz = _fs_deriv(sxz, pd.z_backward, _pd2.z_backward if _pd2 else None, top_halo, True, -2, _n_o2)
+        dsxz_dz = _fs_deriv(sxz, pd.z_backward, _pd2.z_backward if _pd2 else None, top_halo, True, -2, _n_o2,
+                            half=True)
     else:
         dszz_dz = pd.z_forward(szz)    # szz (i, j)          -> (i, j+1/2)   feeds pz
         dsxz_dz = pd.z_backward(sxz)   # sxz (i+1/2, j+1/2)  -> (i+1/2, j)   feeds px
@@ -250,8 +253,10 @@ def vr_stress_substep(
     dpz_dx = pd.x_forward(pz)      # pz (i, j+1/2)   -> (i+1/2, j+1/2) feeds sigma_xz
     # z-derivatives of momentum: image-method mirror at the top free surface
     # (pz odd like vz, px even like vx; mirrors _elastic_step_core), else plain.
+    # pz sits at z=+h/2 like vz -> half-cell mirror.
     if free_surface:
-        dpz_dz = _fs_deriv(pz, pd.z_backward, _pd2.z_backward if _pd2 else None, top_halo, True, -2, _n_o2)
+        dpz_dz = _fs_deriv(pz, pd.z_backward, _pd2.z_backward if _pd2 else None, top_halo, True, -2, _n_o2,
+                           half=True)
         dpx_dz = _fs_deriv(px, pd.z_forward, _pd2.z_forward if _pd2 else None, top_halo, False, -2, _n_o2)
     else:
         dpz_dz = pd.z_backward(pz)     # pz (i, j+1/2)   -> (i, j)         feeds sigma_zz
@@ -303,7 +308,10 @@ def vr_stress_substep(
             sxx, sxx_pre, dt, once(invariants, "fs_coef", lambda: 4.0 * vs2 * (vp2 - vs2) / vp2),
             dpx_dx, top_halo, axis=-2
         )
-        sxz = zero_top_row(sxz, top_halo, axis=-2)
+        # Only the normal stress is zeroed: sxz's surface-row node sits +h/2
+        # inside the medium, and forcing it to zero is the over-constraint
+        # Elastic dropped (Kristek, Moczo & Archuleta 2002, Table 1) -- it
+        # slowed the Rayleigh wave by up to ~7 %.
         szz = zero_top_row(szz, top_halo, axis=-2)
 
     return (
