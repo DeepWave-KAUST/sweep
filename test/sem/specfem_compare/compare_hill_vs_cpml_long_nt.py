@@ -1,15 +1,13 @@
-"""Long-nt CPML stability: 1st-order velocity-stress on hill_case.
+"""Long-nt CPML comparison on hill_case: 2nd- vs 1st-order elastic SEM.
 
-Demonstrates that the 1st-order velocity-stress SEM with FD-style
-single-stage CPML stays stable over long simulations (NSTEP=2000+),
-where the 2nd-order displacement form's SPECFEM-style CPML develops
-the documented elastic late-time instability around t ~ 1 s.
+Two runs on the same hill_case geometry (Gaussian hill, NSTEP=2000):
 
-Three runs on the same hill_case geometry (Gaussian hill, NSTEP=2000):
+  1. SEM 2nd-order displacement + SPECFEM CPML
+  2. SEM 1st-order velocity-stress + simple CPML
 
-  1. SEM 2nd-order displacement + Stacey         — reference (stable, partial absorption)
-  2. SEM 2nd-order displacement + SPECFEM CPML   — known late-time instability
-  3. SEM 1st-order velocity-stress + simple CPML — should stay stable
+Both should stay stable over the run: the 2nd-order C-PML carries the
+acceleration/mass damping term that keeps it stable (``sweep.sem.cpml.elastic``,
+gated by ``test/sem/test_elastic_deformed_cpml.py``).
 
 Saves seismic gathers, plus a quantitative 'late-window energy ratio'
 table at receivers far from / near the boundary.
@@ -34,7 +32,7 @@ from sweep.sem import (
 )
 
 
-# Match compare_hill_sem_cpml_vs_stacey.py so geometry/source are identical.
+# Match run_compare_hill.py so geometry/source are identical.
 X_MAX, Z_BOTTOM = 1270.0, 890.0
 NEX, NEZ        = 64, 44
 N_ORDER         = 4
@@ -78,25 +76,6 @@ def _build_mesh_and_models():
     return mesh, vp_e, vs_e, rho_e
 
 
-def run_2nd_stacey(mesh, vp_e, vs_e, rho_e, stations):
-    eq = ElasticSEM2DDeformed.build(
-        mesh, vp_e, vs_e, rho_e,
-    )
-    rec_sem = [to_sem(rx) for rx in stations]
-    prop = SEMPropagator.build(
-        eq, dt=DT, nt=NSTEP,
-        source_xz=[to_sem(SRC_SPEC_XZ)], receiver_xz=rec_sem,
-        source_kinds=["moment_tensor"], source_payloads=[SRC_MT],
-    )
-    t = np.arange(NSTEP) * DT
-    src = torch.from_numpy(ricker(t, F0, TSHIFT))
-    out = prop.forward(src)
-    # 2nd-order outputs displacement; differentiate for velocity comparison.
-    vx = np.gradient(out[..., 0].T.numpy(), DT, axis=1)
-    vz = -np.gradient(out[..., 1].T.numpy(), DT, axis=1)
-    return vx, vz
-
-
 def run_2nd_specfem_cpml(mesh, vp_e, vs_e, rho_e, stations):
     cpml = build_elastic_cpml(
         mesh, dt=DT, sides=("left", "right", "bottom"),
@@ -114,6 +93,7 @@ def run_2nd_specfem_cpml(mesh, vp_e, vs_e, rho_e, stations):
     t = np.arange(NSTEP) * DT
     src = torch.from_numpy(ricker(t, F0, TSHIFT))
     out = prop.forward(src)
+    # 2nd-order outputs displacement; differentiate for velocity comparison.
     vx = np.gradient(out[..., 0].T.numpy(), DT, axis=1)
     vz = -np.gradient(out[..., 1].T.numpy(), DT, axis=1)
     return vx, vz
@@ -162,10 +142,6 @@ def main():
     mesh, vp_e, vs_e, rho_e = _build_mesh_and_models()
 
     print(f"NSTEP={NSTEP}, total time = {NSTEP*DT:.2f} s")
-    print(f"Running 2nd-order + Stacey…")
-    s_vx, s_vz = run_2nd_stacey(mesh, vp_e, vs_e, rho_e, stations)
-    print(f"  v_z peak = {np.abs(s_vz).max():.3e}")
-
     print(f"Running 2nd-order + SPECFEM CPML…")
     c2_vx, c2_vz = run_2nd_specfem_cpml(mesh, vp_e, vs_e, rho_e, stations)
     print(f"  v_z peak = {np.abs(c2_vz).max():.3e}")
@@ -189,41 +165,35 @@ def main():
         ax.set_xlabel("t (s)"); ax.set_ylabel("receiver x (m)")
         ax.tick_params(labelsize=8)
 
-    fig, axes = plt.subplots(3, 2, figsize=(15, 10),
+    fig, axes = plt.subplots(2, 2, figsize=(15, 7),
                              sharex="col", sharey="row")
-    panel(axes[0, 0], t_sem, s_vx,  "2nd-order Stacey v_x", vmax=0.15)
-    panel(axes[0, 1], t_sem, s_vz,  "2nd-order Stacey −v_z", vmax=0.15)
-    panel(axes[1, 0], t_sem, c2_vx, "2nd-order CPML (SPECFEM-style) v_x", vmax=0.15)
-    panel(axes[1, 1], t_sem, c2_vz, "2nd-order CPML (SPECFEM-style) −v_z", vmax=0.15)
-    panel(axes[2, 0], t_sem, c1_vx, "1st-order CPML (FD-style) v_x", vmax=0.15)
-    panel(axes[2, 1], t_sem, c1_vz, "1st-order CPML (FD-style) −v_z", vmax=0.15)
-    fig.suptitle(f"hill_case, NSTEP={NSTEP}: three boundary treatments",
+    panel(axes[0, 0], t_sem, c2_vx, "2nd-order CPML (SPECFEM-style) v_x", vmax=0.15)
+    panel(axes[0, 1], t_sem, c2_vz, "2nd-order CPML (SPECFEM-style) −v_z", vmax=0.15)
+    panel(axes[1, 0], t_sem, c1_vx, "1st-order CPML (FD-style) v_x", vmax=0.15)
+    panel(axes[1, 1], t_sem, c1_vz, "1st-order CPML (FD-style) −v_z", vmax=0.15)
+    fig.suptitle(f"hill_case, NSTEP={NSTEP}: 2nd- vs 1st-order CPML",
                  fontsize=11)
     fig.tight_layout()
-    g1 = fig_dir / "hill_three_bc_long_nt.png"
+    g1 = fig_dir / "hill_cpml_2nd_vs_1st_long_nt.png"
     fig.savefig(g1, dpi=150, bbox_inches="tight"); plt.close(fig)
     print(f"Saved: {g1.resolve()}")
 
     # ----- late-window absolute amplitude ---------------------------------- #
-    fig, axes = plt.subplots(3, 2, figsize=(15, 10),
+    fig, axes = plt.subplots(2, 2, figsize=(15, 7),
                              sharex="col", sharey="row")
-    panel(axes[0, 0], t_sem, s_vx,  "2nd-order Stacey v_x late",
+    panel(axes[0, 0], t_sem, c2_vx, "2nd-order CPML v_x late",
           vmax=0.03, per_trace=False)
-    panel(axes[0, 1], t_sem, s_vz,  "2nd-order Stacey −v_z late",
+    panel(axes[0, 1], t_sem, c2_vz, "2nd-order CPML −v_z late",
           vmax=0.03, per_trace=False)
-    panel(axes[1, 0], t_sem, c2_vx, "2nd-order CPML v_x late",
+    panel(axes[1, 0], t_sem, c1_vx, "1st-order CPML v_x late",
           vmax=0.03, per_trace=False)
-    panel(axes[1, 1], t_sem, c2_vz, "2nd-order CPML −v_z late",
-          vmax=0.03, per_trace=False)
-    panel(axes[2, 0], t_sem, c1_vx, "1st-order CPML v_x late",
-          vmax=0.03, per_trace=False)
-    panel(axes[2, 1], t_sem, c1_vz, "1st-order CPML −v_z late",
+    panel(axes[1, 1], t_sem, c1_vz, "1st-order CPML −v_z late",
           vmax=0.03, per_trace=False)
     t_late = 0.6
     for ax in axes.flat:
         ax.set_xlim(t_late, t_sem[-1])
     fig.tight_layout()
-    g2 = fig_dir / "hill_three_bc_long_nt_late.png"
+    g2 = fig_dir / "hill_cpml_2nd_vs_1st_long_nt_late.png"
     fig.savefig(g2, dpi=150, bbox_inches="tight"); plt.close(fig)
     print(f"Saved: {g2.resolve()}")
 
@@ -231,32 +201,27 @@ def main():
     late_start = int(t_late / DT)
     print()
     print(f"Late-window v_z amplitude (t > {t_late} s) as fraction of peak:")
-    print(f"{'offset':>7s}  {'Stacey':>10s}  "
-          f"{'2nd CPML':>12s}  {'1st CPML':>12s}")
+    print(f"{'offset':>7s}  {'2nd CPML':>12s}  {'1st CPML':>12s}")
     for j in range(0, len(stations), 5):
         rx = stations[j][0]
         off = abs(rx - SRC_SPEC_XZ[0])
-        s_pct  = (np.abs(s_vz[j,  late_start:]).max()
-                  / max(np.abs(s_vz[j]).max(),  1e-30))
         c2_pct = (np.abs(c2_vz[j, late_start:]).max()
                   / max(np.abs(c2_vz[j]).max(), 1e-30))
         c1_pct = (np.abs(c1_vz[j, late_start:]).max()
                   / max(np.abs(c1_vz[j]).max(), 1e-30))
-        print(f"{off:7.0f}  {s_pct:10.2%}  {c2_pct:12.2%}  {c1_pct:12.2%}")
+        print(f"{off:7.0f}  {c2_pct:12.2%}  {c1_pct:12.2%}")
 
     # ----- absolute peak across full simulation ---------------------------- #
     print()
     print(f"Stability check — peak |v_z| at three time windows:")
-    print(f"{'window':>15s}  {'Stacey':>12s}  {'2nd CPML':>12s}  {'1st CPML':>12s}")
+    print(f"{'window':>15s}  {'2nd CPML':>12s}  {'1st CPML':>12s}")
     for t0, t1, label in [(0.0, 0.5, "  early [0,0.5]"),
                           (0.5, 1.0, "  mid   [0.5,1]"),
                           (1.0, NSTEP*DT, " late   [1,end]")]:
         i0, i1 = int(t0/DT), int(t1/DT)
-        s_peak  = np.abs(s_vz[:,  i0:i1]).max()
         c2_peak = np.abs(c2_vz[:, i0:i1]).max()
         c1_peak = np.abs(c1_vz[:, i0:i1]).max()
-        print(f"{label:>15s}  {s_peak:12.3e}  {c2_peak:12.3e}  "
-              f"{c1_peak:12.3e}")
+        print(f"{label:>15s}  {c2_peak:12.3e}  {c1_peak:12.3e}")
 
 
 if __name__ == "__main__":

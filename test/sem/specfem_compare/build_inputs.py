@@ -327,7 +327,7 @@ def main():
     print(f"  source  : SEM xz=({s.src_xz}) -> SPECFEM ({s.src_xz[0]},"
           f" {specfem_z(s.src_xz[1], s.z_max)})")
     print(f"  dt={s.dt}  nstep={s.nstep}  image_every={s.image_every}")
-    print(f"  free top + Stacey on left/right/bottom")
+    print(f"  free top + C-PML on left/right/bottom")
     print(f"  next: cd {root} && ln -sf <repo>/_specfem_compare/specfem2d_src/bin/* . && "
           f"./xmeshfem2D && ./xspecfem2D")
 

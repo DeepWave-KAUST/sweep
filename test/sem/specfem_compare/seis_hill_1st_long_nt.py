@@ -2,18 +2,16 @@
 
 Runs the 1st-order solver to NSTEP=3000 (3 s, ~4× longer than the
 SPECFEM2D reference) so we can see boundary-reflection behaviour over
-the full 'late-time' window where the 2nd-order SPECFEM-style CPML
-blows up. The 2nd-order Stacey reference is also plotted for context;
-SPECFEM is overlaid where it exists (t ≤ 0.7 s, the limit of the
-pre-computed binaries).
+the full 'late-time' window. SPECFEM is overlaid where it exists
+(t ≤ 0.7 s, the limit of the pre-computed binaries).
 
 Two output figures:
 
   * ``hill_1st_long_nt_traces.png``  — single-receiver line plots at a
     handful of stations, both v_x and v_z, overlay of 1st-order CPML
-    vs 2nd-order Stacey vs SPECFEM where available.
-  * ``hill_1st_long_nt_gather.png``  — full gather images for both
-    backends, with the SPECFEM cut-off marked.
+    vs SPECFEM where available.
+  * ``hill_1st_long_nt_gather.png``  — full gather images (v_x, v_z),
+    with the SPECFEM cut-off marked.
 """
 
 from __future__ import annotations
@@ -26,7 +24,6 @@ import numpy as np
 import torch
 
 from sweep.sem import (
-    ElasticSEM2DDeformed,
     SEMPropagator,
     ElasticVSSEM2DDeformed,
     build_simple_elastic_cpml,
@@ -111,25 +108,6 @@ def run_1st_cpml(mesh, vp_e, vs_e, rho_e, stations, *, free_top=False):
     return out[..., 0].T.numpy(), -out[..., 1].T.numpy()
 
 
-def run_2nd_stacey(mesh, vp_e, vs_e, rho_e, stations):
-    eq = ElasticSEM2DDeformed.build(
-        mesh, vp_e, vs_e, rho_e,
-    )
-    rec_sem = [to_sem(rx) for rx in stations]
-    prop = SEMPropagator.build(
-        eq, dt=DT, nt=NSTEP,
-        source_xz=[to_sem(SRC_SPEC_XZ)], receiver_xz=rec_sem,
-        source_kinds=["moment_tensor"], source_payloads=[SRC_MT],
-    )
-    t = np.arange(NSTEP) * DT
-    src = torch.from_numpy(ricker(t, F0, TSHIFT))
-    out = prop.forward(src)
-    # u → v by gradient, then sign-flip v_z
-    vx = np.gradient(out[..., 0].T.numpy(), DT, axis=1)
-    vz = -np.gradient(out[..., 1].T.numpy(), DT, axis=1)
-    return vx, vz
-
-
 def load_specfem_traces(specfem_dir, n_stations):
     """Load all SPECFEM .semv traces; return arrays + time axis."""
     bxx = []
@@ -192,12 +170,6 @@ def main():
           f"late-window peak (t>1s) = "
           f"{np.abs(c1_vz[:, int(1.0/DT):]).max():.3e}")
 
-    print("Running 2nd-order displacement + Stacey…")
-    s_vx, s_vz = run_2nd_stacey(mesh, vp_e, vs_e, rho_e, stations)
-    print(f"  peak |v_z| = {np.abs(s_vz).max():.3e}; "
-          f"late-window peak (t>1s) = "
-          f"{np.abs(s_vz[:, int(1.0/DT):]).max():.3e}")
-
     # ----- SPECFEM reference (only available for t ≤ 0.7 s) ------------- #
     spec_vx_raw, spec_vz_raw, t_spec_axis = load_specfem_traces(
         specfem_dir, n_stations
@@ -221,7 +193,6 @@ def main():
         ax_x, ax_z = axes[ri]
         # v_x
         ax_x.plot(t_sem,        c1_vx[j], "C2-",  lw=1.0, label="1st CPML")
-        ax_x.plot(t_sem,        s_vx[j],  "C1--", lw=0.9, label="2nd Stacey")
         ax_x.plot(t_spec_phys,  spec_vx_raw[j], "k:", lw=0.9, label="SPECFEM2D")
         ax_x.axvline(t_spec_phys[-1], color="gray", lw=0.5,
                      linestyle="-", alpha=0.5)
@@ -231,7 +202,6 @@ def main():
         ax_x.tick_params(labelsize=8)
         # v_z
         ax_z.plot(t_sem,        c1_vz[j], "C2-",  lw=1.0, label="1st CPML")
-        ax_z.plot(t_sem,        s_vz[j],  "C1--", lw=0.9, label="2nd Stacey")
         ax_z.plot(t_spec_phys,  spec_vz_raw[j], "k:", lw=0.9, label="SPECFEM2D")
         ax_z.axvline(t_spec_phys[-1], color="gray", lw=0.5,
                      linestyle="-", alpha=0.5)
@@ -248,7 +218,7 @@ def main():
     plt.close(fig)
     print(f"Saved: {g_traces.resolve()}")
 
-    # ----- 2. Full gather (per-trace normalised, side by side) ---------- #
+    # ----- 2. Full gather (per-trace normalised, v_x | v_z) ------------- #
     def panel(ax, t_axis, seis, title, vmax=0.15, per_trace=True):
         s = seis.copy()
         if per_trace:
@@ -265,12 +235,10 @@ def main():
         ax.set_xlabel("t (s)"); ax.set_ylabel("receiver x (m)")
         ax.tick_params(labelsize=8)
 
-    fig, axes = plt.subplots(2, 2, figsize=(15, 8),
-                             sharex="col", sharey="row")
-    panel(axes[0, 0], t_sem, c1_vx, "1st-order CPML v_x", vmax=0.15)
-    panel(axes[0, 1], t_sem, s_vx,  "2nd-order Stacey v_x", vmax=0.15)
-    panel(axes[1, 0], t_sem, c1_vz, "1st-order CPML −v_z", vmax=0.15)
-    panel(axes[1, 1], t_sem, s_vz,  "2nd-order Stacey −v_z", vmax=0.15)
+    fig, axes = plt.subplots(1, 2, figsize=(15, 4.5),
+                             sharex=True, sharey=True)
+    panel(axes[0], t_sem, c1_vx, "1st-order CPML v_x", vmax=0.15)
+    panel(axes[1], t_sem, c1_vz, "1st-order CPML −v_z", vmax=0.15)
     fig.suptitle(
         f"hill_case NSTEP={NSTEP} — green dashed = SPECFEM cut-off "
         f"(t={t_spec_phys[-1]:.2f} s)",
@@ -286,13 +254,12 @@ def main():
     print()
     print(f"Stability — peak |v_z| at successive 1-s windows "
           f"(SPECFEM cut-off at {t_spec_phys[-1]:.2f} s):")
-    print(f"{'window':>16s}  {'1st CPML':>12s}  {'2nd Stacey':>12s}")
+    print(f"{'window':>16s}  {'1st CPML':>12s}")
     last_t = NSTEP * DT
     for t0, t1 in [(0.0, 1.0), (1.0, 2.0), (2.0, last_t)]:
         i0, i1 = int(t0/DT), int(t1/DT)
         c1_p = np.abs(c1_vz[:, i0:i1]).max()
-        s_p  = np.abs(s_vz[:,  i0:i1]).max()
-        print(f"  [{t0:.1f}, {t1:.1f}] s   {c1_p:12.3e}  {s_p:12.3e}")
+        print(f"  [{t0:.1f}, {t1:.1f}] s   {c1_p:12.3e}")
 
 
 if __name__ == "__main__":
