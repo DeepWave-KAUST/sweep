@@ -709,8 +709,9 @@ void elastic3d_backward(const Sem3dElasticBackwardInputCore& in) {
 // ---- 3-D velocity-stress elastic backward (P8) ------------------------------
 // Reverse loop k = nt-1..0 over the staggered leapfrog. Per step:
 // record^T -> stress_update^T (imaging + mvel adjoints + Grad^T into lv) ->
-// vel_update^T (grad_inv_M, lR) + grad_wav -> sigma_div^T (msig adjoints,
-// lsig update). lv/lsig/lmsig/lmvel carry across steps in place.
+// vel_update^T (grad_inv_M, lR) + grad_wav -> cpml_nodal^T (msig adjoints,
+// lP) -> sigma_div^T (lsig update). lv/lsig/lmsig/lmvel carry across steps in
+// place.
 void elastic_vs3d_backward(const Sem3dVsBackwardInputCore& in) {
     sweep::DeviceGuard guard(in.inv_M.device_index());
     cudaStream_t stream = sweep::current_stream();
@@ -737,6 +738,7 @@ void elastic_vs3d_backward(const Sem3dVsBackwardInputCore& in) {
     const float* by = cp ? in.b_y.data_ptr<float>() : nullptr;
     const float* az = cp ? in.a_z.data_ptr<float>() : nullptr;
     const float* bz = cp ? in.b_z.data_ptr<float>() : nullptr;
+    const float* a_n = cp ? in.a_n.data_ptr<float>() : nullptr;
     const float* px_ = in.pat_x.data_ptr<float>();
     const float* py_ = in.pat_y.data_ptr<float>();
     const float* pz_ = in.pat_z.data_ptr<float>();
@@ -757,7 +759,8 @@ void elastic_vs3d_backward(const Sem3dVsBackwardInputCore& in) {
     float* lRy = in.lRy.data_ptr<float>();
     float* lRz = in.lRz.data_ptr<float>();
     float* lsig = in.lsig.data_ptr<float>();
-    float* lmsig = in.lmsig.data_ptr<float>();
+    float* lmsig = cp ? in.lmsig.data_ptr<float>() : nullptr;
+    float* lP = cp ? in.lP.data_ptr<float>() : nullptr;
     float* lmvel = in.lmvel.data_ptr<float>();
     float* gLam = in.grad_lam.data_ptr<float>();
     float* gMu = in.grad_mu.data_ptr<float>();
@@ -767,7 +770,6 @@ void elastic_vs3d_backward(const Sem3dVsBackwardInputCore& in) {
     const long Em = static_cast<long>(E) * m;
 
     const size_t sh9 = static_cast<size_t>(9 * m) * sizeof(float);
-    const size_t sh3 = static_cast<size_t>(3 * m) * sizeof(float);
     const dim3 grid(E, B);
     const int TPB = 256;
     const int nb = (ng + TPB - 1) / TPB;
@@ -793,8 +795,10 @@ void elastic_vs3d_backward(const Sem3dVsBackwardInputCore& in) {
         sem2d::sem2d_accum_gradW<<<nb, TPB, 0, stream>>>(px_, inv_M, lvx, dt, k, gW, ng);
         sem2d::sem2d_accum_gradW<<<nb, TPB, 0, stream>>>(py_, inv_M, lvy, dt, k, gW, ng);
         sem2d::sem2d_accum_gradW<<<nb, TPB, 0, stream>>>(pz_, inv_M, lvz, dt, k, gW, ng);
-        sem3d_vs_sigma_div_T<<<grid, m, sh3, stream>>>(
-            lRx, lRy, lRz, lsig, lmsig, ax, bx, ay, by, az, bz,
+        if (cp)
+            sem3d_vs_cpml_nodal_T<<<nb, TPB, 0, stream>>>(a_n, lRx, lRy, lRz, lmsig, lP, ng);
+        sem3d_vs_sigma_div_T<<<grid, m, sh9, stream>>>(
+            lRx, lRy, lRz, lP, lsig, ax, bx, ay, by, az, bz,
             wHx, wHy, wHz, ibool, D, ngll, E, ng);
     }
     SWEEP_CUDA_CHECK(cudaGetLastError());

@@ -476,6 +476,7 @@ void elastic_vs3d_forward(const Sem3dVsForwardInputCore& in) {
     const float* by = cp ? in.b_y.data_ptr<float>() : nullptr;
     const float* az = cp ? in.a_z.data_ptr<float>() : nullptr;
     const float* bz = cp ? in.b_z.data_ptr<float>() : nullptr;
+    const float* a_n = cp ? in.a_n.data_ptr<float>() : nullptr;
     const float* px_ = in.pat_x.data_ptr<float>();
     const float* py_ = in.pat_y.data_ptr<float>();
     const float* pz_ = in.pat_z.data_ptr<float>();
@@ -492,8 +493,9 @@ void elastic_vs3d_forward(const Sem3dVsForwardInputCore& in) {
     float* Rx = in.Rx.data_ptr<float>();
     float* Ry = in.Ry.data_ptr<float>();
     float* Rz = in.Rz.data_ptr<float>();
+    float* P = cp ? in.P.data_ptr<float>() : nullptr;
     float* sig = in.sig.data_ptr<float>();
-    float* msig = in.msig.data_ptr<float>();
+    float* msig = cp ? in.msig.data_ptr<float>() : nullptr;
     float* mvel = in.mvel.data_ptr<float>();
     const bool save = in.save_vx.numel() > 0;
     float* s_vx = save ? in.save_vx.data_ptr<float>() : nullptr;
@@ -514,9 +516,12 @@ void elastic_vs3d_forward(const Sem3dVsForwardInputCore& in) {
         cudaMemsetAsync(Rx, 0, ngb, stream);
         cudaMemsetAsync(Ry, 0, ngb, stream);
         cudaMemsetAsync(Rz, 0, ngb, stream);
+        if (cp) cudaMemsetAsync(P, 0, 9 * ngb, stream);
         sem3d_vs_sigma_div<<<grid, m, sh_v, stream>>>(
-            sig, msig, ax, bx, ay, by, az, bz, wHx, wHy, wHz,
-            ibool, D, Rx, Ry, Rz, ngll, E, ng);
+            sig, ax, bx, ay, by, az, bz, wHx, wHy, wHz,
+            ibool, D, Rx, Ry, Rz, P, ngll, E, ng);
+        if (cp)
+            sem3d_vs_cpml_nodal<<<nb, TPB, 0, stream>>>(a_n, P, msig, Rx, Ry, Rz, ng);
         const size_t o = static_cast<size_t>(n) * ng;
         sem3d_vs_vel_update<<<nb, TPB, 0, stream>>>(
             vx, vy, vz, Rx, Ry, Rz, inv_M, px_, py_, pz_, wav, n, dt,

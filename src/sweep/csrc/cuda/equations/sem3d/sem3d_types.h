@@ -293,18 +293,23 @@ struct Sem3dElasticBackwardInput {
 };
 
 // P8: 3-D velocity-stress elastic WITH simple per-axis CPML (ElasticVSSEM3D).
-// 27-field staggered leapfrog: v x3 (global), sigma x6 + 18 memories
-// (element-local). Coefficients a/b per axis are element-local. Optional
-// save-all: v history (adjoint propagation) + the 9 STRETCHED velocity
-// gradients per step (what the lam/mu imaging needs).
+// 27-field staggered leapfrog: v x3 (global), sigma x6 + 9 velocity-gradient
+// memories (element-local) + 9 divergence memories (NODAL: the C-PML recursion
+// runs on the assembled divergence split by derivative direction). Coefficients
+// a/b per axis element-local, and per node (a_n). Optional save-all: v history
+// (adjoint propagation) + the 9 STRETCHED velocity gradients per step (what
+// the lam/mu imaging needs).
 struct Sem3dVsForwardInput {
     torch::Tensor ibool, D, lam, mu, lam2mu;         // (E, ngll^3)
     torch::Tensor wHx, wHy, wHz, inv_M;              // weights + 1/mass_rho
     torch::Tensor a_x, b_x, a_y, b_y, a_z, b_z;      // (E, ngll^3); empty = bare
+    torch::Tensor a_n;                               // (6, n_global) a_x b_x a_y b_y a_z b_z per node; empty = bare
     torch::Tensor pat_x, pat_y, pat_z, wavelet, rec_G, rec_W;
     torch::Tensor vx, vy, vz, Rx, Ry, Rz;            // (n_global,)
+    torch::Tensor P;                                 // (9, n_global) divergence by direction (scratch); empty = bare
     torch::Tensor sig;                               // (6, E*ngll^3) stress
-    torch::Tensor msig, mvel;                        // (9, E*ngll^3) memories
+    torch::Tensor msig;                              // (9, n_global) divergence memories
+    torch::Tensor mvel;                              // (9, E*ngll^3) velocity-gradient memories
     torch::Tensor seis_x, seis_y, seis_z;
     torch::Tensor save_vx, save_vy, save_vz;         // (nt, n_global) OPTIONAL
     torch::Tensor save_gv;                           // (nt, 9, E*ngll^3) OPTIONAL
@@ -317,11 +322,14 @@ struct Sem3dVsForwardInput {
 struct Sem3dVsBackwardInput {
     torch::Tensor ibool, D, lam, mu, lam2mu, wHx, wHy, wHz, inv_M;
     torch::Tensor a_x, b_x, a_y, b_y, a_z, b_z;
+    torch::Tensor a_n;                               // (6, n_global); empty = bare
     torch::Tensor pat_x, pat_y, pat_z, wavelet, rec_G, rec_W;
     torch::Tensor save_vx, save_vy, save_vz, save_gv;
     torch::Tensor grad_sx, grad_sy, grad_sz;
-    // adjoint state: lv x3 (global), lsig (6, E*m), lmsig/lmvel (9, E*m)
+    // adjoint state: lv x3 (global), lsig (6, E*m), lmsig (9, n_global),
+    // lmvel (9, E*m); lP the divergence-by-direction adjoint (9, n_global, scratch)
     torch::Tensor lvx, lvy, lvz, lRx, lRy, lRz, adj_x, adj_y, adj_z;
+    torch::Tensor lP;
     torch::Tensor lsig, lmsig, lmvel, lgv;           // lgv scratch (9, E*m)
     torch::Tensor grad_lam, grad_mu, grad_lam2mu, grad_inv_M, grad_wavelet;
     double dt = 0.0; double ihx = 0.0, ihy = 0.0, ihz = 0.0;

@@ -1337,15 +1337,22 @@ static __global__ void sem3d_elastic_imaging_deformed(
 }
 
 // ============ 3-D velocity-stress elastic kernels (P8, VS + CPML) ===========
-// ElasticVSSEM3D: first-order staggered leapfrog. sigma and the 18 CPML
-// memories are ELEMENT-LOCAL (per-node ownership, in-place updates, no
-// races); only v and the stress-divergence R are assembled. Memory layout:
-// sig[c*Em + off] (c = xx,yy,zz,xy,xz,yz), msig/mvel[j*Em + off] in the fixed
-// 9-slot order of ElasticVSSEM3D.step.
+// ElasticVSSEM3D: first-order staggered leapfrog. sigma and the 9 velocity-
+// gradient memories are ELEMENT-LOCAL (per-node ownership, in-place updates,
+// no races); v, the stress-divergence R and its 9 C-PML memories are nodal.
+// Memory layout: sig[c*Em + off] (c = xx,yy,zz,xy,xz,yz), mvel[j*Em + off],
+// msig[j*n_global + g], in the fixed 9-slot order of ElasticVSSEM3D.step.
 
-// V: sigma-memory update + stretch + wH weighting + D^T divergence -> R.
+// V: the stress divergence (wH weighting + D^T) -> R. An element the C-PML
+// reaches writes it split by derivative direction into P (9 parts, slot order
+// (xx,x)(xy,y)(xz,z)(xy,x)(yy,y)(yz,z)(xz,x)(yz,y)(zz,z)) instead, for
+// sem3d_vs_cpml_nodal to recurse on and add to R: only such elements touch a
+// node the layer reaches, so P is complete there. (Recursing on sigma and
+// differentiating sigma + psi gave d(psi*sigma), not psi*d(sigma): an extra
+// term in the profile's gradient that reflected low frequencies off the layer
+// at any resolution.) The element-local a/b only say which elements.
 static __global__ void sem3d_vs_sigma_div(
-    const float* __restrict__ sig, float* __restrict__ msig,
+    const float* __restrict__ sig,
     const float* __restrict__ a_x, const float* __restrict__ b_x,
     const float* __restrict__ a_y, const float* __restrict__ b_y,
     const float* __restrict__ a_z, const float* __restrict__ b_z,   // null = bare
@@ -1353,6 +1360,7 @@ static __global__ void sem3d_vs_sigma_div(
     const float* __restrict__ wHz,
     const int* __restrict__ ibool, const float* __restrict__ D,
     float* __restrict__ Rx, float* __restrict__ Ry, float* __restrict__ Rz,
+    float* __restrict__ P,
     int ngll, int E, long n_global)
 {
     const int e = blockIdx.x;
@@ -1363,35 +1371,39 @@ static __global__ void sem3d_vs_sigma_div(
     const int off = e * m + tid;
     const long Em = static_cast<long>(E) * m;
     const size_t bo = static_cast<size_t>(blockIdx.y) * n_global;
+    // block-uniform: the barriers below stay legal
+    const bool layer = a_x && __syncthreads_or(
+        a_x[off] != 0.f || a_y[off] != 0.f || a_z[off] != 0.f ||
+        b_x[off] != 0.f || b_y[off] != 0.f || b_z[off] != 0.f);
 
     extern __shared__ float sh[];        // 9 flux arrays F[j*m + tid]
     const float sxx = sig[0 * Em + off], syy = sig[1 * Em + off], szz = sig[2 * Em + off];
     const float sxy = sig[3 * Em + off], sxz = sig[4 * Em + off], syz = sig[5 * Em + off];
-    // 9 stretched fields, order (sxx,x)(sxy,y)(sxz,z)(sxy,x)(syy,y)(syz,z)(sxz,x)(syz,y)(szz,z)
     const float s9[9] = {sxx, sxy, sxz, sxy, syy, syz, sxz, syz, szz};
-    float str[9];
-    if (a_x) {
-        const float ax = a_x[off], bx = b_x[off], ay = a_y[off], by = b_y[off];
-        const float az = a_z[off], bz = b_z[off];
-        const float ca[9] = {ax, ay, az, ax, ay, az, ax, ay, az};
-        const float cb[9] = {bx, by, bz, bx, by, bz, bx, by, bz};
-        #pragma unroll
-        for (int j = 0; j < 9; ++j) {
-            const float mm = ca[j] * msig[j * Em + off] + cb[j] * s9[j];
-            msig[j * Em + off] = mm;
-            str[j] = s9[j] + mm;
-        }
-    } else {
-        #pragma unroll
-        for (int j = 0; j < 9; ++j) str[j] = s9[j];
-    }
     const float wx = wHx[off], wy = wHy[off], wz = wHz[off];
     const float w9[9] = {wx, wy, wz, wx, wy, wz, wx, wy, wz};
     #pragma unroll
-    for (int j = 0; j < 9; ++j) sh[j * m + tid] = w9[j] * str[j];
+    for (int j = 0; j < 9; ++j) sh[j * m + tid] = w9[j] * s9[j];
     __syncthreads();
 
     const int zy = (kz_i * ngll + ky_i) * ngll;
+    const int g = ibool[off];
+    if (layer) {
+        float r9[9] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+        for (int q = 0; q < ngll; ++q) {
+            const float Tx = D[q * ngll + kx_i], Ty = D[q * ngll + ky_i], Tz = D[q * ngll + kz_i];
+            const int iy = (kz_i * ngll + q) * ngll + kx_i, iz = (q * ngll + ky_i) * ngll + kx_i;
+            #pragma unroll
+            for (int i = 0; i < 3; ++i) {
+                r9[3 * i + 0] += Tx * sh[(3 * i + 0) * m + zy + q];
+                r9[3 * i + 1] += Ty * sh[(3 * i + 1) * m + iy];
+                r9[3 * i + 2] += Tz * sh[(3 * i + 2) * m + iz];
+            }
+        }
+        #pragma unroll
+        for (int j = 0; j < 9; ++j) atomicAdd(&P[j * n_global + bo + g], r9[j]);
+        return;
+    }
     float rx = 0.f, ry = 0.f, rz = 0.f;
     for (int q = 0; q < ngll; ++q) {
         const float Tx = D[q * ngll + kx_i], Ty = D[q * ngll + ky_i], Tz = D[q * ngll + kz_i];
@@ -1400,10 +1412,31 @@ static __global__ void sem3d_vs_sigma_div(
         ry += Tx * sh[3 * m + zy + q] + Ty * sh[4 * m + iy] + Tz * sh[5 * m + iz];
         rz += Tx * sh[6 * m + zy + q] + Ty * sh[7 * m + iy] + Tz * sh[8 * m + iz];
     }
-    const int g = ibool[off];
     atomicAdd(&Rx[bo + g], rx);
     atomicAdd(&Ry[bo + g], ry);
     atomicAdd(&Rz[bo + g], rz);
+}
+
+// C: the C-PML on the divergence by direction, per node: psi_j = a psi_j + b P_j
+// (the slot's axis), and R_i += the three slots of P + psi. a_n (6, n_global):
+// a_x b_x a_y b_y a_z b_z. A node the layer does not reach has P = psi = 0.
+static __global__ void sem3d_vs_cpml_nodal(
+    const float* __restrict__ a_n, const float* __restrict__ P,
+    float* __restrict__ msig,
+    float* __restrict__ Rx, float* __restrict__ Ry, float* __restrict__ Rz, int ng)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= ng) return;
+    float r[3] = {0.f, 0.f, 0.f};
+    #pragma unroll
+    for (int j = 0; j < 9; ++j) {
+        const int d = j % 3;
+        const float p = P[j * ng + i];
+        const float psi = a_n[(2 * d) * ng + i] * msig[j * ng + i] + a_n[(2 * d + 1) * ng + i] * p;
+        msig[j * ng + i] = psi;
+        r[j / 3] += p + psi;
+    }
+    Rx[i] += r[0]; Ry[i] += r[1]; Rz[i] += r[2];
 }
 
 // N: v += dt invM (pat wav[n] - R), 3 components + optional v-history save.
@@ -1620,12 +1653,34 @@ static __global__ void sem3d_vs_vel_update_T(
     }
 }
 
-// K5 = sigma_div^T (element, no atomics): lsig_str = wH * refgrad(gather lR);
-// msig adjoint recursion in place; lsig += lsig_str + B_s * tot.
-static __global__ void sem3d_vs_sigma_div_T(
+// K4c = cpml_nodal^T (nodal): the psi adjoint tot_j = lR_i + lmsig_j, the msig
+// recursion lmsig_j = a tot_j in place, and the adjoint of the slot's divergence
+// part lP_j = lR_i + b tot_j (P enters R directly and through psi).
+static __global__ void sem3d_vs_cpml_nodal_T(
+    const float* __restrict__ a_n,
     const float* __restrict__ lRx, const float* __restrict__ lRy,
     const float* __restrict__ lRz,
-    float* __restrict__ lsig, float* __restrict__ lmsig,
+    float* __restrict__ lmsig, float* __restrict__ lP, int ng)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= ng) return;
+    const float lr[3] = {lRx[i], lRy[i], lRz[i]};
+    #pragma unroll
+    for (int j = 0; j < 9; ++j) {
+        const int d = j % 3;
+        const float tot = lr[j / 3] + lmsig[j * ng + i];
+        lmsig[j * ng + i] = a_n[(2 * d) * ng + i] * tot;
+        lP[j * ng + i] = lr[j / 3] + a_n[(2 * d + 1) * ng + i] * tot;
+    }
+}
+
+// K5 = sigma_div^T (element, no atomics): lsig += wH * refgrad(gather lR); an
+// element the C-PML reaches gathers each slot's own adjoint lP instead (the
+// transpose of sem3d_vs_sigma_div's split). Shared 9m.
+static __global__ void sem3d_vs_sigma_div_T(
+    const float* __restrict__ lRx, const float* __restrict__ lRy,
+    const float* __restrict__ lRz, const float* __restrict__ lP,
+    float* __restrict__ lsig,
     const float* __restrict__ a_x, const float* __restrict__ b_x,
     const float* __restrict__ a_y, const float* __restrict__ b_y,
     const float* __restrict__ a_z, const float* __restrict__ b_z,   // null = bare
@@ -1642,48 +1697,57 @@ static __global__ void sem3d_vs_sigma_div_T(
     const int off = e * m + tid;
     const long Em = static_cast<long>(E) * m;
     const size_t bo = static_cast<size_t>(blockIdx.y) * n_global;
+    const bool layer = a_x && __syncthreads_or(
+        a_x[off] != 0.f || a_y[off] != 0.f || a_z[off] != 0.f ||
+        b_x[off] != 0.f || b_y[off] != 0.f || b_z[off] != 0.f);
 
     extern __shared__ float sh[];
-    float* s_x = sh; float* s_y = sh + m; float* s_z = sh + 2 * m;
     const int g = ibool[off];
-    s_x[tid] = lRx[bo + g]; s_y[tid] = lRy[bo + g]; s_z[tid] = lRz[bo + g];
-    __syncthreads();
-
     const int zy = (kz_i * ngll + ky_i) * ngll;
-    float rx_x = 0.f, rx_y = 0.f, rx_z = 0.f;
-    float ry_x = 0.f, ry_y = 0.f, ry_z = 0.f;
-    float rz_x = 0.f, rz_y = 0.f, rz_z = 0.f;
-    for (int q = 0; q < ngll; ++q) {
-        const float Dx = D[kx_i * ngll + q], Dy = D[ky_i * ngll + q], Dz = D[kz_i * ngll + q];
-        const int iy = (kz_i * ngll + q) * ngll + kx_i, iz = (q * ngll + ky_i) * ngll + kx_i;
-        rx_x += Dx * s_x[zy + q]; rx_y += Dy * s_x[iy]; rx_z += Dz * s_x[iz];
-        ry_x += Dx * s_y[zy + q]; ry_y += Dy * s_y[iy]; ry_z += Dz * s_y[iz];
-        rz_x += Dx * s_z[zy + q]; rz_y += Dy * s_z[iy]; rz_z += Dz * s_z[iz];
-    }
     const float wx = wHx[off], wy = wHy[off], wz = wHz[off];
     // slots: (sxx,x)(sxy,y)(sxz,z)(sxy,x)(syy,y)(syz,z)(sxz,x)(syz,y)(szz,z)
     float ls[9];
-    ls[0] = wx * rx_x;  ls[1] = wy * rx_y;  ls[2] = wz * rx_z;
-    ls[3] = wx * ry_x;  ls[4] = wy * ry_y;  ls[5] = wz * ry_z;
-    ls[6] = wx * rz_x;  ls[7] = wy * rz_y;  ls[8] = wz * rz_z;
-    float add6[6] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+    if (layer) {
+        #pragma unroll
+        for (int j = 0; j < 9; ++j) sh[j * m + tid] = lP[j * n_global + bo + g];
+        __syncthreads();
+        float r9[9] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+        for (int q = 0; q < ngll; ++q) {
+            const float Dx = D[kx_i * ngll + q], Dy = D[ky_i * ngll + q], Dz = D[kz_i * ngll + q];
+            const int iy = (kz_i * ngll + q) * ngll + kx_i, iz = (q * ngll + ky_i) * ngll + kx_i;
+            #pragma unroll
+            for (int i = 0; i < 3; ++i) {
+                r9[3 * i + 0] += Dx * sh[(3 * i + 0) * m + zy + q];
+                r9[3 * i + 1] += Dy * sh[(3 * i + 1) * m + iy];
+                r9[3 * i + 2] += Dz * sh[(3 * i + 2) * m + iz];
+            }
+        }
+        const float w9[9] = {wx, wy, wz, wx, wy, wz, wx, wy, wz};
+        #pragma unroll
+        for (int j = 0; j < 9; ++j) ls[j] = w9[j] * r9[j];
+    } else {
+        float* s_x = sh; float* s_y = sh + m; float* s_z = sh + 2 * m;
+        s_x[tid] = lRx[bo + g]; s_y[tid] = lRy[bo + g]; s_z[tid] = lRz[bo + g];
+        __syncthreads();
+        float rx_x = 0.f, rx_y = 0.f, rx_z = 0.f;
+        float ry_x = 0.f, ry_y = 0.f, ry_z = 0.f;
+        float rz_x = 0.f, rz_y = 0.f, rz_z = 0.f;
+        for (int q = 0; q < ngll; ++q) {
+            const float Dx = D[kx_i * ngll + q], Dy = D[ky_i * ngll + q], Dz = D[kz_i * ngll + q];
+            const int iy = (kz_i * ngll + q) * ngll + kx_i, iz = (q * ngll + ky_i) * ngll + kx_i;
+            rx_x += Dx * s_x[zy + q]; rx_y += Dy * s_x[iy]; rx_z += Dz * s_x[iz];
+            ry_x += Dx * s_y[zy + q]; ry_y += Dy * s_y[iy]; ry_z += Dz * s_y[iz];
+            rz_x += Dx * s_z[zy + q]; rz_y += Dy * s_z[iy]; rz_z += Dz * s_z[iz];
+        }
+        ls[0] = wx * rx_x;  ls[1] = wy * rx_y;  ls[2] = wz * rx_z;
+        ls[3] = wx * ry_x;  ls[4] = wy * ry_y;  ls[5] = wz * ry_z;
+        ls[6] = wx * rz_x;  ls[7] = wy * rz_y;  ls[8] = wz * rz_z;
+    }
     // map slot -> sigma component: 0->xx,1->xy,2->xz,3->xy,4->yy,5->yz,6->xz,7->yz,8->zz
     const int comp[9] = {0, 3, 4, 3, 1, 5, 4, 5, 2};
-    if (a_x) {
-        const float ax = a_x[off], bx = b_x[off], ay = a_y[off], by = b_y[off];
-        const float az = a_z[off], bz = b_z[off];
-        const float ca[9] = {ax, ay, az, ax, ay, az, ax, ay, az};
-        const float cb[9] = {bx, by, bz, bx, by, bz, bx, by, bz};
-        #pragma unroll
-        for (int j = 0; j < 9; ++j) {
-            const float tot = ls[j] + lmsig[j * Em + off];
-            add6[comp[j]] += ls[j] + cb[j] * tot;
-            lmsig[j * Em + off] = ca[j] * tot;
-        }
-    } else {
-        #pragma unroll
-        for (int j = 0; j < 9; ++j) add6[comp[j]] += ls[j];
-    }
+    float add6[6] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+    #pragma unroll
+    for (int j = 0; j < 9; ++j) add6[comp[j]] += ls[j];
     #pragma unroll
     for (int c = 0; c < 6; ++c) lsig[c * Em + off] += add6[c];
 }

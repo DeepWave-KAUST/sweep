@@ -10,6 +10,7 @@ patterns recurred verbatim across every equation module:
 * :func:`phys_grads` — element-local physical ∂/∂x, ∂/∂z of one or more global
   fields via the deformed ``inv_J`` chain rule, in one batched gather + two
   batched ξ/η einsums.
+* :func:`first_copies` — one element copy per global node, to sum node values once.
 """
 from __future__ import annotations
 
@@ -85,6 +86,19 @@ def assemble(r_e: torch.Tensor, ibool: torch.Tensor, like: torch.Tensor):
     k = r_e.shape[-1]
     out = torch.zeros_like(like).unsqueeze(-1).repeat(1, k)
     return out.index_add(0, idx, r_e.reshape(-1, k)).unbind(-1)
+
+
+def first_copies(ibool, n_global):
+    """Boolean mask, shaped like ``ibool``: True on one element copy of each
+    global node (the lowest flat index), so summing a node-valued quantity that
+    every copy holds over the masked copies counts each node once."""
+    idx = ibool.reshape(-1)
+    n = idx.numel()
+    first = torch.full((n_global,), n, dtype=torch.long, device=idx.device)
+    first = first.scatter_reduce(0, idx, torch.arange(n, device=idx.device), reduce="amin")
+    mask = torch.zeros(n, dtype=torch.bool, device=idx.device)
+    mask[first[first < n]] = True
+    return mask.reshape(ibool.shape)
 
 
 def element_mean(mesh, f_e):
@@ -192,6 +206,23 @@ def phys_grads3(D, ibool, inv_J, *fields):
                 t = inv_J[..., m, d].unsqueeze(-1) * d_ref[m]
                 acc = t if acc is None else acc + t
             out.append(acc[..., k])
+    return out
+
+
+def divergence_parts3(D, inv_J, w_jac, sig):
+    """The element-local terms of :func:`stress_divergence3` one physical
+    derivative direction at a time: for each of the nine ``(i, j)`` entries of
+    ``sig`` (same order), ``Σ_m D^T_m (w|J| σ_ij inv_J[..., m, j])`` -- unassembled,
+    so a C-PML can stretch each direction of the divergence on its own."""
+    eins = ("Xx,ezyX->ezyx", "Yy,ezYx->ezyx", "Zz,eZyx->ezyx")
+    out = []
+    for k, s in enumerate(sig):
+        j = k % 3
+        acc = None
+        for m, ein in enumerate(eins):
+            t = contract(ein, D, w_jac * s * inv_J[..., m, j])
+            acc = t if acc is None else acc + t
+        out.append(acc)
     return out
 
 

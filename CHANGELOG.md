@@ -174,6 +174,20 @@ and this project adheres to
   free top and bottom with absorbing sides -- still grows, since the solid between the faces is
   a plate whose backward-propagating Lamb modes any PML amplifies, and `PropSEM` refuses it on
   these classes (`ValueError`; `test/sem/test_sem_cpml_outer_edge.py`).
+- The velocity-stress SEMs' C-PML (`ElasticVSSEM2DDeformed`,
+  `ElasticVTISEM2DDeformed`, `BiotVSSEM2DDeformed`, `ElasticVSSEM3D(Deformed)`,
+  eager and `impl='c'`) recursed on the stress -- and Biot's flux -- and then took
+  the weak-form derivative of `sigma + psi`: `d(psi*sigma)` instead of
+  `psi*d(sigma)`. The extra term in the profile's gradient sent a low-frequency
+  echo back from the top of the layer, the same size at any resolution (0.34 % of
+  the record peak through a 200 m layer at 12 Hz; FD 0.01 %). The recursion now
+  runs on the assembled divergence split by derivative direction (the
+  mass-weighted nodal derivative, inter-element jumps included): 0.018 % there,
+  and the late tail decays to 1e-6 instead of 1e-4. In 3-D the body-wave echo
+  drops 20-70x; a surface wave meeting a side layer under-resolved (40 m
+  elements at 30 Hz) still reflects as much as before. `impl='c'` keeps these
+  memories per node (`Sem3dVsForwardInput.a_n`, `.P`; backward `.lP`): a core
+  built from this tree is needed.
 
 ## [0.3.6] - 2026-10-29
 

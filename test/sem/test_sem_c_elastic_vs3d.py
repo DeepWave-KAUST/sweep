@@ -92,3 +92,35 @@ def test_elastic_vs3d_grads_match_eager(cpml):
     gc = run(True)
     for name, e, c in zip(("vp", "vs", "rho"), ge, gc):
         assert _cos(c, e) >= 1 - 1e-4, f"grad {name} cos={_cos(c, e):.6f}"
+
+
+def _rel(a, b):
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    return float(np.linalg.norm(a - b) / np.linalg.norm(b))
+
+
+def test_elastic_vs3d_cpml_matches_eager_in_the_layer():
+    """The C-PML terms themselves, c against eager: a source next to the bottom
+    layer and a record long enough for the wave to go through it and come back
+    (the cosine tests above end before the wave reaches the layer). Relative L2,
+    records and every gradient: the velocity update's recursion on the strong-form
+    stress derivatives must be the same on both paths."""
+    nt = 450
+    t = np.arange(nt) * DT
+    a = (np.pi * F0 * (t - TSH)) ** 2
+    wav = torch.tensor((1 - 2 * a) * np.exp(-a), dtype=torch.float32)
+    src = (XMAX * 0.5, YMAX * 0.45, ZMAX - 260.0)
+
+    def run(uc):
+        eq, (vp, vs, rho) = _eq(True, grad=True)
+        o = (SEMCudaPropagator if uc else SEMPropagator).build(
+            eq, dt=DT, nt=nt, source_xz=[src], receiver_xz=REC,
+            source_kinds=["force"], source_payloads=[PAYLOAD], pml_guard="off").forward(wav)
+        o.square().sum().backward()
+        return o.detach().cpu(), vp.grad.cpu(), vs.grad.cpu(), rho.grad.cpu()
+    oe, *ge = run(False)
+    oc, *gc = run(True)
+    assert _rel(oc, oe) < 1e-5, f"record rel {_rel(oc, oe):.2e}"
+    for name, e, c in zip(("vp", "vs", "rho"), ge, gc):
+        assert _rel(c, e) < 1e-4, f"grad {name} rel {_rel(c, e):.2e}"
