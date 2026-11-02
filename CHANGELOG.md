@@ -304,6 +304,22 @@ and this project adheres to
   carry four memories each (`sweep.sem.coupling.InterfaceCPML`, the profiles' new per-axis
   `sigma_*`/`d_*` and `alpha_*`), on both backends, the shot batch, boundary saving and
   domain decomposition (`test/sem/test_sem_fs_cpml_interface.py`).
+- The SEM C-PML profiles no longer take a node on an absorbing layer's inner
+  edge into the layer. Its coordinate equals `lo + L` (`hi - L`) only up to
+  round-off, and `coord < lo + L` counted it in whenever it fell an ulp short:
+  `d ~ 1e-30 d_max`, `alpha = alpha_max`, and every element touching it joined
+  the band -- one physical element column or row, on that side only (287 band
+  elements instead of 272 on a 38 x 19 mesh), in the eager band split, the
+  `impl='c'` interior fast-path mask and the boundary-saving rings. It hit 576
+  of 1248 meshes scanned, float32 and float64, flat, topography and 3-D. The
+  displacement and velocity-stress elastic, acoustic 2-D/3-D and DD axis
+  profiles now count a node in only past 16 ulps of the axis extent;
+  coefficients inside the layer are bit-identical. Where such a node also lay
+  in the other axis's layer it took the corner formulas, whose separation
+  could move its `d` by a few percent; that is gone too. Records and gradients
+  move by round-off (3e-14 in float64) unless that separation acted: then by
+  8e-7 at surface receivers, and 3e-5 with the source and receivers next to
+  that corner.
 
 ## [0.3.6] - 2026-10-29
 

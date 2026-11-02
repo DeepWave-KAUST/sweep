@@ -50,6 +50,7 @@ import numpy as np
 import torch
 
 from ..mesh.quad9 import Quad9Mesh
+from ._axis import inner_edge_tol
 
 _TINY = 1.0e-20
 
@@ -73,17 +74,21 @@ def _compute_coef_convolution(bb: torch.Tensor, dt: float):
 
 def _build_damping_axis(coord, lo, hi, *, side_low, side_high,
                         pml_L, d_max, alpha_max, poly, dtype):
-    """SPECFEM damping/frequency-shift profile along one axis."""
+    """SPECFEM damping/frequency-shift profile along one axis. A node within
+    round-off of the inner edge is outside, on both sides (``inner_edge_tol``)."""
     d = torch.zeros_like(coord)
     alpha = torch.zeros_like(coord)
+    tol = inner_edge_tol(lo, hi, coord.dtype)
     if side_low:
-        in_lo = coord < (lo + pml_L)
-        s = ((lo + pml_L - coord) / pml_L).clamp(min=0.0, max=1.0)
+        depth = lo + pml_L - coord
+        in_lo = depth > tol
+        s = (depth / pml_L).clamp(min=0.0, max=1.0)
         d = d + in_lo.to(dtype) * d_max * s.pow(poly)
         alpha = alpha + in_lo.to(dtype) * alpha_max * (1.0 - s)
     if side_high:
-        in_hi = coord > (hi - pml_L)
-        s = ((coord - (hi - pml_L)) / pml_L).clamp(min=0.0, max=1.0)
+        depth = coord - (hi - pml_L)
+        in_hi = depth > tol
+        s = (depth / pml_L).clamp(min=0.0, max=1.0)
         d = d + in_hi.to(dtype) * d_max * s.pow(poly)
         alpha = alpha + in_hi.to(dtype) * alpha_max * (1.0 - s)
     return d, alpha
