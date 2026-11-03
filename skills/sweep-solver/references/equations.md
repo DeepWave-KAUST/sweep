@@ -57,7 +57,7 @@ faces on eager and c; `top` = top face only; `refused` = raises `NotImplementedE
 | `AcousticTTI` (`AcousticTTILiang`) | 2 | `vp, epsilon, delta, theta` | `h1` / `h1` | yes | `theta` in rad |
 | `AcousticVTIBorn` / `AcousticTTIBorn` | 2 | `+ mp` | `h1` / `sh1` | yes, `mp` grad only | Born pair of the above |
 | `AcousticVTI1st` (`AcousticVTIDuveneck`), `AcousticVTI1st3D` (`AcousticVTIDuveneck3D`, `AcousticVTIDefault3D`) | 2/3 | `vp, epsilon, delta, rho` | **`sH, sV`** / **`vz`** | yes | Duveneck 2008, staggered; warns if `epsilon < delta`; `recommended_dt(vp_max, epsilon_max, h)` classmethod |
-| `AcousticTariq` (`AcousticVTIAlkhalifah`, `AcousticTTIAlkhalifah`) | 2 | `vv, v, eta` | `h1` / `h1` | no | Alkhalifah 2000 eta form |
+| `AcousticTariq` (`AcousticVTIAlkhalifah`) | 2 | `vv, v, eta` | `h1` / `h1` | no | Alkhalifah 2000 eta form |
 | `AcousticAniso` | 2/3 | per `method=` | | | factory: `AcousticAniso(method="duveneck"|"liang"|"alkhalifah", symmetry="vti"|"tti", ndim=2)` returns one of the above |
 
 ### Elastic

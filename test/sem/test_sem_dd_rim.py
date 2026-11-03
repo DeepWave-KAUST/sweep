@@ -1,21 +1,24 @@
 """``bs_band_mode='rim'`` on the decomposed and the fluid-solid paths.
 
-Rim mode rings the C-PML band's interface LINE instead of the band AREA. It was
-wired for the single-domain acoustic path first (``test_sem_bs_rim.py``); the
-two paths pinned here used to hard-code the "full" convention and SILENTLY
-ignore the flag -- a caller asking for rim on a strip or on the coupled
-propagator got full-band memory and no warning.
+Rim mode rings only the C-PML band's first element layer, the one touching
+the model, instead of the whole band. It was wired for the single-domain
+acoustic path first (``test_sem_bs_rim.py``); the two paths pinned here used to
+hard-code the "full" convention and SILENTLY ignore the flag -- a caller asking
+for rim on a strip or on the coupled propagator got full-band memory and no
+warning.
 
 Three separate claims, one test each:
 
-* the ring really shrinks -- a perimeter instead of an area;
-* the decomposition does not change the bargain: rim at ``px>1`` reproduces rim
+* the ring really shrinks -- one element thick instead of the band's thickness;
+* the decomposition does not change the result: rim at ``px>1`` reproduces rim
   at ``px=1`` to the atomics floor, so a cut sitting inside the band neither
   helps nor hurts;
-* the gradient is exact once the band is cropped off, and NOT before. The
-  configurations drive energy into the band head-on (source one element off it),
-  which is what makes the cropped comparison worth anything --
-  ``test_the_configuration_actually_discriminates`` fails if it stops doing so.
+* the model gradient equals the full tape: on the grid-model acoustic case over
+  the whole model, on the element-local elastic and coupled cases (whose models
+  cover the band too, and the band beyond its first layer is not rebuilt) once
+  the band is cropped. The configurations drive energy into the band head-on
+  (source one element off it); ``test_the_configuration_actually_discriminates``
+  checks that storing less than the layer is visibly wrong on them.
 
 ELEMENT rings are deliberately EXEMPT from rim and stay whole-band. The elastic
 C-PML memory fields live only inside the band, and zeroing them corrupts the
@@ -25,8 +28,7 @@ the fs case below. ``test_fs_rim_keeps_the_element_rings`` pins that they are
 untouched, and the fs gradient test is what would catch it if they were not.
 
 Cropping is in ELEMENTS of C-PML thickness, not pixels: the fs models are
-element-local, and the band is ``abcn // n_order`` elements thick plus its
-one-element rim.
+element-local, and the band is ``abcn // n_order`` elements thick.
 """
 from __future__ import annotations
 
@@ -57,24 +59,15 @@ NZ, NX, ABCN, PAD = 49, 65, 6, 6 * 4
 # at nt=400 once the pad was cut from the gradient (it had folded the band's
 # error onto the outer ring).
 NT, DT = 400, 0.30 * (0.172 * NO * DH) / 4500.0
-# The band's one-element rim, in model pixels: rim's error stays inside the
-# first element (n_order pixels plus the node it shares with the next one).
-# Measured px=1 against the full tape: cos 0.998 at 2, 0.999993 at 4 (the
-# shared node is still in), 1.0 at 5 with rel err 3.5e-6 from 5 to 10 pixels.
-# 4 passed before kappa_node read one element copy: the old per-copy
-# gradient overcount weighed that ring differently (its rim error was 3e-4
-# of the gradient max then, 4e-3 now; 1e-7 vs 1e-6 from 5 on).
-CROP = NO + 1
 # --- coupled: element-local models over the WHOLE mesh, band included, so the
 # band overlaps REAL material. FS_NZ x FS_NX is that mesh (the crop below is in
 # its coordinates); the model PropSEM adds the band outside is smaller by it --
 FS_NZ, FS_NX, FS_NW, FS_ABCN = 49, 97, 8, 3
 FS_SHAPE = (FS_NZ - FS_ABCN * NO, FS_NX - 2 * FS_ABCN * NO)
 FS_NT, FS_DT = 300, 1.2e-3
-# Crop the band PLUS its one-element rim. One element short is not a
-# detail: on the elastic case below, K=abcn gives cos 0.997 and
-# K=abcn+1 gives exactly 1.0.
-FS_CROP_E = FS_ABCN + 1
+# Crop the band: its elements carry model entries too, and only the first
+# layer's fields are stored.
+FS_CROP_E = FS_ABCN
 
 
 def _cos(a, b):
@@ -130,25 +123,22 @@ def _dd(mode, px, memory):
     return _CACHE[key]
 
 
-def _crop(g, c=CROP):
-    return g[c:NZ - c, c:NX - c]
-
-
 @pytest.mark.parametrize("px", [1, 2])
 def test_dd_rim_stores_far_fewer_band_nodes(px):
-    """A perimeter, not an area. The strips used to ignore the flag entirely,
-    so the count is the part that actually proves the wiring landed."""
+    """One element thick, not six. The strips used to ignore the flag
+    entirely, so the count is the part that actually proves the wiring
+    landed."""
     _, full = _dd("full", px, "boundary")
     _, rim = _dd("rim", px, "boundary")
     assert rim * 5 < full, f"px={px}: rim {rim} nodes vs full {full}"
 
 
 @pytest.mark.parametrize("px", [1, 2])
-def test_dd_rim_matches_full_tape_beyond_the_band(px):
+def test_dd_rim_matches_full_tape_up_to_the_model_edge(px):
     ref, _ = _dd("full", px, None)
     rim, _ = _dd("rim", px, "boundary")
-    c = _cos(_crop(rim), _crop(ref))
-    assert c >= 1 - 1e-6, f"px={px}: cropped grad cos={c:.8f}"
+    c = _cos(rim, ref)
+    assert c >= 1 - 1e-9, f"px={px}: uncropped grad 1-cos={1 - c:.2e}"
 
 
 @pytest.mark.parametrize("px", [1, 2])
@@ -157,7 +147,7 @@ def test_dd_full_band_mode_is_still_exact_everywhere(px):
     ref, _ = _dd("full", px, None)
     full, _ = _dd("full", px, "boundary")
     c = _cos(full, ref)
-    assert c >= 1 - 1e-7, f"px={px}: grad cos={c:.8f}"
+    assert c >= 1 - 1e-9, f"px={px}: grad 1-cos={1 - c:.2e}"
 
 
 def test_dd_rim_bargain_does_not_depend_on_px():
@@ -167,16 +157,33 @@ def test_dd_rim_bargain_does_not_depend_on_px():
     one, _ = _dd("rim", 1, "boundary")
     two, _ = _dd("rim", 2, "boundary")
     c = _cos(one, two)
-    assert c >= 1 - 1e-6, f"rim px=1 vs px=2 cos={c:.8f}"
+    assert c >= 1 - 1e-9, f"rim px=1 vs px=2 1-cos={1 - c:.2e}"
 
 
-def test_the_configuration_actually_discriminates():
-    """If the band never saw the wavefield, rim would agree everywhere and the
-    cropped tests above would pass no matter how wrong rim was."""
+def _edge_line_only(monkeypatch):
+    """Store only the model's edge line of the rim: enough to rebuild the
+    model's interior, not the band elements its edge nodes share material
+    with."""
+    import sweep.sem.boundary_saving as bsm
+    real = bsm.band_from_active
+
+    def patched(active, elem_nodes, mode="full", model=None):
+        band, has = real(active, elem_nodes, mode, model)
+        if mode == "rim":
+            band &= model
+        return band, has
+
+    monkeypatch.setattr(bsm, "band_from_active", patched)
+
+
+def test_the_configuration_actually_discriminates(monkeypatch):
+    """If the band never saw the wavefield, a rim storing too little would
+    agree everywhere and the exactness tests above would prove nothing."""
     ref, _ = _dd("full", 1, None)
-    rim, _ = _dd("rim", 1, "boundary")
+    _edge_line_only(monkeypatch)
+    rim, _ = _dd_run("rim", 1, "boundary")
     c = _cos(rim, ref)
-    assert c <= 0.999, f"uncropped rim cos={c:.8f} -- band is not excited"
+    assert c <= 0.999, f"edge-line-only cos={c:.8f} -- band is not excited"
 
 
 # ============================== fluid-solid =============================== #
@@ -241,7 +248,7 @@ def test_fs_rim_shrinks_both_domains_node_rings():
     _, (ac_f, el_f, _), _ = _fs("full", 1, "boundary")
     _, (ac_r, el_r, _), _ = _fs("rim", 1, "boundary")
     assert ac_r * 3 < ac_f, f"fluid ring {ac_r} vs {ac_f}"
-    assert el_r * 3 < el_f, f"solid node ring {el_r} vs {el_f}"
+    assert el_r * 2 < el_f, f"solid node ring {el_r} vs {el_f}"
 
 
 def test_fs_rim_keeps_the_element_rings():
@@ -254,29 +261,19 @@ def test_fs_rim_keeps_the_element_rings():
 
 @pytest.mark.parametrize("px", [1, 2])
 def test_fs_rim_matches_full_tape_beyond_the_band(px):
-    """Unlike the acoustic and elastic paths, coupled rim does NOT come all the
-    way back to 1.0 -- it plateaus. Measured over the band-aware mask, worst of
-    the three models:
+    """The models are element-local over the whole mesh, so the band's
+    elements carry model entries too; crop them and rim is the full tape.
+    Measured worst-model 1-cos 2.8e-10 at K=abcn (full-band BS 1.4e-10).
 
-    ======  ==============  ===========  ==========
-    crop K  full-band BS    rim          elements
-    ======  ==============  ===========  ==========
-    3       1.000000000     0.9838       162
-    4       1.000000000     0.9999780    128
-    5       1.000000000     0.9999883     98
-    ======  ==============  ===========  ==========
-
-    Full-band BS is EXACTLY 1.0 over the same mask, so the ~2e-5 is rim's own
-    residual, not the atomics floor -- and it is the ONE path that plateaus
-    instead of converging. The likely source is that the two domains' bands are
-    built separately here, so their rims meet at the seabed; that is not
-    verified, and the bar records the measurement, not a theory."""
+    This used to plateau at ~2e-5 however far in it was cropped, and the
+    docstring here guessed at the seabed. It was the rim itself: it stored the
+    model's outermost element instead of the band's first layer."""
     ref, _, _ = _fs("full", px, None)
     rim, _, (ze, xe) = _fs("rim", px, "boundary")
     keep = _fs_interior(ze, xe)
     for j, name in enumerate(("vp", "vs", "rho")):
         c = _cos(rim[j][keep], ref[j][keep])
-        assert c >= 1 - 5e-5, f"px={px} {name}: cropped grad cos={c:.8f}"
+        assert c >= 1 - 1e-8, f"px={px} {name}: cropped grad 1-cos={1 - c:.2e}"
 
 
 @pytest.mark.parametrize("px", [1, 2])
@@ -287,7 +284,7 @@ def test_fs_full_band_mode_is_exact_over_the_same_mask(px):
     keep = _fs_interior(ze, xe)
     for j, name in enumerate(("vp", "vs", "rho")):
         c = _cos(full[j][keep], ref[j][keep])
-        assert c >= 1 - 1e-8, f"px={px} {name}: cropped grad cos={c:.9f}"
+        assert c >= 1 - 1e-8, f"px={px} {name}: cropped grad 1-cos={1 - c:.2e}"
 
 
 def test_fs_configuration_actually_discriminates():
@@ -339,7 +336,7 @@ EL_NZ, EL_NX, EL_ABCN = 65, 129, 5
 # outside the model on all four sides
 EL_SHAPE = (EL_NZ - 2 * EL_ABCN * NO, EL_NX - 2 * EL_ABCN * NO)
 EL_NT, EL_DT = 800, 7e-4
-EL_CROP_E = EL_ABCN + 1
+EL_CROP_E = EL_ABCN
 
 
 def _el_run(mode, px, memory):
@@ -399,21 +396,22 @@ def _el_interior(ze, xe, k=EL_CROP_E):
 def test_el_rim_shrinks_node_rings_and_keeps_element_rings():
     _, (n_full, e_full), _ = _el("full", 1, "boundary")
     _, (n_rim, e_rim), _ = _el("rim", 1, "boundary")
-    assert n_rim * 5 < n_full, f"node ring {n_rim} vs {n_full}"
+    assert n_rim * 4 < n_full, f"node ring {n_rim} vs {n_full}"
     assert e_rim == e_full > 0, f"element ring {e_rim} vs {e_full}"
 
 
 @pytest.mark.parametrize("px", [1, 2])
 def test_el_rim_matches_full_tape_beyond_the_band(px):
-    """Exact, not merely close -- and one element of crop short of the rim it
-    is not: measured worst-model cos 0.0466 at K=0, 0.99746 at K=abcn,
-    1.0000000 at K=abcn+1 and beyond, identically at px=1 and px=2."""
+    """Exact once the band (whose elements carry model entries here) is
+    cropped: measured worst-model 1-cos 1.1e-10 at K=abcn. The old rim needed
+    K=abcn+1 (cos 0.99746 at K=abcn): it got the model's outermost element
+    wrong."""
     ref, _, _ = _el("full", px, None)
     rim, _, (ze, xe) = _el("rim", px, "boundary")
     keep = _el_interior(ze, xe)
     for j, name in enumerate(("vp", "vs", "rho")):
         c = _cos(rim[j][keep], ref[j][keep])
-        assert c >= 1 - 1e-7, f"px={px} {name}: cropped grad cos={c:.8f}"
+        assert c >= 1 - 1e-8, f"px={px} {name}: cropped grad 1-cos={1 - c:.2e}"
 
 
 @pytest.mark.parametrize("px", [1, 2])

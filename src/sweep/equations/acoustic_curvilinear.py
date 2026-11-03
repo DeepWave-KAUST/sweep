@@ -136,10 +136,30 @@ class AcousticCurvilinear(SecondOrderEquation):
             + self._curv_metric_pη * p_η
         )
 
+        # The CPML terms take physical z derivatives, d/dZ = beta d/deta in
+        # the absorbing bands (alpha = 0 at the bottom row they replicate).
+        # One computational row is D(x) d_eta metres, not dh, so neither the
+        # propagator's h nor its dbz/dz (built with dh) can be used as is.
+        beta = getattr(self, "_curv_beta", None)
+        if beta is None:
+            raise RuntimeError(
+                "AcousticCurvilinear needs the beta metric (_curv_beta) that "
+                "the Propagator attaches with the other metrics."
+            )
+        hz_pml = h if isinstance(h, (int, float)) else h[-2]
+
+        def grad_phys(f, _h, axis, kernels=None):
+            if axis == -2:
+                return beta * self.gradient(f, hz, -2, kernels=kernels)
+            return self.gradient(f, hx, axis, kernels=kernels)
+
+        az, bz, dbzdz, ax, bx, dbxdx = self.b
+        pml = (az, bz, dbzdz * (hz_pml / hz) * beta, ax, bx, dbxdx)
+
         out = step_cpml(
             *wavefields, vp, dt, h, b,
             lap_x_curv, lap_z_curv,
-            self.b, self.gradient, self.grad_kernels,
+            pml, grad_phys, self.grad_kernels,
         )
         if getattr(self, "free_surface", False):
             # On the flat computational top row η=0, the BC is the usual

@@ -54,9 +54,9 @@ def step_cpml(
     return u_next, u_now, f_next, f_now, psixn, psizn, zetaxn, zetazn
 
 
-@register_equation(aliases=('AcousticTTIAlkhalifah', 'AcousticVTIAlkhalifah'))
+@register_equation(aliases=('AcousticVTIAlkhalifah',))
 class AcousticTariq(SecondOrderEquation):
-    """Second-order 2-D pseudo-acoustic VTI/TTI wave equation (Alkhalifah eta).
+    """Second-order 2-D pseudo-acoustic VTI wave equation (Alkhalifah eta).
 
     Two-field pseudo-acoustic formulation: the primary pressure-like
     field ``h1`` is coupled to an auxiliary integrated field ``f1``
@@ -64,8 +64,9 @@ class AcousticTariq(SecondOrderEquation):
     ``(h1, f1)`` is what suppresses the shear-mode artifact that the
     original Alkhalifah pseudo-acoustic exhibits. The model parameter
     ``v`` here is the *NMO velocity* (``v = vp · sqrt(1 + 2 delta)``),
-    **not** the horizontal velocity; ``vv`` is the squared vertical
-    velocity. Source must include ``h1`` (default
+    **not** the horizontal velocity; ``vv`` is the vertical velocity
+    (not its square: the step squares it). VTI only: there is no tilt
+    parameter. Source must include ``h1`` (default
     ``source_type=['h1']`` is set by the propagator).
 
     Reference: Alkhalifah T. 2000, *An acoustic wave equation for
@@ -78,7 +79,7 @@ class AcousticTariq(SecondOrderEquation):
     # medium (see EquationBase.supports_free_surface); fail loud instead.
     supports_free_surface = False
     MODEL_SPECS = (
-        ModelSpec("vv", description="Squared vertical velocity-like parameter for the Tariq qP formulation."),
+        ModelSpec("vv", description="Vertical P-wave velocity.", unit="m/s"),
         ModelSpec("v", aliases=("velocity",), description="Velocity-like parameter for the Tariq qP formulation.", unit="m/s"),
         ModelSpec("eta", description="Anellipticity parameter for the Tariq qP formulation."),
     )

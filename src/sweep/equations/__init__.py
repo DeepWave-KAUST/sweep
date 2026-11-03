@@ -12,8 +12,8 @@ visible where the physics is:
 
 * ``AcousticVTILiang`` / ``AcousticTTILiang`` -- Liang K. et al. (2023),
   2nd-order pure qP (new acoustic approximation), 10.1190/geo2022-0292.1
-* ``AcousticVTIAlkhalifah`` / ``AcousticTTIAlkhalifah`` -- Tariq Alkhalifah
-  (2000), qP eta-formulation, 10.1190/1.1444815 (one class covers VTI and TTI)
+* ``AcousticVTIAlkhalifah`` -- Tariq Alkhalifah (2000), qP eta-formulation,
+  10.1190/1.1444815 (VTI only)
 * ``AcousticVTIDuveneck``/``3D`` -- Duveneck et al. (2008), 1st-order
   velocity-stress, 10.1190/1.3059320
 * ``DASElastic``/``3D`` -- alias of ``DASZhao``/``3D``

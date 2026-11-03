@@ -216,11 +216,8 @@ _TOPO = [
     Cfg("acoustic2d", "c", "full", "interior", "phys", topo="stairs"),
     Cfg("acoustic3d", "eager", "full", "interior", "phys", topo="hill"),
     Cfg("acoustic3d", "c", "full", "interior", "phys", topo="hill"),
-    # elastic: image on both impls
-    Cfg("elastic2d", "eager", "full", "interior", "phys", topo="hill",
-        topo_method="image"),
-    Cfg("elastic2d", "c", "full", "interior", "phys", topo="hill",
-        topo_method="image"),
+    # (no elastic: the elastic staircase was removed and every impl refuses
+    # it -- an error-vs-error config would be a green that checks nothing)
 ]
 
 

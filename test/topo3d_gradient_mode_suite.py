@@ -1,7 +1,7 @@
 """3-D topography Python eager consistency suite.
 
-Covers ``acoustic3d`` and ``elastic3d`` with irregular free-surface
-topography (image method).
+Covers ``acoustic3d`` with irregular free-surface topography (image method).
+(The elastic staircase was removed; 3-D elastic topography is ``PropSEM``.)
 Since the CUDA 3-D topo backend is not yet implemented, this suite
 validates the Python eager path by three orthogonal checks per case:
 
@@ -20,7 +20,7 @@ validates the Python eager path by three orthogonal checks per case:
 Usage::
 
     python test/topo3d_gradient_mode_suite.py             # default scenarios
-    python test/topo3d_gradient_mode_suite.py --solvers elastic3d_topo
+    python test/topo3d_gradient_mode_suite.py --solvers acoustic3d_topo
 """
 from __future__ import annotations
 
@@ -47,7 +47,6 @@ REPO_ROOT = find_repo_root()
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from sweep.equations.acoustic3d import Acoustic3D                          # noqa: E402
-from sweep.equations.elastic3d import Elastic                               # noqa: E402
 from sweep.propagator.torch import PropTorch                                # noqa: E402
 
 
@@ -91,7 +90,6 @@ def _ridge(ny: int, nx: int) -> np.ndarray:
 
 SOLVERS = {
     "acoustic3d_topo":      TopoSolver("acoustic3d_topo",     Acoustic3D, False, "image"),
-    "elastic3d_topo":       TopoSolver("elastic3d_topo",      Elastic,    True,  "image"),
 }
 
 SCENARIOS = {
@@ -100,7 +98,7 @@ SCENARIOS = {
     "ridge":        TopoScenario("ridge",        _ridge),
 }
 
-DEFAULT_SOLVERS = "acoustic3d_topo,elastic3d_topo"
+DEFAULT_SOLVERS = "acoustic3d_topo"
 DEFAULT_SCENARIOS = "flat,gentle_hill,ridge"
 
 

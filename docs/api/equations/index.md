@@ -248,7 +248,7 @@ The raw equation classes (API on [Other equations](others.md)) are:
 | --- | --- | --- | --- |
 | `AcousticVTI` | VTI | 2D | Liang K. et al. 2023 (2nd-order pure qP) |
 | `AcousticTTI` | TTI | 2D | Liang K. et al. 2023 (TTI extension) |
-| `AcousticTariq` | VTI / TTI | 2D | Alkhalifah 2000 (qP η-formulation) |
+| `AcousticTariq` | VTI | 2D | Alkhalifah 2000 (qP η-formulation) |
 | `AcousticVTI1st` / `AcousticVTI1st3D` | VTI | 2D / 3D | Duveneck et al. 2008 (1st-order velocity-stress) |
 
 `AcousticAniso` is a thin **factory** that dispatches by `(method, symmetry,
@@ -266,7 +266,7 @@ record = prop(wavelet, sources, receivers, models=[vp, eps, delta, rho])
 ```
 
 Author-named aliases also exist for the raw classes: `AcousticVTILiang`,
-`AcousticTTILiang`, `AcousticVTIAlkhalifah`, `AcousticTTIAlkhalifah`,
-`AcousticVTIDuveneck`, `AcousticVTIDuveneck3D`.  Use `sweep show <ClassName>`
+`AcousticTTILiang`, `AcousticVTIAlkhalifah`, `AcousticVTIDuveneck`,
+`AcousticVTIDuveneck3D`.  Use `sweep show <ClassName>`
 from the CLI to inspect any of them; the [CLI page](../../user-guide/cli.md)
 has a full output example.

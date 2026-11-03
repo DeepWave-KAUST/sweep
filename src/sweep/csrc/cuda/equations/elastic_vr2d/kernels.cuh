@@ -337,7 +337,7 @@ __global__ void evr_stress_kernel(
     // correction (matches eager fs_sxx_correction).  VR-native coefficient on
     // d px/dx: physical 4 mu (lam+mu)/(lam+2mu) * d vx/dx  ->  with px = rho*vx
     // becomes  4 vs^2 (vp^2 - vs^2)/vp^2 * d px/dx (rho cancels).
-    if (elastic_is_top_free_surface_row(solver, ix, iz)) {
+    if (elastic_is_top_free_surface_row(solver, iz)) {
         f.sxx[idx] = sxx_pre + solver.dt * (4.f * Vs2 * (Vp2 - Vs2) / Vp2) * dpx_dx;
         f.szz[idx] = 0.f;
         f.sxz[idx] = 0.f;
@@ -482,7 +482,7 @@ __global__ void evr_adjoint_zero_top_fs(ElasticWavefieldPointer wf, SolverContex
     int iz = blockIdx.y * blockDim.y + threadIdx.y;
     int b  = blockIdx.z;
     if (ix >= solver.nx || iz >= solver.nz) return;
-    if (!elastic_is_top_free_surface_row(solver, ix, iz)) return;
+    if (!elastic_is_top_free_surface_row(solver, iz)) return;
     int spatial_size = solver.nx * solver.nz;
     auto f = wf.offset(b, spatial_size);
     int idx = iz * solver.nx + ix;
@@ -563,7 +563,7 @@ __global__ void evr_stress_adjoint_prepare(
     float lam          = Vp2 - 2.f * Vs2;
     float mu_          = Vs2;          // V_S^2
 
-    bool is_fs = elastic_is_top_free_surface_row(solver, ix, iz);
+    bool is_fs = elastic_is_top_free_surface_row(solver, iz);
     float bar_sxx = f.sxx[idx];
     float bar_szz = f.szz[idx];
     float bar_sxz = f.sxz[idx];
@@ -1004,7 +1004,7 @@ __global__ void calculate_grad_evr_nobs(
     float Rsx = Rsx_b[idx], Rsz = Rsz_b[idx];
     float px = fpx_b[idx], pz = fpz_b[idx];
 
-    bool is_fs = elastic_is_top_free_surface_row(solver, ix, iz);
+    bool is_fs = elastic_is_top_free_surface_row(solver, iz);
     if (is_fs) {
         // Material derivative of the VR FS sigma_xx fix.  Forward surface row:
         //   sxx = old + dt * C_surf * dpx_dx,  C_surf = 4 vs^2 (vp^2 - vs^2)/vp^2.

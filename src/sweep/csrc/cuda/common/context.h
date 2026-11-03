@@ -342,15 +342,6 @@ struct SolverContext {
     __host__ __device__ inline int ny_phys() const { return phys_hi_[1] - phys_lo_[1]; }
     __host__ __device__ inline int nz_phys() const { return phys_hi_[0] - phys_lo_[0]; }
 
-    // Per-column surface row (2-D propagator).  Returns the row index of
-    // the first SOLID cell in column ``ix`` (matches Python ``topo_rows``
-    // semantics: cells with ``iz < surface_row(ix)`` are air).  Falls
-    // back to the constant ``phys_z0()`` when there's no topography.
-    __host__ __device__
-    inline int surface_row(int ix) const {
-        return has_topo ? topo_rows[ix] : phys_z0();
-    }
-
     // ---- CPML aux-field strip (slab) storage ----------------------------
     // psi/zeta (acoustic) and m_* (elastic) auxiliary fields are only ever
     // nonzero inside the PML bands of their own differencing axis, and are
@@ -469,16 +460,6 @@ struct SolverContext {
     }
     __host__ __device__ inline long aux_idx_z3(int iz, int iy, int ix) const {
         return ((long)aux_z.map(iz) * ny + iy) * nx + ix;
-    }
-
-    // Per-(iy, ix)-column surface row (3-D propagator).  ``topo_rows`` is
-    // a flat row-major (ny, nx) int array on the runtime grid.  Returns
-    // the row index of the first SOLID cell at (iy, ix); cells with
-    // ``iz < surface_row(ix, iy)`` are air.  Falls back to ``phys_z0()``
-    // when there's no topography.
-    __host__ __device__
-    inline int surface_row(int ix, int iy) const {
-        return has_topo ? topo_rows[iy * nx + ix] : phys_z0();
     }
 
     // ---- Sole constructor ------------------------------------------------

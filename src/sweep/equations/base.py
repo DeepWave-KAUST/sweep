@@ -30,8 +30,10 @@ class hybridmethod:
 
 
 def init_wavenumbers(shape, h):
-    kz = np.fft.fftfreq(shape[0], d=h) * 2 * np.pi
-    kx = np.fft.fftfreq(shape[1], d=h) * 2 * np.pi
+    """Angular wavenumbers of a 2-D grid; ``h`` is one spacing or ``(dz, dx)``."""
+    hz, hx = (h, h) if np.ndim(h) == 0 else (h[0], h[1])
+    kz = np.fft.fftfreq(shape[0], d=hz) * 2 * np.pi
+    kx = np.fft.fftfreq(shape[1], d=hx) * 2 * np.pi
     kzz, kxx = np.meshgrid(kz, kx, indexing='ij')
     k = np.sqrt(kxx**2 + kzz**2)
     return k, kx, kz
@@ -128,10 +130,13 @@ class WaveEquation:
     supports_image_topography = False
 
     # Same, for the compiled ``impl='c'`` kernels (they read the rows through
-    # ``SolverContext``).  Declared separately because support differs by impl:
-    # 3-D Elastic honours topography on eager but its CUDA kernels do not, and
-    # ElasticVRR is the reverse.
+    # ``SolverContext``).  Declared separately because support may differ by
+    # impl.
     supports_image_topography_c = False
+
+    # Appended to the propagator's refusal of ``topography=`` when the
+    # staircase is unsupported: where to go instead.
+    image_topography_hint = None
 
     # Class-level spec tables. Subclasses that declare these tables drive
     # the ``wavefields`` / ``models`` / ``field_specs`` / ``model_specs``

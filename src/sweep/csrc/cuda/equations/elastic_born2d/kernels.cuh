@@ -188,7 +188,7 @@ __global__ void __launch_bounds__(256) elastic_born_stress_kernel(
     const float dlam2mu = dlam + 2.f * dmu;
 
     // elastic2d's PML / interior split, free-surface rows kept on the full path.
-    int z_lo = solver.fsLo(0) ? (solver.surface_row(ix) + 1) : (solver.padLo(0) + halo);
+    int z_lo = solver.fsLo(0) ? (solver.phys_z0() + 1) : (solver.padLo(0) + halo);
     int z_hi = solver.fsHi(0) ? elastic_z_bottom_surface_row(solver)
                               : (solver.nz - solver.padHi(0) - halo);
     int x_lo = solver.fsLo(2) ? (elastic_x_left_surface_col(solver) + 1)
@@ -241,7 +241,7 @@ __global__ void __launch_bounds__(256) elastic_born_stress_kernel(
         // elastic2d's per-face traction BC on both fields: Robertsson
         // corrections first, zeroing after.  The scattered surface row takes
         // the Born source of the Robertsson coefficient instead of the bulk one.
-        bool is_z_fs = elastic_is_top_free_surface_row(solver, ix, iz);
+        bool is_z_fs = elastic_is_top_free_surface_row(solver, iz);
         bool is_x_fs = elastic_is_x_free_surface_col(solver, ix);
         if (is_z_fs || is_x_fs) {
             const float dc = (4.f * mu_ * mu_ * dlam

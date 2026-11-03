@@ -1,10 +1,10 @@
 """Elastic 2-D forward modeling with **curvilinear** free-surface
-topography — counterpart of ``elastic2d_hill_demo.py``.
+topography.
 
-The boundary-fitted grid removes the staircase corner energy injection
-that drives the staircase late-time instability, so the simulation can
-run long enough to watch the Rayleigh wave sweep the whole receiver
-array.  The solver is the collocated asymmetric-operator scheme of
+The boundary-fitted grid follows the surface, so the simulation runs
+long enough to watch the Rayleigh wave sweep the whole receiver array
+(the elastic image-method staircase was removed: it was unstable on
+steep slopes).  The solver is the collocated asymmetric-operator scheme of
 Bartana, Xu & Rickett (SLB); see
 :mod:`sweep.equations.elastic_curvilinear`.
 

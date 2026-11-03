@@ -137,7 +137,7 @@ background models' and the wavelet's. No free surface.
 `[vp, vs, rho, dvp, dvs, drho]`; the perturbations are **absolute** (m/s, kg/m^3), not ratios.
 Default source on the background stresses `sxx, szz` (explosion), receivers on the scattered
 velocities `svx, svz`, so the output is the Born data only. `pml_type` `cpmls`, per-edge free
-surface and topography as `Elastic`. The `dvp, dvs, drho` gradients are the elastic LSRTM images
+surface as `Elastic` (no topography). The `dvp, dvs, drho` gradients are the elastic LSRTM images
 in every memory mode on both `impl`s; the background (RWI) and wavelet gradients are
 `impl='eager'` only and the compiled path refuses them (detach `vp, vs, rho` and the wavelet
 on `impl='c'`).

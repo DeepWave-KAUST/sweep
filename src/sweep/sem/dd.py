@@ -799,17 +799,20 @@ def _assert_strip_ibool(ml, mesh_g, eids, gidx):
             "are not the same mesh, so every sliced field is misaligned")
 
 
-def _band_nodes(mesh, *profiles, mode="full"):
+def _band_nodes(mesh, profiles, model=None, mode="full"):
     """This strip's C-PML band: every node of every element that touches a
     node with a non-zero profile coefficient (``mode='full'``), or only the
-    non-PML nodes of that set -- the interface LINE (``mode='rim'``, 7-12x
-    fewer nodes, exact from a few model pixels in; see ``cpml_node_masks``).
-    ``profiles`` is however many per-axis coefficients the equation has (2-D:
-    b_x, b_z, dbx, dbz; 3-D adds the y pair).
+    nodes of the band's first element layer, the one touching the model
+    (``mode='rim'``; see ``band_from_active``). ``profiles`` is however many
+    per-axis coefficients the equation has (2-D: b_x, b_z, dbx, dbz; 3-D adds
+    the y pair); ``model`` is this strip's slice of the model node mask
+    (:func:`_strip_model_nodes`), needed by ``'rim'`` only.
 
     The mode is read ONCE per decomposition from the propagator, so the strips
     cannot disagree about it -- which the composition argument below needs just
-    as much as it needs the sliced profile.
+    as much as it needs the sliced profile. ``model`` is decided on the whole
+    mesh and sliced, for the same reason: whether a cut node belongs to the
+    model can depend on an element in the OTHER strip.
 
     What makes boundary saving compose with the decomposition is NOT that a
     cut avoids the band -- it usually does not. The rim reaches a cut through
@@ -829,8 +832,53 @@ def _band_nodes(mesh, *profiles, mode="full"):
         active |= v != 0
     from .boundary_saving import band_from_active
     band, _ = band_from_active(
-        active, mesh.ibool.reshape(mesh.n_elements, -1).to(dev), mode)
+        active, mesh.ibool.reshape(mesh.n_elements, -1).to(dev), mode,
+        None if model is None else model.to(dev))
     return torch.nonzero(band).reshape(-1).contiguous()
+
+
+def _axis_model_nodes(b, no):
+    """1-D :func:`~sweep.sem.boundary_saving.model_node_mask` on one axis of
+    a separable profile: ``b`` is the axis table (one value per GLL node of
+    the line), ``no`` the order. An element is band when ``b`` is non-zero at
+    one of its interior nodes."""
+    n = b.numel()
+    ne = (n - 1) // no
+    nz = (b != 0)[:ne * no].reshape(ne, no)
+    band = nz[:, 1:].any(1) if no > 1 else nz.any(1)
+    keep = torch.nonzero(~band).reshape(-1)
+    model = torch.zeros(n, dtype=torch.bool, device=b.device)
+    if keep.numel():
+        idx = keep[:, None] * no + torch.arange(no + 1, device=b.device)
+        model[idx.reshape(-1)] = True
+    return model
+
+
+def _strip_model_nodes(ctx, s, coefs):
+    """This strip's slice of the model node mask, for ``bs_band_mode='rim'``
+    (``None`` otherwise: the full band needs none). A separable 3-D profile
+    (``ctx.axes``) builds it from the 1-D tables -- a node belongs to the
+    model when it does on every axis, since an element outside the band is
+    outside it on every axis -- so the global mesh never has to exist; every
+    other path computes it on the global mesh once per call and slices."""
+    if ctx.bmode != "rim":
+        return None
+    if ctx.axes is not None:
+        no, nyg = ctx.no, ctx.nyg
+        iz = torch.div(ctx.rows, nyg, rounding_mode="floor")
+        iy = ctx.rows % nyg
+        m = {ax: _axis_model_nodes(ctx.axes[f"b_{ax}"], no) for ax in "xyz"}
+        # laid out as _strip_cpml_from_axes lays out the profile
+        return (m["x"][s.cols][None, :]
+                & (m["y"][iy] & m["z"][iz])[:, None]).reshape(-1)
+    key = tuple(id(v) for v in coefs)
+    cache = ctx.model_g
+    if cache.get("key") != key:
+        from .boundary_saving import model_node_mask
+        mesh = ctx.mesh
+        cache["key"], cache["mask"] = key, model_node_mask(
+            coefs, mesh.ibool, mesh.n_global)
+    return s.sl(cache["mask"].float()) > 0
 
 
 def _patch_dup_grad_syn(parts, gs, nt, stride=1):
@@ -934,8 +982,12 @@ def _pin_band_global(eq_g, node_in_pml=None, mode="full"):
     else:                                    # element-shaped marker
         active[mesh.ibool[nodes != 0]] = True
     from .boundary_saving import band_from_active
+    model = None
+    if mode == "rim":
+        from .boundary_saving import model_node_mask
+        model = model_node_mask([nodes], mesh.ibool, ng)
     band, _ = band_from_active(
-        active, mesh.ibool.reshape(mesh.n_elements, -1), mode)
+        active, mesh.ibool.reshape(mesh.n_elements, -1), mode, model)
     v[band] = 1.0
     return v
 
@@ -1000,7 +1052,7 @@ class _StripCtx:
     in particular: both sides of a cut must give the shared nodes the SAME
     band membership (see ``_band_nodes``)."""
 
-    __slots__ = ("dd", "eq", "p", "mesh", "d3", "compact", "no", "bmode",
+    __slots__ = ("dd", "eq", "p", "mesh", "d3", "compact", "no", "bmode", "model_g",
                  "nex", "ney", "nez", "nxg", "nyg", "nzg", "dev", "mdev",
                  "pattern", "src_node", "slots", "rows", "ranks", "axes", "vp2")
 
@@ -1012,6 +1064,7 @@ class _StripCtx:
         self.compact = isinstance(eq_g, _CompactEq3D)
         no = self.no = self.p.n_order
         self.bmode = getattr(self.p, "bs_band_mode", "full")
+        self.model_g = {}             # the global model node mask (rim)
         mesh = self.mesh
         self.nex, self.nez = mesh.nex, mesh.nez
         # 2-D is the 3-D numbering with a single y node -- e = ez*nex + ex,
@@ -1529,9 +1582,12 @@ class SEMModelParallel:
                 c[nm] = s.sl(getattr(eq_g.cpml, nm))
         # the BS ring on the STRIP mesh from the SLICED profile: a cut may
         # sit inside it and still compose (see _band_nodes)
-        c["band_idx"] = _band_nodes(s.ml, c["b_x"], c["b_y"], c["b_z"],
-                                    c["dbx_dx"], c["dby_dy"], c["dbz_dz"],
-                                    mode=ctx.bmode)
+        c["band_idx"] = _band_nodes(
+            s.ml, (c["b_x"], c["b_y"], c["b_z"],
+                   c["dbx_dx"], c["dby_dy"], c["dbz_dz"]),
+            _strip_model_nodes(ctx, s, None if ctx.axes is not None else
+                               [eq_g.cpml.b_x, eq_g.cpml.b_y, eq_g.cpml.b_z]),
+            mode=ctx.bmode)
         _band_support(c, "xyz")
         # a middle strip has no x slab: nsx = 0. The y/z plane sets come from
         # the GLOBAL profile when it is the one being sliced, so every strip
@@ -1576,9 +1632,10 @@ class SEMModelParallel:
             "dirichlet_idx": (_i64(eq_l.dirichlet_idx)
                               if eq_l.dirichlet_idx.numel() else
                               torch.zeros(0, dtype=torch.int64, device=dev)),
-            "band_idx": _band_nodes(s.ml, prof["b_x"], prof["b_z"],
-                                    prof["dbx_dx"], prof["dbz_dz"],
-                                    mode=ctx.bmode),
+            "band_idx": _band_nodes(
+                s.ml, (prof["b_x"], prof["b_z"], prof["dbx_dx"], prof["dbz_dz"]),
+                _strip_model_nodes(ctx, s, [cp_g.b_x, cp_g.b_z]),
+                mode=ctx.bmode),
             **s.tail(ctx),
         }
         _band_support(c, "xz")
@@ -1669,8 +1726,9 @@ class SEMModelParallel:
         }
         for nm in ("a_x", "b_x", "dbx_dx", "a_z", "b_z", "dbz_dz"):
             c[nm] = s.sl(getattr(cp_ac, nm))
-        c["band_idx"] = _band_nodes(s.ml, c["b_x"], c["b_z"], c["dbx_dx"],
-                                    c["dbz_dz"], mode=ctx.bmode)
+        c["band_idx"] = _band_nodes(
+            s.ml, (c["b_x"], c["b_z"], c["dbx_dx"], c["dbz_dz"]),
+            _strip_model_nodes(ctx, s, [cp_ac.b_x, cp_ac.b_z]), mode=ctx.bmode)
         _elastic_cpml_consts(c, cp_el, el)
         mat = (ac._inv_rho[s.eids].to("cuda", torch.float32),   # _FS_MATS order
                ac._inv_M[s.gm].to("cuda", torch.float32),

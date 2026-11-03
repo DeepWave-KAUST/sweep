@@ -136,6 +136,31 @@ def _has_torch_compile():
 requires_compile = pytest.mark.skipif(not _has_torch_compile(), reason="this torch has no torch.compile")
 
 
+# ``@pytest.mark.slow``: long-run stability gates and the long validations
+# against analytic / external references -- the minutes of a full run, guarding
+# what an everyday change rarely moves. Skipped unless ``--runslow`` (or
+# ``SWEEP_TEST_SLOW=1``); the CI runs them, and so should anything before a
+# release or a change to an absorbing layer, a coupling or a long-run path.
+def pytest_addoption(parser):
+    parser.addoption("--runslow", action="store_true", default=False,
+                     help="also run the tests marked slow")
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "slow: long-run gates and long validations; run with --runslow")
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--runslow") or os.environ.get(
+            "SWEEP_TEST_SLOW", "").lower() in ("1", "true", "yes", "on"):
+        return
+    skip = pytest.mark.skip(reason="slow: run with --runslow or SWEEP_TEST_SLOW=1")
+    for item in items:
+        if "slow" in item.keywords:
+            item.add_marker(skip)
+
+
 def ricker(nt, dt, fm=10.0, delay=0.06, scale=1.0):
     """The sampled Ricker wavelet the suite uses, in one place.
 

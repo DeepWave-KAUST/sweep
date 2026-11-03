@@ -146,14 +146,61 @@ and this project adheres to
   (replaced by the equation registry), and `gate/sync_to_ibex.sh` /
   `gate/run_reorder_checks.sh`.  Notebook outputs `fwi_ddp.py` and
   `15_wavefield_topography.gif` are no longer tracked.
+- **The elastic image-method topography staircase** (`topography=` on
+  `Elastic`, `Elastic3D`, `ElasticBorn` and `ElasticVRR`).  It grew without
+  bound on slopes steeper than about 0.5 (5 m grid, 45° ridge: 2000× the
+  physical amplitude by 0.35 s, on every stencil order), and holding its air at
+  zero only stopped the growth: against a refined spectral-element reference
+  its error rose with refinement (relative L2 0.52, 0.63, 0.80 at 5, 2.5,
+  1.25 m).  These equations now refuse `topography=` on every impl and name the
+  alternatives, `ElasticCurvilinear` (2-D) and `PropSEM`.  The acoustic
+  staircase (`Acoustic`, `Acoustic3D`, `ViscoAcoustic`) is unchanged, and so is
+  every flat free surface.  The per-column surface-row paths in the elastic
+  CUDA kernels are gone too (records and gradients are bit-identical); the
+  `Elastic` and `ElasticVRR` CUDA drivers now refuse topography rows
+  themselves.  `examples/wavefields/topography/elastic2d_hill_demo.py` and the
+  two elastic topography bitgate configs go with it, and notebook 15 now runs
+  the acoustic image method and curvilinear grid, and elastic on the
+  curvilinear grid only.
 
 ### Fixed
+- `PropSEM(memory=BoundarySaving(), bs_band_mode='rim')` gives the full-tape
+  gradient over the whole model, its edge included. The rim was meant to be
+  the band's inner edge, but the C-PML derivative profiles (`dbx_dx` ...,
+  from `np.gradient`) are non-zero on the model's edge line too, so it was
+  counted as band: rim zeroed it in the reverse march and stored the model's
+  outermost element instead. That element's gradient was wrong (2-D acoustic,
+  `impl='c'`: `1 - cos` 0.35 uncropped; elastic 1.7e-5; the fluid-solid
+  "2e-5 plateau" was the same error). Rim now stores the band's first element
+  layer, the one touching the model. Band elements are told apart by `b_*` /
+  `node_in_pml` at their interior GLL nodes only, since on the band's inner
+  face the profile is zero only up to round-off (`b_z = -3.8e-16` measured),
+  and a model node the ring does not restore is no longer zeroed in the
+  eager reverse march (`np.gradient` leaves 1e-17 on `dbz_dz` one node into
+  the model). Every path that
+  takes the option -- 2-D acoustic, elastic and fluid-solid, 3-D acoustic, DD
+  strips, `impl='c'` and eager -- is at round-off, uncropped. It stores more
+  than the old rim (2-D acoustic peak 50 → 114 MB on a 97×193 grid, against
+  553 MB for the full band), and the C-PML memory rings are no longer empty
+  in rim mode. No kernel change.
+- `AcousticTariq`: `vv` is the vertical velocity, as the step uses it
+  (`vv**2`); the docstring and model spec called it the squared velocity.
+  `AcousticAniso(method='alkhalifah', symmetry='tti')` now raises
+  `NotImplementedError` and the `AcousticTTIAlkhalifah` alias is gone: the
+  class has no tilt parameter, so both silently solved the VTI equation.
 - `PropSEM(memory=BoundarySaving(storage_dtype='fp16'))` is refused on both
   backends. The eager ring stored a plain fp16 cast, which flushes the SEM's
   small field values to zero: 2-D elastic gradients came out 15% and 2-D
   acoustic 6% off the full tape (bf16 5e-5, int8 2e-4); `impl='c'` refused it
   already, under an internal option's name. PropTorch's fp16 ring is
   block-normalised; the SEM rings take fp32, bf16 and int8.
+- `AcousticCurvilinear`: the z-direction CPML terms took their derivatives
+  with `dh`, but one computational row is `D(x) d_eta` metres, so whenever the
+  surface lies below row 0 the stretched-coordinate correction was off by
+  `(row_spacing / dh)**2` and the bottom layer reflected (1.2% of the record
+  with the surface at row 40 of 121, 3% at row 60, against 1e-4 without
+  topography). They now use `beta d/deta`. The interior is unchanged;
+  `ElasticCurvilinear`'s first-order CPML is scale-free and was right.
 - `PropSEM(impl='eager')` compiling its step no longer fails when
   `torch.compile` cannot build it, e.g. on CPU with g++ older than 10
   (`InductorError: CppCompileError`, `-std=c++20` rejected). As on the FD eager
@@ -188,6 +235,11 @@ and this project adheres to
   elements at 30 Hz) still reflects as much as before. `impl='c'` keeps these
   memories per node (`Sem3dVsForwardInput.a_n`, `.P`; backward `.lP`): a core
   built from this tree is needed.
+- `ViscoAcoustic` with `dh=(dz, dx)` and `dz != dx`: the spectral attenuation
+  and dispersion filters (eager and `impl='c'`) built |k| from dz on both axes,
+  so the x wavenumbers were scaled by dz/dx and the Q response depended on the
+  grid orientation (a transposed problem's record differed by 28%). They now
+  use both spacings; uniform grids are unchanged.
 
 ## [0.3.6] - 2026-10-29
 

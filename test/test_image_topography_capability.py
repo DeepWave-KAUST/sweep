@@ -1,9 +1,10 @@
 """topography= (a staircase, not a flat free surface) must be refused by
 equations that would silently ignore the rows and model a flat surface.
 
-The support matrix is genuinely per-impl: 3-D Elastic applies the staircase in
-its eager func but its CUDA kernels never read the rows (switching impl used to
-switch the physics with no error); ElasticVRR is the exact reverse.
+The support matrix is per-impl.  The staircase is acoustic-only: the elastic
+image-method staircase was removed (unstable on slopes steeper than ~0.5 and,
+stabilised, wrong in a way that grew with refinement), and every elastic
+equation now refuses topography= on every impl, naming the alternatives.
 """
 from __future__ import annotations
 
@@ -12,8 +13,8 @@ import pytest
 import torch
 
 from sweep.equations import (
-    Acoustic, Acoustic3D, AcousticVRZ, Elastic, Elastic3D, ElasticVRR,
-    ViscoAcoustic,
+    Acoustic, Acoustic3D, AcousticVRZ, Elastic, Elastic3D, ElasticBorn,
+    ElasticVRR, ViscoAcoustic,
 )
 from sweep.propagator.torch import PropTorch
 
@@ -34,10 +35,11 @@ def _build(eq_cls, impl, dev, **extra):
 def test_the_support_matrix_is_declared_per_impl():
     assert Acoustic.supports_image_topography and Acoustic.supports_image_topography_c
     assert Acoustic3D.supports_image_topography and Acoustic3D.supports_image_topography_c
-    assert Elastic.supports_image_topography and Elastic.supports_image_topography_c
-    assert Elastic3D.supports_image_topography and not Elastic3D.supports_image_topography_c
     assert ViscoAcoustic.supports_image_topography and not ViscoAcoustic.supports_image_topography_c
-    assert not ElasticVRR.supports_image_topography and ElasticVRR.supports_image_topography_c
+    for cls in (Elastic, Elastic3D, ElasticBorn, ElasticVRR):
+        assert not cls.supports_image_topography, cls
+        assert not cls.supports_image_topography_c, cls
+        assert cls.image_topography_hint, cls
     assert not AcousticVRZ.supports_image_topography and not AcousticVRZ.supports_image_topography_c
 
 
@@ -51,23 +53,27 @@ def test_a_flat_free_surface_never_consults_the_flag():
     assert p.free_surface
 
 
-def test_eager_elastic3d_still_takes_image_topography():
+@pytest.mark.parametrize("cls", [Elastic, ElasticBorn])
+def test_eager_elastic_refuses_topography_and_names_the_alternative(cls):
+    with pytest.raises(NotImplementedError, match="ElasticCurvilinear|PropSEM|no "
+                       "topography path"):
+        _build(cls, "eager", "cpu", topography=_rows())
+
+
+def test_eager_elastic3d_refuses_topography_and_names_propsem():
     eq3 = Elastic3D(spatial_order=4, device="cpu", backend="torch")
     rows = np.tile(_rows(24)[None, :3], (20, 8))[:20, :24]
-    p = PropTorch(eq3, (24, 20, 24), backend="torch", impl="eager", dev="cpu",
+    with pytest.raises(NotImplementedError, match="PropSEM"):
+        PropTorch(eq3, (24, 20, 24), backend="torch", impl="eager", dev="cpu",
                   dh=10.0, dt=1e-3, abcn=6, nt=20, B=1,
                   topography=rows, topo_method="image")
-    assert p._topo_method == "image"
 
 
 @cuda_only
-def test_c_elastic3d_refuses_what_its_kernels_ignore():
-    eq3 = Elastic3D(spatial_order=4, device="cuda", backend="torch")
-    rows = np.tile(_rows(24)[None, :3], (20, 8))[:20, :24]
+@pytest.mark.parametrize("cls", [Elastic, ElasticBorn, ElasticVRR])
+def test_c_elastic_refuses_topography(cls):
     with pytest.raises(NotImplementedError, match="supports_image_topography_c"):
-        PropTorch(eq3, (24, 20, 24), backend="torch", impl="c", dev="cuda",
-                  dh=10.0, dt=1e-3, abcn=6, nt=20, B=1,
-                  topography=rows, topo_method="image")
+        _build(cls, "c", "cuda", topography=_rows())
 
 
 @cuda_only

@@ -8,33 +8,23 @@ from ._free_surface import (
     FS_MOD_SXX,
     top_free_surface_derivative,
     top_free_surface_cell_derivative,
-    top_free_surface_derivative_topo,
     zero_top_row,
-    zero_at_topo,
     overwrite_top_row,
-    overwrite_at_topo,
 )
 from ._registry import register_equation
 
 
-def _fs_z_deriv(field, deriv, top_halo, odd, topo_rows, half=False):
-    """3-D free-surface z-derivative: flat ``top_halo`` row when
-    ``topo_rows`` is None, per-(iy,ix) ``topo_rows[iy, ix]`` row otherwise.
+def _fs_z_deriv(field, deriv, top_halo, odd, half=False):
+    """3-D free-surface z-derivative about the flat ``top_halo`` row.
 
     ``half=True`` marks the staggered fields at ``z=+h/2`` (``sxz``, ``syz``,
     ``vz``): their image reflects about ``top_halo-1/2``, giving
     ``tau_zx(-h/2) = -tau_zx(+h/2)`` (Kristek, Moczo & Archuleta 2002, Table 1).
     The integer-grid mirror would instead pair ``-h/2`` with ``+3h/2`` — masked
-    while the surface row is force-zeroed, destabilising once it is not.
-    Irregular topography reflects about ``iz_surf-1/2`` for the same fields, so
-    a constant ``topo_rows`` reproduces the flat path exactly."""
-    if topo_rows is None:
-        deriv_fn = (top_free_surface_cell_derivative if half
-                    else top_free_surface_derivative)
-        return deriv_fn(field, deriv, top_halo, odd=odd, axis=-3)
-    return top_free_surface_derivative_topo(
-        field, deriv, top_halo, odd=odd, axis=-3, iz_surf=topo_rows, half=half
-    )
+    while the surface row is force-zeroed, destabilising once it is not."""
+    deriv_fn = (top_free_surface_cell_derivative if half
+                else top_free_surface_derivative)
+    return deriv_fn(field, deriv, top_halo, odd=odd, axis=-3)
 
 
 def velocity_substep(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
@@ -46,7 +36,7 @@ def velocity_substep(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
                      m_sxzx, m_sxzz,
                      m_syyy,
                      m_syzy, m_syzz,
-                     *, rho, dt, pd, pml, free_surface=False, topo_rows=None):
+                     *, rho, dt, pd, pml, free_surface=False):
     """First half of :func:`step`: the stress derivatives (and their CPML
     memories), then the velocities. Returns all 27 fields, in order."""
     az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh = pml
@@ -55,21 +45,21 @@ def velocity_substep(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
     dsxx_dx = pd.x_forward(sxx)
     dsxy_dy = pd.y_backward(sxy)
     if free_surface:
-        dsxz_dz = _fs_z_deriv(sxz, pd.z_backward, top_halo, True, topo_rows, half=True)
+        dsxz_dz = _fs_z_deriv(sxz, pd.z_backward, top_halo, True, half=True)
     else:
         dsxz_dz = pd.z_backward(sxz)
 
     dsxy_dx = pd.x_backward(sxy)
     dsyy_dy = pd.y_forward(syy)
     if free_surface:
-        dsyz_dz = _fs_z_deriv(syz, pd.z_backward, top_halo, True, topo_rows, half=True)
+        dsyz_dz = _fs_z_deriv(syz, pd.z_backward, top_halo, True, half=True)
     else:
         dsyz_dz = pd.z_backward(syz)
 
     dsxz_dx = pd.x_backward(sxz)
     dsyz_dy = pd.y_backward(syz)
     if free_surface:
-        dszz_dz = _fs_z_deriv(szz, pd.z_forward, top_halo, True, topo_rows)
+        dszz_dz = _fs_z_deriv(szz, pd.z_forward, top_halo, True)
     else:
         dszz_dz = pd.z_forward(szz)
 
@@ -112,7 +102,7 @@ def stress_substep(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
                    m_sxzx, m_sxzz,
                    m_syyy,
                    m_syzy, m_syzz,
-                   *, lame_lambda, lame_mu, dt, pd, pml, free_surface=False, topo_rows=None,
+                   *, lame_lambda, lame_mu, dt, pd, pml, free_surface=False,
                    return_gradients=False):
     """Second half of :func:`step`: the velocity derivatives (and their CPML
     memories), then the stresses and the free-surface rows."""
@@ -122,21 +112,21 @@ def stress_substep(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
     dvx_dx = pd.x_backward(vx)
     dvx_dy = pd.y_forward(vx)
     if free_surface:
-        dvx_dz = _fs_z_deriv(vx, pd.z_forward, top_halo, False, topo_rows)
+        dvx_dz = _fs_z_deriv(vx, pd.z_forward, top_halo, False)
     else:
         dvx_dz = pd.z_forward(vx)
 
     dvy_dx = pd.x_forward(vy)
     dvy_dy = pd.y_backward(vy)
     if free_surface:
-        dvy_dz = _fs_z_deriv(vy, pd.z_forward, top_halo, False, topo_rows)
+        dvy_dz = _fs_z_deriv(vy, pd.z_forward, top_halo, False)
     else:
         dvy_dz = pd.z_forward(vy)
 
     dvz_dx = pd.x_forward(vz)
     dvz_dy = pd.y_forward(vz)
     if free_surface:
-        dvz_dz = _fs_z_deriv(vz, pd.z_backward, top_halo, True, topo_rows, half=True)
+        dvz_dz = _fs_z_deriv(vz, pd.z_backward, top_halo, True, half=True)
     else:
         dvz_dz = pd.z_backward(vz)
 
@@ -177,20 +167,13 @@ def stress_substep(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
             _coef2 = 2.0 * lame_lambda * lame_mu / _l2m
             _sxx_surf = sxx_pre_fs + dt * (_coef * dvx_dx + _coef2 * dvy_dy)
             _syy_surf = syy_pre_fs + dt * (_coef2 * dvx_dx + _coef * dvy_dy)
-            if topo_rows is not None:
-                sxx = overwrite_at_topo(sxx, _sxx_surf, topo_rows, axis=-3)
-                syy = overwrite_at_topo(syy, _syy_surf, topo_rows, axis=-3)
-            else:
-                sxx = overwrite_top_row(sxx, _sxx_surf, top_halo, axis=-3)
-                syy = overwrite_top_row(syy, _syy_surf, top_halo, axis=-3)
-        if topo_rows is not None:
-            # z-low free surface: zero ONLY the normal stress szz (its node is
-            # on the surface).  sxz/syz live +h/2 inside the medium, so zeroing
-            # them is a spurious over-constraint that adds ~6% Rayleigh grid
-            # dispersion (Kristek 2002 Table 1; cf. Elastic._fs_zero_traction).
-            szz = zero_at_topo(szz, topo_rows, axis=-3)
-        else:
-            szz = zero_top_row(szz, top_halo, axis=-3)
+            sxx = overwrite_top_row(sxx, _sxx_surf, top_halo, axis=-3)
+            syy = overwrite_top_row(syy, _syy_surf, top_halo, axis=-3)
+        # z-low free surface: zero ONLY the normal stress szz (its node is on
+        # the surface).  sxz/syz live +h/2 inside the medium, so zeroing them is
+        # a spurious over-constraint that adds ~6% Rayleigh grid dispersion
+        # (Kristek 2002 Table 1; cf. Elastic._fs_zero_traction).
+        szz = zero_top_row(szz, top_halo, axis=-3)
     
     out = (vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
            m_vxx, m_vxy, m_vxz,
@@ -226,7 +209,6 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
          dt, h, b, pd,
          pml=None,
          free_surface=False,
-         topo_rows=None,
          return_gradients=False,
          ):
     """One leapfrog step: :func:`velocity_substep`, then :func:`stress_substep`
@@ -241,9 +223,9 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
                               m_syyy,
                               m_syzy, m_syzz,
                               rho=rho, dt=dt, pd=pd, pml=pml,
-                              free_surface=free_surface, topo_rows=topo_rows)
+                              free_surface=free_surface)
     return stress_substep(*fields, lame_lambda=lame_lambda, lame_mu=lame_mu, dt=dt, pd=pd, pml=pml,
-                          free_surface=free_surface, topo_rows=topo_rows,
+                          free_surface=free_surface,
                           return_gradients=return_gradients)
 
 
@@ -305,9 +287,9 @@ class Elastic(FirstOrderEquation):
     # The eager boundary-saving sub-steps carry the free-surface BC (the image
     # derivatives and the surface rows of stress_substep).
     supports_bs_free_surface = True
-    supports_image_topography = True   # eager func applies the staircase
-    # supports_image_topography_c stays False: the CUDA kernels never read
-    # the topo rows (topo3d_gradient_mode_suite's docstring says the same).
+    image_topography_hint = (
+        "The elastic image-method staircase was removed; for a 3-D elastic "
+        "surface with topography use PropSEM.")
 
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch'):
         """Build the 3-D elastic equation operator.
@@ -365,10 +347,6 @@ class Elastic(FirstOrderEquation):
     def func(self, wavefields, models, dt, h, b, **kwargs):
         vp, vs, rho, lame_lambda, lame_mu = self._moduli(models)
 
-        # Image-method / flat step.  ``topo_rows`` is 2-D
-        # ``(ny, nx)`` on the runtime grid for irregular topo; ``None``
-        # for flat / no-FS.
-        topo_rows = getattr(self, "_topo_rows_runtime", None)
         return step(
             *wavefields,
             vp,
@@ -382,7 +360,6 @@ class Elastic(FirstOrderEquation):
             pd=self.pd,
             pml=self.b,
             free_surface=getattr(self, "free_surface", False),
-            topo_rows=topo_rows,
             **kwargs,
         )
 
@@ -396,8 +373,7 @@ class Elastic(FirstOrderEquation):
         at ``-dt``."""
         pd = self.pd
         fs = bool(getattr(self, "free_surface", False))
-        topo = getattr(self, "_topo_rows_runtime", None)
-        kw = dict(pd=pd, pml=(0.0,) * 12, free_surface=fs, topo_rows=topo)
+        kw = dict(pd=pd, pml=(0.0,) * 12, free_surface=fs)
 
         def sub_v(wf, models, dt, h):
             return list(velocity_substep(*wf, rho=self._moduli(models)[2], dt=dt, **kw))

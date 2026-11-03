@@ -311,7 +311,6 @@ Instantiated on the CPU with defaults (`backend='torch'`). `src`/`rec` = default
 | `AcousticBorn3D` | 3 | `['vp', 'mp']` | `['h1']` | `['h1']` | `['sh1']` | `['sh1']` | `cpmlr` | yes | yes | no/no | yes/yes | no |
 | `AcousticCurvilinear` | 2 | `['vp']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | no | yes | no/no | yes/yes | no |
 | `AcousticTTI` | 2 | `['vp', 'epsilon', 'delta', 'theta']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | yes | no | no/no | yes/no | no |
-| `AcousticTTIAlkhalifah` (= `qP_tariq.AcousticTariq`) | 2 | `['vv', 'v', 'eta']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | no | no | no/no | yes/yes | no |
 | `AcousticTTIBorn` | 2 | `['vp', 'epsilon', 'delta', 'theta', 'mp']` | `['h1']` | `['h1']` | `['sh1']` | `['sh1']` | `cpmlr` | yes | no | no/no | yes/no | no |
 | `AcousticTTILiang` (= `qP_tti.AcousticTTI`) | 2 | `['vp', 'epsilon', 'delta', 'theta']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | yes | no | no/no | yes/no | no |
 | `AcousticTariq` | 2 | `['vv', 'v', 'eta']` | `['h1']` | `['h1']` | `['h1']` | `['h1']` | `cpmlr` | no | no | no/no | yes/yes | no |

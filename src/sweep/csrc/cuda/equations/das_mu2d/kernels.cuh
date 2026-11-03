@@ -110,9 +110,7 @@ __global__ void das_mu2d_stress_strain_kernel(
         // coefficient 4 mu (lam+mu)/(lam+2mu) * dvx_dx (from sigma_zz=0).
         // Applied as a correction on top of the bulk update above (the
         // lam*dvz_dz term cancels, the dvx_dx coefficient is replaced).
-        // Flat surface only — eager gates this on ``not has_topo``.
-        if (!solver.has_topo)
-            f.sxx[idx] += -solver.dt * lam * (lam / (lam + 2.f * mu_) * dvx_dx + dvz_dz);
+        f.sxx[idx] += -solver.dt * lam * (lam / (lam + 2.f * mu_) * dvx_dx + dvz_dz);
         f.szz[idx] = 0.f;   // z-low FS: zero only szz; sxz is a +h/2 medium value (fix)
     }
 
@@ -178,10 +176,9 @@ __global__ void das_mu2d_stress_strain_adjoint_prepare(
     float bar_exz = -f.exz[idx];
 
     float bar_dvx_dx, bar_dvz_dz, bar_dvx_dz, bar_dvz_dx;
-    if (is_fs && !solver.has_topo) {
-        // Transpose of the Robertsson FS sigma_xx fix (flat only — eager gates on
-        // not has_topo; strain terms unchanged, the free surface BC is on stress,
-        // not strain): surface sxx = old_sxx + dt * C_surf * dvx_dx,
+    if (is_fs) {
+        // Transpose of the Robertsson FS sigma_xx fix (strain terms unchanged,
+        // the free surface BC is on stress, not strain): surface sxx = old_sxx + dt * C_surf * dvx_dx,
         // C_surf = 4 mu (lam+mu)/(lam+2mu); the dvz_dz dependence cancels.
         float c_surf = 4.f * mu_ * (lam + mu_) / (lam + 2.f * mu_);
         bar_dvx_dx = solver.dt * (c_surf * bar_sxx + bar_exx);
