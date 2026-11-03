@@ -204,6 +204,11 @@ and this project adheres to
   elements at 30 Hz) still reflects as much as before. `impl='c'` keeps these
   memories per node (`Sem3dVsForwardInput.a_n`, `.P`; backward `.lP`): a core
   built from this tree is needed.
+- `ViscoAcoustic` with `dh=(dz, dx)` and `dz != dx`: the spectral attenuation
+  and dispersion filters (eager and `impl='c'`) built |k| from dz on both axes,
+  so the x wavenumbers were scaled by dz/dx and the Q response depended on the
+  grid orientation (a transposed problem's record differed by 28%). They now
+  use both spacings; uniform grids are unchanged.
 
 ## [0.3.6] - 2026-10-29
 

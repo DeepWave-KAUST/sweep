@@ -30,8 +30,10 @@ class hybridmethod:
 
 
 def init_wavenumbers(shape, h):
-    kz = np.fft.fftfreq(shape[0], d=h) * 2 * np.pi
-    kx = np.fft.fftfreq(shape[1], d=h) * 2 * np.pi
+    """Angular wavenumbers of a 2-D grid; ``h`` is one spacing or ``(dz, dx)``."""
+    hz, hx = (h, h) if np.ndim(h) == 0 else (h[0], h[1])
+    kz = np.fft.fftfreq(shape[0], d=hz) * 2 * np.pi
+    kx = np.fft.fftfreq(shape[1], d=hx) * 2 * np.pi
     kzz, kxx = np.meshgrid(kz, kx, indexing='ij')
     k = np.sqrt(kxx**2 + kzz**2)
     return k, kx, kz

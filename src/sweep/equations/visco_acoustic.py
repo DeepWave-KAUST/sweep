@@ -379,7 +379,7 @@ class ViscoAcoustic(SecondOrderEquation):
         import torch
         from .base import init_wavenumbers
         shape = tuple(int(v) for v in prop.shape_cuda)[-2:]
-        h = float(np.asarray(prop._grid_spacing).reshape(-1)[0])
+        h = tuple(float(v) for v in np.asarray(prop._grid_spacing).reshape(-1)[-2:])
         # One exponent for a shared model; per-shot models with differing Q
         # carry one per batch element, and the fractional grids become
         # (B, nz, nx) stacks (the CUDA filter strides them per batch index).
@@ -503,8 +503,9 @@ class ViscoAcoustic(SecondOrderEquation):
         super().init_abc(type=type, **kwargs)
 
         shape = tuple(int(s) for s in kwargs['shape'])[-2:]
-        h_scalar = float(np.asarray(kwargs['grid_spacing']).reshape(-1)[0])
-        k_np, _, _ = init_wavenumbers(shape, h_scalar)
+        # (dz, dx): one spacing for both axes put dz on the x wavenumbers.
+        h = tuple(float(v) for v in np.asarray(kwargs['grid_spacing']).reshape(-1)[-2:])
+        k_np, _, _ = init_wavenumbers(shape, h)
         # Same rule as the PML profiles above: keep numpy on jax, where this
         # runs inside the user's trace and a jnp array would leak as a tracer.
         if self.backend == 'jax':
