@@ -18,7 +18,7 @@ import pytest
 import torch
 
 from sweep.sem import PropSEM
-from sweep.sem.equations import AcousticPotentialSEM2D
+from sweep.sem.equations import AcousticPotentialSEM2D, ElasticSEM2DDeformed
 from sweep.sem.prop_c import sem_c_available
 
 DT = 1e-3
@@ -88,23 +88,31 @@ def _wav(dev):
                         device=dev)
 
 
-def _prop(impl, dev):
+def _prop(impl, dev, equation=AcousticPotentialSEM2D, rtype=("p",)):
     kw = dict(eager_options=dict(use_compile=False)) if impl == "eager" else {}
-    return PropSEM(AcousticPotentialSEM2D, shape=(NZ, NX), dh=DH, dt=DT_RUN,
+    return PropSEM(equation, shape=(NZ, NX), dh=DH, dt=DT_RUN,
                    n_order=4, abcn=16, f_dominant=F0, impl=impl, dev=dev,
-                   receiver_type=["p"], **kw)
+                   receiver_type=list(rtype), **kw)
 
 
-def _end_errors(impl, dev):
-    p = _prop(impl, dev)
-    vp = torch.full((NZ, NX), 2000.0, device=dev)
+def _models(equation, dev):
+    vals = (2000.0,) if equation is AcousticPotentialSEM2D else (2000.0, 1100.0, 2000.0)
+    return [torch.full((NZ, NX), v, device=dev) for v in vals]
+
+
+def _end_errors(impl, dev, equation=AcousticPotentialSEM2D, rtype=("p",)):
+    """On the potential form p is the recorded run itself (no difference at
+    all, test_sem_pressure_wavelet.py); on the displacement elastics vx/vz
+    are the differenced displacement, end sample included."""
+    p = _prop(impl, dev, equation, rtype)
+    vp = _models(equation, dev)
     w = _wav(dev)
     with torch.no_grad():
-        full = p(w, SRC, REC, models=[vp])[..., 0].double().cpu()
+        full = p(w, SRC, REC, models=vp).double().cpu()
         scale = float(full.abs().max())
         out = []
         for n in CUTS:
-            cut = p(w[:n], SRC, REC, models=[vp])[..., 0].double().cpu()
+            cut = p(w[:n], SRC, REC, models=vp).double().cpu()
             # the cut changes nothing before its last sample...
             torch.testing.assert_close(cut[:, :-1], full[:, :n - 1],
                                        rtol=0, atol=1e-4 * scale)
@@ -113,10 +121,13 @@ def _end_errors(impl, dev):
     return out, scale
 
 
-def test_eager_cut_record_ends_on_the_trace():
-    errs, scale = _end_errors("eager", "cpu")
+@pytest.mark.parametrize("equation, rtype", [
+    (AcousticPotentialSEM2D, ("p",)),
+    (ElasticSEM2DDeformed, ("vx", "vz"))])
+def test_eager_cut_record_ends_on_the_trace(equation, rtype):
+    errs, scale = _end_errors("eager", "cpu", equation, rtype)
     assert scale > 0
-    # repeating u(nt-1) gave 2-9x the trace's peak here
+    # repeating u(nt-1) gave 2-9x the trace's peak for p here
     assert max(errs) < 0.03, errs
 
 

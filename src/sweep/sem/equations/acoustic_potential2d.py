@@ -2,7 +2,10 @@
 
     (1/κ) ∂²χ/∂t² = ∇·((1/ρ) ∇χ) + s        κ = ρ c²
 
-with displacement ``u = (1/ρ) ∇χ`` and pressure ``p = −∂²χ/∂t²``. Weak form::
+with displacement ``u = (1/ρ) ∇χ`` and pressure ``p = −∂²χ/∂t²``. ``s`` is the
+source this class is given; PropSEM gives it minus the double time integral
+of its wavelet, so that the wavelet is the pressure source, as on the pressure
+form (see ``PropSEM.forward``). Weak form::
 
     ∫ (1/κ) v χ̈ dΩ  +  ∫ (1/ρ) ∇v · ∇χ dΩ  =  ∫ v s dΩ   (+ surface terms)
 
@@ -64,6 +67,11 @@ class AcousticPotentialSEM2D(DerivedInitState, DirichletNodes):
 
     # FD-aligned receiver components: SPECFEM potential normalization: p = -chi_ddot (module docstring).
     derived_receiver_types: ClassVar[dict] = {"p": ("chi", "pressure")}
+
+    # PropSEM's wavelet is the PRESSURE source, as on the pressure form and
+    # PropTorch: the records are those of chi driven by minus its double time
+    # integral, so p = -chi_ddot has the wavelet's waveform (PropSEM.forward).
+    propsem_pressure_wavelet: ClassVar[bool] = True
 
     mesh: Quad9Mesh
     vp_e: torch.Tensor            # (E, ngll, ngll)

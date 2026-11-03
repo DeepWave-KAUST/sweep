@@ -6,7 +6,10 @@ instead of every caller differentiating traces by hand. The contract:
 
 * ``p`` on the potential-form acoustics is ``-d2(chi)/dt2`` and ``vx``/``vz``
   on the displacement elastics is ``d(u)/dt``, both with the MATCHED leapfrog
-  stencils (central differences, quiescent-start left pad);
+  stencils (central differences, quiescent-start left pad). On the potential
+  forms the wavelet is the pressure source, so the run it drives records
+  ``p`` itself and chi / u / v are its running integrals, which those
+  stencils undo (see test_sem_pressure_wavelet.py);
 * on the scalar-wave acoustics ``p`` is a pure name alias (the field IS the
   pressure-like wavefield -- FD's ``Acoustic`` aliases the same equation's
   field to 'p'); on the velocity-stress family ``vx`` aliases ``v_x``;
@@ -102,8 +105,10 @@ def test_p_is_the_matched_second_difference():
         out = p(_wav(), SRC, REC_WATER, models=_fs_models(p))
     chi, pr = out[..., 0], out[..., 1]
     assert float(chi.abs().max()) > 0, "hydrophones recorded nothing"
-    assert torch.equal(pr, S.PropSEM._trace_neg_d2dt2(chi, DT))
-    assert float((pr - chi).abs().max()) > 0, "p was not transformed"
+    assert torch.equal(chi, S.PropSEM._trace_from_pressure_run(pr, None, DT))
+    # float32 double integral differenced back: equal to its round-off
+    d = S.PropSEM._trace_neg_d2dt2(chi, DT) - pr
+    assert _rel(d[:, :-1], 0 * pr[:, :-1], pr.abs().max()) < 1e-3
 
 
 def test_v_is_the_matched_first_difference():
@@ -113,8 +118,8 @@ def test_v_is_the_matched_first_difference():
     for ub, vb in ((0, 1), (2, 3)):
         u, v = out[..., ub], out[..., vb]
         assert float(u.abs().max()) > 0
-        assert torch.equal(v, S.PropSEM._trace_ddt(u, DT))
-        assert float((v - u).abs().max()) > 0
+        d = S.PropSEM._trace_ddt(u, DT) - v
+        assert _rel(d[:, :-1], 0 * v[:, :-1], v.abs().max()) < 1e-3
 
 
 def test_vs_family_alias_is_identity():
@@ -215,8 +220,11 @@ def test_unknown_receiver_error_lists_the_derived_names():
 
 def test_default_path_returns_the_untouched_tensor():
     """No derived request -> _apply_derived_receivers must be the identity on
-    the SAME object, so the historical default path stays bit-untouched."""
-    p = _fs_prop(None)
+    the SAME object, so the historical default path stays bit-untouched --
+    except on the potential forms, whose records are always converted."""
+    assert not _fs_prop(None)._recv_identity
+    p = S.PropSEM(E.AcousticSEM2DDeformed, shape=(NZ, NX), dh=DH, dt=DT,
+                  nt=NT, n_order=NO, abcn=4 * NO, f_dominant=F0, dev="cuda")
     assert p._recv_identity
     x = torch.randn(2, 8, 3, 3)
     assert p._apply_derived_receivers(x) is x

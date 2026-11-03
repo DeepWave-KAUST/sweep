@@ -44,7 +44,9 @@ module of `sweep.sem.equations` is one.
 The potential form (SPECFEM's) is the FWI workhorse: shot batching, per-shot
 models and batched boundary saving on `impl='c'` are there. Its `build` takes
 a density model; `PropSEM` gives it the constant `density=`. The other four
-take `vp` alone, one per mesh family.
+take `vp` alone, one per mesh family. Under `PropSEM` the wavelet is the
+pressure source on the potential form too: its `p` has the pressure form's
+waveform for the same wavelet.
 
 ::: sweep.sem.AcousticPotentialSEM2D
     options:

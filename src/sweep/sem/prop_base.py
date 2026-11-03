@@ -276,6 +276,25 @@ _FD_STRESS = {2: ("sxx", "szz", "sxz"),
 _MOMENT_SLOT = {"sxx": 0, "szz": 1, "sxz": 2}
 
 
+def _pressure_to_potential_wavelet(wavelet, dt):
+    """The chi source that makes ``p = -d2(chi)/dt2`` the pressure a
+    pressure-form run (and PropTorch's ``Acoustic``) records for
+    ``wavelet``: minus its double running sum times dt^2, one step late.
+    Only a snapshot run is driven by it; seismograms come from the run the
+    wavelet drives (``PropSEM.forward``), which is the same record.
+
+    The potential form evolves chi by the same leapfrog the pressure form
+    evolves its field by, so -chi_ddot obeys it with the source's negated
+    second difference; the one-step lag centres that difference on the
+    wavelet's own sample. Exact to round-off on a homogeneous model, up to
+    the scale kappa = rho*c^2 at the source the potential form carries. A
+    wavelet with a non-zero mean (or first moment) leaves chi a static (or
+    ramping) offset that p does not see.
+    """
+    s = torch.cumsum(torch.cumsum(wavelet, dim=-1), dim=-1) * (-dt * dt)
+    return torch.nn.functional.pad(s[..., :-1], (1, 0))
+
+
 def _resolve_vector_source(equation, source_type, ndim):
     """``source_type`` on an elastic equation -> ``(names, force_axes, moment)``.
 
@@ -543,7 +562,8 @@ class _Acq:
     # is how two readers start disagreeing about which copy is current.
     __slots__ = ("sv", "receivers", "nshots", "shot_src", "wav_per_shot")
 
-    def __init__(self, prop, wavelet, sources, receivers, source_vector):
+    def __init__(self, prop, wavelet, sources, receivers, source_vector,
+                 potential_wavelet=False):
         nd = prop.ndim
         # elastic body-force direction (default unit vertical force, z = last).
         # FIRST, before any coercion: a bad source_vector override must keep
@@ -563,6 +583,9 @@ class _Acq:
             # integral -- without it the record is one time derivative off
             # FD's. Done here, once, so every backend sees the same series.
             wavelet = torch.cumsum(wavelet, dim=-1) * prop.dt
+        if potential_wavelet:
+            # a snapshot run: the fields themselves must be chi / u
+            wavelet = _pressure_to_potential_wavelet(wavelet, prop.dt)
 
         if sources.dim() == 2 and sources.shape[1] == nd:              # mode A
             nshots = sources.shape[0]
@@ -913,8 +936,14 @@ class PropSEM:
             if base not in self._recv_base:
                 self._recv_base.append(base)
             self._recv_plan.append((self._recv_base.index(base), op))
+        # the potential forms take the wavelet as the PRESSURE source (see
+        # _pressure_to_potential_wavelet): their seismograms are converted on
+        # the way out even when nothing derived is asked for
+        self._pressure_wavelet = bool(
+            getattr(equation, "propsem_pressure_wavelet", False))
         self._recv_identity = (
-            self._recv_base == self.receiver_type
+            not self._pressure_wavelet
+            and self._recv_base == self.receiver_type
             and all(op is None for _, op in self._recv_plan))
         # what return_wavefield=True copies out: the fields the receivers
         # record from (the BASE fields behind a derived p / vx), in that order
@@ -1405,8 +1434,32 @@ class PropSEM:
         pad = torch.cat([z, x, PropSEM._trace_end_pad(x, 3)], 1)
         return -(pad[:, 2:] - 2.0 * x + pad[:, :-2]) / (dt * dt)
 
-    def _apply_derived_receivers(self, out):
-        """(nshots, nt, nrec, n_base) -> (nshots, nt, nrec, n_requested)."""
+    @staticmethod
+    def _trace_from_pressure_run(x, op, dt):
+        """A potential-form component from the trace ``x`` of the run driven
+        by the wavelet itself, whose chi is the pressure (see :meth:`forward`).
+        The base fields are that trace under the conversion the wavelet would
+        take, ``-dt^2`` times the double running sum one step late; ``p`` is
+        the trace; ``v``, the central difference of the base field, is
+        ``-dt (sum - x/2)``."""
+        if op == "pressure":
+            return x
+        c = torch.cumsum(x, 1)
+        if op == "velocity":
+            return -dt * (c - 0.5 * x)
+        if op is not None:
+            raise AssertionError(f"unknown derived receiver op {op!r}")
+        s = torch.cumsum(c, 1) * (-dt * dt)
+        return torch.cat([torch.zeros_like(s[:, :1]), s[:, :-1]], 1)
+
+    def _apply_derived_receivers(self, out, pressure_run=False):
+        """(nshots, nt, nrec, n_base) -> (nshots, nt, nrec, n_requested).
+        ``pressure_run``: ``out`` is the potential-form run driven by the
+        wavelet itself (:meth:`forward`)."""
+        if pressure_run:
+            return torch.stack([
+                self._trace_from_pressure_run(out[..., col], op, self.dt)
+                for col, op in self._recv_plan], -1)
         if self._recv_identity:
             return out                    # bit-untouched default path
         comps = []
@@ -1529,13 +1582,22 @@ class PropSEM:
         wrapper adds the derived receiver components: requested ``p`` /
         ``vx`` / ``vy`` / ``vz`` are produced from the recorded base traces
         (p = -chi_ddot, v = u_dot) so callers get FD-aligned pressure /
-        particle-velocity data without converting anything themselves."""
+        particle-velocity data without converting anything themselves.
+
+        On the potential forms the wavelet is the pressure source: what is
+        recorded is the run driven by minus its double time integral (see
+        :func:`_pressure_to_potential_wavelet`). Without snapshots that run is
+        not made: the system is linear and time-invariant, so the run driven
+        by the wavelet itself records ``p`` sample for sample, and ``chi`` /
+        ``u`` / ``v`` are its running integrals -- no difference of a float32
+        double integral, and no one-sided end sample."""
         out = self._forward_fields(wavelet, sources, receivers,
                                    models=models, **kw)
         if isinstance(out, tuple):                       # return_wavefield
             seis, snaps = out
             return self._apply_derived_receivers(seis), snaps
-        return self._apply_derived_receivers(out)
+        return self._apply_derived_receivers(
+            out, pressure_run=self._pressure_wavelet)
 
     def _set_nt(self, wavelet):
         """This call's ``nt``: the wavelet's length, which a ``nt`` given to
@@ -1617,7 +1679,8 @@ class PropSEM:
         self._set_nt(wavelet)
         snap_steps = _resolve_snapshot_steps(self.nt, return_wavefield,
                                              snapshot_times, snapshot_interval)
-        acq = _Acq(self, wavelet, sources, receivers, source_vector)
+        acq = _Acq(self, wavelet, sources, receivers, source_vector,
+                   potential_wavelet=self._pressure_wavelet and return_wavefield)
 
         # 3-D acoustic on CUDA: the single-strip DD driver, BEFORE any global
         # equation is built (that build is what it saves) -- see _forward_c_dd3d

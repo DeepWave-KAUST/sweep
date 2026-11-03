@@ -82,6 +82,9 @@ the FD classes. `models=` per class: `api-signatures.md`.
 
 - `receiver_type=["p", "vx", "vz"]` work on every SEM equation (converted from the native fields,
   e.g. `p = -d2(chi)/dt2` on the potential form, `v = du/dt` on displacement elastics).
+  On the potential forms (`AcousticPotentialSEM2D`, `AcousticElasticSEM2D`) the wavelet is the
+  pressure source: same wavelet, same `p` waveform as `AcousticSEM2DDeformed` / FD (amplitude
+  differs by `rho*c^2` at the source); `chi` is minus its double time integral.
   `p` is receiver-only.
 - Elastic `source_type`: `["vz"]`/`["vx"]` = force along that axis (default: unit vertical
   force), `["sxx", "szz"]` = explosion (moment rate), `["sxz"]` = shear moment. Forces and

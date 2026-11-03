@@ -134,6 +134,22 @@ and this project adheres to
   compiled 2.2x | 1.3x on top of the unrolled contractions. A memory field is
   indexed by band row, not by element id.
 
+- **`PropSEM`'s wavelet is the pressure source on the potential forms too**
+  (`AcousticPotentialSEM2D`, the water of `AcousticElasticSEM2D`). The
+  wavelet used to drive chi, so `p = -d2(chi)/dt2` came out two time
+  derivatives off the pressure form's `p` (`AcousticSEM2DDeformed`, FD's
+  `Acoustic`) for the same wavelet. The records are now those of chi driven by
+  minus the wavelet's double time integral: the same `p` waveform on both
+  forms (to 2e-13 in float64; the amplitude still differs by `rho*c^2` at the
+  source), and the fluid-solid `vx`/`vz` stay consistent with that `p`.
+  **`chi`, `u_x`, `u_z` and `vx`/`vz` records change accordingly**: observed
+  data made with the old convention no longer matches. PropSEM takes them from
+  the run the wavelet itself drives -- linear and time-invariant, that run
+  records `p` sample for sample and the rest are its running integrals -- so
+  float32 never differences a double integral; `return_wavefield=True` runs
+  the integrated wavelet instead, so the snapshots are chi and u.
+  `SEMPropagator` and `SEMModelParallel` keep the wavelet as the chi source.
+
 ### Removed
 - Stale examples and repo-root leftovers: `examples/FWI/` and
   `examples/LSRTM/` (unlinked scripts, covered by the notebooks; their
