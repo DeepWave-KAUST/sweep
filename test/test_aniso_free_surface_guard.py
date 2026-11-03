@@ -125,4 +125,4 @@ def test_isotropic_free_surface_unaffected():
     _build(Elastic, True)
     _build(Elastic, ["top", "left"])
     _build(Acoustic, True)
-    _build(Elastic, False, topography=np.zeros(56, dtype=np.int64))
+    _build(Acoustic, False, topography=np.zeros(56, dtype=np.int64))

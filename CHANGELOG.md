@@ -146,6 +146,22 @@ and this project adheres to
   (replaced by the equation registry), and `gate/sync_to_ibex.sh` /
   `gate/run_reorder_checks.sh`.  Notebook outputs `fwi_ddp.py` and
   `15_wavefield_topography.gif` are no longer tracked.
+- **The elastic image-method topography staircase** (`topography=` on
+  `Elastic`, `Elastic3D`, `ElasticBorn` and `ElasticVRR`).  It grew without
+  bound on slopes steeper than about 0.5 (5 m grid, 45° ridge: 2000× the
+  physical amplitude by 0.35 s, on every stencil order), and holding its air at
+  zero only stopped the growth: against a refined spectral-element reference
+  its error rose with refinement (relative L2 0.52, 0.63, 0.80 at 5, 2.5,
+  1.25 m).  These equations now refuse `topography=` on every impl and name the
+  alternatives, `ElasticCurvilinear` (2-D) and `PropSEM`.  The acoustic
+  staircase (`Acoustic`, `Acoustic3D`, `ViscoAcoustic`) is unchanged, and so is
+  every flat free surface.  The per-column surface-row paths in the elastic
+  CUDA kernels are gone too (records and gradients are bit-identical); the
+  `Elastic` and `ElasticVRR` CUDA drivers now refuse topography rows
+  themselves.  `examples/wavefields/topography/elastic2d_hill_demo.py` and the
+  two elastic topography bitgate configs go with it, and notebook 15 now runs
+  the acoustic image method and curvilinear grid, and elastic on the
+  curvilinear grid only.
 
 ### Fixed
 - `PropSEM(memory=BoundarySaving(storage_dtype='fp16'))` is refused on both

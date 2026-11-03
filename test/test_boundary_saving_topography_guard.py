@@ -13,7 +13,9 @@ The forward record is unaffected (cos 1.0000000, rel 5e-7 against the full
 path), so nothing warns you.  It scales with the surface's distance from row 0
 — a one-cell hill already gives cos 0.52, a constant non-zero topography gives
 0.55 — and it hits Acoustic too (cos 0.9935 on the same hill), so it is a
-property of the reconstruction rather than of the elastic kernels.
+property of the reconstruction rather than of the elastic kernels.  (Those
+elastic numbers predate the removal of the elastic staircase; the guard now
+protects the acoustic one, which is what these tests run.)
 
 These tests pin the guard: it fires for topography + boundary saving, and it
 does NOT fire for the configurations that are fine (flat free surface, the full
@@ -49,12 +51,12 @@ def _hill(nx=NX, height=5.0, width=10.0):
 
 def _prop(*, topography=None, free_surface=False, boundary=False, impl="c",
           topo_method=None):
-    from sweep.equations import Elastic
+    from sweep.equations import Acoustic
     from sweep.propagator.torch import PropTorch
 
-    eq = Elastic(spatial_order=SO, device="cuda", backend="torch")
+    eq = Acoustic(spatial_order=SO, device="cuda", backend="torch")
     kw = dict(backend="torch", shape=(NZ, NX), abcn=ABCN, dh=DH, dt=DT,
-              dev="cuda", pml_type="cpmls", nt=NT, B=1,
+              dev="cuda", nt=NT, B=1,
               free_surface=free_surface, use_ckpt=False,
               boundary_saving_config={"enabled": bool(boundary), "storage": "gpu"})
     if topography is not None:
@@ -73,9 +75,7 @@ def _inputs(topo=None):
     rx = np.arange(6, NX - 6, 6, dtype=np.int64)
     rec = np.stack([rx, (surf[rx] + 1).astype(np.int64)], -1)[None]
     vp = np.full((NZ, NX), 2000.0, np.float32)
-    vs = np.full((NZ, NX), 1150.0, np.float32)
-    rho = np.full((NZ, NX), 2000.0, np.float32)
-    return wav, src, rec, [vp, vs, rho]
+    return wav, src, rec, [vp]
 
 
 def _run(prop, topo=None, requires_grad=True):
@@ -154,15 +154,15 @@ def test_topography_forward_only_with_boundary_saving_is_allowed():
 def test_eager_boundary_saving_under_topography_is_not_guarded():
     """The eager boundary-saving path reconstructs correctly under topography
     (rel ~1e-5 vs the eager tape), so it stays available."""
-    from sweep.equations import Elastic
+    from sweep.equations import Acoustic
     from sweep.propagator.options import BoundaryOptions, EagerOptions, MemoryOptions
     from sweep.propagator.torch import PropTorch
 
     topo = _hill()
-    eq = Elastic(spatial_order=SO, device="cuda", backend="torch")
+    eq = Acoustic(spatial_order=SO, device="cuda", backend="torch")
     prop = PropTorch(
         eq, backend="torch", impl="eager", shape=(NZ, NX), abcn=ABCN, dh=DH,
-        dt=DT, dev="cuda", pml_type="cpmls", nt=NT, B=1, use_ckpt=False,
+        dt=DT, dev="cuda", nt=NT, B=1, use_ckpt=False,
         topography=topo, topo_method="image",
         eager_options=EagerOptions(use_compile=False),
         memory=MemoryOptions(strategy="boundary",

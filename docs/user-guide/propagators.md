@@ -121,7 +121,12 @@ Support matrix:
   ``'full'``).
 - **3-D** — top face only (``free_surface=True``); per-edge lists raise.
 - **Topography** (irregular surface) — a separate top-only feature; it
-  cannot be combined with per-edge faces.
+  cannot be combined with per-edge faces.  The image-method staircase
+  (``topo_method='image'``) is acoustic-only (``Acoustic``, ``Acoustic3D``,
+  ``ViscoAcoustic``).  The elastic staircase was removed: it was unstable on
+  slopes steeper than about 0.5 and, stabilised, wrong in a way that grew with
+  refinement.  For an elastic surface with topography use
+  ``ElasticCurvilinear`` (2-D) or ``PropSEM``.
 - **Anisotropic equations** (``AcousticVTI1st``, ``AcousticVTI``,
   ``AcousticTTI``, ``ElasticTTI(SG)``, …) raise ``NotImplementedError`` for
   any free surface: the anisotropic stress-free condition couples through

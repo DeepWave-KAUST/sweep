@@ -79,7 +79,7 @@ __host__ __device__ __forceinline__ long visco_elastic2d_strip_len(int nx, int n
 
 __device__ __forceinline__ long visco_elastic2d_strip_z(const SolverContext& solver, int ix, int iz)
 {
-    const int face = (solver.fsLo(0) && iz == solver.surface_row(ix)) ? 0 : 1;
+    const int face = (solver.fsLo(0) && iz == solver.phys_z0()) ? 0 : 1;
     return (long)face * solver.nx + ix;
 }
 
@@ -178,7 +178,7 @@ __global__ void __launch_bounds__(256, 4) visco_elastic2d_stress_kernel(
     float ezz = dvz_dz;
     const float exz = dvx_dz + dvz_dx;
 
-    const bool is_z_fs = elastic_is_top_free_surface_row(solver, ix, iz);
+    const bool is_z_fs = elastic_is_top_free_surface_row(solver, iz);
     const bool is_x_fs = elastic_is_x_free_surface_col(solver, ix);
     if (is_z_fs || is_x_fs) {
         float sum_cp = 0.f, sum_cross = 0.f;
@@ -310,7 +310,7 @@ __global__ void visco_elastic2d_stress_adjoint_prepare(
     }
 
     // Transpose of the traction zeroing (as elastic_stress_adjoint_prepare).
-    const bool is_z_fs = elastic_is_top_free_surface_row(solver, ix, iz);
+    const bool is_z_fs = elastic_is_top_free_surface_row(solver, iz);
     const bool is_x_fs = elastic_is_x_free_surface_col(solver, ix);
     float bar_sxx = f.sxx[idx];
     float bar_szz = f.szz[idx];

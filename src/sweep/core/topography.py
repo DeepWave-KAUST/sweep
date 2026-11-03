@@ -55,8 +55,8 @@ def resolve_topo_method(*, topography, topo_method, free_surface,
     if topo_method == 'apm':
         raise ValueError(
             "topo_method='apm' was removed. For an elastic surface with "
-            "topography use ElasticCurvilinear (2-D, boundary-fitted), or "
-            "topo_method='image' for the staircase.")
+            "topography use ElasticCurvilinear (2-D, boundary-fitted) or "
+            "PropSEM; the image-method staircase is acoustic-only.")
     if topo_method not in (None, 'auto', 'image'):
         raise ValueError(
             f"topo_method must be 'auto' or 'image', got {topo_method!r}")

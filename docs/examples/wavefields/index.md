@@ -47,8 +47,8 @@ solver settings change the wavefield.
 
     ---
 
-    Irregular free surface for acoustic & elastic 2-D, two ways on one
-    Gaussian hill: the image method on the grid and a boundary-fitted
+    Irregular free surface in 2-D on one Gaussian hill: acoustic with the
+    image method and a boundary-fitted curvilinear grid, elastic on the
     curvilinear grid -- wavefields and shot gathers side by side.
 
     [:material-notebook-outline: Open notebook](../../notebooks/15_wavefield_topography.ipynb)

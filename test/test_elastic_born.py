@@ -4,7 +4,7 @@ the Elastic record along the model perturbation.
 1. background record == Elastic record, bit-exact;
 2. scattered record == the Elastic Jacobian along (dvp, dvs, drho), as the
    adjoint identity against Elastic's autograd gradient, for no free surface /
-   flat top / per-edge / topography;
+   flat top / per-edge;
 3. boundary-saving gradients == full-storage gradients (exact reverse substeps).
 """
 
@@ -27,8 +27,6 @@ FS_CASES = {
     "none": dict(free_surface=False),
     "top": dict(free_surface=True),
     "per_edge": dict(free_surface=(True, False, True, False)),
-    "topography": dict(topography=(2 + 2 * np.sin(np.linspace(0, np.pi, NX))).astype(np.int64),
-                       topo_method="image", free_surface=False),
 }
 
 

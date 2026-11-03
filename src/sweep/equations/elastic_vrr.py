@@ -381,9 +381,9 @@ class ElasticVRR(FirstOrderEquation):
 
     C_NAME = "elastic_vr2d"
 
-    # The CUDA forward applies the staircase (elastic_vr2d/forward.cu reads
-    # topo_rows); the eager step does not.
-    supports_image_topography_c = True
+    image_topography_hint = (
+        "The elastic image-method staircase was removed; for an elastic "
+        "surface with topography use ElasticCurvilinear (2-D) or PropSEM.")
 
     MODEL_SPECS = (
         ModelSpec("vp", aliases=("p_velocity",),

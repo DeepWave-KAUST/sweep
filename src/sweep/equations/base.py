@@ -128,10 +128,13 @@ class WaveEquation:
     supports_image_topography = False
 
     # Same, for the compiled ``impl='c'`` kernels (they read the rows through
-    # ``SolverContext``).  Declared separately because support differs by impl:
-    # 3-D Elastic honours topography on eager but its CUDA kernels do not, and
-    # ElasticVRR is the reverse.
+    # ``SolverContext``).  Declared separately because support may differ by
+    # impl.
     supports_image_topography_c = False
+
+    # Appended to the propagator's refusal of ``topography=`` when the
+    # staircase is unsupported: where to go instead.
+    image_topography_hint = None
 
     # Class-level spec tables. Subclasses that declare these tables drive
     # the ``wavefields`` / ``models`` / ``field_specs`` / ``model_specs``

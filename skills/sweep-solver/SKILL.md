@@ -95,7 +95,7 @@ else stays.
 | Elastic TTI | `ElasticTTISG` / `ElasticTTISG3D` | `vp0, vs0, rho, epsilon, delta, gamma, theta, phi` | yes | refused |
 | DAS (strain / strain rate) | `DASZhao`, `DASMu` (+`3D`) | `vp, vs, rho` | yes | top |
 | Poroelastic (Biot) | `Biot` | `H, mu, C, M, rho, rho_f, m, b` | no | top |
-| Irregular topography | `AcousticCurvilinear`, `ElasticCurvilinear`, or `topography=` (staircase), or `sweep.sem` | as base | see `references/boundaries.md` | built in |
+| Irregular topography | `AcousticCurvilinear`, `ElasticCurvilinear`, or `topography=` (acoustic staircase), or `sweep.sem` | as base | see `references/boundaries.md` | built in |
 
 **Backend:**
 

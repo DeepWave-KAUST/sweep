@@ -29,7 +29,7 @@ from ._elastic_step_core import (
     elastic_velocity_substep,
     elastic_stress_substep,
 )
-from ._free_surface import FS_MOD_SXX, overwrite_at_topo, overwrite_surface_row
+from ._free_surface import FS_MOD_SXX, overwrite_surface_row
 from ._registry import register_equation
 from .elastic import Elastic
 
@@ -94,8 +94,9 @@ class ElasticBorn(FirstOrderEquation):
     supports_per_edge_free_surface_c = True
     supports_bs_free_surface = True
     supports_batched_models = True
-    supports_image_topography = True
-    supports_image_topography_c = True
+    image_topography_hint = (
+        "The elastic image-method staircase was removed; ElasticBorn has no "
+        "topography path.")
 
     def __init__(self, spatial_order=4, device='cpu', backend='torch'):
         """Build the elastic Born equation operator.
@@ -145,7 +146,6 @@ class ElasticBorn(FirstOrderEquation):
             lame_lambda=lam, lame_mu=mu, mu_xz=mu, rho_x=rho, rho_z=rho,
             dt=dt, h=h, b=b, pd=self.pd, pml=pml,
             free_surface=bool(getattr(self, "free_surface", False)),
-            topo_rows=getattr(self, "_topo_rows_runtime", None),
             fs_faces=getattr(self, "fs_faces", None),
             lame_lambda_2mu=lam2mu,
         )
@@ -178,21 +178,16 @@ class ElasticBorn(FirstOrderEquation):
         sc2[3] = szz_s + dt * (dlam2mu * vz_z + dlam * vx_x)
         sc2[4] = sc2[4] + dt * dmu * (vx_z + vz_x)
 
-        topo = kw["topo_rows"]
-        has_topo = kw["free_surface"] and topo is not None
         z_sides, x_sides = _fs_sides(kw["fs_faces"], kw["free_surface"])
-        if FS_MOD_SXX and (has_topo or z_sides or x_sides):
+        if FS_MOD_SXX and (z_sides or x_sides):
             # d/dλ, d/dμ of c = 4 μ (λ+μ)/(λ+2μ)
             den = lam2mu * lam2mu
             dc = (4 * mu * mu * dlam + 4 * (lam * lam + 2 * lam * mu + 2 * mu * mu) * dmu) / den
             halo = self.pd.coes.shape[0]
-            if has_topo or z_sides:
+            if z_sides:
                 surf = sxx_s + dt * dc * vx_x
-                if has_topo:
-                    sc2[2] = overwrite_at_topo(sc2[2], surf, topo, axis=-2)
-                else:
-                    for side in z_sides:
-                        sc2[2] = overwrite_surface_row(sc2[2], surf, halo, axis=-2, side=side)
+                for side in z_sides:
+                    sc2[2] = overwrite_surface_row(sc2[2], surf, halo, axis=-2, side=side)
             if x_sides:
                 surf = szz_s + dt * dc * vz_z
                 for side in x_sides:
@@ -202,7 +197,7 @@ class ElasticBorn(FirstOrderEquation):
         if kw["free_surface"]:
             for o in (0, _NF):
                 out[o + 3], out[o + 4], out[o + 2] = self._fs_zero_traction(
-                    out[o + 3], out[o + 4], out[o + 2], topo)
+                    out[o + 3], out[o + 4], out[o + 2])
         return out
 
     _fs_zero_traction = Elastic._fs_zero_traction

@@ -261,12 +261,9 @@ struct Driver {
     }
 
     template <class P>
-    static void setup_ctx(SolverContext& solver, const P& p)
+    static void setup_ctx(SolverContext&, const P& p)
     {
-        if (p.has_topo) {
-            solver.topo_rows = p.topo_rows.template data_ptr<int>();
-            solver.has_topo = true;
-        }
+        SWEEP_CHECK(!p.has_topo, "ElasticVRR: topography is not supported (use ElasticCurvilinear or PropSEM)");
     }
 
     // The hand-written drivers never ranged the aux slabs (no DD path).

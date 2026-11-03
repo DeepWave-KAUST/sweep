@@ -376,20 +376,17 @@ def overwrite_surface_row(base, repl, halo, axis, side="low"):
 
 
 # -----------------------------------------------------------------------------
-# Per-column (irregular topography) image-method helpers.
+# Per-column (irregular topography) staircase helpers for the acoustic
+# equations: the surface row ``iz_surf[..., ix]`` (``[..., iy, ix]`` in 3D)
+# varies by column and the air (``z < iz_surf``) is held at zero (Mittet 2002
+# vacuum).  The elastic staircase was removed.
 #
-# These generalise the flat-surface mirror to a column-dependent surface row
-# ``iz_surf[..., ix]`` (and ``[..., iy, ix]`` in 3D). The reflection rule is
-# ``mirror_z(ix) = 2*iz_surf(ix) - z``; air cells (``z < iz_surf(ix)``) are
-# overwritten by the reflected interior value, with an optional sign flip for
-# z-anti-symmetric (odd-parity) fields.
-#
-# Torch-only for now; called only on the eager Python backend.
+# Torch-only; called only on the eager Python backend.
 # -----------------------------------------------------------------------------
 
 
 def _broadcast_topo(u, iz_surf, axis):
-    """Build ``(z, surf, ax, nz)`` broadcasting tensors for per-column mirror.
+    """Build ``(z, surf, ax, nz)`` broadcasting tensors for a per-column surface.
 
     ``iz_surf`` must describe the surface for every non-z dim AFTER the z-axis,
     e.g. for a 2D field ``u`` of shape ``(..., nz, nx)`` with ``axis=-2`` the
@@ -428,65 +425,6 @@ def _broadcast_topo(u, iz_surf, axis):
     return z, surf, ax, nz
 
 
-def extend_top_free_surface_topo(u, halo, odd, axis, iz_surf, half=False):
-    """Per-column image-method mirror across an irregular surface.
-
-    Parameters
-    ----------
-    u : torch.Tensor
-        Field of shape ``(..., nz, [ny,] nx)`` on a padded grid.
-    halo : int
-        Stencil half-width. ``halo <= 0`` returns ``u`` unchanged.
-    odd : bool
-        If True the mirrored ghost is negated (vz-like, anti-symmetric fields).
-    axis : int
-        Z-axis position in ``u`` (e.g. ``-2`` for 2D, ``-3`` for 3D).
-    iz_surf : torch.Tensor or array_like
-        Long-tensor giving the surface row per column in padded-grid
-        coordinates. Shape must match ``u``'s non-z dims after the z-axis;
-        see :func:`_broadcast_topo`.
-    half : bool
-        Mark fields that sit half a cell BELOW the surface plane (``sxz``,
-        ``syz``, ``vz`` on the staggered grid). Their image must reflect
-        about ``iz_surf - 1/2`` — ``mirror = 2*surf - 1 - z``, i.e.
-        ``tau_zx(-h/2) = -tau_zx(+h/2)`` — not about ``iz_surf``, which
-        would pair ``-h/2`` with ``+3h/2`` (Kristek, Moczo & Archuleta 2002,
-        Eq. 7 / Table 1). This is the per-column analogue of
-        :func:`extend_top_free_surface_cell_centered`, and with a constant
-        ``iz_surf == halo`` it reproduces it index-for-index, which is what
-        keeps the flat-degenerate topography path bit-exact against the flat
-        free surface.
-
-    Notes
-    -----
-    The ``halo`` argument is kept for API symmetry with
-    :func:`extend_top_free_surface`; the per-column mirror itself does not
-    need ``halo`` (the reflection works for any number of air cells). It is
-    still honoured as the trivial early-out ``halo <= 0 -> u``.
-    """
-    if halo <= 0:
-        return u
-    import torch
-
-    z, surf, ax, nz = _broadcast_topo(u, iz_surf, axis)
-    above = z < surf
-    reflected = (2 * surf - 1 - z) if half else (2 * surf - z)
-    mirror_z = torch.where(above, reflected, z).clamp(0, nz - 1)
-    mirror_z = mirror_z.expand_as(u)
-    out = u.gather(ax, mirror_z)
-    if odd:
-        out = torch.where(above.expand_as(u), -out, out)
-    return out
-
-
-def top_free_surface_derivative_topo(u, deriv, halo, odd, axis, iz_surf, half=False):
-    """Apply ``deriv`` to the topo-mirrored field. Mirror of
-    :func:`top_free_surface_derivative` (``half=False``) and
-    :func:`top_free_surface_cell_derivative` (``half=True``) for the
-    irregular-surface path."""
-    return deriv(extend_top_free_surface_topo(u, halo, odd, axis, iz_surf, half=half))
-
-
 def zero_above_topo(u, iz_surf, axis):
     """Zero cells strictly above the surface in each column (the "air"
     region). Replaces :func:`zero_top_row` on the topo path."""
@@ -500,19 +438,7 @@ def zero_above_topo(u, iz_surf, axis):
     return u.masked_fill(mask, 0.0)
 
 
-def overwrite_at_topo(base, repl, iz_surf, axis):
-    """Per-column version of :func:`overwrite_top_row`: set the surface row
-    (``z == iz_surf[ix]``) of ``base`` to the corresponding entry of ``repl``;
-    all other cells are left untouched.  Used for the Robertsson surface-sigma_xx
-    modified coefficient under irregular topography."""
-    import torch
-
-    z, surf, ax, nz = _broadcast_topo(base, iz_surf, axis)
-    mask = (z == surf).expand_as(base)
-    return torch.where(mask, repl, base)
-
-
-def fs_sxx_correction(sxx, sxx_pre, dt, c_surf, vx_x, top_halo, axis=-2, topo_rows=None):
+def fs_sxx_correction(sxx, sxx_pre, dt, c_surf, vx_x, top_halo, axis=-2):
     """Robertsson free-surface sigma_xx correction, shared across the staggered
     elastic equations (Elastic, DASMu, ElasticVR).
 
@@ -523,30 +449,10 @@ def fs_sxx_correction(sxx, sxx_pre, dt, c_surf, vx_x, top_halo, axis=-2, topo_ro
       * Elastic / DASMu : c_surf = 4 mu (lam+mu)/(lam+2mu),  vx_x = d vx/dx
       * ElasticVR (native, momentum px = rho*vx, no explicit rho needed):
                           c_surf = 4 vs^2 (vp^2 - vs^2)/vp^2,  vx_x = d px/dx
-    Overwrites the flat top row (``overwrite_top_row``) or, when ``topo_rows`` is
-    given, the per-column surface row along topography (``overwrite_at_topo``).
+    Overwrites the flat top row (``overwrite_top_row``).
     Env-gated by ``SWEEP_FS_MOD_SXX`` (default on); returns ``sxx`` unchanged off.
     """
     if not FS_MOD_SXX:
         return sxx
     sxx_surf = sxx_pre + dt * c_surf * vx_x
-    if topo_rows is not None:
-        return overwrite_at_topo(sxx, sxx_surf, topo_rows, axis=axis)
     return overwrite_top_row(sxx, sxx_surf, top_halo, axis=axis)
-
-
-def zero_at_topo(u, iz_surf, axis):
-    """Zero exactly the surface row per column (one cell per ``ix`` at
-    ``z == iz_surf[ix]``).
-
-    For staggered first-order elastic FS the image method enforces
-    ``σ_zz = σ_xz = 0`` at the surface row; this is the topo
-    generalisation of :func:`zero_top_row` (which zeros the constant row
-    ``halo``). Cells above and below the surface are untouched — the
-    mirror operation done one step earlier already replaces air cells
-    next time the derivative is taken."""
-    import torch
-
-    z, surf, ax, nz = _broadcast_topo(u, iz_surf, axis)
-    mask = (z == surf).expand_as(u)
-    return u.masked_fill(mask, 0.0)

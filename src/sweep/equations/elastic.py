@@ -9,7 +9,6 @@ from ._elastic_step_core import (
     elastic_stress_substep,
 )
 from ._free_surface import (
-    zero_at_topo,
     zero_top_row,
     zero_surface_row,
     sides_from_fs_faces_2d,
@@ -80,8 +79,11 @@ class Elastic(FirstOrderEquation):
     # directly by ``impl='c'``: shot ``b`` propagates in its own (vp,vs,rho)[b]
     # and each parameter's gradient is kept per-shot. Same for the eager path.
     supports_batched_models = True
-    supports_image_topography = True
-    supports_image_topography_c = True
+    # The elastic staircase was removed: unstable on slopes steeper than ~0.5
+    # and, stabilised, wrong in a way that grew with refinement.
+    image_topography_hint = (
+        "The elastic image-method staircase was removed; for an elastic "
+        "surface with topography use ElasticCurvilinear (2-D) or PropSEM.")
 
     def __init__(self, spatial_order=4, device='cpu', backend='torch'):
         """Build the elastic equation operator.
@@ -158,7 +160,6 @@ class Elastic(FirstOrderEquation):
         # solved by ``elastic_step_core``.  We alias ρ_x = ρ_z = ρ and
         # μ_xz = μ (no node-centred averaging, no per-cell modifications).
         free_surface = getattr(self, "free_surface", False)
-        topo_rows = getattr(self, "_topo_rows_runtime", None)
         out = elastic_step_core(
             *wavefields,
             lame_lambda=lame_lambda,
@@ -168,7 +169,6 @@ class Elastic(FirstOrderEquation):
             rho_z=rho,
             dt=dt, h=h, b=b, pd=self.pd, pml=self.b,
             free_surface=free_surface,
-            topo_rows=topo_rows,
             fs_faces=getattr(self, "fs_faces", None),
             lame_lambda_2mu=lame_lambda_2mu,
         )
@@ -179,7 +179,7 @@ class Elastic(FirstOrderEquation):
 
         # Image-method post-step traction zeroing (per active free-surface face).
         if free_surface:
-            szz, sxz, sxx = self._fs_zero_traction(szz, sxz, sxx, topo_rows)
+            szz, sxz, sxx = self._fs_zero_traction(szz, sxz, sxx)
 
         return (
             vx, vz, sxx, szz, sxz,
@@ -188,7 +188,7 @@ class Elastic(FirstOrderEquation):
             m_txzx, m_txzz,
         )
 
-    def _fs_zero_traction(self, szz, sxz, sxx, topo_rows):
+    def _fs_zero_traction(self, szz, sxz, sxx):
         """Zero the traction that lies exactly ON each active free-surface node:
         the normal stress -- ``szz`` at z-faces (top/bottom), ``sxx`` at x-faces
         (left/right).
@@ -204,9 +204,6 @@ class Elastic(FirstOrderEquation):
         the surface-row ``sxz`` node lies outside the medium and its zeroing is
         retained (removing it pollutes the reconstruction)."""
         top_halo = self.pd.coes.shape[0]
-        if topo_rows is not None:                       # irregular top = z-low surface
-            szz = zero_at_topo(szz, topo_rows, axis=-2)
-            return szz, sxz, sxx
         fs_faces = getattr(self, "fs_faces", None)
         if fs_faces is None:                            # legacy top-only = z-low surface
             szz = zero_top_row(szz, top_halo, axis=-2)
@@ -232,7 +229,6 @@ class Elastic(FirstOrderEquation):
         exactly by composing the list in reverse order at ``-dt``."""
         pd = self.pd
         fs = bool(getattr(self, "free_surface", False))
-        topo = getattr(self, "_topo_rows_runtime", None)
         top_halo = pd.coes.shape[0]
         pml_zero = (0.0,) * 8
 
@@ -243,7 +239,7 @@ class Elastic(FirstOrderEquation):
             return dict(
                 lame_lambda=lam, lame_mu=mu, mu_xz=mu, rho_x=rho, rho_z=rho,
                 dt=dt, h=h, b=None, pd=pd, pml=pml_zero,
-                free_surface=fs, topo_rows=topo, fs_faces=fs_faces,
+                free_surface=fs, fs_faces=fs_faces,
                 lame_lambda_2mu=lam2mu,
             )
 
@@ -254,7 +250,7 @@ class Elastic(FirstOrderEquation):
             out = list(elastic_stress_substep(*wf, **_kw(models, dt, h)))
             if fs:  # post-step free-surface traction zeroing (mirrors ``func``)
                 # out order (vx, vz, sxx, szz, sxz, ...): [2]=sxx [3]=szz [4]=sxz
-                out[3], out[4], out[2] = self._fs_zero_traction(out[3], out[4], out[2], topo)
+                out[3], out[4], out[2] = self._fs_zero_traction(out[3], out[4], out[2])
             return out
 
         return [sub_v, sub_s]   # forward order; reverse = reversed(...) at -dt

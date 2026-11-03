@@ -204,14 +204,15 @@ class PropBase:
         # A topography STAIRCASE (not a flat free surface) needs the equation
         # to actually apply ``_topo_rows_runtime`` / the kernel-side rows;
         # accepting it otherwise silently models a flat surface.  The flag name
-        # is per-impl (``_IMAGE_TOPO_FLAG``): e.g. 3-D Elastic honours the
-        # rows on eager but not in its CUDA kernels.
+        # is per-impl (``_IMAGE_TOPO_FLAG``).
         if topography is not None and self._topo_method == 'image' \
                 and not getattr(equation, self._IMAGE_TOPO_FLAG, False):
+            hint = getattr(equation, "image_topography_hint", None)
             raise NotImplementedError(
                 f"topography= with the image method is not implemented by "
                 f"{type(equation).__name__} on this impl "
                 f"({self._IMAGE_TOPO_FLAG} is False)."
+                + (f" {hint}" if hint else "")
             )
         # ``_resolve_topo_method`` can turn the TOP free surface on implicitly
         # (topography= implies an image-method free surface even with

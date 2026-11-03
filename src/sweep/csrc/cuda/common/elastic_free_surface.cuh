@@ -36,14 +36,11 @@ __device__ __forceinline__ float elastic_top_fs_value_2d(
     bool half = false
 )
 {
-    // z-low (top) free surface.  Surface row is per-column under irregular
-    // topography, falls back to the constant ``phys_z0()`` in the flat case
-    // (no topo → ``surface_row`` returns ``phys_z0()``).
+    // z-low (top) free surface on row ``phys_z0()``.
     if (solver.fsLo(0)) {
-        const int top = solver.surface_row(ix);
+        const int top = solver.phys_z0();
         if (iz < top) {
-            int m = (half && !solver.has_topo) ? (2 * top - 1 - iz)
-                                               : (2 * top - iz);
+            int m = half ? (2 * top - 1 - iz) : (2 * top - iz);
             float v = u[m * grad_ctx.sz + ix * grad_ctx.sx];
             return odd ? -v : v;
         }
@@ -55,7 +52,7 @@ __device__ __forceinline__ float elastic_top_fs_value_2d(
     // mirror pairs arr[bot+j] with arr[bot-1-j]  ->  m = 2*bot - 1 - iz.
     if (solver.fsHi(0)) {
         const int bot = elastic_z_bottom_surface_row(solver);
-        const bool hz = half && !solver.has_topo;
+        const bool hz = half;
         const int air0 = hz ? bot : bot + 1;
         if (iz >= air0) {
             int m = hz ? (2 * bot - 1 - iz) : (2 * bot - iz);
@@ -87,17 +84,14 @@ __device__ __forceinline__ float elastic_top_fs_sgradient_z_2d(
     // M physical rows adjacent to each active z free surface (top band
     // [top, top+M) and/or bottom band (bot-M, bot]) suppresses the high-order FS
     // instability; the interior keeps full order.  Matches the eager blend.
-    // FLAT surface only (topography path is full-order, gated on ``!has_topo``).
     bool in_o2_band = false;
-    if (!solver.has_topo) {
-        if (solver.fsLo(0)) {
-            const int top = solver.surface_row(ix);
-            if (iz - top >= 0 && iz - top < M) in_o2_band = true;
-        }
-        if (solver.fsHi(0)) {
-            const int bot = elastic_z_bottom_surface_row(solver);
-            if (bot - iz >= 0 && bot - iz < M) in_o2_band = true;
-        }
+    if (solver.fsLo(0)) {
+        const int top = solver.phys_z0();
+        if (iz - top >= 0 && iz - top < M) in_o2_band = true;
+    }
+    if (solver.fsHi(0)) {
+        const int bot = elastic_z_bottom_surface_row(solver);
+        if (bot - iz >= 0 && bot - iz < M) in_o2_band = true;
     }
     if (in_o2_band) {
         float gz2 = 0.f;
@@ -155,12 +149,11 @@ __device__ __forceinline__ float elastic_fs_plain_reduced_adjoint_z_2d(
 )
 {
     const int M   = elastic_stencil_half_order<Order>(solver);
-    const int top = solver.surface_row(ix);
+    const int top = solver.phys_z0();
     const int bot = elastic_z_bottom_surface_row(solver);
-    // Order-2 reduction bands (FLAT surface only; topography path is full-order):
-    // top band [top, top+M) and/or bottom band (bot-M, bot].
-    const bool band_top = solver.fsLo(0) && !solver.has_topo;
-    const bool band_bot = solver.fsHi(0) && !solver.has_topo;
+    // Order-2 reduction bands: top band [top, top+M) and/or bottom band (bot-M, bot].
+    const bool band_top = solver.fsLo(0);
+    const bool band_bot = solver.fsHi(0);
     #define ELASTIC_FS_IN_BAND(j) \
         ((band_top && (j) >= top && (j) < top + M) || (band_bot && (j) > bot - M && (j) <= bot))
     const int sz = grad_ctx.sz;
@@ -224,7 +217,7 @@ __device__ __forceinline__ float elastic_top_fs_adjoint_sgradient_z_2d(
         }
     }
 
-    const int top = solver.surface_row(ix);                 // z-low surface row
+    const int top = solver.phys_z0();                       // z-low surface row
     const int bot = elastic_z_bottom_surface_row(solver);   // z-high surface row
 
     // Air cells are not independent solid dofs (the forward overwrites them by
@@ -245,13 +238,12 @@ __device__ __forceinline__ float elastic_top_fs_adjoint_sgradient_z_2d(
     float gz = elastic_fs_plain_reduced_adjoint_z_2d<Order, ForwardType>(q, ix, iz, grad_ctx, solver);
 
     if (solver.fsLo(0)) {
-        const int miz = (half && !solver.has_topo) ? (2 * top - 1 - iz)
-                                                   : (2 * top - iz);
+        const int miz = half ? (2 * top - 1 - iz) : (2 * top - iz);
         if (miz < top)                  // the mirror source is a top-air row
             gz += parity * elastic_fs_plain_reduced_adjoint_z_2d<Order, ForwardType>(q, ix, miz, grad_ctx, solver);
     }
     if (solver.fsHi(0)) {
-        const bool hz = half && !solver.has_topo;
+        const bool hz = half;
         const int miz  = hz ? (2 * bot - 1 - iz) : (2 * bot - iz);
         const int air0 = hz ? bot : bot + 1;     // half-cell air starts one cell earlier
         if (miz >= air0)
@@ -263,21 +255,7 @@ __device__ __forceinline__ float elastic_top_fs_adjoint_sgradient_z_2d(
 
 // True on a z-normal free-surface row: the top (z-low) surface row and/or the
 // bottom (z-high) surface row, whichever faces are active.  (Name kept for the
-// existing call sites; now covers both z faces.)  Legacy top-only reduces to
-// ``free_surface && iz == surface_row``.
-__device__ __forceinline__ bool elastic_is_top_free_surface_row(
-    const SolverContext& solver,
-    int ix,
-    int iz
-)
-{
-    return (solver.fsLo(0) && iz == solver.surface_row(ix))
-        || (solver.fsHi(0) && iz == elastic_z_bottom_surface_row(solver));
-}
-
-// Back-compat overload for callers that don't carry per-column ``ix``.
-// Falls back to the constant ``phys_z0()`` (the flat-FS top row).  Safe
-// when ``has_topo == false``; in topography mode pass the ``ix`` overload.
+// existing call sites; now covers both z faces.)
 __device__ __forceinline__ bool elastic_is_top_free_surface_row(
     const SolverContext& solver,
     int iz
@@ -331,7 +309,7 @@ __device__ __forceinline__ float elastic_fs_value_x_2d(
     bool half = false
 )
 {
-    const bool hx = half && !solver.has_topo;
+    const bool hx = half;
     if (solver.fsLo(2)) {
         const int left = elastic_x_left_surface_col(solver);
         if (ix < left) {
@@ -486,7 +464,7 @@ __device__ __forceinline__ float elastic_fs_adjoint_sgradient_x_2d(
     // Fold uses the SAME index map as the forward mirror (see
     // ``elastic_fs_value_x_2d``); testing whether the mirror source lands in the
     // air region keeps the condition right for both maps.
-    const bool hx = half && !solver.has_topo;
+    const bool hx = half;
     if (solver.fsLo(2)) {
         const int mix = hx ? (2 * left - 1 - ix) : (2 * left - ix);
         if (mix < left)

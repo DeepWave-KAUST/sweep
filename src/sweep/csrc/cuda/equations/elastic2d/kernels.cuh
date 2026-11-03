@@ -195,17 +195,10 @@ __global__ void __launch_bounds__(256, 8) elastic_stress_kernel(
     float lam = lam_b[idx];
     float mu_ = mu_b[idx];
 
-    // PML / interior split. Conservative for free_surface: keep the iz == halo
-    // row (the free-surface row, where szz/sxz must be reset to 0) on the full
-    // PML path so the BC fires.
-    // Stress kernel needs the per-column surface row INSIDE the in_pml zone
-    // so the BC zero (``σ_zz = σ_xz = 0`` at the FS row) fires after the
-    // PML update.  Under irregular topography the surface row varies per
-    // column — ``solver.surface_row(ix)`` returns the runtime row index
-    // (falls back to ``phys_z0()`` in flat mode → ``halo`` for free_surface).
-    // Keep each active z free-surface row INSIDE the in_pml (full-path) zone so
-    // the traction BC (σzz=σxz=0, Robertsson σxx) fires after the PML update.
-    int z_lo = solver.fsLo(0) ? (solver.surface_row(ix) + 1) : (solver.padLo(0) + halo);
+    // PML / interior split.  Keep each active z free-surface row INSIDE the
+    // in_pml (full-path) zone so the traction BC (σzz=σxz=0, Robertsson σxx)
+    // fires after the PML update.
+    int z_lo = solver.fsLo(0) ? (solver.phys_z0() + 1) : (solver.padLo(0) + halo);
     int z_hi = solver.fsHi(0) ? elastic_z_bottom_surface_row(solver)
                               : (solver.nz - solver.padHi(0) - halo);
     // Same treatment for the x (left/right) free-surface columns: keep the
@@ -280,7 +273,7 @@ __global__ void __launch_bounds__(256, 8) elastic_stress_kernel(
     // σzz=σxz=0.  x faces (left/right): Robertsson σzz fix (x<->z swap), then
     // σxx=σxz=0.  Robertsson corrections first, zeroing after, so a z∩x corner
     // ends σxx=σzz=σxz=0 (matches the eager post-step zeroing order).
-    bool is_z_fs = elastic_is_top_free_surface_row(solver, ix, iz);
+    bool is_z_fs = elastic_is_top_free_surface_row(solver, iz);
     bool is_x_fs = elastic_is_x_free_surface_col(solver, ix);
     if (is_z_fs) f.sxx[idx] += -solver.dt * lam * (lam / (lam + 2.f*mu_) * dvx_dx + dvz_dz);
     if (is_x_fs) f.szz[idx] += -solver.dt * lam * (lam / (lam + 2.f*mu_) * dvz_dz + dvx_dx);
@@ -513,7 +506,7 @@ __global__ void elastic_stress_adjoint_prepare(
     float lam = lam_b[idx];
     float mu_ = mu_b[idx];
 
-    bool is_z_fs = elastic_is_top_free_surface_row(solver, ix, iz);
+    bool is_z_fs = elastic_is_top_free_surface_row(solver, iz);
     bool is_x_fs = elastic_is_x_free_surface_col(solver, ix);
     float bar_sxx = f.sxx[idx];
     float bar_szz = f.szz[idx];
@@ -898,15 +891,6 @@ __global__ void calculate_grad_elastic_bs(
         iz < solver.phys_z0() || iz >= solver.phys_z1())
         return;
 
-    // Even cells strictly above the per-column surface row ("air") can carry
-    // nonzero gradient under irregular topography: vp/vs/rho at an air cell
-    // (iz, ix) participate in the stress update at (iz, ix), which then
-    // contributes to sxx via D_x — and D_x reads sxx across columns ix±k.
-    // Neighbouring columns may have a LOWER surface so (iz, ix±k) is solid
-    // there, and the physical wavefield does reach the receiver.  So Python
-    // autograd assigns a nonzero gradient at air cells and we must too —
-    // do NOT skip air rows here.
-
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
 
@@ -929,7 +913,7 @@ __global__ void calculate_grad_elastic_bs(
     float fvx_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.vx, ix, iz, grad_ctx, solver, false);
     float fvz_x = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD>(f.vz, ix, iz, grad_ctx, solver, false);
 
-    bool is_z_fs = elastic_is_top_free_surface_row(solver, ix, iz);
+    bool is_z_fs = elastic_is_top_free_surface_row(solver, iz);
     bool is_x_fs = elastic_is_x_free_surface_col(solver, ix);
     float bar_sxx = is_x_fs ? 0.f : a.sxx[idx];               // x face zeroes sxx
     float bar_szz = is_z_fs ? 0.f : a.szz[idx];               // z face zeroes szz
@@ -1008,11 +992,6 @@ __global__ void calculate_grad_elastic_nobs(
         iz < solver.phys_z0() || iz >= solver.phys_z1())
         return;
 
-    // Even cells strictly above the per-column surface row ("air") can carry
-    // nonzero gradient under irregular topography (see comment on
-    // calculate_grad_elastic_bs counterpart): air-cell parameters couple to
-    // solid neighbours through x-derivatives.  Don't skip them here.
-
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
 
@@ -1036,7 +1015,7 @@ __global__ void calculate_grad_elastic_nobs(
     float fvx_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (fvx_b, ix, iz, grad_ctx, solver, false);
     float fvz_x = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD>(fvz_b, ix, iz, grad_ctx, solver, false);
 
-    bool is_z_fs = elastic_is_top_free_surface_row(solver, ix, iz);
+    bool is_z_fs = elastic_is_top_free_surface_row(solver, iz);
     bool is_x_fs = elastic_is_x_free_surface_col(solver, ix);
     float bar_sxx = is_x_fs ? 0.f : a.sxx[idx];
     float bar_szz = is_z_fs ? 0.f : a.szz[idx];

@@ -11,7 +11,7 @@
 //   * models: parse_models reads {vp, vs, rho} and derives mu = rho*vs^2 and lambda = rho*(vp^2 - 2*vs^2) as torch tensors kept alive in Models (kernels hold raw pointers into them);
 //   * State = Models + one SGradParam grad_ctx + launch/source/record configs + order + nx/nz/B; Workspace = ElasticAdjointWorkspaceTensor via bind_adjoint_workspace_required(p.adjoint_workspace, 2);
 //   * validate_forward / validate_backward and zero_adjoint_if_first_segment / zero_adjoint_if_first_segment_bs are no-ops (the adjoint buffers arrive Python-zeroed);
-//   * setup_ctx installs the per-edge free surface (set_per_edge(fs_faces, pad_lo, pad_hi)) and topo_rows / has_topo when p.has_topo;
+//   * setup_ctx installs the per-edge free surface (set_per_edge(fs_faces, pad_lo, pad_hi)) and refuses has_topo (the image-method staircase was removed; Python refuses it first);
 //   * init_aux_slabs = elastic_init_aux_slabs (CPML aux slabs); alloc_cpml = cpml.bind(pml_vals, 2);
 //   * allt_shape = (nt, 2, B, nz, nx): u_allt stores the velocities only (Vx, Vz);
 //   * field_ptr = elastic_field_ptr(wf, 2, idx); view = wf.view();
@@ -164,11 +164,8 @@ struct Driver {
     template <class P>
     static void setup_ctx(SolverContext& solver, const P& p)
     {
+        SWEEP_CHECK(!p.has_topo, "Elastic: topography is not supported (use ElasticCurvilinear or PropSEM)");
         solver.set_per_edge(p.fs_faces, p.pad_lo, p.pad_hi);
-        if (p.has_topo) {
-            solver.topo_rows = p.topo_rows.template data_ptr<int>();
-            solver.has_topo = true;
-        }
     }
 
     static void init_aux_slabs(SolverContext& solver, Wavefield& wf)
