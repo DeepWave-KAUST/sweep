@@ -2,8 +2,8 @@
 
 The spectral-element solver, `sweep.sem.PropSEM`: `PropTorch`'s call on a
 Quad9 mesh that follows the free surface. Start with *Hello · SEM* for one
-forward and one gradient, then the seven short *SEM basics* notebooks, each on
-one part of the API, from the mesh to 3-D. The examples after them compare
+forward and one gradient, then the eight short *SEM basics* notebooks, each on
+one part of the API, from the mesh to 3-D and to anisotropic and porous rocks. The examples after them compare
 topography against the finite-difference solvers and run FWI on Marmousi, one
 model and every shot's window in one batched call. The
 [SEM user guide](../../user-guide/sem.md) has the rest of the API.
@@ -78,7 +78,7 @@ model and every shot's window in one batched call. The
 
     vp, vs and rho gradients from one multi-shot call, then `Full()`,
     `BoundarySaving()` and `Ckpt()` on both backends: time, peak memory and the
-    gradient.
+    gradient, and the smaller rim-mode boundary saving.
 
     [:material-notebook-outline: Open notebook](../../notebooks/54_sem_gradients_and_memory.ipynb)
 
@@ -103,6 +103,17 @@ model and every shot's window in one batched call. The
     gradient: the same call with one more axis.
 
     [:material-notebook-outline: Open notebook](../../notebooks/56_sem_3d.ipynb)
+
+-   ![SEM VTI and Biot](../../figures/gallery/57_sem_vti_and_biot.png){ loading=lazy }
+
+    **Basics 8 · Anisotropic and poroelastic rocks**
+
+    ---
+
+    VTI with the Thomsen parameters, and Biot's porous rock with its slow P
+    wave, anisotropic permeability and `equation_options`.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/57_sem_vti_and_biot.ipynb)
 
 </div>
 

@@ -153,6 +153,7 @@ nav:
               - Basics 5 · Gradients and memory: notebooks/54_sem_gradients_and_memory.ipynb
               - Basics 6 · Water over a sea floor: notebooks/55_sem_fluid_solid.ipynb
               - Basics 7 · 3-D: notebooks/56_sem_3d.ipynb
+              - Basics 8 · VTI and Biot: notebooks/57_sem_vti_and_biot.ipynb
               - FD vs SEM · topography: notebooks/41_fd_vs_sem_topography.ipynb
               - Acoustic · Marmousi · FWI: notebooks/42_fwi_acoustic_marmousi_sem.ipynb
               - Batched local windows · FWI: notebooks/44_sem_batched_local_window_fwi.ipynb
