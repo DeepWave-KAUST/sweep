@@ -175,6 +175,13 @@ and this project adheres to
   acoustic 6% off the full tape (bf16 5e-5, int8 2e-4); `impl='c'` refused it
   already, under an internal option's name. PropTorch's fp16 ring is
   block-normalised; the SEM rings take fp32, bf16 and int8.
+- `AcousticCurvilinear`: the z-direction CPML terms took their derivatives
+  with `dh`, but one computational row is `D(x) d_eta` metres, so whenever the
+  surface lies below row 0 the stretched-coordinate correction was off by
+  `(row_spacing / dh)**2` and the bottom layer reflected (1.2% of the record
+  with the surface at row 40 of 121, 3% at row 60, against 1e-4 without
+  topography). They now use `beta d/deta`. The interior is unchanged;
+  `ElasticCurvilinear`'s first-order CPML is scale-free and was right.
 - `PropSEM(impl='eager')` compiling its step no longer fails when
   `torch.compile` cannot build it, e.g. on CPU with g++ older than 10
   (`InductorError: CppCompileError`, `-std=c++20` rejected). As on the FD eager
