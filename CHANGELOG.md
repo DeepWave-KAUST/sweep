@@ -247,6 +247,15 @@ and this project adheres to
   velocity sample half a step off. The end is now the second-order one-sided
   difference: a record cut at `nt` ends within 1-2 % of the longer record's
   value there (was up to 9x its peak), on both backends.
+- The SEM C-PML placement guard no longer flags a source or receiver on the
+  model's edge column (`ix = 0` / `nx - 1`). PropSEM adds the layer outside
+  the model, so that column is the band's inner edge, but the band's
+  thickness comes out of float32 mesh coordinates (200.00002 for 200 m) and
+  the comparison had no tolerance: `"in left band (x<200.0)"`. Points within
+  round-off of the edge now count as inside. The warning that does fire says
+  that on PropSEM such a point is outside the model grid and names
+  `pml_guard='off'` as the forward-call option it is, instead of advising a
+  smaller `pml_thickness_elements`, which PropSEM does not take.
 
 ## [0.3.6] - 2026-10-29
 
