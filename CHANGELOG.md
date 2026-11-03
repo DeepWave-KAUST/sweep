@@ -164,6 +164,25 @@ and this project adheres to
   curvilinear grid only.
 
 ### Fixed
+- `PropSEM(memory=BoundarySaving(), bs_band_mode='rim')` gives the full-tape
+  gradient over the whole model, its edge included. The rim was meant to be
+  the band's inner edge, but the C-PML derivative profiles (`dbx_dx` ...,
+  from `np.gradient`) are non-zero on the model's edge line too, so it was
+  counted as band: rim zeroed it in the reverse march and stored the model's
+  outermost element instead. That element's gradient was wrong (2-D acoustic,
+  `impl='c'`: `1 - cos` 0.35 uncropped; elastic 1.7e-5; the fluid-solid
+  "2e-5 plateau" was the same error). Rim now stores the band's first element
+  layer, the one touching the model. Band elements are told apart by `b_*` /
+  `node_in_pml` at their interior GLL nodes only, since on the band's inner
+  face the profile is zero only up to round-off (`b_z = -3.8e-16` measured),
+  and a model node the ring does not restore is no longer zeroed in the
+  eager reverse march (`np.gradient` leaves 1e-17 on `dbz_dz` one node into
+  the model). Every path that
+  takes the option -- 2-D acoustic, elastic and fluid-solid, 3-D acoustic, DD
+  strips, `impl='c'` and eager -- is at round-off, uncropped. It stores more
+  than the old rim (2-D acoustic peak 50 → 114 MB on a 97×193 grid, against
+  553 MB for the full band), and the C-PML memory rings are no longer empty
+  in rim mode. No kernel change.
 - `AcousticTariq`: `vv` is the vertical velocity, as the step uses it
   (`vv**2`); the docstring and model spec called it the squared velocity.
   `AcousticAniso(method='alkhalifah', symmetry='tti')` now raises
