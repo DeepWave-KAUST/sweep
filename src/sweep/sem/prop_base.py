@@ -603,6 +603,8 @@ class _Acq:
                 f"receivers batch {receivers.shape[0]} must be 1 or match "
                 f"nshots {nshots}.")
         self.receivers = receivers
+        prop._refuse_above_surface(sources, "source")
+        prop._refuse_above_surface(receivers, "receiver")
 
     def check_pershot(self, pershot_eqs):
         """Per-shot models must carry one equation per shot."""
@@ -1475,6 +1477,46 @@ class PropSEM:
         rev_pad = self._pad0[::-1]                # (x, [y,] z)
         return tuple((float(idx_row[k]) + rev_pad[k]) * self.dh
                      for k in range(self.ndim))
+
+    def _refuse_above_surface(self, idx, role):
+        """Refuse grid points ``[ix, [iy,] iz]`` above the topography.
+
+        The curved mesh starts at the surface, so such a point is in no
+        element, and the locator would only say it found none. The surface
+        row of a fractional column is the one the mesh is built from
+        (:class:`_SurfaceRows`: linear between columns); a point on it, up to
+        round-off, is in the model.
+        """
+        if self.topography is None:
+            return
+        c = idx.detach().cpu().double().reshape(-1, self.ndim)
+        rows = self.topography
+
+        def axis(p, n):
+            p = p.clamp(0.0, n - 1)
+            i0 = p.floor().long().clamp(max=n - 1)
+            return i0, (i0 + 1).clamp(max=n - 1), p - i0
+
+        x0, x1, fx = axis(c[:, 0], rows.shape[-1])
+        if self.ndim == 2:
+            surf = rows[x0] + fx * (rows[x1] - rows[x0])
+        else:
+            y0, y1, fy = axis(c[:, 1], rows.shape[0])
+            lo = rows[y0, x0] + fx * (rows[y0, x1] - rows[y0, x0])
+            hi = rows[y1, x0] + fx * (rows[y1, x1] - rows[y1, x0])
+            surf = lo + fy * (hi - lo)
+        bad = (c[:, -1] < surf - 1e-3).nonzero().flatten()
+        if bad.numel():
+            i = int(bad[0])
+            where = ", ".join(f"{v:g}" for v in c[i].tolist())
+            col = ", ".join(f"{v:g}" for v in c[i, :-1].tolist())
+            raise ValueError(
+                f"{bad.numel()} {role}(s) above the topography, e.g. "
+                f"[{where}] where the surface of column [{col}] is row "
+                f"{float(surf[i]):.2f}. Sources and receivers are model grid "
+                f"indices [ix, {'iy, ' if self.ndim == 3 else ''}iz], iz in "
+                f"rows of dh from the top of the model: put them at or below "
+                f"the surface row of their column.")
 
     # ------------------------------------------------------------------ #
     # forward — PropTorch-compatible signature

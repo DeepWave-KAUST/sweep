@@ -256,6 +256,11 @@ and this project adheres to
   that on PropSEM such a point is outside the model grid and names
   `pml_guard='off'` as the forward-call option it is, instead of advising a
   smaller `pml_thickness_elements`, which PropSEM does not take.
+- A `PropSEM` source or receiver above the `topography` is refused up front,
+  naming the point and the surface row of its column, on every backend. It
+  used to reach the curved-mesh locator, which said only `could not locate
+  (x=..., z=...) in any Quad9 element of column ex=..`. A point on the
+  surface row (fractional rows and columns too) is accepted as before.
 
 ## [0.3.6] - 2026-10-29
 
