@@ -113,11 +113,13 @@ assert 0.6 < lag * v / (2 * dh) < 1.2
 
 | Option | Equations / impl | Notes |
 |---|---|---|
-| `topography=rows` (staircase image method) | eager: `Acoustic`, `Acoustic3D`, `Elastic`, `Elastic3D`, `ViscoAcoustic`; c: `Acoustic`, `Acoustic3D`, `Elastic`, `ElasticVRR` | `rows`: int array `(nx,)` (2-D) / `(ny, nx)` (3-D), surface row per column; free surface implied (no `free_surface=` needed); c refuses boundary saving with it, use `memory=Full()` or `Ckpt` |
+| `topography=rows` (staircase image method) | eager: `Acoustic`, `Acoustic3D`, `ViscoAcoustic`; c: `Acoustic`, `Acoustic3D` (acoustic only) | `rows`: int array `(nx,)` (2-D) / `(ny, nx)` (3-D), surface row per column; free surface implied (no `free_surface=` needed); c refuses boundary saving with it, use `memory=Full()` or `Ckpt` |
 | `AcousticCurvilinear`, `ElasticCurvilinear` + `topography=` | eager only | boundary-fitted grid, fractional rows allowed; sources/receivers stay physical indices |
 | `sweep.sem.PropSEM` + `topography=` | eager and c | curved spectral elements; see `sem.md` |
 
-Other equations raise `NotImplementedError` for `topography=`. Cells above the surface should
+Other equations raise `NotImplementedError` for `topography=`, the elastic ones (`Elastic`,
+`Elastic3D`, `ElasticBorn`, `ElasticVRR`) included: their staircase was removed, so an elastic
+surface with topography is `ElasticCurvilinear` (2-D) or `PropSEM`. Cells above the surface should
 still hold sensible model values (they are vacuum for the solver). Topography cannot be combined
 with per-edge free surfaces, `boundary_buffer`, or `ModelParallel`.
 
@@ -154,4 +156,5 @@ be combined with `topography=`.
 - Per-edge free surface / per-face `abcn` on 3-D or on equations other than 2-D
   `Acoustic`/`Elastic`/`ViscoAcoustic`/`ViscoElastic`; per-face `abcn` on `impl='c'`.
 - `topo_method='apm'` (removed); anything except `'auto'`/`'image'`.
+- `topography=` on the Cartesian elastic equations (the elastic staircase was removed).
 - Boundary saving + `topography=` on `impl='c'`.

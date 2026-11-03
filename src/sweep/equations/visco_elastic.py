@@ -441,7 +441,7 @@ class ViscoElastic(FirstOrderEquation):
         kw = dict(
             lame_lambda=lam, lame_mu=mu, mu_xz=mu, rho_x=rho, rho_z=rho,
             dt=dt, h=h, b=b, pd=self.pd, pml=self.b,
-            free_surface=free_surface, topo_rows=None, fs_faces=fs_faces,
+            free_surface=free_surface, fs_faces=fs_faces,
             lame_lambda_2mu=lam2mu,
         )
         (vx, vz, sxx, szz, sxz,
@@ -452,7 +452,7 @@ class ViscoElastic(FirstOrderEquation):
         exx, ezz, vx_z, vz_x, m_vxx, m_vzz = elastic_velocity_gradients(
             vx, vz, m_vxx, m_vzz,
             dt=dt, h=h, b=b, pd=self.pd, pml=self.b,
-            free_surface=free_surface, topo_rows=None, fs_faces=fs_faces,
+            free_surface=free_surface, fs_faces=fs_faces,
         )
         vx_z, vz_x, m_vxz, m_vzx = elastic_shear_cpml(vx_z, vz_x, m_vxz, m_vzx, self.b, (vx, vz, self.pd))
         exz = vx_z + vz_x
@@ -506,7 +506,7 @@ class ViscoElastic(FirstOrderEquation):
         sxz = sxz + (0.5 * dt) * sum_xz
 
         if free_surface:
-            szz, sxz, sxx = self._fs_zero_traction(szz, sxz, sxx, None)
+            szz, sxz, sxx = self._fs_zero_traction(szz, sxz, sxx)
 
         return (
             vx, vz, sxx, szz, sxz,

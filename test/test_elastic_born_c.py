@@ -29,8 +29,6 @@ FS_CASES = {
     "none": dict(free_surface=False),
     "top": dict(free_surface=True),
     "per_edge": dict(free_surface=(True, False, True, False)),
-    "topography": dict(topography=(2 + 2 * np.sin(np.linspace(0, np.pi, NX))).astype(np.int64),
-                       topo_method="image", free_surface=False),
 }
 MEMORY = {
     "full": Full(),
@@ -79,7 +77,7 @@ def test_c_forward(fs):
     """The background record is Elastic's; the scattered one is the derivative
     of the Elastic impl='c' record along the perturbation (Richardson-extrapolated
     central differences, fp32: ~2e-4..4e-4 measured).  Not against eager: Elastic
-    itself differs between the backends (1.4e-4 flat, ~0.5 with topography)."""
+    itself differs between the backends (1.4e-4 flat)."""
     sources, receivers = _geometry()
     w = _wavelet()
     bg, pert = _models()
@@ -105,9 +103,8 @@ def _c_grads(cls, fs, mode, models, r):
     return d.detach(), [m.grad for m, (_, g) in zip(ms, models) if g]
 
 
-# boundary saving + topography is refused on impl='c' (Elastic alike)
-@pytest.mark.parametrize("fs,mode", [(fs, mode) for fs in ("none", "top", "topography")
-                                     for mode in MEMORY if (fs, mode) != ("topography", "bs")])
+@pytest.mark.parametrize("fs,mode", [(fs, mode) for fs in ("none", "top")
+                                     for mode in MEMORY])
 def test_c_gradients_are_elastic_imaging(fs, mode):
     bg, pert = _models()
     shape = (2, NT, _geometry()[1].shape[1], 2)

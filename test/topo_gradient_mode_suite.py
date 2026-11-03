@@ -5,8 +5,9 @@ Mirrors :file:`solver_gradient_mode_suite.py` but focused on the irregular
 free-surface topography paths added to the CUDA backend:
 
 * **Acoustic** image / vacuum-staircase (Mittet 2002) — forward + backward
-* **Elastic** image method (Robertsson 1996, ``topo_method='image'``) —
-  forward + backward
+
+(The elastic image-method staircase was removed; elastic topography is
+``ElasticCurvilinear`` / ``PropSEM``.)
 
 For each (solver × topo scenario × memory mode) the suite runs both eager
 and CUDA propagators, computes gradients via autograd, and reports cosine
@@ -53,7 +54,7 @@ if "--source-import" in sys.argv:
     if str(SRC_DIR) not in sys.path:
         sys.path.insert(0, str(SRC_DIR))
 
-from sweep.equations import Acoustic, Elastic  # noqa: E402
+from sweep.equations import Acoustic  # noqa: E402
 from sweep.propagator.torch import PropTorch  # noqa: E402
 
 
@@ -103,9 +104,6 @@ SOLVERS = {
     "acoustic2d_topo": TopoSolver(
         "acoustic2d_topo", Acoustic, False, "image",
     ),
-    "elastic2d_topo_image": TopoSolver(
-        "elastic2d_topo_image", Elastic, True, "image",
-    ),
 }
 
 SCENARIOS = {
@@ -114,7 +112,7 @@ SCENARIOS = {
     "stairs":      TopoScenario("stairs", "discrete-step topography (worst case for staircase)", _stairs),
 }
 
-DEFAULT_SOLVERS = "acoustic2d_topo,elastic2d_topo_image"
+DEFAULT_SOLVERS = "acoustic2d_topo"
 DEFAULT_SCENARIOS = "gentle_hill,mountain,stairs"
 DEFAULT_MODES = "full,bs_gpu,bs_cpu"
 

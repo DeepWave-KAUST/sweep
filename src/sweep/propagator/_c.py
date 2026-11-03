@@ -859,7 +859,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         one-cell-high hill already gives cos 0.52) and hits any surface that is
         not identically zero, including a CONSTANT non-zero topography.  Acoustic
         is affected too (cos 0.9935, rel 0.12 on the same hill), so this is a
-        property of the reconstruction, not of the elastic kernels.  Unaffected:
+        property of the reconstruction, not of the elastic kernels (whose
+        staircase has since been removed).  Unaffected:
         ``free_surface=True`` with no topography, both checkpoint modes, the full
         path, and eager boundary saving (``impl='eager'`` +
         ``BoundarySaving()``), which all agree to ~1e-6.

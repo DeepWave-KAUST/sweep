@@ -112,6 +112,7 @@ _CURV_HILL = 2.0 - 2.0 * np.exp(-((np.arange(44) - 22.0) / 8.0) ** 2)
 
 EQUATIONS = [
     pytest.param(Acoustic, (40, 44), {}, id="acoustic2d"),
+    pytest.param(Acoustic, (12, 16), {"topography": _HILL}, id="acoustic2d_topography"),
     pytest.param(Acoustic3D, (16, 14, 12), {}, id="acoustic3d"),
     pytest.param(AcousticVRZ3D, (16, 14, 12), {}, id="acoustic_vrz3d"),
     pytest.param(Elastic, (40, 44), {}, id="elastic2d"),
@@ -119,8 +120,6 @@ EQUATIONS = [
     # Small enough that the wave reaches the bottom and both sides in 60 steps.
     pytest.param(Elastic, (10, 14), {"free_surface": ["bottom", "left", "right"]},
                  id="elastic2d_per_edge_free_surface"),
-    pytest.param(Elastic, (12, 16), {"topography": _HILL, "topo_method": "image"},
-                 id="elastic2d_topography"),
     pytest.param(Elastic3D, (16, 14, 12), {}, id="elastic3d"),
     pytest.param(ElasticTTI, (40, 44), {}, id="elastic_tti_rsg"),
     # Their steps read lookup tables and a per-run cache that once broke the
