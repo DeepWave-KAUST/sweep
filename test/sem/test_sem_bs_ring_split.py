@@ -17,7 +17,7 @@ What has to hold, and is checked here rather than argued:
   the split cannot have dropped a value;
 * the eager path gives the SAME record and gradient with either layout,
   ``torch.equal``, on the CPU where it is deterministic;
-* rim mode empties the six memory rings (the rim carries no ``b``);
+* rim mode rings them on the band's first element layer only;
 * the C paths' end-to-end gradient with either layout agrees to the cosine
   floor of this path (its assembly is a float atomicAdd; see
   ``lesson_sem_dd_no_bitexact_criterion``).
@@ -129,7 +129,8 @@ def test_strip_ring_indices_are_the_axis_slabs(mode):
             assert torch.equal(got, want)
             assert torch.equal(got, torch.sort(got).values)      # a filter, not a re-sort
             if mode == "rim":
-                assert got.numel() == 0, "the rim carries no b, so no memory ring"
+                # the band's first layer: the edge nodes read its memories
+                assert got.numel() > 0, f"rim stored no {ax} memory"
         if mode == "full":
             u = torch.unique(torch.cat([c[f"band_idx_{ax}"] for ax in "xyz"]))
             assert u.numel() < band.numel(), "supports should not cover the band"

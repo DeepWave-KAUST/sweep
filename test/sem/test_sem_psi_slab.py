@@ -17,8 +17,9 @@ What the change rests on, and how each piece is held here:
    bitwise criterion on this path (the assembly is a float atomicAdd), so
    the bar is ten times the measured floor plus a cosine gap.
 4. The account: the fifteen forward arrays shrink by the slab fraction.
-5. The fallbacks: a save-all tape forces the full layout; rim mode has
-   empty rings but the slabs still carry the fields; a middle strip with no
+5. The fallbacks: a save-all tape forces the full layout; rim mode rings
+   only the band's first element layer while the slabs still carry the
+   fields; a middle strip with no
    x slab runs with empty psi_x / zeta_x buffers.
 """
 from __future__ import annotations
@@ -383,9 +384,9 @@ def test_fused_boundary_saving_matches_the_full_layout(deformed, store):
 
 
 @needs_c
-def test_rim_mode_runs_with_empty_memory_rings():
-    # rim: the interface line carries no b, so band_idx_d and ring_slot_d are
-    # empty; the fields still live on their slabs and the backward reconstructs
+def test_rim_mode_runs_on_the_slab_layout():
+    # rim: band_idx_d and ring_slot_d cover only the band's first element
+    # layer; the fields still live on their slabs and the backward reconstructs
     full = _fused_run(False, False, True, None, "rim", nex=10, abcn=2)
     slab = _fused_run(False, True, True, None, "rim", nex=10, abcn=2)
     _check(full, slab)

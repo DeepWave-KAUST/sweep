@@ -669,12 +669,11 @@ class PropSEM:
             raise ValueError(
                 f"bs_band_mode must be 'full' or 'rim', got {bs_band_mode!r}")
         # What boundary saving stores of the C-PML region: the whole band
-        # ("full", exact everywhere) or only its interface line ("rim", a
-        # perimeter instead of an area -- 7-12x less history). "rim" is NOT a
-        # drop-in: measured exact from ~8 model pixels in, the error sitting in
-        # the model cells next to the band (the band itself is no longer in
-        # the gradient: _interp_to_gll). See
-        # sweep.sem.boundary_saving.cpml_node_masks.
+        # ("full") or only its first element layer, the one touching the model
+        # ("rim", one element thick instead of abcn). Both give the full-tape
+        # gradient over the whole model; the band beyond that layer is not in
+        # the gradient (_interp_to_gll). See
+        # sweep.sem.boundary_saving.band_from_active.
         self.bs_band_mode = bs_band_mode
         shape = tuple(int(s) for s in shape)
         self.n_order = int(n_order)

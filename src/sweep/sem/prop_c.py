@@ -1128,7 +1128,7 @@ class SEMCudaPropagator(SEMPropagator):
         The C path saves real rings instead: acoustic band from the node
         profile's b/db coefficients, elastic band from ``node_in_pml``, each
         widened by its one-element rim -- or, under ``bs_band_mode='rim'``,
-        that rim ALONE, for both domains' node rings.
+        each band's first element layer, for both domains' node rings.
 
         The solid's ELEMENT ring is exempt from ``'rim'`` and always covers the
         whole band: its six memory fields live only inside the C-PML, and
@@ -1145,23 +1145,20 @@ class SEMCudaPropagator(SEMPropagator):
         ngm = mesh.n_global
         elem_nodes = mesh.ibool.reshape(mesh.n_elements, -1)
 
-        def band(coefs):
-            active = torch.zeros(ngm, dtype=torch.bool, device=mesh.ibool.device)
-            for v in coefs:
-                v = v.to(mesh.ibool.device)
-                if tuple(v.shape) == (ngm,):
-                    active |= v != 0
-                else:                        # element-local, ibool-shaped
-                    active[mesh.ibool[v != 0]] = True
+        def band(coefs, strict_coefs):
+            from .boundary_saving import (band_from_active, model_node_mask,
+                                          profile_node_mask)
+            active = profile_node_mask(coefs, mesh.ibool, ngm)
+            model = model_node_mask(strict_coefs, mesh.ibool, ngm)
             # 'rim' thins the NODE ring only: the solid's ELEMENT ring
             # stays full-band, for the reason the docstring gives
-            from .boundary_saving import band_from_active
-            b, has = band_from_active(active, elem_nodes, mode)
+            b, has = band_from_active(active, elem_nodes, mode, model)
             return (torch.nonzero(b).reshape(-1),
                     torch.nonzero(has).reshape(-1), has)
 
-        ac_nodes, _, _ = band([cp_ac.b_x, cp_ac.b_z, cp_ac.dbx_dx, cp_ac.dbz_dz])
-        el_nodes, el_elems, el_has = band([cp_el.node_in_pml])
+        ac_nodes, _, _ = band([cp_ac.b_x, cp_ac.b_z, cp_ac.dbx_dx, cp_ac.dbz_dz],
+                              [cp_ac.b_x, cp_ac.b_z])
+        el_nodes, el_elems, el_has = band([cp_el.node_in_pml], [cp_el.node_in_pml])
         return {
             "band_idx": _i64(ac_nodes),
             "band_node_idx": _i64(el_nodes),

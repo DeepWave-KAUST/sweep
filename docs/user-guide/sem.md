@@ -279,8 +279,8 @@ Knobs:
   values to zero (2-D elastic gradients came out 15% off), where `'bf16'` keeps
   fp32's range.
 - `bs_band_mode='full' | 'rim'` (constructor) — what the ring covers: the whole
-  band (default; gradient equals the full tape everywhere) or only its
-  interface line. See **Rim mode**.
+  band (default) or only its first element layer, the one touching the model.
+  Both give the full-tape gradient over the whole model. See **Rim mode**.
 
 ### One index set per field
 
@@ -294,8 +294,8 @@ therefore rings only the band nodes its own coefficient is non-zero on
 The union of the three slabs is about 2.4× any one of them, so the seven 3-D
 rings shrink from `7 · |band|` to about half (measured: 244,699 → 122,077
 node-slots on a 33³ grid; DD rank memory for forward + backward 921 → 581
-B per global node at 161³). In `'rim'` mode the memory rings are empty
-altogether: the interface line lies outside every slab. Nothing changes in
+B per global node at 161³). In `'rim'` mode they cover the band's first
+element layer only, like the wavefield ring. Nothing changes in
 what is reconstructed — `test_sem_bs_ring_split.py` checks on the stored
 bytes that the dropped entries were all zero, and the eager path is bitwise
 identical to the old layout.
@@ -439,42 +439,71 @@ The five-tape path stays behind `prop_c._WSUM_TAPE_2D = False`.
 
 ### Rim mode
 
-`bs_band_mode='rim'` rings the band's interface **line** instead of the band
-**area** — a perimeter instead of a surface, so it scales with the mesh edge
-rather than the C-PML thickness. It is honoured on every path: the
-single-domain acoustic/elastic/coupled propagators and every DD strip. (The
-strips and the coupled path used to hard-code the "full" convention and ignore
-the flag silently, handing back full-band memory with no warning.)
+`bs_band_mode='rim'` rings only the band's **first element layer**, the one
+that touches the model, instead of the whole band: one element deep instead of
+`abcn` cells. That layer is all the model gradient reads. The reverse march
+rebuilds the model's own wavefield once the layer's inner edge (the model's
+edge line) is restored, and the model's edge nodes share their material with
+the layer's elements, whose stiffness and C-PML memories enter the edge nodes'
+update. Deeper band elements hold no model node and are cut from the gradient
+(the band is an edge extension of the model, see `_interp_to_gll`), so their
+wavefield is never needed. Rim and full give the same gradient over the
+**whole model**, its edge included. It is honoured on every path: the
+single-domain acoustic/elastic/coupled propagators and every DD strip.
 
-The bargain, measured worst-of-all-models cosine against the full tape:
+Measured on one shot 300 m from the left edge of a 97×193 grid (2-D, `abcn=20`,
+4-sided band) and a 41×41×65 grid (3-D, `abcn=12`), against `Full()` over the
+whole model (fluid-solid: element-local models, over the elements inside the
+model):
 
-| path | band nodes full → rim | band in the gradient | band cropped | band + one element cropped |
-|---|---|---|---|---|
-| acoustic 2-D, px=1 and 2 | 8816 → 816 (10.8×) | 0.9984 | — | 1.0000000 |
-| elastic, px=1 and 2 | 6808 → 620 (11.0×) | 0.0466 | 0.99746 | 1.0000000 |
-| fluid-solid, px=1 and 2 | 2737 → 540 fluid, 2197 → 145 solid | 0.68 | 0.9838 | 0.999978 |
+| path | peak MB: `Full()` / full band / rim (old rim) | `1 - cos`, rim (old rim) |
+|---|---|---|
+| 2-D acoustic potential, `impl='c'` | 755 / 553 / 114 (50) | 1e-11 (0.35) |
+| 2-D acoustic potential, eager | 403 / 555 / 116 (52) | 1e-11 (0.82) |
+| 2-D acoustic potential, DD px=2 | 766 / 556 / 121 (56) | 5e-11 (0.35) |
+| 2-D elastic, `impl='c'` | 4155 / 1773 / 1525 (1471) | 5e-13 (2e-5) |
+| 2-D elastic, eager | 4370 / 7140 / 6893 (6838) | 3e-12 (0.11) |
+| 2-D elastic, DD px=2 | 4198 / 1784 / 1532 (1477) | 3e-12 (4e-3) |
+| fluid-solid, `impl='c'` | 5107 / 1892 / 1235 (1177) | 2e-11 (7e-8) |
+| fluid-solid, DD px=2 | 5135 / 1927 / 1263 (1213) | 1e-11 (4e-8) |
+| 3-D `AcousticSEM3D`, `impl='c'` | 2103 / 5875 / 1330 (312) | 2e-16 (2e-5) |
+| 3-D `AcousticSEM3D`, eager | 2363 / 6123 / 1561 (544) | 9e-15 (2e-4) |
+| 3-D `AcousticSEM3D`, DD px=2 | 2199 / 6012 / 1418 (388) | 2e-15 (5e-5) |
+| 3-D `AcousticSEM3DDeformed`, `impl='c'` | 2459 / 6291 / 1723 (656) | 8e-16 (2e-5) |
+| 3-D `AcousticSEM3DDeformed`, eager | 4316 / 2065 / 758 (551) | 8e-13 (5e-4) |
 
-Measured when the band lay inside `shape`. It now lies outside the model and
-its gradient is cut at the model edge, so a model gradient is the "band
-cropped" column, and dropping the model's outermost element gives the last.
+The full band is the same at round-off on every row. The rim stores about
+twice what the old one did (the band's first element layer and its C-PML
+memories, where the old one stored four node lines and no memory) and still
+4-5x less than the full band on the acoustic paths. On these small test grids
+the 3-D full band is most of the mesh, so boundary saving there costs more
+than the tape; that is unrelated to rim.
 
-Three things that bite:
+An element belongs to the band when `b_x`, `b_y`, `b_z` (or the elastic
+`node_in_pml`) is non-zero at one of its *interior* GLL nodes. Interior nodes
+only, because on the band's inner face the profile is zero only up to the
+coordinate round-off (measured `b_z = -3.8e-16` on a top edge line). The
+derivative profiles `dbx_dx` … come from `np.gradient` and are non-zero on
+the model's edge line outright. The first rim used them: it counted the edge
+line as band, zeroed it in the reverse march and stored the model's outermost
+element instead of the band's first. That element's gradient was wrong (2-D acoustic
+`1 - cos` 0.35 uncropped, exact two elements in), and the fluid-solid "2e-5
+plateau" this page used to report was the same error.
 
-- **Crop the model's outermost element as well.** One element short is not a
-  detail — elastic sits at 0.997 with the band alone cropped and at exactly
-  1.0 with that element too.
-- **Element rings are exempt** and always cover the whole band. The elastic
-  C-PML memory fields live only inside it, and zeroing them corrupts the
-  adjoint entering the *interior*, not just the band gradient — dropping them
-  takes even full-band node mode to cos 0.755. So rim shrinks the node rings
-  only: a big win where the rings are node-only (acoustic), a partial one on
-  elastic and coupled, where the element rings are the bulk of the bytes.
-- **Fluid-solid plateaus** at ~2e-5 instead of converging to 1.0. The other
-  paths reach the full-tape gradient exactly. Unexplained; the two domains'
-  bands are built separately there, so their rims meet at the seabed.
+**Element rings are exempt** and always cover the whole band. The elastic C-PML
+memory fields live only inside it, and zeroing them corrupts the adjoint
+entering the *interior*, not just the band gradient — dropping them takes even
+full-band node mode to cos 0.755. So rim shrinks the node rings only: a big win
+where the rings are node-only (acoustic), a small one on elastic and coupled,
+where the element rings are the bulk of the bytes.
+
+A model given element-local (GLL-native) covers the band too, and those
+entries are not reproduced beyond the first layer; crop the band before
+comparing such a gradient.
 
 Asking for `'rim'` on a mesh whose C-PML band covers every node raises — there
-is no interface line to store, and boundary saving would silently ring nothing.
+is no model node for a first layer to touch, and boundary saving would silently
+ring nothing.
 Small 3-D test grids hit this routinely (measured: band 5746 of 5746 nodes).
 
 ### In the shot batch

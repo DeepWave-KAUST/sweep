@@ -62,12 +62,81 @@ def _assemble_src(cfg, wav):
 # --------------------------------------------------------------------------- #
 # CPML node bookkeeping: absorbing nodes + the interior interface ring.
 # --------------------------------------------------------------------------- #
+# The profile coefficients that are non-zero exactly where a node damps:
+# inside the band, and zero in the model. The derivative profiles
+# (``dbx_dx`` ...) are not among them: they come from ``np.gradient``, which
+# carries them one node out, onto the model edge. On the band's inner face
+# itself even these are only zero up to the coordinate round-off (measured
+# b_z = -3.8e-16 on a top edge line), which model_node_mask steps around.
+STRICT_PROFILE_NAMES = ("b_x", "b_y", "b_z", "node_in_pml")
+PROFILE_NAMES = STRICT_PROFILE_NAMES + ("dbx_dx", "dby_dy", "dbz_dz")
+
+
+def profile_node_mask(coefs, ibool, n_global):
+    """``(n_global,)`` bool: is any of ``coefs`` non-zero at the node? Each
+    coefficient is global-node ``(n_global,)`` (acoustic) or element-local
+    ``ibool``-shaped (elastic), in 2-D ``(E, g, g)`` or 3-D ``(E, g, g, g)``;
+    an element-local one counts at a node if any of its copies is non-zero."""
+    device = ibool.device
+    out = torch.zeros(n_global, dtype=torch.bool, device=device)
+    for v in coefs:
+        v = v.to(device)
+        if tuple(v.shape) == (n_global,):
+            out |= v != 0
+        elif tuple(v.shape) == tuple(ibool.shape):
+            out[ibool[v != 0]] = True
+        else:
+            raise ValueError(
+                f"unexpected CPML coefficient shape {tuple(v.shape)}")
+    return out
+
+
+def _interior_slots(ibool):
+    """The element-INTERIOR GLL nodes (off every face) of an ``ibool``-shaped
+    tensor's trailing axes, as an index for ``x[(slice(None),) + idx]``. With
+    no interior node (two GLL points per axis) the whole element."""
+    g = ibool.shape[1]
+    sl = slice(1, g - 1) if g > 2 else slice(None)
+    return (slice(None),) + (sl,) * (ibool.dim() - 1)
+
+
+def model_node_mask(coefs, ibool, n_global):
+    """``(n_global,)`` bool: the MODEL's nodes, i.e. every node of every
+    element outside the absorbing band (its edge line included).
+
+    An element is in the band when one of ``coefs`` -- the strict profile,
+    :data:`STRICT_PROFILE_NAMES` -- is non-zero at one of its INTERIOR GLL
+    nodes. Those sit a fraction of an element away from any face, so the
+    test never reads the band's inner face, where the profile is zero only up
+    to round-off: reading it there would flip edge nodes in and out of the
+    band one by one.
+
+    Element adjacency, so it needs the whole mesh: a DD strip slices this
+    mask from the global one (``dd._strip_model_nodes``)."""
+    E = ibool.shape[0]
+    inner = _interior_slots(ibool)
+    band_el = torch.zeros(E, dtype=torch.bool, device=ibool.device)
+    for v in coefs:
+        v = v.to(ibool.device)
+        if tuple(v.shape) == (n_global,):
+            band_el |= (v[ibool[inner]] != 0).reshape(E, -1).any(1)
+        elif tuple(v.shape) == tuple(ibool.shape):
+            band_el |= (v[inner] != 0).reshape(E, -1).any(1)
+        else:
+            raise ValueError(
+                f"unexpected CPML coefficient shape {tuple(v.shape)}")
+    model = torch.zeros(n_global, dtype=torch.bool, device=ibool.device)
+    model[ibool[~band_el].reshape(-1)] = True
+    return model
+
+
 def cpml_node_masks(eq) -> tuple[torch.Tensor, torch.Tensor]:
     """``(cpml_zero_idx, interface_save_idx)`` Long index tensors over global
     nodes. Active = any of the CPML *input* coefficients ``b_{x,y,z}`` /
     ``db*_d*`` nonzero (exactly zero outside the band — NOT the decay coef ``a``,
-    which is ~1 everywhere). Interface = inactive nodes sharing an element with
-    an active one. Both empty when there is no CPML.
+    which is ~1 everywhere): those nodes are zeroed in the reverse march. The
+    second tensor is what is stored and restored; see :func:`band_from_active`.
+    Both empty when there is no CPML.
 
     Dimension-agnostic: the coefficient tensors are either global-node
     ``(n_global,)`` (acoustic) or element-local ``ibool``-shaped (elastic), in
@@ -79,67 +148,44 @@ def cpml_node_masks(eq) -> tuple[torch.Tensor, torch.Tensor]:
 
     ``eq.bs_band_mode`` selects what the second tensor covers:
 
-    * ``"full"`` (default) — active nodes plus their one-element rim. The
-      boundary-saved gradient then equals the full-tape one everywhere.
-    * ``"rim"`` — the rim only, i.e. an interface LINE instead of the band AREA.
-      The saving grows with the mesh and with the C-PML thickness, because a rim
-      is a perimeter and a band is an area: measured 7.7x fewer stored nodes at
-      144x96 elements with a 6-element band and 11.8x at 288x192 with a
-      10-element band.
+    * ``"full"`` (default) — active nodes plus their one-element rim.
+    * ``"rim"`` — the nodes of the band's first element layer only, the
+      layer that touches the model. Its size goes with the band's perimeter
+      times one element, not times the band thickness: measured 4.8x less
+      peak memory than ``"full"`` on a 97x193 grid with a 5-element band
+      (acoustic, impl='c'), more with a thicker band.
 
-      NOT a drop-in replacement. The gradient inside the absorbing band is not
-      reproduced, and the band is an edge-replication of the model, so its
-      (wrong) contribution folds back onto the outermost model pixels.
-      Measured on a 49x65 model with a 6-element band, source at 15% of
-      X, no free surface (4-sided band) and a 1500/4500 contrast — i.e. with
-      real energy in the band — against the full tape:
-
-      ===============  ================  ==================
-      pixels cropped   cos vs full tape  max rel error
-      ===============  ================  ==================
-      0                0.83              0.37
-      1                0.99              0.10
-      2                0.999             0.17
-      4                0.99999           2e-3
-      8                1.0000000         < 1e-7
-      ===============  ================  ==================
-
-      So: exact from ~8 pixels (2 elements) in, badly wrong on the outermost
-      ring. A gentle configuration hides this completely (the same table reads
-      1e-4 everywhere when the source is centred and the record is short), so
-      judge it on a case that actually drives energy into the band."""
+    Both give the full-tape gradient everywhere in the model, its edge
+    included."""
     mesh = eq.mesh
     n_global = mesh.n_global
     device = mesh.ibool.device
-
-    active = torch.zeros(n_global, dtype=torch.bool, device=device)
     cp = getattr(eq, "cpml", None)   # bare-only equations have no attr
-    elem_shape = tuple(mesh.ibool.shape)
-    if cp is not None:
-        for name in ("b_x", "b_y", "b_z", "dbx_dx", "dby_dy", "dbz_dz",
-                     "node_in_pml"):
-            v = getattr(cp, name, None)
-            if v is None:
-                continue
-            v = v.to(device)
-            if tuple(v.shape) == (n_global,):              # global-node (acoustic)
-                active |= v != 0
-            elif tuple(v.shape) == elem_shape:             # element-local (elastic)
-                active[mesh.ibool[v != 0]] = True
-            else:
-                raise ValueError(
-                    f"unexpected CPML coefficient shape {tuple(v.shape)} for {name}")
-    if not bool(active.any()):
+    if cp is None:
         empty = torch.empty(0, dtype=torch.long, device=device)
         return empty, empty
 
+    def coefs(names):
+        return [v for v in (getattr(cp, nm, None) for nm in names)
+                if v is not None]
+
+    active = profile_node_mask(coefs(PROFILE_NAMES), mesh.ibool, n_global)
+    if not bool(active.any()):
+        empty = torch.empty(0, dtype=torch.long, device=device)
+        return empty, empty
+    model = model_node_mask(coefs(STRICT_PROFILE_NAMES), mesh.ibool, n_global)
     band, _ = band_from_active(active, mesh.ibool.reshape(mesh.n_elements, -1),
-                               getattr(eq, "bs_band_mode", "full"))
+                               getattr(eq, "bs_band_mode", "full"), model)
+    # never zero a model node the ring does not restore: np.gradient leaves
+    # round-off (1.8e-17) on the derivative profile one GLL node INTO the
+    # model, which made those nodes "active". The full band stores them; the
+    # rim does not, and the reverse march rebuilds them exactly.
+    active &= ~model | band
     return (torch.nonzero(active, as_tuple=False).reshape(-1),
             torch.nonzero(band, as_tuple=False).reshape(-1))
 
 
-def band_from_active(active, elem_nodes, mode="full"):
+def band_from_active(active, elem_nodes, mode="full", model=None):
     """The C-PML ring's node mask, from the mask of nodes the profile damps.
 
     ``'full'`` is those nodes PLUS their one-element rim. The step is linear
@@ -149,8 +195,23 @@ def band_from_active(active, elem_nodes, mode="full"):
     the model-padding edge extension. Restoring the whole band exactly is what
     makes the boundary-saved gradient equal the full-tape one.
 
-    ``'rim'`` is that rim ALONE: the interface LINE between the band and the
-    interior, 7-12x fewer nodes, exact from a few model pixels in.
+    ``'rim'`` is every node of the band's FIRST element layer: the elements
+    holding both a ``model`` node (:func:`model_node_mask`) and a node that is
+    not one. That is what the model gradient needs and no more. The model's own nodes are rebuilt by the reverse march once the
+    edge line is restored, and the edge line is in the layer. The layer's
+    other nodes are needed because the edge nodes' material is shared with
+    those band elements: their stiffness, and the C-PML memories that enter
+    the edge nodes' update, read every node of the element. Deeper band
+    elements hold no model node and stay out of the gradient
+    (``PropSEM._interp_to_gll``).
+
+    ``model`` cannot be read off ``active``: the ``np.gradient`` derivative
+    profiles mark the model's edge line too. The old rim (the nodes of
+    elements touching ``active``, minus ``active``) therefore stored the
+    model's outermost element instead of the band's first, with the edge
+    line zeroed, and that whole element's gradient was wrong (cos 0.65
+    against the full tape, acoustic, impl='c'). Given ``model``, the test is
+    per element on per-node data, so DD strips sharing a cut agree on it.
 
     Returns ``(band mask, which elements touch the active set)``. Four callers
     built this by hand with four copies of the refusal below -- the eager node
@@ -159,9 +220,14 @@ def band_from_active(active, elem_nodes, mode="full"):
     """
     has = active[elem_nodes].any(1)
     band = torch.zeros_like(active)
-    band[elem_nodes[has].reshape(-1)] = True
-    if mode == "rim":
-        band &= ~active
+    if mode == "full":
+        band[elem_nodes[has].reshape(-1)] = True
+    elif mode == "rim":
+        if model is None:
+            raise TypeError("bs_band_mode='rim' needs the model node mask")
+        in_band = ~model[elem_nodes]
+        layer = in_band.any(1) & (~in_band).any(1)
+        band[elem_nodes[layer].reshape(-1)] = True
         if active.any() and not band.any():
             raise ValueError(
                 "bs_band_mode='rim' has nothing to store here: the C-PML band "
@@ -169,7 +235,7 @@ def band_from_active(active, elem_nodes, mode="full"):
                 "no interface line between it and an interior. Enlarge the "
                 "interior (more elements) or thin the band (a smaller "
                 "abcn), or use bs_band_mode='full'.")
-    elif mode != "full":
+    else:
         raise ValueError(f"bs_band_mode must be 'full' or 'rim', got {mode!r}")
     return band, has
 
@@ -236,9 +302,8 @@ def cpml_ring_masks(eq, save_idx):
     """``{field_index: ring index}`` for the fields whose ring can live on one
     axis's support -- declared by the equation as ``bs_ring_support =
     {field: coefficient name}``. Fields not declared (and equations that
-    declare nothing) ring on ``save_idx`` as before. In rim mode ``save_idx``
-    holds no absorbing node, so every declared field's ring is empty: exactly
-    right, since the rim carries no C-PML memory."""
+    declare nothing) ring on ``save_idx`` as before. In rim mode that is the
+    band's first element layer, whose memories the model's edge nodes read."""
     out = {}
     sup = getattr(eq, "bs_ring_support", None) or {}
     cp = getattr(eq, "cpml", None)
