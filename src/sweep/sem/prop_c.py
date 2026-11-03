@@ -658,6 +658,16 @@ class _ConstsBase:
                 "Gxz": float(4.0 / (mesh.dx_e * mesh.dz_e)),
                 "Gyz": float(4.0 / (mesh.dy_e * mesh.dz_e))}
 
+    def nodal(self, *ts):
+        """``(len(ts), n_global)``: element-layout ``(E, m)`` arrays read at one
+        element copy of each node (the lowest flat index) -- for coefficients that
+        depend on the node only."""
+        idx = self.ibool_flat().reshape(-1).long()
+        n = idx.numel()
+        first = torch.full((int(idx.max()) + 1,), n, dtype=torch.long, device=idx.device)
+        first = first.scatter_reduce(0, idx, torch.arange(n, device=idx.device), reduce="amin")
+        return torch.stack([t.reshape(-1)[first] for t in ts]).contiguous()
+
     def vs3d_geom(self):
         """The velocity-stress Hex8 quadrature: the three half-cell weight
         arrays and the ``1/(2h)`` scalars."""
@@ -1059,6 +1069,8 @@ class SEMCudaPropagator(SEMPropagator):
         }
         if eq.cpml is not None:     # the driver's own fill list, so they cannot drift
             c.update({nm: b.ex3(getattr(eq.cpml, nm)) for nm in _VS3D_CPML})
+            # per node too: the divergence memories are nodal
+            c["a_n"] = b.nodal(*(c[nm] for nm in _VS3D_CPML))
         return c
 
     def _forward_elastic_vs3d(self, wav):

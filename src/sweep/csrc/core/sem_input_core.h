@@ -1523,6 +1523,7 @@ struct Sem3dVsForwardInputCore {
     Buf b_y;
     Buf a_z;
     Buf b_z;
+    Buf a_n;   // (6, n_global) a_x b_x a_y b_y a_z b_z per node; empty = bare
     Buf pat_x;
     Buf pat_y;
     Buf pat_z;
@@ -1535,9 +1536,10 @@ struct Sem3dVsForwardInputCore {
     Buf Rx;
     Buf Ry;
     Buf Rz;
+    Buf P;   // (9, n_global) divergence by direction (scratch); empty = bare
     Buf sig;   // (6, E*ngll^3) stress
-    Buf msig;   // (9, E*ngll^3) memories
-    Buf mvel;
+    Buf msig;   // (9, n_global) divergence memories
+    Buf mvel;   // (9, E*ngll^3) velocity-gradient memories
     Buf seis_x;
     Buf seis_y;
     Buf seis_z;
@@ -1574,6 +1576,7 @@ struct Sem3dVsBackwardInputCore {
     Buf b_y;
     Buf a_z;
     Buf b_z;
+    Buf a_n;   // (6, n_global); empty = bare
     Buf pat_x;
     Buf pat_y;
     Buf pat_z;
@@ -1596,6 +1599,7 @@ struct Sem3dVsBackwardInputCore {
     Buf adj_x;
     Buf adj_y;
     Buf adj_z;
+    Buf lP;
     Buf lsig;   // lgv scratch (9, E*m)
     Buf lmsig;
     Buf lmvel;

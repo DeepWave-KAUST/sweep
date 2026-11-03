@@ -50,11 +50,18 @@ from typing import ClassVar, Optional
 
 import torch
 
-from .._assembly import assemble, contract, phys_grads
+from .._assembly import assemble, contract, first_copies, phys_grads
 from ..cpml.band import active_elements, element_split
-from ..cpml.elastic_vs import SimpleElasticCPMLProfile, build_simple_elastic_cpml
+from ..cpml.elastic_vs import (SimpleElasticCPMLProfile, build_simple_elastic_cpml,
+                               pin_outer_edge)
 from ..fields import DerivedInitState, FieldSpec, check_element_arrays
 from ..mesh.quad9 import Quad9Mesh, boundary_element_edges
+
+
+def _first(ibool, mesh):
+    """:func:`first_copies` of the band's nodes, as a ``(E_b, ngll, ngll, 1)``
+    weight for the two-component ψ."""
+    return first_copies(ibool, mesh.n_global).to(mesh.w_jac.dtype).unsqueeze(-1)
 
 
 def _band_split(mesh, cp, top_elem_ids, split):
@@ -71,11 +78,13 @@ def _band_split(mesh, cp, top_elem_ids, split):
             "iex": mesh.inv_J[..., 1, 0], "iez": mesh.inv_J[..., 1, 1]}
     if inner.numel() == 0:
         on_band = dict(geom, **{n: getattr(cp, n) for n in names})
+        on_band["first"] = _first(on_band["ibool"], mesh)
         return dict(band_elements=band, interior_elements=inner, _band=on_band,
                     _inner=None, _top_band_rows=top_elem_ids)
     take = lambda rows: {k: v[rows] for k, v in geom.items()}
     on_band = take(band)
     on_band.update({n: getattr(cp, n)[band] for n in names})
+    on_band["first"] = _first(on_band["ibool"], mesh)
     top_rows = torch.nonzero(torch.isin(band, top_elem_ids), as_tuple=False).reshape(-1)
     return dict(band_elements=band, interior_elements=inner, _band=on_band,
                 _inner=take(inner), _top_band_rows=top_rows)
@@ -87,8 +96,10 @@ class ElasticVSSEM2DDeformed(DerivedInitState):
 
     # ---- Field specification: the positional state layout (see fields.py) ---- #
     # (v_x, v_z, sigma_xx, sigma_zz, sigma_xz, then the 8 CPML memory variables —
-    #  on the C-PML band elements only (``band``: zero on every other element);
-    #  none when cpml is None.)
+    #  of the divergence by derivative direction (m_sxx_x: the x part of the
+    #  v_x divergence, …; every element copy of a node holds the node's value)
+    #  and of the velocity gradients — on the C-PML band elements only (``band``: zero on every
+    #  other element); none when cpml is None.)
     field_specs: ClassVar[list] = [
         FieldSpec("v_x", supports_source=True, supports_receiver=True,
                   seis_key="seis_vx", snap_key="snapshots_vx"),
@@ -205,7 +216,7 @@ class ElasticVSSEM2DDeformed(DerivedInitState):
 
         return cls(
             mesh=mesh, vp_e=vp_e, vs_e=vs_e, rho_e=rho_e,
-            mass_rho=mass_rho, _inv_M=1.0 / mass_rho, cpml=cpml,
+            mass_rho=mass_rho, _inv_M=pin_outer_edge(1.0 / mass_rho, mesh, cpml), cpml=cpml,
             free_top=free_top, top_elem_ids=top_elem_ids,
             _tx_top=tx_top, _tz_top=tz_top,
             _D=mesh.deriv,
@@ -239,7 +250,7 @@ class ElasticVSSEM2DDeformed(DerivedInitState):
     # ------------------------------------------------------------------ #
     def assemble_stress_divergence(
         self,
-        sigma_xx_xpart: torch.Tensor,   # σ_xx ⊗ ∂φ/∂x-part (with CPML stretching)
+        sigma_xx_xpart: torch.Tensor,   # σ_xx ⊗ ∂φ/∂x-part
         sigma_xz_zpart: torch.Tensor,   # σ_xz ⊗ ∂φ/∂z-part of v_x equation
         sigma_xz_xpart: torch.Tensor,   # σ_xz ⊗ ∂φ/∂x-part of v_z equation
         sigma_zz_zpart: torch.Tensor,   # σ_zz ⊗ ∂φ/∂z-part
@@ -247,9 +258,9 @@ class ElasticVSSEM2DDeformed(DerivedInitState):
         """Assemble ``R_i = ∫ ∂φ/∂x_j · σ_ij dV`` at global GLL nodes.
 
         The caller supplies four element-local σ-arrays, one per
-        (test-function-axis × stress-component) pairing. Without CPML
-        these are all identical to the bare σ field; with CPML they are
-        the CPML-stretched fields ``σ + m_σ`` for the appropriate axis.
+        (test-function-axis × stress-component) pairing; the step passes
+        the bare σ in all four and adds the C-PML's share itself (from the
+        same divergence split by direction).
 
         For the v_x equation:
             ``R_x = ∫ (∂φ/∂x σ_xx + ∂φ/∂z σ_xz) dV``
@@ -282,20 +293,6 @@ class ElasticVSSEM2DDeformed(DerivedInitState):
         F_alpha = torch.stack([F_x_alpha, F_z_alpha], dim=-1)
         return (contract("db,eadk->eabk", self._D, F_beta)
                 + contract("ga,egbk->eabk", self._D, F_alpha))  # (E,ngll,ngll,2)
-
-    def _split_divergence(self, sigma_xx, sigma_zz, sigma_xz, sxx_xpart_b,
-                          sxz_zpart_b, sxz_xpart_b, szz_zpart_b):
-        """:meth:`assemble_stress_divergence` split by element: the bare stress on
-        the interior, the four C-PML-stretched ones (given on the band rows) on
-        the band (see :mod:`sweep.sem.cpml.band`)."""
-        gi, gb, ei = self._inner, self._band, self.interior_elements
-        sxz_i = sigma_xz[ei]
-        R_i = self._divergence_e(sigma_xx[ei], sxz_i, sxz_i, sigma_zz[ei], gi)
-        R_b = self._divergence_e(sxx_xpart_b, sxz_zpart_b, sxz_xpart_b, szz_zpart_b, gb)
-        acc = sigma_xx.new_zeros(self.mesh.n_global, 2)
-        acc = acc.index_add(0, gi["ibool"].reshape(-1), R_i.reshape(-1, 2))
-        acc = acc.index_add(0, gb["ibool"].reshape(-1), R_b.reshape(-1, 2))
-        return acc.unbind(-1)
 
     # ------------------------------------------------------------------ #
     # Free surface: traction-free in local coords at top GLL nodes.
@@ -388,28 +385,38 @@ class ElasticVSSEM2DDeformed(DerivedInitState):
         inv_M = self._inv_M
         b_x, b_z = src[0], src[1]
 
-        # ----- velocity update from current σ (with σ-field CPML) -----
-        # The memories live on the band rows (sweep.sem.cpml.band): the band
-        # elements take the stretched stress, the interior the bare one.
+        # ----- velocity update from current σ (with σ-derivative CPML) -----
+        # The bare weak divergence everywhere. On the band (sweep.sem.cpml.band)
+        # the C-PML recursion runs on the assembled divergence split by
+        # derivative direction -- the lumped-mass-weighted nodal ∂_j σ_ij, the
+        # inter-element jumps included -- and its stretch is added once per
+        # node: R += ψ. Only band elements touch a node the layer reaches, so
+        # the band's assembly is complete there; every element copy of a node
+        # carries the node's memory. (Recursing on σ and differentiating σ + ψ
+        # gave ∂(ψ*σ), not ψ*∂σ: an extra term in the profile's gradient that
+        # reflected low frequencies off the layer at any resolution.)
+        R_x, R_z = self.assemble_stress_divergence(
+            sigma_xx, sigma_xz, sigma_xz, sigma_zz)
         if use_cpml:
             cb, eb, split = self._band, self.band_elements, self._inner is not None
             pick = (lambda t: t[eb]) if split else (lambda t: t)
-            sxx_b, szz_b, sxz_b = pick(sigma_xx), pick(sigma_zz), pick(sigma_xz)
-            m_sxx_x = cb["a_x"] * m_sxx_x + cb["b_x"] * sxx_b
-            m_sxz_z = cb["a_z"] * m_sxz_z + cb["b_z"] * sxz_b
-            m_sxz_x = cb["a_x"] * m_sxz_x + cb["b_x"] * sxz_b
-            m_szz_z = cb["a_z"] * m_szz_z + cb["b_z"] * szz_b
-            if split:
-                R_x, R_z = self._split_divergence(
-                    sigma_xx, sigma_zz, sigma_xz, sxx_b + m_sxx_x, sxz_b + m_sxz_z,
-                    sxz_b + m_sxz_x, szz_b + m_szz_z)
-            else:
-                R_x, R_z = self.assemble_stress_divergence(
-                    sigma_xx + m_sxx_x, sigma_xz + m_sxz_z, sigma_xz + m_sxz_x,
-                    sigma_zz + m_szz_z)
-        else:
-            R_x, R_z = self.assemble_stress_divergence(
-                sigma_xx, sigma_xz, sigma_xz, sigma_zz)
+            sxx_b, sxz_b, szz_b = pick(sigma_xx), pick(sigma_xz), pick(sigma_zz)
+            z = torch.zeros_like(sxx_b)
+            ib = cb["ibool"]
+            # (x part of R_x, x part of R_z, z part of R_x, z part of R_z)
+            P = torch.cat([self._divergence_e(sxx_b, z, sxz_b, z, cb),
+                           self._divergence_e(z, sxz_b, z, szz_b, cb)], -1)
+            P = sigma_xx.new_zeros(self.mesh.n_global, 4).index_add(
+                0, ib.reshape(-1), P.reshape(-1, 4))[ib]
+            m_sxx_x = cb["a_x"] * m_sxx_x + cb["b_x"] * P[..., 0]
+            m_sxz_x = cb["a_x"] * m_sxz_x + cb["b_x"] * P[..., 1]
+            m_sxz_z = cb["a_z"] * m_sxz_z + cb["b_z"] * P[..., 2]
+            m_szz_z = cb["a_z"] * m_szz_z + cb["b_z"] * P[..., 3]
+            psi = torch.stack([m_sxx_x + m_sxz_z, m_sxz_x + m_szz_z], -1) * cb["first"]
+            acc = sigma_xx.new_zeros(self.mesh.n_global, 2).index_add(
+                0, ib.reshape(-1), psi.reshape(-1, 2))
+            R_x = R_x + acc[:, 0]
+            R_z = R_z + acc[:, 1]
         v_x = v_x + dt * inv_M * (-R_x + b_x)
         v_z = v_z + dt * inv_M * (-R_z + b_z)
 
@@ -467,6 +474,9 @@ class ElasticVSSEM2DDeformed(DerivedInitState):
     # propagator: the profile dataclasses are NOT interchangeable, and
     # the equation is what knows which one it takes.
     cpml_builder: ClassVar[object] = staticmethod(build_simple_elastic_cpml)
+    # a C-PML side between two free faces grows: PropSEM refuses it
+    # (sweep.sem.cpml.elastic_vs.refuse_free_waveguide)
+    free_plate_unstable: ClassVar[bool] = True
 
     bs_ring_save: ClassVar[list] = [0, 1]
     bs_ring_restore: ClassVar[list] = [(0, 0, 0), (1, 1, 0)]   # (field, slot, offset)
@@ -512,7 +522,9 @@ class ElasticVSSEM2DDeformed(DerivedInitState):
         saved_inv = self._inv_M
         for a in self.bs_model_attrs:
             setattr(self, a, leaves[a])
-        self._inv_M = 1.0 / leaves["mass_rho"]
+        # the C-PML's rigid outer edge (pin_outer_edge) stays pinned
+        self._inv_M = torch.where(saved_inv == 0, torch.zeros_like(saved_inv),
+                                  1.0 / leaves["mass_rho"])
         try:
             return self.step(fields, src, dt)
         finally:

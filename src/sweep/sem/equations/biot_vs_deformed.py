@@ -80,8 +80,9 @@ on an interface it is shared among the elements that carry each field.
 Boundaries: an open-pore free surface (traction-free, ``p = 0``) on the ``dirichlet``
 sides -- ``p`` pinned to zero on their nodes, the traction natural; elsewhere the boundary
 integrals are dropped (traction-free, no flow), behind the C-PML. C-PML: the profile of
-:class:`ElasticVSSEM2DDeformed`, field memories for the weak forms (stress, flux) and
-gradient memories for the strong ones (``grad v``, ``grad p``): 12 element fields. An
+:class:`ElasticVSSEM2DDeformed`, every memory on a derivative: the ``div sigma`` and
+``div q`` weak forms split by derivative direction (assembled, on the layer's elements),
+``grad v`` and ``grad p``: 12 element fields. An
 interface may cross the side or bottom bands, with the plain coupling there, but no corner
 region (as in :class:`~sweep.sem.equations.acoustic_elastic2d.AcousticElasticSEM2D`).
 
@@ -112,15 +113,32 @@ from typing import ClassVar, Optional
 
 import torch
 
-from .._assembly import assemble, contract, phys_grads
+from .._assembly import assemble, contract, first_copies, phys_grads
 from ..coupling import FluidSolidInterface, assert_no_corner_pml_on_interface
-from ..cpml.elastic_vs import SimpleElasticCPMLProfile, build_simple_elastic_cpml
+from ..cpml.band import active_elements
+from ..cpml.elastic_vs import (SimpleElasticCPMLProfile, build_simple_elastic_cpml,
+                               pin_outer_edge)
 from ..fields import FieldSpec, check_element_arrays, init_state_from_specs
 from ..mesh.boundaries import free_surface_node_idx
 from ..mesh.domains import DomainMask, masked_inv_mass
 from ..mesh.quad9 import Quad9Mesh
 
 _SOURCE_MODES = ("load", "velocity")
+
+
+def _cpml_band(mesh, w, cp):
+    """The elements a C-PML coefficient reaches, with what the divergence
+    memories need there (see :meth:`BiotVSSEM2DDeformed._div_parts`)."""
+    names = ("a_x", "b_x", "a_z", "b_z")
+    rows = torch.nonzero(active_elements([(getattr(cp, n), 0.0) for n in names],
+                                         mesh.n_elements), as_tuple=False).reshape(-1)
+    ib = mesh.ibool[rows]
+    out = {"rows": rows, "ibool": ib, "w": w[rows],
+           "ixx": mesh.inv_J[rows, ..., 0, 0], "ixz": mesh.inv_J[rows, ..., 0, 1],
+           "iex": mesh.inv_J[rows, ..., 1, 0], "iez": mesh.inv_J[rows, ..., 1, 1],
+           "first": first_copies(ib, mesh.n_global).to(w.dtype)}
+    out.update({n: getattr(cp, n)[rows] for n in names})
+    return out
 
 
 def _node_slots(ibool):
@@ -294,6 +312,9 @@ class BiotVSSEM2DDeformed:
     _iez: torch.Tensor
 
     source_mode: str = "load"          # see the module docstring
+    # the C-PML's elements (``rows``) with their geometry, a/b and first-copy
+    # mask, where the divergence memories are updated; None without a C-PML
+    _cpml_band: Optional[dict] = None
     _drag: tuple = None                # (dt, E, Psi), set by init_state
 
     @classmethod
@@ -377,7 +398,8 @@ class BiotVSSEM2DDeformed:
             dirichlet=tuple(dirichlet),
             dirichlet_idx=free_surface_node_idx(mesh, dirichlet, device),
             viscous_q=None if viscous_q is None else tuple(float(v) for v in viscous_q),
-            mass_rho=mass_rho, _inv_M=masked_inv_mass(mass_rho, v_alive),
+            mass_rho=mass_rho,
+            _inv_M=pin_outer_edge(masked_inv_mass(mass_rho, v_alive), mesh, cpml),
             _inv_Mm=masked_inv_mass(lump(m_e), p_alive),
             _inv_Mp=masked_inv_mass(lump(inv_M_e), p_alive), _inv_M1=inv_M1,
             _lam_d=H_e - 2.0 * mu_e - alpha * C_e, _alpha=alpha,
@@ -390,10 +412,18 @@ class BiotVSSEM2DDeformed:
             _D=mesh.deriv, _w_J=w,
             _ixx=mesh.inv_J[..., 0, 0], _ixz=mesh.inv_J[..., 0, 1],
             _iex=mesh.inv_J[..., 1, 0], _iez=mesh.inv_J[..., 1, 1],
+            _cpml_band=None if cpml is None else _cpml_band(mesh, w, cpml),
         )
 
     # The C-PML builder ``cpml=`` expects, and the speed PropSEM designs it for.
     cpml_builder: ClassVar[object] = staticmethod(build_simple_elastic_cpml)
+
+    @property
+    def free_plate_unstable(self) -> bool:
+        """A solid between two free faces of a C-PML band grows, and PropSEM refuses it
+        (:func:`~sweep.sem.cpml.elastic_vs.refuse_free_waveguide`); a fluid alone has no
+        backward modes."""
+        return bool(self._solid_e.any())
 
     @staticmethod
     def pml_speed(models) -> float:
@@ -484,6 +514,33 @@ class BiotVSSEM2DDeformed:
             return assemble(R_e[..., 0], self.mesh.ibool, like)
         return assemble(R_e, self.mesh.ibool, like)
 
+    def _div_parts(self, *pairs):
+        """:meth:`_weak_div` of each element-local pair ``(X, Z)`` on the C-PML's
+        elements, split by derivative direction and assembled -- complete at every
+        node the layer reaches, which only those elements touch -- then read back
+        on every copy: ``(E_b, ngll, ngll, 2 K)``, the x and z parts of each pair."""
+        cb = self._cpml_band
+        r, w = cb["rows"], cb["w"]
+        F_beta, F_alpha = [], []
+        for X, Z in pairs:
+            X, Z = X[r], Z[r]
+            F_beta += [w * X * cb["ixx"], w * Z * cb["ixz"]]
+            F_alpha += [w * X * cb["iex"], w * Z * cb["iez"]]
+        F_beta, F_alpha = torch.stack(F_beta, -1), torch.stack(F_alpha, -1)
+        P = (contract("db,eadk->eabk", self._D, F_beta)
+             + contract("ga,egbk->eabk", self._D, F_alpha))
+        ib = cb["ibool"]
+        return P.new_zeros(self.mesh.n_global, P.shape[-1]).index_add(
+            0, ib.reshape(-1), P.reshape(-1, P.shape[-1]))[ib]
+
+    def _psi_once(self, *psi):
+        """The band's node-valued ψ fields summed once per node, at the global nodes."""
+        cb = self._cpml_band
+        f = torch.stack(psi, -1) * cb["first"].unsqueeze(-1)
+        out = f.new_zeros(self.mesh.n_global, f.shape[-1]).index_add(
+            0, cb["ibool"].reshape(-1), f.reshape(-1, f.shape[-1]))
+        return out.unbind(-1)
+
     def _pin(self, p):
         """``p = 0`` on the open-pore surface."""
         idx = self.dirichlet_idx
@@ -525,18 +582,24 @@ class BiotVSSEM2DDeformed:
         # ----- forces at t^n: total-stress divergence and pressure gradient -----
         d_p_dx, d_p_dz = phys_grads(self._D, ibool, self._ixx, self._ixz, self._iex,
                                     self._iez, p)
+        R_x, R_z = self._weak_div((s_xx, s_xz), (s_xz, s_zz))
         if cp is not None:
-            m_sxx_x = cp.a_x * m_sxx_x + cp.b_x * s_xx
-            m_sxz_z = cp.a_z * m_sxz_z + cp.b_z * s_xz
-            m_sxz_x = cp.a_x * m_sxz_x + cp.b_x * s_xz
-            m_szz_z = cp.a_z * m_szz_z + cp.b_z * s_zz
+            # the C-PML on the divergence split by derivative direction, on the
+            # layer's elements, as in ElasticVSSEM2DDeformed.step
+            cb = self._cpml_band
+            r = cb["rows"]
+            P = self._div_parts((s_xx, s_xz), (s_xz, s_zz))
+            ms = [a * m[r] + b * P[..., k] for k, (a, b, m) in enumerate((
+                (cb["a_x"], cb["b_x"], m_sxx_x), (cb["a_z"], cb["b_z"], m_sxz_z),
+                (cb["a_x"], cb["b_x"], m_sxz_x), (cb["a_z"], cb["b_z"], m_szz_z)))]
+            m_sxx_x, m_sxz_z, m_sxz_x, m_szz_z = (
+                m.index_copy(0, r, mb) for m, mb in
+                zip((m_sxx_x, m_sxz_z, m_sxz_x, m_szz_z), ms))
+            P_x, P_z = self._psi_once(ms[0] + ms[1], ms[2] + ms[3])
+            R_x, R_z = R_x + P_x, R_z + P_z
             m_px = cp.a_x * m_px + cp.b_x * d_p_dx
             m_pz = cp.a_z * m_pz + cp.b_z * d_p_dz
             d_p_dx, d_p_dz = d_p_dx + m_px, d_p_dz + m_pz
-            R_x, R_z = self._weak_div((s_xx + m_sxx_x, s_xz + m_sxz_z),
-                                      (s_xz + m_sxz_x, s_zz + m_szz_z))
-        else:
-            R_x, R_z = self._weak_div((s_xx, s_xz), (s_xz, s_zz))
         f_x, f_z = -R_x, -R_z
         ifc = self.ifc
         if ifc.n_face:
@@ -578,9 +641,12 @@ class BiotVSSEM2DDeformed:
             d_vz_dz = d_vz_dz + m_vzz
             d_vx_dz = d_vx_dz + m_vxz
             d_vz_dx = d_vz_dx + m_vzx
-            m_qx_x = cp.a_x * m_qx_x + cp.b_x * q_x
-            m_qz_z = cp.a_z * m_qz_z + cp.b_z * q_z
-            div_q = self._weak_div((q_x + m_qx_x, q_z + m_qz_z))
+            P = self._div_parts((q_x, q_z))
+            mq_x = cb["a_x"] * m_qx_x[r] + cb["b_x"] * P[..., 0]
+            mq_z = cb["a_z"] * m_qz_z[r] + cb["b_z"] * P[..., 1]
+            m_qx_x, m_qz_z = m_qx_x.index_copy(0, r, mq_x), m_qz_z.index_copy(0, r, mq_z)
+            (dq,) = self._psi_once(mq_x + mq_z)
+            div_q = self._weak_div((q_x, q_z)) + dq
         else:
             div_q = self._weak_div((q_x, q_z))
         div_v = d_vx_dx + d_vz_dz

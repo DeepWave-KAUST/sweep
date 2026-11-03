@@ -80,6 +80,7 @@ from .mesh import MESH_BUILDERS
 from .mesh.hex8 import hex8_layout
 from .cpml.acoustic import build_cpml
 from .cpml.acoustic3d import build_cpml3d
+from .cpml.elastic_vs import refuse_free_waveguide
 from .equations.acoustic2d import AcousticSEM2D
 from .equations.acoustic3d import AcousticSEM3D
 from .equations.acoustic3d_deformed import AcousticSEM3DDeformed
@@ -1244,6 +1245,11 @@ class PropSEM:
 
     def _build_eq(self, models, c_max=None):
         eq = self._build_eq_raw(models, c_max=c_max)
+        if getattr(eq, "free_plate_unstable", False):
+            # a solid between two free faces of a C-PML side's band is a plate, whose
+            # backward modes the layer amplifies; the equations' build() leaves that to
+            # its caller (the absorption gates run side layers alone, for 1.1 s)
+            refuse_free_waveguide(eq.mesh, eq.cpml, self.equation.__name__)
         eq.bs_band_mode = self.bs_band_mode
         if self._src_mode is not None:
             # injected fields, or loads (a force, a moment tensor); see

@@ -11,8 +11,10 @@ Storage
 * Velocity ``v_x, v_y, v_z`` — continuous-Galerkin global fields ``(n_global,)``.
 * Stress ``σ_xx, σ_yy, σ_zz, σ_xy, σ_xz, σ_yz`` — element-local ``(E,g,g,g)``.
 * CPML memory — element-local; 9 for the stress divergence (one per (stress,
-  derivative-direction) pairing in the v update) + 9 for the velocity gradients
-  (one per (velocity-component, derivative-direction) in the σ update).
+  derivative-direction) part of the assembled divergence in the v update; every
+  element copy of a node holds the node's value)
+  + 9 for the velocity gradients (one per (velocity-component,
+  derivative-direction) in the σ update).
 
 Why velocity-stress (vs the 2nd-order displacement form): the FD-style
 single-recursion CPML ``m' = a·m + b·∂`` is long-nt stable here, whereas the
@@ -31,8 +33,9 @@ from typing import ClassVar, Optional
 
 import torch
 
-from .._assembly import assemble_each, contract
+from .._assembly import assemble_each, contract, first_copies
 from ..cpml.band import active_elements, element_split
+from ..cpml.elastic_vs import pin_outer_edge
 from ..cpml.elastic_vs3d import (SimpleElasticCPML3DProfile,
                                  build_simple_elastic_cpml_3d)
 from ..fields import DerivedInitState, FieldSpec, check_element_arrays
@@ -102,6 +105,9 @@ class ElasticVSSEM3D(DerivedInitState):
     # The C-PML builder this equation's ``cpml=`` argument expects -- same
     # declaration the 2-D equations carry, so PropSEM's routing is uniform.
     cpml_builder = staticmethod(build_simple_elastic_cpml_3d)
+    # a C-PML side between two free faces grows: PropSEM refuses it
+    # (sweep.sem.cpml.elastic_vs.refuse_free_waveguide)
+    free_plate_unstable: ClassVar[bool] = True
     # divergence weights w₃·|J|·(2/d_j)
     _wHx: torch.Tensor
     _wHy: torch.Tensor
@@ -152,7 +158,7 @@ class ElasticVSSEM3D(DerivedInitState):
         wHz = w3 * (jac * 2.0 / mesh.dz_e)
         return cls(
             mesh=mesh, vp_e=vp_e, vs_e=vs_e, rho_e=rho_e,
-            mass_rho=mass_rho, _inv_M=1.0 / mass_rho, cpml=cpml,
+            mass_rho=mass_rho, _inv_M=pin_outer_edge(1.0 / mass_rho, mesh, cpml), cpml=cpml,
             _D=mesh.deriv, _lam=lam, _mu=mu, _lam2mu=lam2mu, _w3=w3,
             _wHx=wHx, _wHy=wHy, _wHz=wHz,
             _inv_half_dx=2.0 / mesh.dx_e,
@@ -175,16 +181,31 @@ class ElasticVSSEM3D(DerivedInitState):
         self.band_elements, self.interior_elements = band, inner
         if inner.numel() == 0:
             self._band = {n: getattr(cp, n) for n in names}
+            self._band["first"] = first_copies(self.mesh.ibool, self.mesh.n_global).to(
+                self._lam.dtype)
             self._parts = None
             return self
         self._band = {n: getattr(cp, n)[band] for n in names}
         self._parts = {"band": self._part_geometry(band), "inner": self._part_geometry(inner)}
+        self._band["first"] = first_copies(self._parts["band"]["ibool"],
+                                           self.mesh.n_global).to(self._lam.dtype)
         return self
 
     def _part_geometry(self, rows):
         """What :meth:`assemble_stress_divergence` needs on the elements ``rows``:
         their node ids (the weights are per-node constants on this mesh)."""
         return {"ibool": self.mesh.ibool[rows]}
+
+    def _divergence_parts(self, sig, split):
+        """The element-local terms of :meth:`assemble_stress_divergence`, one per
+        entry of ``sig`` (its nine-slot order: each (stress, derivative
+        direction)), on the band rows (``split``) or on every element."""
+        D = self._D
+        dt = {0: lambda F: contract("Xx,ezyX->ezyx", D, F),
+              1: lambda F: contract("Yy,ezYx->ezyx", D, F),
+              2: lambda F: contract("Zz,eZyx->ezyx", D, F)}
+        w = (self._wHx, self._wHy, self._wHz)
+        return [dt[k % 3](w[k % 3] * s) for k, s in enumerate(sig)]
 
     # ------------------------------------------------------------------ #
     # Strong-form velocity gradients (element-local) — for the σ update.
@@ -260,46 +281,41 @@ class ElasticVSSEM3D(DerivedInitState):
         inv_M = self._inv_M
         b_x, b_y, b_z = src[0], src[1], src[2]
 
-        # ----- velocity update from current σ (σ-field CPML) -----
-        # The memories live on the band rows (sweep.sem.cpml.band): the band
-        # elements take the stretched stress, the interior the bare one.
+        # ----- velocity update from current σ (σ-derivative CPML) -----
+        # The bare weak divergence everywhere. On the band (sweep.sem.cpml.band)
+        # the C-PML recursion runs on the assembled divergence split by
+        # derivative direction (the lumped-mass-weighted nodal ∂_j σ_ij) and its
+        # stretch is added once per node: R += ψ (see ElasticVSSEM2DDeformed.step).
+        R_x, R_y, R_z = self.assemble_stress_divergence(
+            sxx, sxy, sxz, sxy, syy, syz, sxz, syz, szz)
         if use_cpml:
-            cb, eb, ei = self._band, self.band_elements, self.interior_elements
+            cb, eb = self._band, self.band_elements
             split = self._parts is not None
             pick = (lambda t: t[eb]) if split else (lambda t: t)
             ax, bx, ay, by, az, bz = (cb[n] for n in ("a_x", "b_x", "a_y", "b_y", "a_z", "b_z"))
-            # m = a*m + b*s fused via addcmul (mul + fused-multiply-add = 2 kernels
+            # m = a*m + b*P fused via addcmul (mul + fused-multiply-add = 2 kernels
             # vs 3) — ~1.08x on the full elastic step, the recurrence block alone
             # ~1.25x; memory-bound elementwise dominates the 27-field step.
             ac = torch.addcmul
-            sb = [pick(t) for t in (sxx, syy, szz, sxy, sxz, syz)]
-            sxx_b, syy_b, szz_b, sxy_b, sxz_b, syz_b = sb
-            m_sxx_x = ac(ax * m_sxx_x, bx, sxx_b)
-            m_sxy_y = ac(ay * m_sxy_y, by, sxy_b)
-            m_sxz_z = ac(az * m_sxz_z, bz, sxz_b)
-            m_sxy_x = ac(ax * m_sxy_x, bx, sxy_b)
-            m_syy_y = ac(ay * m_syy_y, by, syy_b)
-            m_syz_z = ac(az * m_syz_z, bz, syz_b)
-            m_sxz_x = ac(ax * m_sxz_x, bx, sxz_b)
-            m_syz_y = ac(ay * m_syz_y, by, syz_b)
-            m_szz_z = ac(az * m_szz_z, bz, szz_b)
-            R_b = self.assemble_stress_divergence(
-                sxx_b + m_sxx_x, sxy_b + m_sxy_y, sxz_b + m_sxz_z,
-                sxy_b + m_sxy_x, syy_b + m_syy_y, syz_b + m_syz_z,
-                sxz_b + m_sxz_x, syz_b + m_syz_y, szz_b + m_szz_z,
-                part="band" if split else None)
-            if split:
-                si = [t[ei] for t in (sxx, syy, szz, sxy, sxz, syz)]
-                sxx_i, syy_i, szz_i, sxy_i, sxz_i, syz_i = si
-                R_i = self.assemble_stress_divergence(
-                    sxx_i, sxy_i, sxz_i, sxy_i, syy_i, syz_i, sxz_i, syz_i, szz_i,
-                    part="inner")
-                R_x, R_y, R_z = (a + b for a, b in zip(R_i, R_b))
-            else:
-                R_x, R_y, R_z = R_b
-        else:
-            R_x, R_y, R_z = self.assemble_stress_divergence(
-                sxx, sxy, sxz, sxy, syy, syz, sxz, syz, szz)
+            ib = self._parts["band"]["ibool"] if split else self.mesh.ibool
+            P = torch.stack(self._divergence_parts(
+                [pick(t) for t in (sxx, sxy, sxz, sxy, syy, syz, sxz, syz, szz)], split), -1)
+            P = P.new_zeros(self.mesh.n_global, 9).index_add(
+                0, ib.reshape(-1), P.reshape(-1, 9))[ib]
+            m_sxx_x = ac(ax * m_sxx_x, bx, P[..., 0])
+            m_sxy_y = ac(ay * m_sxy_y, by, P[..., 1])
+            m_sxz_z = ac(az * m_sxz_z, bz, P[..., 2])
+            m_sxy_x = ac(ax * m_sxy_x, bx, P[..., 3])
+            m_syy_y = ac(ay * m_syy_y, by, P[..., 4])
+            m_syz_z = ac(az * m_syz_z, bz, P[..., 5])
+            m_sxz_x = ac(ax * m_sxz_x, bx, P[..., 6])
+            m_syz_y = ac(ay * m_syz_y, by, P[..., 7])
+            m_szz_z = ac(az * m_szz_z, bz, P[..., 8])
+            f = cb["first"]
+            Q = assemble_each([f * (m_sxx_x + m_sxy_y + m_sxz_z),
+                               f * (m_sxy_x + m_syy_y + m_syz_z),
+                               f * (m_sxz_x + m_syz_y + m_szz_z)], ib, R_x)
+            R_x, R_y, R_z = R_x + Q[0], R_y + Q[1], R_z + Q[2]
         vx = vx + dt * inv_M * (-R_x + b_x)
         vy = vy + dt * inv_M * (-R_y + b_y)
         vz = vz + dt * inv_M * (-R_z + b_z)
@@ -377,7 +393,9 @@ class ElasticVSSEM3D(DerivedInitState):
         saved_inv = self._inv_M
         for a in self.bs_model_attrs:
             setattr(self, a, leaves[a])
-        self._inv_M = 1.0 / leaves["mass_rho"]
+        # the C-PML's rigid outer edge (pin_outer_edge) stays pinned
+        self._inv_M = torch.where(saved_inv == 0, torch.zeros_like(saved_inv),
+                                  1.0 / leaves["mass_rho"])
         try:
             return self.step(fields, src, dt)
         finally:

@@ -21,7 +21,7 @@ import torch
 from sweep.propagator import BoundarySaving, Ckpt, EagerOptions, Full
 from sweep.sem import (PropSEM, ElasticSEM2DDeformed, ElasticVSSEM2DDeformed,
                        ElasticVTISEM2DDeformed, ElasticVSSEM3D, ElasticVSSEM3DDeformed)
-from sweep.sem._assembly import assemble
+from sweep.sem._assembly import assemble, first_copies
 from sweep.sem.fields import FieldSpec
 
 SHAPE, NT, DT = (25, 41), 140, 8e-4
@@ -170,7 +170,8 @@ def test_the_split():
 
 
 class _FullMeshVSStep:
-    """The velocity-stress step on every element, as it was."""
+    """The velocity-stress step on every element: the C-PML recursion on the
+    divergence split by derivative direction, at every node."""
 
     field_specs = _on_every_element(ElasticVSSEM2DDeformed.field_specs)
 
@@ -184,12 +185,18 @@ class _FullMeshVSStep:
         cp = self.cpml
         inv_M = self._inv_M
         b_x, b_z = src[0], src[1]
-        m_sxx_x = cp.a_x * m_sxx_x + cp.b_x * sigma_xx
-        m_sxz_z = cp.a_z * m_sxz_z + cp.b_z * sigma_xz
-        m_sxz_x = cp.a_x * m_sxz_x + cp.b_x * sigma_xz
-        m_szz_z = cp.a_z * m_szz_z + cp.b_z * sigma_zz
-        R_x, R_z = self.assemble_stress_divergence(
-            sigma_xx + m_sxx_x, sigma_xz + m_sxz_z, sigma_xz + m_sxz_x, sigma_zz + m_szz_z)
+        ib, ng = self.mesh.ibool, self.mesh.n_global
+        z = torch.zeros_like(sigma_xx)
+        Rxx, Rzx = self.assemble_stress_divergence(sigma_xx, z, sigma_xz, z)   # x parts
+        Rxz, Rzz = self.assemble_stress_divergence(z, sigma_xz, z, sigma_zz)   # z parts
+        m_sxx_x = cp.a_x * m_sxx_x + cp.b_x * Rxx[ib]
+        m_sxz_x = cp.a_x * m_sxz_x + cp.b_x * Rzx[ib]
+        m_sxz_z = cp.a_z * m_sxz_z + cp.b_z * Rxz[ib]
+        m_szz_z = cp.a_z * m_szz_z + cp.b_z * Rzz[ib]
+        once = first_copies(ib, ng).to(sigma_xx.dtype)
+        like = sigma_xx.new_zeros(ng)
+        R_x = Rxx + Rxz + assemble(once * (m_sxx_x + m_sxz_z), ib, like)
+        R_z = Rzx + Rzz + assemble(once * (m_sxz_x + m_szz_z), ib, like)
         v_x = v_x + dt * inv_M * (-R_x + b_x)
         v_z = v_z + dt * inv_M * (-R_z + b_z)
         d_vx_dx, d_vx_dz, d_vz_dx, d_vz_dz = self.velocity_gradients(v_x, v_z)
@@ -281,7 +288,7 @@ def test_vs_essential_free_surface(split):
 
 
 class _FullMeshVS3DStep:
-    """The 3-D velocity-stress step on every element, as it was."""
+    """The 3-D velocity-stress step on every element (the 2-D oracle's C-PML)."""
 
     field_specs = _on_every_element(ElasticVSSEM3D.field_specs)
 
@@ -295,8 +302,13 @@ class _FullMeshVS3DStep:
         ax, bx, ay, by, az, bz = cp.a_x, cp.b_x, cp.a_y, cp.b_y, cp.a_z, cp.b_z
         coef = [(ax, bx), (ay, by), (az, bz), (ax, bx), (ay, by), (az, bz), (ax, bx), (ay, by), (az, bz)]
         sig = [sxx, sxy, sxz, sxy, syy, syz, sxz, syz, szz]
-        ms = [a * mm + b * s for (a, b), mm, s in zip(coef, m[:9], sig)]
-        R = self.assemble_stress_divergence(*(s + mm for s, mm in zip(sig, ms)))
+        ib, ng = self.mesh.ibool, self.mesh.n_global
+        Pg = [assemble(p, ib, vx.new_zeros(ng)) for p in self._divergence_parts(sig, False)]
+        ms = [a * mm + b * p[ib] for (a, b), mm, p in zip(coef, m[:9], Pg)]
+        once = first_copies(ib, ng).to(sxx.dtype)
+        R = [Pg[3 * i] + Pg[3 * i + 1] + Pg[3 * i + 2]
+             + assemble(once * (ms[3 * i] + ms[3 * i + 1] + ms[3 * i + 2]), ib, vx.new_zeros(ng))
+             for i in range(3)]
         vx = vx + dt * inv_M * (-R[0] + src[0])
         vy = vy + dt * inv_M * (-R[1] + src[1])
         vz = vz + dt * inv_M * (-R[2] + src[2])

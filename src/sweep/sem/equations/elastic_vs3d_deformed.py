@@ -10,8 +10,9 @@ an absorbing boundary** at once. Before it, the choice was:
 It is a subclass, not a copy. Everything that is physics rather than geometry
 -- the velocity-stress time loop, the constitutive update, the C-PML memory
 recursion, ``field_specs``, the boundary-saving hooks -- is inherited unchanged
-from :class:`ElasticVSSEM3D`. Exactly three things are overridden, and all
-three are the same substitution: an axis-aligned mesh lets a physical
+from :class:`ElasticVSSEM3D`. What is overridden is the geometry -- the
+derivatives (of v, and of σ for the C-PML), the divergence and its weights --
+and all of it is the same substitution: an axis-aligned mesh lets a physical
 derivative be ONE reference derivative times a constant (``2/dx_e``), while a
 deformed mesh needs the full chain rule
 
@@ -39,7 +40,8 @@ import torch
 
 from ..fields import check_element_arrays
 
-from .._assembly import phys_grads3, stress_divergence3
+from .._assembly import divergence_parts3, phys_grads3, stress_divergence3
+from ..cpml.elastic_vs import pin_outer_edge
 from ..cpml.elastic_vs3d import SimpleElasticCPML3DProfile
 from ..mesh.hex27 import Hex27Mesh
 from .elastic_vs3d import ElasticVSSEM3D
@@ -85,7 +87,7 @@ class ElasticVSSEM3DDeformed(ElasticVSSEM3D):
 
         return cls(
             mesh=mesh, vp_e=vp_e, vs_e=vs_e, rho_e=rho_e,
-            mass_rho=mass_rho, _inv_M=1.0 / mass_rho, cpml=cpml,
+            mass_rho=mass_rho, _inv_M=pin_outer_edge(1.0 / mass_rho, mesh, cpml), cpml=cpml,
             _D=mesh.deriv, _lam=lam, _mu=mu, _lam2mu=lam2mu, _w3=w3,
             # the axis-aligned shortcuts are unused on this path; keep the
             # dataclass fields well-formed rather than leaving them None
@@ -100,7 +102,12 @@ class ElasticVSSEM3DDeformed(ElasticVSSEM3D):
         return {"ibool": self.mesh.ibool[rows], "inv_J": self._inv_J[rows],
                 "w_jac": self._w_jac[rows]}
 
-    # -- the two geometry-dependent operators, and nothing else ----------- #
+    def _divergence_parts(self, sig, split):
+        """The parent's per-direction divergence terms, through ``inv_J``."""
+        g = self._parts["band"] if split else {"inv_J": self._inv_J, "w_jac": self._w_jac}
+        return divergence_parts3(self._D, g["inv_J"], g["w_jac"], sig)
+
+    # -- the geometry-dependent operators, and nothing else --------------- #
     def velocity_gradients(self, vx_g, vy_g, vz_g):
         """The nine ``d v_l / d x_k``, in the parent's fixed order."""
         g = phys_grads3(self._D, self.mesh.ibool, self._inv_J, vx_g, vy_g, vz_g)

@@ -291,13 +291,15 @@ class _SEMElasticVS3DC(torch.autograd.Function):
         A = Alloc(wavelet.device, c["n_global"], c["nt"])
         s = _C.Sem3dVsForwardInput()
         fill(s, c, _VS3D_BARE)
+        ng = c["n_global"]
         if c["has_cpml"]:
-            fill(s, c, _VS3D_CPML)
+            fill(s, c, _VS3D_CPML + ("a_n",))
+            s.P, s.msig = A.block(9, ng), A.block(9, ng)      # the divergence memories are nodal
         else:
-            put(s, _VS3D_CPML, A.empty)
+            put(s, _VS3D_CPML + ("a_n", "P", "msig"), A.empty)
         s.lam, s.mu, s.lam2mu, s.inv_M, s.wavelet = lam, mu, lam2mu, inv_M, wavelet
         put(s, ("vx", "vy", "vz", "Rx", "Ry", "Rz"), A.zeros)
-        s.sig, s.msig, s.mvel = A.block(6, E * m), A.block(9, E * m), A.block(9, E * m)
+        s.sig, s.mvel = A.block(6, E * m), A.block(9, E * m)
         give(s, _record(A, c, "seis_x", "seis_y", "seis_z"))
         put(s, ("save_vx", "save_vy", "save_vz"), A.hist if need_bwd else A.empty)
         s.save_gv = (torch.zeros(c["nt"], 9, E * m, dtype=torch.float32, device=A.dev)
@@ -318,17 +320,19 @@ class _SEMElasticVS3DC(torch.autograd.Function):
         A = Alloc(wavelet.device, c["n_global"], c["nt"])
         b = _C.Sem3dVsBackwardInput()
         fill(b, c, _VS3D_BARE)
+        ng = c["n_global"]
         if c["has_cpml"]:
-            fill(b, c, _VS3D_CPML)
+            fill(b, c, _VS3D_CPML + ("a_n",))
+            b.lP, b.lmsig = A.block(9, ng), A.block(9, ng)
         else:
-            put(b, _VS3D_CPML, A.empty)
+            put(b, _VS3D_CPML + ("a_n", "lP", "lmsig"), A.empty)
         b.lam, b.mu, b.lam2mu, b.inv_M = mats
         b.wavelet = wavelet
         give(b, ctx.carry)
         b.grad_sx, b.grad_sy, b.grad_sz = (g.contiguous().float() for g in (gsx, gsy, gsz))
         put(b, ("lvx", "lvy", "lvz", "lRx", "lRy", "lRz", "adj_x", "adj_y", "adj_z",
                 "grad_inv_M"), A.zeros)
-        b.lsig, b.lmsig, b.lmvel = A.block(6, E * m), A.block(9, E * m), A.block(9, E * m)
+        b.lsig, b.lmvel = A.block(6, E * m), A.block(9, E * m)
         b.lgv = A.empty
         for nm, t in zip(("grad_lam", "grad_mu", "grad_lam2mu"), mats):
             setattr(b, nm, torch.zeros_like(t))

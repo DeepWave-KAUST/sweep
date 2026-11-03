@@ -33,7 +33,13 @@ The options PropTorch has mean what they mean there:
   every side without a free surface; the model is edge-extended into them and
   its gradient stops at the model edge (see [The model edge](#the-model-edge));
 - `free_surface` — `True` (the top), edge names (`"top"`, `["top", "left"]`),
-  a per-edge mask or an `{edge: bool}` dict; default `False`;
+  a per-edge mask or an `{edge: bool}` dict; default `False`. On the
+  velocity-stress solids (elastic and Biot) a C-PML side between two free
+  faces is refused -- free top, left and right over an absorbing bottom, or
+  free top and bottom with absorbing sides: the solid between the free faces
+  is a plate, whose backward-propagating Lamb modes a PML amplifies, and the
+  run grows without bound after a few seconds. Leave one face of the pair
+  absorbing;
 - `topography` — the surface row of every column, `(nx,)` in 2-D and
   `(ny, nx)` in 3-D, fractional rows allowed: a free surface on top, which the
   curved mesh follows (it passes through the rows at the element nodes);
