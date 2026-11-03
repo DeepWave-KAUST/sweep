@@ -146,6 +146,13 @@ nav:
           - SEM:
               - examples/sem/index.md
               - Hello · SEM · forward and backward: notebooks/43_sem_forward_backward.ipynb
+              - Basics 1 · Mesh and time step: notebooks/50_sem_mesh_and_time_step.ipynb
+              - Basics 2 · Choosing an equation: notebooks/51_sem_equations_and_models.ipynb
+              - Basics 3 · Sources and receivers: notebooks/52_sem_sources_and_receivers.ipynb
+              - Basics 4 · Boundaries and snapshots: notebooks/53_sem_boundaries_and_snapshots.ipynb
+              - Basics 5 · Gradients and memory: notebooks/54_sem_gradients_and_memory.ipynb
+              - Basics 6 · Water over a sea floor: notebooks/55_sem_fluid_solid.ipynb
+              - Basics 7 · 3-D: notebooks/56_sem_3d.ipynb
               - FD vs SEM · topography: notebooks/41_fd_vs_sem_topography.ipynb
               - Acoustic · Marmousi · FWI: notebooks/42_fwi_acoustic_marmousi_sem.ipynb
               - Batched local windows · FWI: notebooks/44_sem_batched_local_window_fwi.ipynb
