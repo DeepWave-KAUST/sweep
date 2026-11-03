@@ -15,7 +15,7 @@ Dispatch table:
     "duveneck"    | vti      | 3    | AcousticVTI1st3D
     "liang"       | vti      | 2    | AcousticVTI           (Liang K. 2023)
     "liang"       | tti      | 2    | AcousticTTI
-    "alkhalifah"  | vti / tti| 2    | AcousticTariq         (Alkhalifah 2000)
+    "alkhalifah"  | vti      | 2    | AcousticTariq         (Alkhalifah 2000)
 
 Typical use::
 
@@ -105,8 +105,13 @@ def _select_equation_class(method: str, symmetry: str, ndim: int):
             raise NotImplementedError(
                 "Alkhalifah η-formulation (AcousticTariq) is 2-D only."
             )
-        # The η-acoustic class covers both VTI and TTI (TTI emerges via
-        # rotated η; see qP_tariq.py for details).
+        if symmetry != "vti":
+            # AcousticTariq has no tilt parameter and no rotation: handing it
+            # out for symmetry='tti' would silently solve the VTI equation.
+            raise NotImplementedError(
+                "Alkhalifah (2000) is implemented for VTI only (AcousticTariq "
+                "has no tilt); use method='liang' for 2-D TTI."
+            )
         return _qpt.AcousticTariq
 
     raise AssertionError(f"unhandled method {method!r}")
@@ -182,5 +187,4 @@ class AcousticAniso:
             ("liang",      "vti", 2),
             ("liang",      "tti", 2),
             ("alkhalifah", "vti", 2),
-            ("alkhalifah", "tti", 2),
         ]

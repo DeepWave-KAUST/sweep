@@ -37,7 +37,7 @@ is supported for every class.
 | `AcousticTTI` | `['vp', 'epsilon', 'delta', 'theta']` | 2D | Pure qP TTI (Liang K. et al. 2023, appendix A) — alias `AcousticTTILiang` | ✅ full / bs |
 | `AcousticVTIBorn` | `['vp', 'epsilon', 'delta', 'mp']` | 2D | Born / LSRTM pair of `AcousticVTI` (background `h1`, scattered `sh1`, reflectivity `mp`) | ✅ full / bs, `mp` gradient |
 | `AcousticTTIBorn` | `['vp', 'epsilon', 'delta', 'theta', 'mp']` | 2D | Born / LSRTM pair of `AcousticTTI` | ✅ full / bs, `mp` gradient |
-| `AcousticTariq` | `['vv', 'v', 'eta']` | 2D | qP η-formulation, Alkhalifah 2000 — aliases `AcousticVTIAlkhalifah` / `AcousticTTIAlkhalifah` | ❌ |
+| `AcousticTariq` | `['vv', 'v', 'eta']` | 2D | qP η-formulation, Alkhalifah 2000 — alias `AcousticVTIAlkhalifah`; VTI only | ❌ |
 | `AcousticVTI1st` | `['vp', 'epsilon', 'delta', 'rho']` | 2D | 1st-order velocity-stress, Duveneck et al. 2008 — alias `AcousticVTIDuveneck` | ✅ |
 | `AcousticVTI1st3D` | `['vp', 'epsilon', 'delta', 'rho']` | 3D | 3D counterpart of `AcousticVTI1st` — aliases `AcousticVTIDuveneck3D` / `AcousticVTIDefault3D` | ✅ |
 
