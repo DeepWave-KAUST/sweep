@@ -333,6 +333,8 @@ Two entry points:
   `impl="eager"` and `impl="c"`.
 - [Propagators](propagators.md) — wiring an equation into `PropTorch` or
   `PropJax`.
+- [Pure-qP VTI / TTI](qp_born.md) — the forward, adjoint and Born equations
+  of `AcousticVTI` / `AcousticTTI`.
 - [Extending](extending.md) — adding a new equation class (reference) and the
   [companion notebook](../notebooks/18_extending_add_new_equation.ipynb)
   (runnable walkthrough).
