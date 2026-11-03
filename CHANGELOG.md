@@ -240,6 +240,13 @@ and this project adheres to
   so the x wavenumbers were scaled by dz/dx and the Q response depended on the
   grid orientation (a transposed problem's record differed by 28%). They now
   use both spacings; uniform grids are unchanged.
+- The last sample of a `PropSEM` derived receiver component no longer spikes.
+  `p = -d2(chi)/dt2` and `vx`/`vz` = `du/dt` repeated the last base sample
+  past the end of the record, so the final `p` sample was a first difference
+  over `dt^2` (717 after 103 on a 97x193 potential-form run) and the final
+  velocity sample half a step off. The end is now the second-order one-sided
+  difference: a record cut at `nt` ends within 1-2 % of the longer record's
+  value there (was up to 9x its peak), on both backends.
 
 ## [0.3.6] - 2026-10-29
 

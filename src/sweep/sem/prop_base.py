@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import math
 import numbers
 
 import torch
@@ -1371,21 +1372,35 @@ class PropSEM:
     # v = u_dot) commute with the linear receiver gather, so differentiating
     # the TRACE equals recording the derived quantity -- and the central
     # stencils below are exactly the leapfrog's own discrete derivatives.
-    # Fields are quiescent before t=0, so the left pad is a true zero; the
-    # final sample uses a one-sided difference.
+    # Fields are quiescent before t=0, so the left pad is a true zero. The
+    # record ends mid-signal, so the right pad u(nt) is extrapolated by the
+    # polynomial through the last samples: the central stencil then becomes
+    # the second-order one-sided difference there -- (3u1 - 4u2 + u3)/2dt
+    # and (2u1 - 5u2 + 4u3 - u4)/dt^2. (Repeating u(nt-1) instead made the
+    # last pressure sample a first difference over dt^2: a spike.)
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _trace_end_pad(x, degree):
+        """u(nt) of ``(nshots, nt, ...)`` traces: the degree-``degree``
+        polynomial through the last ``degree + 1`` samples (lower when the
+        trace is shorter), extrapolated one step."""
+        k = min(degree, x.shape[1] - 1) + 1
+        # u(n) = sum_j (-1)^(j+1) C(k, j) u(n-j), j = 1..k
+        return sum((-1) ** (j + 1) * math.comb(k, j) * x[:, -j:x.shape[1] - j + 1]
+                   for j in range(1, k + 1))
+
     @staticmethod
     def _trace_ddt(x, dt):
         """du/dt along dim 1 of ``(nshots, nt, nrec, ...)`` traces."""
         z = torch.zeros_like(x[:, :1])
-        pad = torch.cat([z, x, x[:, -1:]], 1)          # u(-dt)=0, u(nt)~u(nt-1)
+        pad = torch.cat([z, x, PropSEM._trace_end_pad(x, 2)], 1)   # u(-dt)=0
         return (pad[:, 2:] - pad[:, :-2]) / (2.0 * dt)
 
     @staticmethod
     def _trace_neg_d2dt2(x, dt):
         """-d2u/dt2 along dim 1 (the pressure from a chi trace)."""
         z = torch.zeros_like(x[:, :1])
-        pad = torch.cat([z, x, x[:, -1:]], 1)
+        pad = torch.cat([z, x, PropSEM._trace_end_pad(x, 3)], 1)
         return -(pad[:, 2:] - 2.0 * x + pad[:, :-2]) / (dt * dt)
 
     def _apply_derived_receivers(self, out):
