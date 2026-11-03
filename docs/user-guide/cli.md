@@ -36,7 +36,6 @@ Finite difference (sweep.equations, run with PropTorch):
   AcousticBorn3D         ['vp', 'mp']                                                        yes            yes
   AcousticCurvilinear    ['vp']                                                              no             no
   AcousticTTI            ['vp', 'epsilon', 'delta', 'theta']                                 yes            yes
-  AcousticTTIAlkhalifah  ['vv', 'v', 'eta']                                                  no             no
   AcousticTTIBorn        ['vp', 'epsilon', 'delta', 'theta', 'mp']                           yes            yes
   AcousticTTILiang       ['vp', 'epsilon', 'delta', 'theta']                                 yes            yes
   AcousticTariq          ['vv', 'v', 'eta']                                                  no             no

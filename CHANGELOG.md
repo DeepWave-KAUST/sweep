@@ -164,6 +164,11 @@ and this project adheres to
   curvilinear grid only.
 
 ### Fixed
+- `AcousticTariq`: `vv` is the vertical velocity, as the step uses it
+  (`vv**2`); the docstring and model spec called it the squared velocity.
+  `AcousticAniso(method='alkhalifah', symmetry='tti')` now raises
+  `NotImplementedError` and the `AcousticTTIAlkhalifah` alias is gone: the
+  class has no tilt parameter, so both silently solved the VTI equation.
 - `PropSEM(memory=BoundarySaving(storage_dtype='fp16'))` is refused on both
   backends. The eager ring stored a plain fp16 cast, which flushes the SEM's
   small field values to zero: 2-D elastic gradients came out 15% and 2-D

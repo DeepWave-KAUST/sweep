@@ -68,7 +68,7 @@ def main() -> int:
     ident = [
         ("Elastic3D", "Elastic", False),
         ("AcousticVTILiang", "AcousticVTI", True),
-        ("AcousticTTIAlkhalifah", "AcousticTariq", True),
+        ("AcousticVTIAlkhalifah", "AcousticTariq", True),
         ("DASElastic", "DASZhao", True),
     ]
     for a, b, same in ident:

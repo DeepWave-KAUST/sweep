@@ -26,8 +26,7 @@ back to eager with a `UserWarning`.
 
 `AcousticAniso` is a factory: it returns an instance of one of the classes
 below. The author-named aliases (`AcousticVTILiang`, `AcousticTTILiang`,
-`AcousticVTIAlkhalifah`, `AcousticTTIAlkhalifah`, `AcousticVTIDuveneck`,
-`AcousticVTIDuveneck3D`) and the `AcousticVTIDefault` / `AcousticVTIDefault3D`
+`AcousticVTIAlkhalifah`, `AcousticVTIDuveneck`, `AcousticVTIDuveneck3D`) and the `AcousticVTIDefault` / `AcousticVTIDefault3D`
 routing names are these same classes.
 
 ::: sweep.equations.AcousticAniso
