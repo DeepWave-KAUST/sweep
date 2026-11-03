@@ -149,6 +149,11 @@ and this project adheres to
   float32 never differences a double integral; `return_wavefield=True` runs
   the integrated wavelet instead, so the snapshots are chi and u.
   `SEMPropagator` and `SEMModelParallel` keep the wavelet as the chi source.
+  **PropSEM's default records are now the pressure** on these forms --
+  `['p']` on the potential form, `['p', 'vx', 'vz']` on the fluid-solid class
+  -- as on PropTorch: chi is now a near-DC tail (fitting it, bf16/int8
+  boundary-saving gradients fell to cos 0.1-0.4 of the full tape's). Ask for
+  `chi` / `u_x` / `u_z` by name; the low-level propagators still record chi.
 
 ### Removed
 - Stale examples and repo-root leftovers: `examples/FWI/` and

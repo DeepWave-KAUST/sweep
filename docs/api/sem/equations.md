@@ -46,7 +46,7 @@ models and batched boundary saving on `impl='c'` are there. Its `build` takes
 a density model; `PropSEM` gives it the constant `density=`. The other four
 take `vp` alone, one per mesh family. Under `PropSEM` the wavelet is the
 pressure source on the potential form too: its `p` has the pressure form's
-waveform for the same wavelet.
+waveform for the same wavelet, and is what it records by default.
 
 ::: sweep.sem.AcousticPotentialSEM2D
     options:
@@ -153,7 +153,8 @@ First-order in time; the source and receiver fields are `v_x`, `v_z` (and
 ## Coupled fluid-solid
 
 An acoustic potential in the water over an elastic solid, with a C-PML on
-each; records `chi`, `u_x`, `u_z` and the derived `p`, `vx`, `vz`.
+each; records `chi`, `u_x`, `u_z` and the derived `p`, `vx`, `vz` (PropSEM's
+default: `p`, `vx`, `vz`).
 
 ::: sweep.sem.AcousticElasticSEM2D
     options:

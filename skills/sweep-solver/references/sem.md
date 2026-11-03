@@ -65,7 +65,7 @@ the FD classes. `models=` per class: `api-signatures.md`.
 
 | Class | Mesh | Models | c | C-PML | Use |
 |---|---|---|---|---|---|
-| `AcousticPotentialSEM2D` | quad9 | `vp` | yes (batched, BS) | yes | acoustic FWI workhorse; records `chi`, `p` |
+| `AcousticPotentialSEM2D` | quad9 | `vp` | yes (batched, BS) | yes | acoustic FWI workhorse; records `p` (default) or `chi` |
 | `AcousticSEM2D` / `AcousticSEM2DDeformed` | quad4 / quad9 | `vp` | no | yes | |
 | `AcousticSEM3D` / `AcousticSEM3DDeformed` | hex8 / hex27 | `vp` | yes | yes | 3-D acoustic (with topography for Deformed) |
 | `ElasticSEM2DDeformed` | quad9 | `vp, vs, rho` | yes | yes | 2-D elastic with topography |
@@ -75,7 +75,7 @@ the FD classes. `models=` per class: `api-signatures.md`.
 | `ElasticVSSEM3D` | hex8 | `vp, vs, rho` | yes | yes | 3-D elastic with absorbing boundary, flat |
 | `ElasticVSSEM3DDeformed` | hex27 | `vp, vs, rho` | no | yes | 3-D elastic, topography + absorbing |
 | `ElasticVTISEM2DDeformed` | quad9 | `vp, vs, rho, epsilon, delta` | no | yes | VTI |
-| `AcousticElasticSEM2D` | quad9 | `vp, vs, rho` | yes | yes | coupled fluid-solid (ocean over seabed); records `chi, u_x, u_z` (+ `p, vx, vz`) |
+| `AcousticElasticSEM2D` | quad9 | `vp, vs, rho` | yes | yes | coupled fluid-solid (ocean over seabed); records `p, vx, vz` (default) or `chi, u_x, u_z` |
 | `BiotVSSEM2DDeformed`, `BiotAnisoPermSEM2DDeformed` | quad9 | Biot set | no | yes | poroelastic; no boundary saving |
 
 ## 5. Sources and receivers
@@ -84,7 +84,8 @@ the FD classes. `models=` per class: `api-signatures.md`.
   e.g. `p = -d2(chi)/dt2` on the potential form, `v = du/dt` on displacement elastics).
   On the potential forms (`AcousticPotentialSEM2D`, `AcousticElasticSEM2D`) the wavelet is the
   pressure source: same wavelet, same `p` waveform as `AcousticSEM2DDeformed` / FD (amplitude
-  differs by `rho*c^2` at the source); `chi` is minus its double time integral.
+  differs by `rho*c^2` at the source); `chi` is minus its double time integral. `p` (and
+  `vx, vz` on the fluid-solid class) is what PropSEM records by default there.
   `p` is receiver-only.
 - Elastic `source_type`: `["vz"]`/`["vx"]` = force along that axis (default: unit vertical
   force), `["sxx", "szz"]` = explosion (moment rate), `["sxz"]` = shear moment. Forces and

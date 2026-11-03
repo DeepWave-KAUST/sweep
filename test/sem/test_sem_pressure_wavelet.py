@@ -136,3 +136,18 @@ def test_fluid_solid_velocity_is_the_displacement_rate():
     ref = PropSEM._trace_ddt(u, DT)
     err = float((v - ref)[:, :-1].abs().max()) / float(v.abs().max())
     assert err < 1e-9, err
+
+
+def test_propsem_records_the_pressure_by_default():
+    """As PropTorch: p (and vx, vz on the fluid-solid class) unless asked;
+    the low-level propagators keep recording chi."""
+    from sweep.sem.fields import resolve_field_types
+    p = PropSEM(AcousticPotentialSEM2D, **KW)
+    assert p.receiver_type == ["p"]
+    fs = PropSEM(AcousticElasticSEM2D, free_surface=("top",), **KW)
+    assert fs.receiver_type == ["p", "vx", "vz"]
+    assert PropSEM(AcousticSEM2DDeformed, **KW).receiver_type == ["u"]
+    assert resolve_field_types(AcousticPotentialSEM2D, None, "receiver") == ["chi"]
+    with torch.no_grad():
+        dflt = p(_wav(), SRC, REC, models=[_vp()])
+    torch.testing.assert_close(dflt, _potential(["p"]), rtol=0, atol=0)

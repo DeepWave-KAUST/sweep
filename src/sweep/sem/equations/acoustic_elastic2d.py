@@ -80,6 +80,9 @@ class AcousticElasticSEM2D(DerivedInitState):
     # PropTorch: the records are those of chi driven by minus its double time
     # integral, so p = -chi_ddot has the wavelet's waveform (PropSEM.forward).
     propsem_pressure_wavelet: ClassVar[bool] = True
+    # ...and records pressure and particle velocity by default (the FD names
+    # of every component; chi and u are the double / single time integrals)
+    propsem_default_receiver_type: ClassVar[tuple] = ("p", "vx", "vz")
 
     mesh: Quad9Mesh
     ac: AcousticPotentialSEM2D

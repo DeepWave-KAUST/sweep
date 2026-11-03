@@ -65,7 +65,8 @@ def test_defaults_match_the_equation():
     a = PropSEM(AcousticPotentialSEM2D, shape=(NZ, NX), dh=DH, dt=DT, nt=NT,
                 n_order=NO, free_surface=("top",),
                 abcn=4 * NO, f_dominant=F0, dev="cpu", impl="eager")
-    assert a.receiver_type == ["chi"] and a.source_type == ["chi"]
+    # PropSEM records the pressure there by default, as PropTorch does
+    assert a.receiver_type == ["p"] and a.source_type == ["chi"]
     # abcn=0: ElasticSEM3D.build takes no `cpml`, so it is a bare reflecting
     # box. It used to accept a 2-element layer and pad the mesh while
     # building NO absorbing layer -- an absorbing layer silently not applied.

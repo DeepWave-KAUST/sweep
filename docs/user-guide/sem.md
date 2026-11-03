@@ -602,7 +602,10 @@ from differencing a double integral; only ``return_wavefield=True`` runs the
 integrated wavelet, so that the snapshots are chi and u. A wavelet with a
 non-zero mean (or first moment) leaves chi and u a static (or ramping) offset
 that ``p`` and ``v`` do not see. ``SEMPropagator`` and ``SEMModelParallel``
-below PropSEM still take the wavelet as the chi source.
+below PropSEM still take the wavelet as the chi source. Without a
+``receiver_type`` PropSEM records ``p`` on the potential form and ``p``,
+``vx``, ``vz`` on the fluid-solid class (PropTorch's defaults); ``chi`` is a
+near-DC tail, a poor record to fit -- ask for it by name.
 
 ## Source types
 

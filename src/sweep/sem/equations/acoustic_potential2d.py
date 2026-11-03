@@ -72,6 +72,9 @@ class AcousticPotentialSEM2D(DerivedInitState, DirichletNodes):
     # PropTorch: the records are those of chi driven by minus its double time
     # integral, so p = -chi_ddot has the wavelet's waveform (PropSEM.forward).
     propsem_pressure_wavelet: ClassVar[bool] = True
+    # ...and records it by default, as PropTorch's Acoustic does; chi, the
+    # pressure's double time integral, is a near-DC tail to fit
+    propsem_default_receiver_type: ClassVar[tuple] = ("p",)
 
     mesh: Quad9Mesh
     vp_e: torch.Tensor            # (E, ngll, ngll)

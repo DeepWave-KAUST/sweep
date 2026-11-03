@@ -921,6 +921,12 @@ class PropSEM:
                 f"source_type selections would be positionally mis-mapped by "
                 f"the stamp layout. Use SEMPropagator with explicit "
                 f"source_kinds/source_payloads.")
+        if not receiver_type:
+            # PropSEM's own default where it differs from the fields' (the
+            # potential forms record the pressure, as PropTorch does; the
+            # low-level propagators keep recording chi)
+            receiver_type = getattr(equation, "propsem_default_receiver_type",
+                                    None)
         self.receiver_type = resolve_field_types(equation, receiver_type,
                                                  "receiver")
         # Derived receiver components (p = -chi_ddot, vx = u_x_dot, ...):
