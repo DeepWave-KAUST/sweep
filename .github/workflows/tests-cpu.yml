@@ -69,7 +69,9 @@ jobs:
         env:
           CUDA_VISIBLE_DEVICES: ''
           OMP_NUM_THREADS: '4'      # unbounded OMP thrashes a 2-core runner
-        run: pytest ${{ matrix.args }} -q --junitxml=report.xml
+        # --runslow: the long-run gates and long validations a local run skips
+        # (test/conftest.py) run here
+        run: pytest ${{ matrix.args }} -q --runslow --junitxml=report.xml
 
       - name: Refuse a green run that executed almost nothing
         # A skip is not a failure, and half this suite is gated on CUDA or on a

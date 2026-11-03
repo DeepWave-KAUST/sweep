@@ -94,6 +94,7 @@ def test_elastic_bs_matches_full_tape(topo):
         assert _cos(b, f) >= 1 - 1e-4, f"grad {name} cos={_cos(b, f):.7f}"
 
 
+@pytest.mark.slow
 def test_elastic_bs_long_record():
     """Long record: the band is strongly loaded, so this is the case that fails
     (cos ~0.99) if the CPML memory adjoint is dropped."""

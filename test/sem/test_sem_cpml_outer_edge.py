@@ -29,6 +29,7 @@ ELASTIC = (3000.0, 1700.0, 2200.0)
 ROCK = tuple(biot_from_biot_constants(**DAI1, b=7e4, phi=0.3))
 
 
+@pytest.mark.slow                   # 16000 f64 CPU steps, 31 s each
 @pytest.mark.parametrize("pinned", [True, False])
 def test_the_layer_stays_bounded_past_the_late_growth(pinned, monkeypatch):
     # 8 s, more than twice the onset; unpinned, the control that the run is long enough

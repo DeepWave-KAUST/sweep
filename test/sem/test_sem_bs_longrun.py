@@ -83,7 +83,8 @@ def _cos(a, b, m):
     return float(a @ b) / (float(a.norm()) * float(b.norm()))
 
 
-@pytest.mark.parametrize("nt", [400, 3000], ids=["short", "long"])
+@pytest.mark.parametrize("nt", [400, pytest.param(3000, marks=pytest.mark.slow)],
+                         ids=["short", "long"])
 def test_boundary_saving_matches_full_tape(nt):
     """The long case is the one that matters: by then the wavefield has loaded
     the C-PML band, which is when a dropped memory adjoint starts contaminating
