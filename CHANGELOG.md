@@ -156,8 +156,12 @@ and this project adheres to
   alternatives, `ElasticCurvilinear` (2-D) and `PropSEM`.  The acoustic
   staircase (`Acoustic`, `Acoustic3D`, `ViscoAcoustic`) is unchanged, and so is
   every flat free surface.  The per-column surface-row paths in the elastic
-  CUDA kernels are gone too; the `Elastic` and `ElasticVRR` CUDA drivers now
-  refuse topography rows themselves.
+  CUDA kernels are gone too (records and gradients are bit-identical); the
+  `Elastic` and `ElasticVRR` CUDA drivers now refuse topography rows
+  themselves.  `examples/wavefields/topography/elastic2d_hill_demo.py` and the
+  two elastic topography bitgate configs go with it, and notebook 15 now runs
+  the acoustic image method and curvilinear grid, and elastic on the
+  curvilinear grid only.
 
 ### Fixed
 - `PropSEM(memory=BoundarySaving(storage_dtype='fp16'))` is refused on both
