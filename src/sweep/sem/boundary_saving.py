@@ -34,7 +34,8 @@ physics-specific pieces:
 * ``eq.bs_pin_fields`` (optional) — fields whose step output the per-step VJP
   pins to the ring (``bs_recompute(..., target=...)``, :func:`pin_to_ring`):
   for equations whose band state the ring does not hold (the velocity-stress
-  forms' element-local stresses and memories).
+  forms' element-local stresses and memories, the second-order acoustic
+  forms' C-PML memories).
 
 The non-reversible CPML band is zeroed and the one-element interior interface
 ring restored, so the lossless interior reconstructs exactly (the PML-region
@@ -498,29 +499,34 @@ class SEMReconState:
 # --------------------------------------------------------------------------- #
 # The step's known output on the ring, for the per-step VJP.
 # --------------------------------------------------------------------------- #
-def pin_to_ring(v, inv_M, mask, t):
+def pin_to_ring(v, coef, mask, t):
     """``v`` moved onto ``t`` at the ring nodes ``mask``, straight through.
 
-    For an equation whose band state the ring does not hold (the
-    velocity-stress forms keep their stresses and C-PML memories element-local
-    and ring only the velocities), the reverse march rebuilds the band wrong,
-    and re-running the step from that frame puts a wrong ``v`` on the ring
-    nodes. The step is linear in the fields, so the adjoint never read those
-    values; the MODEL gradient does: the stress update multiplies the
-    stiffness by ``∇v``, and the edge nodes' mass by the increment ``F`` of
-    ``v = v_in + inv_M F``. Both sit next to the band (4e-4 of the 3-D VS
-    gradient against the full tape). The step's true output ``t`` is known on
-    exactly these nodes -- they are the ring -- so add ``inv_M c`` with
-    ``c = (t - v) / inv_M`` held constant: the value is ``t``, the derivatives
-    in the fields are unchanged and the one in ``inv_M`` becomes the true
-    increment ``F + c``. Nodes with ``inv_M = 0`` (the C-PML's pinned outer
-    edge) do not move. Elementwise, so it runs under ``vmap``."""
+    For an equation whose band state the ring does not hold, the reverse
+    march rebuilds the band wrong, and re-running the step from that frame
+    puts a wrong ``v`` on the ring nodes: the velocity-stress forms keep
+    their stresses and C-PML memories element-local and ring only the
+    velocities; the second-order acoustic forms ring ``u`` only, and the
+    model's edge nodes read the C-PML memories of the band element next to
+    them. The step is linear in the fields, so the adjoint never read those
+    values; the MODEL gradient does. ``coef`` is the model factor of the
+    step's increment ``F`` in ``v = v_in + coef F`` -- the velocity update's
+    ``inv_M``, the acoustic leapfrog's ``vp²`` -- and the gradient reads
+    ``F`` on the edge nodes (and, in the velocity-stress forms, ``∇v`` in the
+    stress update): 4e-4 of the 3-D VS gradient against the full tape, 4e-5
+    of the 2-D acoustic one, all next to the band. The step's true output
+    ``t`` is known on exactly these nodes -- they are the ring -- so add
+    ``coef c`` with ``c = (t - v) / coef`` held constant: the value is ``t``,
+    the derivatives in the fields are unchanged and the one in ``coef``
+    becomes the true increment ``F + c``. Nodes with ``coef = 0`` (the
+    C-PML's pinned outer edge) do not move. Elementwise, so it runs under
+    ``vmap``."""
     with torch.no_grad():
-        im = inv_M.detach()
-        keep = mask & (im != 0)
-        c = torch.where(keep, (t - v.detach()) / torch.where(keep, im, torch.ones_like(im)),
-                        torch.zeros_like(im))
-    return v + inv_M * c
+        k = coef.detach()
+        keep = mask & (k != 0)
+        c = torch.where(keep, (t - v.detach()) / torch.where(keep, k, torch.ones_like(k)),
+                        torch.zeros_like(k))
+    return v + coef * c
 
 
 def _pin_targets(eq, recon, out_frame):

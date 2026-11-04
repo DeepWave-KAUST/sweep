@@ -40,6 +40,7 @@ from typing import ClassVar, Optional
 import torch
 
 from .._assembly import assemble, contract
+from ..boundary_saving import pin_to_ring
 from ..cpml.acoustic import CPMLProfile
 from ..mesh.boundaries import free_surface_node_idx
 from ..mesh.nodes import node_field
@@ -227,7 +228,9 @@ class AcousticSEM2D(DerivedInitState, DirichletNodes):
     # SEMPropagator interface: positional init_state + step (Newmark).
     # State layout = (u, u_prev, psi_x, psi_z, zeta_x, zeta_z) per field_specs.
     # ================================================================== #
-    def step(self, fields: tuple, src, dt: float) -> tuple:
+    def step(self, fields: tuple, src, dt: float, target=None) -> tuple:
+        """One leapfrog step. ``target`` is boundary saving's (see
+        :meth:`bs_recompute`)."""
         u_now, u_prev, psi_x, psi_z, zeta_x, zeta_z = fields
         dt2, inv_M = dt * dt, self._inv_M
         b = src[0]                                  # source -> field 0 (u)
@@ -244,6 +247,8 @@ class AcousticSEM2D(DerivedInitState, DirichletNodes):
             u_next = (2.0 * u_now - u_prev
                       + dt2 * self.vp_squared_node * (-Ku * inv_M) + dt2 * inv_M * b)
             (u_next,) = self._apply_dirichlet(u_next)
+        if target is not None:
+            u_next = pin_to_ring(u_next, self.vp_squared_node, *target[0])
         return (u_next, u_now, psi_x, psi_z, zeta_x, zeta_z)
 
     # ================================================================== #
@@ -253,6 +258,14 @@ class AcousticSEM2D(DerivedInitState, DirichletNodes):
     # ================================================================== #
     bs_ring_save: ClassVar[list] = [0]                       # save u's ring
     bs_ring_restore: ClassVar[list] = [(0, 0, 0), (1, 0, -1)]  # (field, slot, offset)
+    # The ring holds u only, so the band's C-PML memories come back zeroed, and
+    # the edge nodes' C-PML terms read them in the band element next door: the
+    # recomputed u there was wrong, and with it the vp gradient on the model's
+    # edge line (4e-5 against the full tape). vp² is the only model factor, so
+    # the per-step VJP pins u's update to the ring (boundary_saving.pin_to_ring).
+    # Ringing the memories (AcousticSEM3D) is exact too, but 2.6-3.4x the ring,
+    # and worse with a bf16/int8 one (1.8e-3 against 1.2e-4, bf16).
+    bs_pin_fields: ClassVar[tuple] = (0,)
 
     def reverse_step(self, fields, src, dt):
         u_ip1, u_i = fields[0], fields[1]
@@ -263,10 +276,15 @@ class AcousticSEM2D(DerivedInitState, DirichletNodes):
     def bs_model_tensors(self) -> dict:
         return {"vp2": self.vp_squared_node}
 
-    def bs_recompute(self, fields, src, dt, leaves):
+    def bs_recompute(self, fields, src, dt, leaves, target=None):
+        """One forward step with ``vp²`` replaced by its leaf (the per-step
+        VJP); ``target``: the ring mask and the step's output on it, for u's
+        update (see ``boundary_saving.pin_to_ring``)."""
         saved = self.vp_squared_node
         self.vp_squared_node = leaves["vp2"]
         try:
-            return self.step(fields, src, dt)
+            if target is None:
+                return self.step(fields, src, dt)
+            return self.step(fields, src, dt, target=target)
         finally:
             self.vp_squared_node = saved
