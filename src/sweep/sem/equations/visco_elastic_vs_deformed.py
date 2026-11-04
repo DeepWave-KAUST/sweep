@@ -50,6 +50,7 @@ from typing import ClassVar, Optional
 import numpy as np
 import torch
 
+from sweep.equations.gsls_nonlinear import GSLSNonlinearFit
 from sweep.equations.visco_elastic import (GSLSFit, MAX_SLS, gsls_band, gsls_moduli_factors,
                                            gsls_relaxation_times)
 
@@ -65,14 +66,43 @@ def gsls_memory_specs(n_sls):
             for l in range(n_sls) for c in ("xx", "zz", "xz")]
 
 
+def _fitted(tau_sigma):
+    """Whether the relaxation times are per-node tensors (a fit per Q) rather than the
+    linear fit's fixed floats."""
+    return any(torch.is_tensor(t) for t in tau_sigma)
+
+
+def _relaxation_parts(tau_sigma, f_ref):
+    """Per mechanism ``(w ts)^2 / (1 + (w ts)^2)`` and ``w ts / (1 + (w ts)^2)`` at
+    ``f_ref``: floats for fixed relaxation times, tensors for fitted ones."""
+    if not _fitted(tau_sigma):
+        wt = 2.0 * np.pi * f_ref * np.asarray(tau_sigma, dtype=np.float64)
+        return ([float(c) for c in wt ** 2 / (1.0 + wt ** 2)],
+                [float(c) for c in wt / (1.0 + wt ** 2)])
+    wt = [2.0 * np.pi * f_ref * t for t in tau_sigma]
+    return [x * x / (1.0 + x * x) for x in wt], [x / (1.0 + x * x) for x in wt]
+
+
+def gsls_phase_factors(taus, tau_sigma, f_ref):
+    """:func:`~sweep.equations.visco_elastic.gsls_moduli_factors` (``v`` the phase velocity
+    at ``f_ref``), also for per-node relaxation times."""
+    if not _fitted(tau_sigma):
+        return gsls_moduli_factors(taus, tau_sigma, f_ref)
+    ca, cb = _relaxation_parts(tau_sigma, f_ref)
+    a = 1.0 + sum(c * t for c, t in zip(ca, taus))
+    b = sum(c * t for c, t in zip(cb, taus))
+    absm = torch.sqrt(a * a + b * b)
+    s_R = 0.5 * (1.0 + a / absm) / absm      # cos^2(phi/2) / |m|
+    return s_R * (1.0 + sum(taus)), s_R
+
+
 def gsls_real_modulus_factors(taus, tau_sigma, f_ref):
     """``(s_U, s_R)`` mapping ``rho v^2`` to the unrelaxed and relaxed moduli when ``rho v^2``
     is the real part of the modulus at ``f_ref``, as SPECFEM2D's ``READ_VELOCITIES_AT_f0``
     takes it (``shift_velocities_from_f0``), instead of the phase velocity's square
     (:func:`~sweep.equations.visco_elastic.gsls_moduli_factors`)."""
-    wt = 2.0 * np.pi * f_ref * np.asarray(tau_sigma, dtype=np.float64)
-    ca = wt ** 2 / (1.0 + wt ** 2)
-    s_R = 1.0 / (1.0 + sum(float(ca[l]) * t for l, t in enumerate(taus)))
+    ca, _ = _relaxation_parts(tau_sigma, f_ref)
+    s_R = 1.0 / (1.0 + sum(c * t for c, t in zip(ca, taus)))
     return s_R * (1.0 + sum(taus)), s_R
 
 
@@ -83,40 +113,70 @@ def gsls_unrelaxed_factors(taus, tau_sigma, f_ref):
     return total / total, 1.0 / total
 
 
-VELOCITY_CONVENTIONS = {"phase": gsls_moduli_factors, "real_modulus": gsls_real_modulus_factors,
+VELOCITY_CONVENTIONS = {"phase": gsls_phase_factors, "real_modulus": gsls_real_modulus_factors,
                         "unrelaxed": gsls_unrelaxed_factors}
 
+# the constant-Q fits gsls_setup takes by name
+GSLS_FITS = ("linear", "nonlinear")
 
-def gsls_setup(Qp_e, Qs_e, f_ref, f_band, n_sls, who, *, n_fit=200, velocities="phase"):
+
+def gsls_setup(Qp_e, Qs_e, f_ref, f_band, n_sls, who, *, n_fit=200, velocities="phase",
+               fit=None):
     """The GSLS of ``n_sls`` mechanisms over ``f_band`` (default: a factor 12 around
     ``f_ref``, see :func:`~sweep.equations.visco_elastic.gsls_band`) for the quality
     factors ``Qp_e``, ``Qs_e``, the constant-Q least squares sampled at ``n_fit``
     frequencies: a namespace of the band, the relaxation times, the fit's ``q_min`` (``Q``
     below it is refused, naming ``who``), the strengths ``tp``, ``ts`` and the factors
-    ``(s_U, s_R)`` of ``VELOCITY_CONVENTIONS[velocities]`` for each."""
+    ``(s_U, s_R)`` of ``VELOCITY_CONVENTIONS[velocities]`` for each.
+
+    ``fit="linear"`` keeps the relaxation times fixed, log-spaced over the band
+    (:class:`~sweep.equations.visco_elastic.GSLSFit`): ``tau_sigma`` holds them and
+    ``tau_p``, ``tau_s`` are the same floats. ``fit="nonlinear"`` fits them with the
+    strengths for each Q (:class:`~sweep.equations.gsls_nonlinear.GSLSNonlinearFit`,
+    SPECFEM2D's ``USE_SOLVOPT``; ``n_fit=None`` takes its ``4 n_sls`` frequencies): then
+    ``tau_sigma`` is ``None`` and ``tau_p``, ``tau_s`` are tensors shaped as ``Qp_e``,
+    ``Qs_e``. Any object with ``q_min`` and ``params(Q) -> (tau_sigma, w)`` -- lists of
+    ``n_sls`` tensors shaped as ``Q`` -- serves as a fit too. ``None`` (a class that takes no
+    ``fit``) is the linear fit."""
     if not 1 <= int(n_sls) <= MAX_SLS:
         raise ValueError(f"n_sls must be in [1, {MAX_SLS}], got {n_sls}")
     if velocities not in VELOCITY_CONVENTIONS:
         raise ValueError(f"velocities must be one of {sorted(VELOCITY_CONVENTIONS)}, "
                          f"got {velocities!r}")
+    if isinstance(fit, str) and fit not in GSLS_FITS:
+        raise ValueError(f"fit must be one of {GSLS_FITS} or a fit object, got {fit!r}")
+    hint = "" if fit is None else ", or use fit='nonlinear'"
+    fit = "linear" if fit is None else fit
     f_ref, n_sls = float(f_ref), int(n_sls)
-    if int(n_fit) < n_sls:
-        raise ValueError(f"n_fit = {n_fit} frequencies cannot fit {n_sls} mechanisms")
     f_band = gsls_band(f_ref, f_band)
-    tau_sigma = gsls_relaxation_times(n_sls, *f_band)
-    fit = GSLSFit(tau_sigma, *f_band, n_freq=int(n_fit))
-    q_min = fit.min_valid_q()
-    q_lo = float(torch.minimum(Qp_e.detach().min(), Qs_e.detach().min()))
-    if not q_lo > q_min:
-        raise ValueError(
-            f"{who}: min(Q) = {q_lo:.3g} is below {q_min:.3g}, where the constant-Q fit "
-            f"yields a negative relaxation strength (n_sls={n_sls}, f_band={f_band}). Bound Q "
-            "from below.")
-    tp, ts = fit.tau(Qp_e), fit.tau(Qs_e)
     factors = VELOCITY_CONVENTIONS[velocities]
-    return SimpleNamespace(f_ref=f_ref, f_band=f_band, n_sls=n_sls, q_min=q_min,
-                           tau_sigma=tuple(float(t) for t in tau_sigma), tp=tp, ts=ts,
-                           p=factors(tp, tau_sigma, f_ref), s=factors(ts, tau_sigma, f_ref))
+    q_lo = float(torch.minimum(Qp_e.detach().min(), Qs_e.detach().min()))
+    if fit == "linear":
+        if int(n_fit) < n_sls:
+            raise ValueError(f"n_fit = {n_fit} frequencies cannot fit {n_sls} mechanisms")
+        tau_sigma = gsls_relaxation_times(n_sls, *f_band)
+        lin = GSLSFit(tau_sigma, *f_band, n_freq=int(n_fit))
+        q_min = lin.min_valid_q()
+        if not q_lo > q_min:
+            raise ValueError(
+                f"{who}: min(Q) = {q_lo:.3g} is below {q_min:.3g}, where the constant-Q fit "
+                f"yields a negative relaxation strength (n_sls={n_sls}, f_band={f_band}). Bound "
+                f"Q from below{hint}.")
+        tp, ts = lin.tau(Qp_e), lin.tau(Qs_e)
+        fixed = tuple(float(t) for t in tau_sigma)
+        return SimpleNamespace(f_ref=f_ref, f_band=f_band, n_sls=n_sls, q_min=q_min,
+                               tau_sigma=fixed, tau_p=fixed, tau_s=fixed, tp=tp, ts=ts,
+                               p=factors(tp, tau_sigma, f_ref), s=factors(ts, tau_sigma, f_ref))
+    nl = GSLSNonlinearFit(n_sls, *f_band, n_freq=n_fit) if fit == "nonlinear" else fit
+    q_min = float(nl.q_min)
+    if not q_lo >= q_min:
+        raise ValueError(f"{who}: min(Q) = {q_lo:.3g} is below {q_min:.3g}, the smallest Q "
+                         "the nonlinear constant-Q fit covers. Bound Q from below.")
+    tau_p, tp = nl.params(Qp_e)
+    tau_s, ts = nl.params(Qs_e)
+    return SimpleNamespace(f_ref=f_ref, f_band=f_band, n_sls=n_sls, q_min=q_min, tau_sigma=None,
+                           tau_p=tuple(tau_p), tau_s=tuple(tau_s), tp=list(tp), ts=list(ts),
+                           p=factors(tp, tau_p, f_ref), s=factors(ts, tau_s, f_ref))
 
 
 def gsls_weights(tau_sigma, dt):

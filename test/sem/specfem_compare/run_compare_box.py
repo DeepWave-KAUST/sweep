@@ -11,7 +11,11 @@ run per medium (``--equation`` picks among the isotropic ones):
   and its reading of the velocities at ``f_ref`` (``velocities="real_modulus"``), and
   ViscoElasticSEM2DDeformed, its displacement scheme (``Qkappa``, ``Qmu``; the velocities
   ``"real_modulus"`` or, without ``READ_VELOCITIES_AT_f0``, ``"unrelaxed"``) -- the
-  velocity-stress class takes ``Qp = Qs``, so only ``Qkappa = Qmu``;
+  velocity-stress class takes ``Qp = Qs``, so only ``Qkappa = Qmu``; with SPECFEM2D's
+  nonlinear fit (``USE_SOLVOPT``), ViscoElasticSEM2DDeformed with ``fit="nonlinear"`` and
+  ``SpecfemSolvopt``, the same class on the relaxation times and strengths SPECFEM2D's own
+  SolvOpt gives for the case's Q values (``--specfem-solvopt``, the output of
+  ``specfem_solvopt_driver.f90``);
 * water: AcousticPotentialSEM2D and AcousticSEM2D, pressure-free on every edge as SPECFEM2D's
   fluid is wherever there is no absorbing condition; attenuating water:
   ViscoAcousticPotentialSEM2D with SPECFEM2D's mechanisms, fit and reading of the velocity
@@ -67,6 +71,47 @@ from sweep.sem import (AcousticElasticSEM2D, AcousticPotentialSEM2D, AcousticSEM
                        ElasticVSSEM2DDeformed, ElasticVTISEM2DDeformed, PropSEM,
                        ViscoAcousticPotentialSEM2D, ViscoElasticSEM2DDeformed,
                        ViscoElasticVSSEM2DDeformed, thomsen_to_tti_cij)
+from sweep.sem.mesh.quad9 import Quad9Mesh
+
+class TabulatedFit:
+    """A constant-Q fit of given relaxation times and strengths per Q value (``q_min``,
+    ``params``, as gsls_setup takes a fit): SPECFEM2D's SolvOpt output for the case's Q."""
+
+    q_min = 0.0
+
+    def __init__(self, table):
+        self.table = table                # {Q: (tau_sigma list, w list)}
+
+    def params(self, Q):
+        n = len(next(iter(self.table.values()))[0])
+        tau = [torch.zeros_like(Q) for _ in range(n)]
+        w = [torch.zeros_like(Q) for _ in range(n)]
+        seen = torch.zeros_like(Q, dtype=torch.bool)
+        for q, (ts, ws) in self.table.items():
+            on = (Q - q).abs() <= 1e-9 * q        # a grid model reaches the nodes interpolated
+            seen |= on
+            for l in range(n):
+                tau[l] = torch.where(on, torch.full_like(Q, ts[l]), tau[l])
+                w[l] = torch.where(on, torch.full_like(Q, ws[l]), w[l])
+        assert bool(seen.all()), "a Q value SPECFEM2D's SolvOpt output does not list"
+        return tau, w
+
+
+SOLVOPT_TABLE: dict = {}
+
+
+class SpecfemSolvopt(ViscoElasticSEM2DDeformed):
+    """ViscoElasticSEM2DDeformed on SPECFEM2D's own SolvOpt mechanisms (``SOLVOPT_TABLE``)."""
+
+    @classmethod
+    def build(cls, mesh: "Quad9Mesh", vp_e, vs_e, rho_e, Qk_e, Qmu_e, *, cpml=None, domain=None,
+              band_split=None, f_ref=10.0, f_band=None, n_sls=3, n_fit=None,
+              velocities="unrelaxed", fit="linear"):
+        return super().build(mesh, vp_e, vs_e, rho_e, Qk_e, Qmu_e, cpml=cpml, domain=domain,
+                             band_split=band_split, f_ref=f_ref, f_band=f_band, n_sls=n_sls,
+                             n_fit=n_fit, velocities=velocities,
+                             fit=TabulatedFit(SOLVOPT_TABLE))
+
 
 def chi_sourced(eq):
     """``eq`` with the wavelet as the chi source, SPECFEM2D's acoustic source, where PropSEM takes
@@ -101,6 +146,7 @@ class SpecfemMemoryLine(ViscoAcousticPotentialSEM2D):
 
 CASES = ("iso_force", "iso_explosion", "hill_explosion", "vti_force", "vti_explosion",
          "tti30_force", "tti30_explosion", "visco_explosion", "visco_km_force",
+         "visco_solvopt_force",
          "water_pressure",
          "water_visco_pressure", "sea_pressure",
          "sea_curved_pressure", "layers_curved_explosion", "sh_force", "sh_hill_force")
@@ -177,6 +223,8 @@ def equations(g, picks):
     if m["kind"] == "coupled":
         return [AcousticElasticSEM2D]
     if m["kind"] == "visco":
+        if m.get("solvopt"):
+            return [ViscoElasticSEM2DDeformed] + ([SpecfemSolvopt] if SOLVOPT_TABLE else [])
         return ([ViscoElasticSEM2DDeformed] if "qmu" in m
                 else [ViscoElasticVSSEM2DDeformed, ViscoElasticSEM2DDeformed])
     if m["kind"] == "visco_acoustic":
@@ -286,11 +334,14 @@ def run_sem(g, eq, device, dtype, n_order=4):
         models = (None if m["kind"] == "layered"
                   else [full(v) for v in (ti or (m["vp"], m["vs"], m["rho"]))])
         if m["kind"] == "visco":
+            solvopt = m.get("solvopt", False)
             kw["equation_options"] = {"f_ref": m["f_ref"], "n_sls": m["n_sls"],
                                       "f_band": (m["f_ref"] / 10.0, 10.0 * m["f_ref"]),
-                                      "n_fit": 2 * m["n_sls"] - 1,
+                                      "n_fit": (4 if solvopt else 2) * m["n_sls"] - (0 if solvopt else 1),
                                       "velocities": ("real_modulus" if m.get("at_f0", True)
                                                      else "unrelaxed")}
+            if solvopt and eq is not SpecfemSolvopt:
+                kw["equation_options"]["fit"] = "nonlinear"
         if g["stype"] == 1:
             th = math.radians(g["angle"])            # SPECFEM2D's (sin, -cos) z up = (sin, cos) down
             calls = [([n], c * w) for n, c in (("vx", math.sin(th)), ("vz", math.cos(th)))
@@ -355,9 +406,15 @@ def main():
                     help="the classes run on an isotropic rock (default: all that fit)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--dtype", default="float32", choices=("float32", "float64"))
+    ap.add_argument("--specfem-solvopt", type=Path,
+                    help="specfem_solvopt_driver.f90's output for the case's Q values")
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     dtype = getattr(torch, args.dtype)
+    if args.specfem_solvopt is not None:
+        for row in np.atleast_2d(np.loadtxt(args.specfem_solvopt)):
+            n = (len(row) - 1) // 2
+            SOLVOPT_TABLE[float(row[0])] = (row[1:1 + n].tolist(), row[1 + n:].tolist())
 
     import matplotlib
     matplotlib.use("Agg")
@@ -380,10 +437,10 @@ def main():
             np.savez(args.out / f"sem_{case}_{eq.__name__}_{args.dtype}.npz", t_sem=t_sem,
                      t_ref=t_ref, **{f"sem_{k}": v for k, v in sem.items()},
                      **{f"ref_{k}": v for k, v in ref.items()})
-            # the components each group records: hydrophones the pressure, geophones the velocity
+            # every group records every component: in the water the pressure and the particle
+            # velocity grad(chi_dot) / rho, in the rock the velocity and the pressure
+            # -kappa div u, as SPECFEM2D records them (sweep.sem.receivers)
             comps = {True: list(sem), False: list(sem)}
-            if g["medium"]["kind"] == "coupled" or wet(g["medium"]):
-                comps = {True: ["PRE"], False: ["BXX", "BXZ"]}
             print(f"{case}, {eq.__name__} ({args.dtype}): shift-free, scale-free", flush=True)
             allo, allr = [], []
             for lab, grp, win in ((f"{lab0}, echo-free", True, True),

@@ -149,6 +149,10 @@ nav:
               - FD vs SEM · topography: notebooks/41_fd_vs_sem_topography.ipynb
               - Acoustic · Marmousi · FWI: notebooks/42_fwi_acoustic_marmousi_sem.ipynb
               - Batched local windows · FWI: notebooks/44_sem_batched_local_window_fwi.ipynb
+              - Receivers · pressure, velocity, rotation, DAS: notebooks/47_sem_receivers.ipynb
+              - Illumination · RTM under a hill: notebooks/48_sem_illumination.ipynb
+              - Attenuation · nonlinear Q fit, attenuating C-PML: notebooks/49_sem_attenuation.ipynb
+              - Plane waves · P, SV, SH, Rayleigh through an injection band: notebooks/58_sem_plane_wave.ipynb
           - Imaging:
               - examples/imaging/index.md
               - RTM · Marmousi: notebooks/08_rtm_acoustic_marmousi.ipynb

@@ -12,7 +12,8 @@ from __future__ import annotations
 import torch
 
 from ..cdrive import (Alloc, check_filled, dd_grads, dims, fill, give,
-                      grads_or_none, memory_mode, put, roll, swap, take)
+                      grads_or_none, illum_alloc, illum_receiver, illum_source,
+                      memory_mode, put, roll, swap, take)
 
 _AC2D_CONSTS = ("ibool", "D", "wJ", "w1d", "ixx", "ixz", "iex", "iez", "mask_e",
                 "inv_Mg", "a_x", "b_x", "dbx_dx", "a_z", "b_z", "dbz_dz",
@@ -86,6 +87,7 @@ def _ac2d_forward_input(c, mats, wavelet, mode, B=1, Bm=1, wtape=False):
         # grads_T images inv_rho from chi^k)
         put(s, ("save_wavefield", "save_w_sum") if wtape else _AC2D_STATE_TAPES,
             A.hist)
+    s.illum = illum_alloc(c, A)
     dims(s, c, 2)
     return check_filled(s), g6
 
@@ -135,6 +137,7 @@ def _ac2d_backward_input(c, mats, wavelet, carry, grad_syn, B=1, Bm=1,
         setattr(b, nm, torch.zeros(*lead, *t.shape, dtype=torch.float32, device=dev))
     b.grad_wavelet = torch.zeros(*((B,) if B > 1 else ()), nt,
                                  dtype=torch.float32, device=dev)
+    b.illum = illum_alloc(c, A)
     dims(b, c, 2)
     return check_filled(b), g6, l3
 
@@ -163,9 +166,10 @@ class _SEMAcousticCpmlC(torch.autograd.Function):
         s, _ = _ac2d_forward_input(c, (inv_rho, inv_M, kappa), wavelet,
                                    mode, B, Bm, wtape)
         seis = _C.sem2d_acoustic_cpml_forward(s)
+        part = illum_source(c, s.illum, B, c["n_global"])
         if need_bwd:
             ctx.save_for_backward(inv_rho, inv_M, kappa, wavelet)
-            ctx.c, ctx.B, ctx.Bm = c, B, Bm
+            ctx.c, ctx.B, ctx.Bm, ctx.illum = c, B, Bm, part
             ctx.carry = take(s, _AC2D_CARRY)
         return seis
 
@@ -178,6 +182,7 @@ class _SEMAcousticCpmlC(torch.autograd.Function):
                                        ctx.carry, grad_seis.contiguous().float(),
                                        B, Bm)
         g_invM, g_invrho, g_kappa, _g_invMg, g_wav = _C.sem2d_acoustic_cpml_backward(b)
+        illum_receiver(ctx.illum, b.illum, B, ctx.c["n_global"])
         if B > 1 and Bm == 1:       # one model for every shot: sum the per-shot grads
             g_invM, g_invrho, g_kappa = g_invM.sum(0), g_invrho.sum(0), g_kappa.sum(0)
         if B > 1 and wavelet.dim() == 1:

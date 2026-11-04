@@ -557,6 +557,40 @@ class PointStamp3D:
         return self._outer().reshape(-1)
 
 
+@dataclass
+class GradientStamp:
+    """The derivative along ``axis`` (0 is x, 1 is y in 3-D, the last is z) of a field at a
+    point: the gradient of :class:`PointStamp`'s / :class:`PointStamp3D`'s basis, the pattern of
+    their moment-tensor stamps. A receiver made of it records the derivative through the same
+    weighted gather (:meth:`gather_weights`, aligned with ``ibool[elem]``) as a plain one records
+    the field, on either backend (:mod:`sweep.sem.receivers`)."""
+    point: object
+    axis: int
+
+    @property
+    def elem_id(self) -> int:
+        return self.point.elem_id
+
+    def _pattern(self) -> torch.Tensor:
+        p = self.point
+        if isinstance(p, PointStamp):
+            w_b_da = p.w_eta[:, None] * p.dw_xi[None, :]     # ∂/∂ξ pattern
+            w_da_b = p.dw_eta[:, None] * p.w_xi[None, :]     # ∂/∂η pattern
+            return (w_b_da * p.ixx + w_da_b * p.iex if self.axis == 0
+                    else w_b_da * p.ixz + w_da_b * p.iez)
+        g, e, x = p.w_gamma, p.w_eta, p.w_xi
+        d_ref = (g[:, None, None] * e[None, :, None] * p.dw_xi[None, None, :],
+                 g[:, None, None] * p.dw_eta[None, :, None] * x[None, None, :],
+                 p.dw_gamma[:, None, None] * e[None, :, None] * x[None, None, :])
+        return sum(d_ref[m] * p.inv[m][self.axis] for m in range(3))
+
+    def gather(self, field_e: torch.Tensor) -> torch.Tensor:
+        return (self._pattern() * field_e).sum()
+
+    def gather_weights(self) -> torch.Tensor:
+        return self._pattern().reshape(-1)
+
+
 def _cached_stamp(mesh, kind, coords, build):
     """``build(mesh, *coords)``, kept on the mesh: a point stamps the same way
     every time, and a survey's receivers are stamped again at every shot."""
@@ -1228,6 +1262,7 @@ class SEMPropagator:
         memory: str | None = None,
         bs_store_dtype=None,
         checkpoint_chunk: int | None = None,
+        illumination=None,
     ):
         """Run the time loop.
 
@@ -1264,6 +1299,10 @@ class SEMPropagator:
         equation, so acoustic gives ``ncomp = 1`` and elastic gives 2 (2-D) or
         3 (3-D).
 
+        ``illumination`` (a :class:`sweep.sem.illumination.Illumination`)
+        accumulates this shot's source illumination as it steps and hooks its
+        wavefields for the receiver one; full tape only.
+
         With ``record_field_every=k`` it returns ``(seis, snaps)`` instead --
         the same shape as FD/JAX's ``(record, wavefield)`` pair -- where
         ``snaps`` is ``(nsnap, ncomp, n_global)`` sampled at time steps
@@ -1280,6 +1319,9 @@ class SEMPropagator:
         layouts = field_layouts(self.eq, recv)
         source_spec, like = self._source_term(per_source, device, dtype)
         step_fn = self._step_fn(compile_options)
+        if illumination is not None and (checkpoint_chunk or memory == "boundary"):
+            raise ValueError("illumination reads the full tape: no checkpointing or "
+                             "boundary saving with it.")
 
         if checkpoint_chunk:
             return self._run_checkpointed(
@@ -1297,6 +1339,8 @@ class SEMPropagator:
                   receiver_gather(self.eq.mesh, self.receivers, lay)[0].to(device)
                   for i, lay in zip(recv, layouts)} if n_rec else {}
         state = self.eq.init_state(self.dt, device, dtype)     # positional tuple
+        sink = (illumination.sink(self.eq, self.dt, state[0])
+                if illumination is not None else None)
         seis = {i: torch.zeros(n_rec, self.nt, dtype=dtype, device=device)
                 for i in recv}
         snaps = {i: [] for i in recv}
@@ -1310,7 +1354,9 @@ class SEMPropagator:
                 s_val = source_wavelet[n]
                 src = [p * s_val for p in source_spec]
             step = step_fn if settled.compiled(n, state) else self.eq.step
-            state = step(state, src, self.dt)
+            old, state = state, step(state, src, self.dt)
+            if sink is not None:
+                sink.after_step(old, state)
 
             if n_rec > 0:
                 for i in recv:

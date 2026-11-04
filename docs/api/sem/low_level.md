@@ -14,7 +14,9 @@ A stamp holds the Lagrange weights of one point, and their derivatives, in the
 element that contains it: a source is spread over that element's GLL nodes
 with them, and a receiver reads the field through them. A moment-tensor source
 differentiates the basis, which jumps across element edges, so a source on an
-edge is stamped in every element that meets there (`EdgeStamp`).
+edge is stamped in every element that meets there (`EdgeStamp`). A
+`GradientStamp` reads a field's derivative at a point the way a plain stamp
+reads the field (the strain, rotation and pressure receivers).
 
 ::: sweep.sem.build_point_stamp
 
@@ -25,6 +27,8 @@ edge is stamped in every element that meets there (`EdgeStamp`).
 ::: sweep.sem.build_moment_stamp
 
 ::: sweep.sem.EdgeStamp
+
+::: sweep.sem.GradientStamp
 
 ## Boundary saving
 

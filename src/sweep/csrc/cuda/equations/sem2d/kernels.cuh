@@ -2005,6 +2005,35 @@ static __global__ void sem2d_ifc_el(
     atomicAdd(&f_z[g], pw * nz[j]);
 }
 
+// ---- illumination (sweep.sem.illumination) ---------------------------------
+// acc[b, g] += ((f_next - 2 f + f_prev) / dt^2)^2: one field's source term.
+// The accumulators are fp64: a sum of squares over every step leaves the fp32
+// range for the adjoint values an unnormalised residual gives.
+static __global__ void sem2d_illum_src(
+    const float* __restrict__ f_next, const float* __restrict__ f,
+    const float* __restrict__ f_prev, float inv_dt2, double* __restrict__ acc, int ng)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= ng) return;
+    const size_t o = static_cast<size_t>(blockIdx.y) * ng + i;
+    const double a = static_cast<double>((f_next[o] - 2.f * f[o] + f_prev[o]) * inv_dt2);
+    acc[o] += a * a;
+}
+
+// acc[b, g] += (inv_M[g] lambda[b, g])^2: one field's receiver term (ms: the
+// inverse mass's per-shot stride, 0 when the batch shares it)
+static __global__ void sem2d_illum_rec(
+    const float* __restrict__ lam, const float* __restrict__ inv_M, int ms,
+    double* __restrict__ acc, int ng)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= ng) return;
+    const size_t o = static_cast<size_t>(blockIdx.y) * ng + i;
+    const double l = static_cast<double>(inv_M[static_cast<size_t>(blockIdx.y) * ms + i])
+                   * static_cast<double>(lam[o]);
+    acc[o] += l * l;
+}
+
 // ---- the interface loads' C-PML stretching (coupling.InterfaceCPML) ---------
 // One thread per (band interface point, shot). A point owns its four memories
 // (two for the solid load, e^{-a t}*chi per axis; two for the fluid load,

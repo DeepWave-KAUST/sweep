@@ -18,8 +18,9 @@ from __future__ import annotations
 import torch
 
 from ..cdrive import (AC_CPML_FIELDS, EL_CPML_FLAT, Alloc, check_filled,
-                      dd_grads, dims, fill, give, grads_or_none, memory_mode,
-                      put, roll, swap, take)
+                      dd_grads, dims, fill, give, grads_or_none, illum_alloc,
+                      illum_receiver, illum_source, memory_mode, put, roll,
+                      swap, take)
 
 _FS_CONSTS = ("ibool", "D", "wJ", "w1d", "ixx", "ixz", "iex", "iez",
               "ac_mask_e", "el_mask_e", "dirichlet_idx",
@@ -147,6 +148,7 @@ def _fs_forward_input(c, mats, wavelet, mode, B=1):
         put(s, tuple("save_" + f for f in _FS_HIST),
             (lambda: A.hist(B * E * m, zero=False)) if cp else A.empty)
     _fs_pml(s, c, A, B, nt, mode)
+    s.illum = illum_alloc(c, A)
     dims(s, c, 2, has_cpml=int(cp))
     return check_filled(s)
 
@@ -220,6 +222,7 @@ def _fs_backward_input(c, mats, wavelet, carry, grads, B=1, own=None):
     put(b, ("grad_ac_inv_M", "grad_ac_kappa", "grad_el_inv_M"), A.zeros)
     b.grad_ac_inv_Mg = A.zeros() if cp else A.empty
     b.grad_wavelet = torch.zeros(*lead, nt, dtype=torch.float32, device=dev)
+    b.illum = illum_alloc(c, A)
     dims(b, c, 2, has_cpml=int(cp))
     return check_filled(b)
 
@@ -253,9 +256,10 @@ class _SEMFluidSolidC(torch.autograd.Function):
         need_bwd = any(t.requires_grad for t in mats + (wavelet,))
         s = _fs_forward_input(c, mats, wavelet, memory_mode(c, need_bwd), B)
         seis_chi, seis_x, seis_z = _C.sem2d_fluid_solid_forward(s)
+        part = illum_source(c, s.illum, B, c["n_global"])
         if need_bwd:
             ctx.save_for_backward(*mats, wavelet)
-            ctx.c, ctx.B = c, B
+            ctx.c, ctx.B, ctx.illum = c, B, part
             ctx.carry = take(s, _FS_CARRY)
         return seis_chi, seis_x, seis_z
 
@@ -268,6 +272,7 @@ class _SEMFluidSolidC(torch.autograd.Function):
                                tuple(g.contiguous().float() for g in (g_chi, g_sx, g_sz)), B)
         (g_air, g_aim, g_akp, g_lam, g_mu, g_l2m,
          g_eim, g_wrj, g_w) = _C.sem2d_fluid_solid_backward(b)
+        illum_receiver(ctx.illum, b.illum, B, ng)
         if B > 1:                  # one model for every shot: sum the per-shot grads
             g_air, g_lam, g_mu, g_l2m, g_wrj = (
                 g_air.sum(0), g_lam.sum(0), g_mu.sum(0), g_l2m.sum(0), g_wrj.sum(0))

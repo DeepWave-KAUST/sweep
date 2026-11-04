@@ -3,9 +3,10 @@
 test/sem/specfem_compare/run_compare_box.py checks it against SPECFEM2D's
 ATTENUATION_VISCOELASTIC; here: ``Q = inf`` is the elastic step bit for bit, a finite Q
 attenuates with distance, ``Qmu`` takes the shear wave down and ``Qkappa`` leaves it alone, the
-absorbing layer (and only it) runs without attenuation, the gradients in the five models
-exist, the two readings of the velocities are the moduli they say, and what it cannot do is
-refused.
+absorbing layer attenuates too (its memories on the stretched strains) and so reflects as
+little as the elastic layer does where an elastic one would reflect the jump of the modulus,
+the gradients in the five models exist, the two readings of the velocities are the moduli
+they say, and what it cannot do is refused.
 """
 import math
 
@@ -15,6 +16,7 @@ import torch
 
 from sweep.propagator import BoundarySaving, EagerOptions, Full
 from sweep.sem import ElasticSEM2DDeformed, PropSEM, ViscoElasticSEM2DDeformed
+from sweep.sem.mesh.quad9 import Quad9Mesh
 
 SHAPE, DH, DT, NT = (61, 121), 5.0, 5e-4, 700
 F64 = torch.float64
@@ -88,16 +90,90 @@ def test_qmu_takes_the_shear_wave_down_and_qkappa_leaves_it_alone():
     assert abs(bulk - 1.0) < 0.02
 
 
-def test_the_absorbing_layer_and_only_it_runs_without_attenuation():
+def test_the_absorbing_layer_attenuates_too():
     p = _prop()
     eq = p._build_eq(_elastic() + _q(p, 20.0, 20.0))
-    E = eq.mesh.n_elements
-    xc, zc = eq.mesh.x_e.mean((1, 2)), eq.mesh.z_e.mean((1, 2))
-    pad = 16 * DH                                     # the layer, left, right and below
-    inside = (xc > pad) & (xc < pad + (SHAPE[1] - 1) * DH) & (zc < (SHAPE[0] - 1) * DH)
     for w in eq._w1 + eq._w2:
-        on = (w != 0).reshape(E, -1)
-        assert torch.equal(on.all(1), inside) and torch.equal(on.any(1), inside)
+        assert bool((w > 0).all())
+    # the band's second copies of the memories, for sigma_zz and sigma_xz
+    n_band = eq.band_elements.numel()
+    band = [s for s in eq.field_specs if s.layout == "band"]
+    assert [s.name for s in band] == [f"{c}z_{l}" for l in range(3) for c in ("e1", "e11", "e13")] + [
+        "thetaz_old", "devz_old", "shz_old"]
+    assert all(tuple(f.shape) == (n_band, 5, 5)
+               for f, s in zip(eq.init_state(DT, "cpu", F64), eq.field_specs) if s.layout == "band")
+
+
+def test_the_outer_edge_of_the_layer_stays_pinned():
+    # the memories load the layer's outer edge too; unpinned there, the outer-edge recursion
+    # is an undamped integrator and the run grows from round-off after a second or two
+    p = _prop()
+    eq = p._build_eq(_elastic() + _q(p, 20.0, 20.0))
+    g = torch.Generator().manual_seed(0)
+    fields = [torch.randn(f.shape, generator=g, dtype=F64) * 1e-3
+              for f in eq.init_state(DT, "cpu", F64)]
+    zero = torch.zeros(eq.mesh.n_global, dtype=F64)
+    out = eq.step(tuple(fields), (zero, zero), DT)
+    oi = eq.cpml.outer_edge_idx
+    assert oi.numel() > 0
+    assert bool((out[0][oi] == 0).all()) and bool((out[1][oi] == 0).all())
+
+
+class _ElasticLayer(ViscoElasticSEM2DDeformed):
+    """The strengths zero on the C-PML band elements: the layer elastic, as the class was."""
+
+    @classmethod
+    def build(cls, mesh: "Quad9Mesh", vp_e, vs_e, rho_e, Qk_e, Qmu_e, *, cpml=None, domain=None,
+              band_split=None, f_ref=10.0, f_band=None, n_sls=3, n_fit=None,
+              velocities="unrelaxed", fit="linear"):
+        eq = super().build(mesh, vp_e, vs_e, rho_e, Qk_e, Qmu_e, cpml=cpml, domain=domain,
+                           band_split=band_split, f_ref=f_ref, f_band=f_band, n_sls=n_sls,
+                           n_fit=n_fit, velocities=velocities, fit=fit)
+        E = mesh.n_elements
+        off = (~cpml.node_in_pml[:, 1:-1, 1:-1].reshape(E, -1).any(1)).to(F64).view(E, 1, 1)
+        eq._w1, eq._w2 = tuple(w * off for w in eq._w1), tuple(w * off for w in eq._w2)
+        return eq
+
+
+@pytest.mark.slow
+def test_the_attenuating_layer_reflects_as_little_as_an_elastic_one():
+    # a 200 m x 400 m box with a 100 m layer against a box 400 m larger on the left, right and
+    # below (nothing returns from its edges in the 0.4 s): Qkappa 30, Qmu 20 with the layer
+    # elastic, its modulus jumps at the layer's edge and the deep receivers see 4-5% of the
+    # record; attenuating, the reflection is the elastic medium's C-PML's (~1e-3) or less
+    small, pad, nt, dt = (41, 81), 80, 1000, 4e-4
+
+    def run(eq, shape, abcn, x0):
+        p = PropSEM(eq, shape=shape, dh=DH, dt=dt, n_order=4, f_dominant=15.0, dev="cpu",
+                    dtype=F64, impl="eager", memory=Full(), abcn=abcn, free_surface=True,
+                    eager_options=EagerOptions(use_compile=False), receiver_type=["vx", "vz"],
+                    source_type=["vz"], equation_options={"f_ref": 15.0})
+        t = np.arange(nt) * dt - 0.08
+        a = (np.pi * 15.0 * t) ** 2
+        w = torch.from_numpy((1 - 2 * a) * np.exp(-a))
+        m = [torch.full(shape, v, dtype=F64) for v in (VP, VS, RHO)]
+        m += [torch.full(p._gll_shape, q, dtype=F64) for q in (30.0, 20.0)]
+        rec = np.array([[[x + x0, z] for z in (1.0, 30.0) for x in (10.0, 30.0, 50.0, 70.0)]])
+        with torch.no_grad():
+            return p(w, np.array([[40.3 + x0, 8.6]]), rec, models=m)[0]
+
+    ref = run(ViscoElasticSEM2DDeformed, (small[0] + pad, small[1] + 2 * pad), 8, float(pad))
+    err = lambda o: max(float((o[:, i] - ref[:, i]).norm() / ref[:, i].norm())
+                        for i in range(o.shape[1]))
+    elastic_layer = err(run(_ElasticLayer, small, 20, 0.0))
+    attenuating = err(run(ViscoElasticSEM2DDeformed, small, 20, 0.0))
+    assert elastic_layer > 2e-2
+    assert attenuating < 1.5e-3 and attenuating < 0.05 * elastic_layer
+
+
+def test_the_band_split_runs_the_same():
+    # the band's memories on the band rows only (band_split, as on large meshes) or on every
+    # element: the same records
+    out = []
+    for split in (False, True):
+        p = _prop(equation_options={"f_ref": 15.0, "band_split": split})
+        out.append(_shot(p, _elastic() + _q(p, 30.0, 20.0)))
+    assert torch.allclose(out[0], out[1], rtol=0, atol=1e-12 * float(out[0].abs().max()))
 
 
 def test_the_gradients_exist():

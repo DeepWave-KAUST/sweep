@@ -418,6 +418,7 @@ class SemAcousticCpmlForwardInputCore(Structure):
         ("ndim", c_int32),
         ("B", c_int32),
         ("Bm", c_int32),
+        ("illum", Buf),
     ]
 
 
@@ -520,6 +521,7 @@ class SemAcousticCpmlBackwardInputCore(Structure):
         ("ndim", c_int32),
         ("B", c_int32),
         ("Bm", c_int32),
+        ("illum", Buf),
     ]
 
 
@@ -630,6 +632,7 @@ class SemElasticCpmlForwardInputCore(Structure):
         ("band_scale", Buf),
         ("band_scale_e", Buf),
         ("band_kind_e", c_int32),
+        ("illum", Buf),
     ]
 
 
@@ -809,6 +812,7 @@ class SemFluidSolidForwardInputCore(Structure):
         ("ifc_pml_cf", Buf),
         ("ifc_pml_mem", Buf),
         ("ifc_pml_tape", Buf),
+        ("illum", Buf),
     ]
 
 
@@ -1048,6 +1052,7 @@ class SemFluidSolidBackwardInputCore(Structure):
         ("ifc_pml_tape", Buf),
         ("ifc_pml_lmem", Buf),
         ("ifc_pml_scr", Buf),
+        ("illum", Buf),
     ]
 
 
@@ -1191,6 +1196,7 @@ class SemElasticCpmlBackwardInputCore(Structure):
         ("band_scale", Buf),
         ("band_scale_e", Buf),
         ("band_kind_e", c_int32),
+        ("illum", Buf),
     ]
 
 
@@ -2194,6 +2200,7 @@ FIELDS = {
         ("ndim", "int", 2),
         ("B", "int", 1),
         ("Bm", "int", 1),
+        ("illum", "Buf", None),
     ],
     "SemAcousticCpmlBackwardInputCore": [
         ("ibool", "Buf", None),
@@ -2293,6 +2300,7 @@ FIELDS = {
         ("ndim", "int", 2),
         ("B", "int", 1),
         ("Bm", "int", 1),
+        ("illum", "Buf", None),
     ],
     "SemElasticCpmlForwardInputCore": [
         ("ibool", "Buf", None),
@@ -2400,6 +2408,7 @@ FIELDS = {
         ("band_scale", "Buf", None),
         ("band_scale_e", "Buf", None),
         ("band_kind_e", "int", 0),
+        ("illum", "Buf", None),
     ],
     "SemFluidSolidForwardInputCore": [
         ("ibool", "Buf", None),
@@ -2576,6 +2585,7 @@ FIELDS = {
         ("ifc_pml_cf", "Buf", None),
         ("ifc_pml_mem", "Buf", None),
         ("ifc_pml_tape", "Buf", None),
+        ("illum", "Buf", None),
     ],
     "SemFluidSolidBackwardInputCore": [
         ("ibool", "Buf", None),
@@ -2812,6 +2822,7 @@ FIELDS = {
         ("ifc_pml_tape", "Buf", None),
         ("ifc_pml_lmem", "Buf", None),
         ("ifc_pml_scr", "Buf", None),
+        ("illum", "Buf", None),
     ],
     "SemElasticCpmlBackwardInputCore": [
         ("ibool", "Buf", None),
@@ -2952,6 +2963,7 @@ FIELDS = {
         ("band_scale", "Buf", None),
         ("band_scale_e", "Buf", None),
         ("band_kind_e", "int", 0),
+        ("illum", "Buf", None),
     ],
     "SemElasticBackwardInputCore": [
         ("ibool", "Buf", None),
@@ -3963,6 +3975,7 @@ LAYOUT_PROBE = [
     ("SemAcousticCpmlForwardInputCore", "ndim"),
     ("SemAcousticCpmlForwardInputCore", "B"),
     ("SemAcousticCpmlForwardInputCore", "Bm"),
+    ("SemAcousticCpmlForwardInputCore", "illum"),
     ("SemAcousticCpmlBackwardInputCore", None),
     ("SemAcousticCpmlBackwardInputCore", "ibool"),
     ("SemAcousticCpmlBackwardInputCore", "D"),
@@ -4061,6 +4074,7 @@ LAYOUT_PROBE = [
     ("SemAcousticCpmlBackwardInputCore", "ndim"),
     ("SemAcousticCpmlBackwardInputCore", "B"),
     ("SemAcousticCpmlBackwardInputCore", "Bm"),
+    ("SemAcousticCpmlBackwardInputCore", "illum"),
     ("SemElasticCpmlForwardInputCore", None),
     ("SemElasticCpmlForwardInputCore", "ibool"),
     ("SemElasticCpmlForwardInputCore", "D"),
@@ -4167,6 +4181,7 @@ LAYOUT_PROBE = [
     ("SemElasticCpmlForwardInputCore", "band_scale"),
     ("SemElasticCpmlForwardInputCore", "band_scale_e"),
     ("SemElasticCpmlForwardInputCore", "band_kind_e"),
+    ("SemElasticCpmlForwardInputCore", "illum"),
     ("SemFluidSolidForwardInputCore", None),
     ("SemFluidSolidForwardInputCore", "ibool"),
     ("SemFluidSolidForwardInputCore", "D"),
@@ -4342,6 +4357,7 @@ LAYOUT_PROBE = [
     ("SemFluidSolidForwardInputCore", "ifc_pml_cf"),
     ("SemFluidSolidForwardInputCore", "ifc_pml_mem"),
     ("SemFluidSolidForwardInputCore", "ifc_pml_tape"),
+    ("SemFluidSolidForwardInputCore", "illum"),
     ("SemFluidSolidBackwardInputCore", None),
     ("SemFluidSolidBackwardInputCore", "ibool"),
     ("SemFluidSolidBackwardInputCore", "D"),
@@ -4577,6 +4593,7 @@ LAYOUT_PROBE = [
     ("SemFluidSolidBackwardInputCore", "ifc_pml_tape"),
     ("SemFluidSolidBackwardInputCore", "ifc_pml_lmem"),
     ("SemFluidSolidBackwardInputCore", "ifc_pml_scr"),
+    ("SemFluidSolidBackwardInputCore", "illum"),
     ("SemElasticCpmlBackwardInputCore", None),
     ("SemElasticCpmlBackwardInputCore", "ibool"),
     ("SemElasticCpmlBackwardInputCore", "D"),
@@ -4716,6 +4733,7 @@ LAYOUT_PROBE = [
     ("SemElasticCpmlBackwardInputCore", "band_scale"),
     ("SemElasticCpmlBackwardInputCore", "band_scale_e"),
     ("SemElasticCpmlBackwardInputCore", "band_kind_e"),
+    ("SemElasticCpmlBackwardInputCore", "illum"),
     ("SemElasticBackwardInputCore", None),
     ("SemElasticBackwardInputCore", "ibool"),
     ("SemElasticBackwardInputCore", "D"),

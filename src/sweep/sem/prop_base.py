@@ -89,6 +89,7 @@ from .equations.acoustic_potential2d import AcousticPotentialSEM2D
 from .fields import (MESH_NDIM, format_field_specs, mesh_kind, model_names,
                      resolve_field_types)
 from .propagator import SEMPropagator, field_layouts, receiver_gather
+from .receivers import recipe_axes, recipe_fields
 
 
 
@@ -692,6 +693,27 @@ class _Acq:
 
 
 
+
+class _PlaneWaveShot:
+    """The acquisition of a plane-wave call, as the eager runners read an :class:`_Acq`:
+    one shot, the band's loads its per-source wavelet."""
+
+    __slots__ = ("receivers", "nshots", "wav_per_shot")
+
+    def __init__(self, receivers, loads):
+        self.receivers, self.nshots, self.wav_per_shot = receivers, 1, [loads]
+
+
+def _minus_kappa(eq):
+    """``-(lambda + 2 mu / 3)`` on a solid's elements: the factor of ``div u`` in the pressure
+    SPECFEM's seismograms take (plane strain in 2-D). The moduli the step uses, else from the
+    velocities (the fluid-solid form's solid is ``eq.el``)."""
+    el = getattr(eq, "el", eq)
+    if hasattr(el, "_lam") and hasattr(el, "_mu"):
+        return -(el._lam + (2.0 / 3.0) * el._mu)
+    return -el.rho_e * (el.vp_e ** 2 - (4.0 / 3.0) * el.vs_e ** 2)
+
+
 class PropSEM:
     """SEM propagator with the FD ``PropTorch`` constructor and call.
 
@@ -804,6 +826,23 @@ class PropSEM:
 
         self._construct_mesh(equation, shape, self.n_order, self.topography,
                              dtype, self.dev)
+        # PropTorch's illumination switch (sweep.sem.illumination): off by
+        # default; when on, each call's source / receiver illumination is read
+        # back from source_illumination / receiver_illumination
+        self.compute_illumination = False
+        self._illumination = None
+
+    @property
+    def source_illumination(self):
+        """The last call's ``sum_t |a|^2`` in its models' shape, or ``None``
+        (see :mod:`sweep.sem.illumination`)."""
+        return None if self._illumination is None else self._illumination.source()
+
+    @property
+    def receiver_illumination(self):
+        """The last call's ``sum_t |lambda|^2`` once its backward has run, or
+        ``None`` (see :mod:`sweep.sem.illumination`)."""
+        return None if self._illumination is None else self._illumination.receiver()
 
     def _resolve_memory(self, memory, bs_store_dtype_elem):
         """``memory`` as PropTorch takes it -> the three run knobs the paths
@@ -958,6 +997,8 @@ class PropSEM:
         # the FD ``source_type`` / ``receiver_type`` convention.
         _stamp = getattr(equation, "propsem_source", None)
         n_src = sum(f.supports_source for f in equation.field_specs)
+        # a plane wave carries its own load, which a source_type would not reach
+        self._source_type_given = source_type is not None
         # the vector equations (a force with one component per axis) also
         # take the FD names; see _resolve_vector_source
         self._src_force_axes, self._src_moment = None, None
@@ -996,8 +1037,18 @@ class PropSEM:
         # list handed down; _recv_plan maps each requested component to its
         # base column and transform.
         derived = getattr(equation, "derived_receiver_types", {})
-        self._recv_base, self._recv_plan = [], []
+        spatial = getattr(equation, "spatial_receiver_types", {})
+        self._recv_base, self._recv_plan, self._spatial = [], [], {}
         for nm in self.receiver_type:
+            if nm in spatial:
+                # a spatial derivative (sweep.sem.receivers): its fields are recorded
+                # at the receivers' gradient stamps too (_with_gradients)
+                self._spatial[nm] = spatial[nm]
+                for base in recipe_fields(spatial[nm]):
+                    if base not in self._recv_base:
+                        self._recv_base.append(base)
+                self._recv_plan.append((None, ("spatial", nm)))
+                continue
             base, op = derived.get(nm, (nm, None))
             if base not in self._recv_base:
                 self._recv_base.append(base)
@@ -1007,8 +1058,10 @@ class PropSEM:
         # the way out even when nothing derived is asked for
         self._pressure_wavelet = bool(
             getattr(equation, "propsem_pressure_wavelet", False))
+        self._grad_axes = tuple(sorted(set().union(
+            *(recipe_axes(r) for r in self._spatial.values()))))
         self._recv_identity = (
-            not self._pressure_wavelet
+            not self._pressure_wavelet and not self._spatial
             and self._recv_base == self.receiver_type
             and all(op is None for _, op in self._recv_plan))
         # what return_wavefield=True copies out: the fields the receivers
@@ -1563,19 +1616,35 @@ class PropSEM:
         return torch.cat([torch.zeros_like(s[:, :1]), s[:, :-1]], 1)
 
     def _apply_derived_receivers(self, out, pressure_run=False):
-        """(nshots, nt, nrec, n_base) -> (nshots, nt, nrec, n_requested).
-        ``pressure_run``: ``out`` is the potential-form run driven by the
-        wavelet itself (:meth:`forward`)."""
-        if pressure_run:
-            return torch.stack([
-                self._trace_from_pressure_run(out[..., col], op, self.dt)
-                for col, op in self._recv_plan], -1)
+        """(nshots, nt, nrec, n_base) -> (nshots, nt, nrec, n_requested). With spatial
+        components the propagators recorded ``nrec`` more receivers per derivative axis
+        (:meth:`_with_gradients`), which these combine. ``pressure_run``: ``out`` is the
+        potential-form run driven by the wavelet itself (:meth:`forward`)."""
         if self._recv_identity:
             return out                    # bit-untouched default path
+        k = 2 ** self.ndim
+        nrec = out.shape[2] // (1 + len(self._grad_axes) * k)
+        real = out[:, :, :nrec]
+        grads = {}
+        if self._grad_axes:
+            receivers, eq, pershot = self._spatial_call
+            S = out.shape[0]
+            w = torch.stack([self._gradient_weights(
+                self._rec_row(receivers, b if receivers.shape[0] > 1 else 0),
+                pershot[b] if pershot is not None else eq) for b in range(S)]).to(out)
+            for i, a in enumerate(self._grad_axes):
+                blk = out[:, :, nrec * (1 + i * k):nrec * (1 + (i + 1) * k)]
+                blk = blk.reshape(S, out.shape[1], k, nrec, out.shape[3])
+                grads[a] = torch.einsum("stqjc,sjq->stjc", blk, w)
         comps = []
         for col, op in self._recv_plan:
-            x = out[..., col]
-            if op == "velocity":
+            if isinstance(op, tuple):
+                comps.append(self._spatial_component(op[1], real, grads, pressure_run))
+                continue
+            x = real[..., col]
+            if pressure_run:
+                x = self._trace_from_pressure_run(x, op, self.dt)
+            elif op == "velocity":
                 x = self._trace_ddt(x, self.dt)
             elif op == "pressure":
                 x = self._trace_neg_d2dt2(x, self.dt)
@@ -1583,6 +1652,70 @@ class PropSEM:
                 raise AssertionError(f"unknown derived receiver op {op!r}")
             comps.append(x)
         return torch.stack(comps, -1)
+
+    def _spatial_component(self, name, real, grads, pressure_run=False):
+        """One spatial receiver component ``(nshots, nt, nrec)`` from the recorded fields
+        (``real``) and their derivatives (``grads``), with its material factor at every
+        receiver and its time operator (see :mod:`sweep.sem.receivers`). ``pressure_run``:
+        the fields are those of the run the wavelet drives (:meth:`forward`), so the time
+        operator is composed with their conversion to the base fields
+        (:meth:`_trace_from_pressure_run`) -- no difference of a double integral."""
+        from .propagator import build_point_stamps
+        receivers, eq, pershot = self._spatial_call
+        nshots = real.shape[0]
+        stamps = [build_point_stamps(self.mesh, self._rec_row(
+            receivers, b if receivers.shape[0] > 1 else 0)) for b in range(nshots)]
+        eqs = pershot if pershot is not None else [eq] * nshots
+
+        def shot_values(field_of):
+            # an element-local array at every receiver of every shot: (nshots, nrec)
+            return torch.stack([torch.stack([st.gather(field_of(e)[st.elem_id]) for st in sts])
+                                for e, sts in zip(eqs, stamps)])
+
+        def evaluate(r):
+            if r is None:
+                return torch.zeros_like(real[..., 0])
+            x = 0.0
+            for field, axis, coef in r["terms"]:
+                col = self._recv_base.index(field)
+                x = x + coef * (real if axis is None else grads[axis])[..., col]
+            scale = r.get("scale")
+            if scale == "inv_rho":
+                x = x * shot_values(lambda e: getattr(e, "ac", e)._inv_rho)[:, None, :].to(x)
+            elif scale == "minus_kappa":
+                x = x * shot_values(_minus_kappa)[:, None, :].to(x)
+            elif scale is not None:
+                raise AssertionError(f"unknown spatial receiver scale {scale!r}")
+            time = r.get("time")
+            if pressure_run:
+                if time in (None, "velocity"):
+                    x = self._trace_from_pressure_run(x, time, self.dt)
+                elif time == "acceleration":
+                    x = -x
+                elif time == "integral":
+                    x = torch.cumsum(self._trace_from_pressure_run(x, None, self.dt),
+                                     dim=1) * self.dt
+                elif time != "neg_acceleration":
+                    raise AssertionError(f"unknown spatial receiver time operator {time!r}")
+            elif time == "velocity":
+                x = self._trace_ddt(x, self.dt)
+            elif time == "acceleration":
+                x = -self._trace_neg_d2dt2(x, self.dt)
+            elif time == "neg_acceleration":
+                x = self._trace_neg_d2dt2(x, self.dt)
+            elif time == "integral":
+                x = torch.cumsum(x, dim=1) * self.dt
+            elif time is not None:
+                raise AssertionError(f"unknown spatial receiver time operator {time!r}")
+            return x
+
+        recipe = self._spatial[name]
+        if "terms" in recipe:
+            return evaluate(recipe)
+        fluid = torch.stack([torch.tensor([not bool(e.domain.is_elastic[st.elem_id]) for st in sts])
+                             for e, sts in zip(eqs, stamps)]).to(real.device)
+        return torch.where(fluid[:, None, :], evaluate(recipe.get("fluid")),
+                           evaluate(recipe.get("solid")))
 
     def _default_source(self):
         """Is the source the equation's default -- the unit vertical force on
@@ -1789,12 +1922,25 @@ class PropSEM:
         self._set_nt(wavelet)
         snap_steps = _resolve_snapshot_steps(self.nt, return_wavefield,
                                              snapshot_times, snapshot_interval)
+        from .plane_wave import PlaneWave
+        if isinstance(sources, PlaneWave):
+            return self._forward_plane_wave(wavelet, sources, receivers, models, snap_steps,
+                                            source_vector=source_vector, pml_guard=pml_guard)
         acq = _Acq(self, wavelet, sources, receivers, source_vector,
                    potential_wavelet=self._pressure_wavelet and return_wavefield)
+        self._illumination = self._illumination_for(models, snap_steps)
 
         # 3-D acoustic on CUDA: the single-strip DD driver, BEFORE any global
         # equation is built (that build is what it saves) -- see _forward_c_dd3d
         if self._use_c and self._dd3d_route(models):
+            if self._illumination is not None:
+                raise NotImplementedError(
+                    "compute_illumination is not wired on the 3-D acoustic strip "
+                    "driver; use impl='eager'.")
+            if self._spatial:
+                raise NotImplementedError(
+                    f"receiver_type {sorted(self._spatial)} records spatial derivatives, "
+                    f"which the 3-D acoustic strip driver does not; use impl='eager'.")
             # NOTE bs_store_dtype_elem is not forwarded: this route rings
             # nodes only, and the element knob is refused there
             return self._forward_c_dd3d(acq.shot_src, acq.receivers,
@@ -1802,6 +1948,8 @@ class PropSEM:
 
         eq, pershot_eqs = self._resolve_model_batch(models)
         acq.check_pershot(pershot_eqs)
+        # what the spatial receivers' material factors are taken from (forward)
+        self._spatial_call = (acq.receivers, eq, pershot_eqs) if self._spatial else None
 
         if self._use_c:                                  # CUDA SEM backend
             # NOTE pml_guard is not forwarded: the C route locates its
@@ -1826,7 +1974,132 @@ class PropSEM:
                                    memory=self._memory,
                                    compile_options=compile_options,
                                    checkpoint_chunk=self._ckpt_chunk,
-                                   store_dtype=self._bs_store)
+                                   store_dtype=self._bs_store,
+                                   illumination=self._illumination)
+
+    # ------------------------------------------------------------------ #
+    # Plane-wave incidence (sweep.sem.plane_wave): one shot whose source is the
+    # band's nodal loads, a time series per node and component
+    # ------------------------------------------------------------------ #
+    def _plane_wave_band(self, eq, wave):
+        """The injection band of ``wave`` on ``eq``: its box (model grid units, on element
+        edges; default one element in from the model's edges, from the top down when the
+        top is free) as element ranges of the padded mesh."""
+        from .plane_wave import injection_band
+        if self.ndim != 2:
+            raise NotImplementedError("plane-wave incidence is wired for the 2-D SEM")
+        no, (pz, px), (nz, nx) = self.n_order, self._pad0, self.shape
+        # the top is free unless an absorbing layer sits on it (abcn=0: every side is)
+        top_free = "top" in self.free_surface or self.abcn_elements == 0
+        if wave.box is None:
+            (x0, z0), (x1, z1) = (no, 0 if top_free else no), (nx - 1 - no, nz - 1 - no)
+        else:
+            (x0, z0), (x1, z1) = wave.box
+
+        def edge(v, pad, name):
+            k = (float(v) + pad) / no
+            if abs(k - round(k)) > 1e-9:
+                raise ValueError(
+                    f"the plane wave's box has {name} = {v}, not on an element edge (a "
+                    f"multiple of n_order = {no} in model grid units)")
+            return int(round(k))
+
+        ex0, ex1 = edge(x0, px, "x0"), edge(x1, px, "x1")
+        ez0, ez1 = edge(z0, pz, "z0"), edge(z1, pz, "z1")
+        # the model's elements, [lo, hi) per axis: the band must lie among them
+        lo_x, lo_z = px // no, pz // no
+        hi_x, hi_z = lo_x + (nx - 1) // no, lo_z + (nz - 1) // no
+        if not (ex0 - 1 >= lo_x and ex1 + 1 <= hi_x and ez1 + 1 <= hi_z
+                and (ez0 == 0 or ez0 - 1 >= lo_z) and ex0 < ex1 and ez0 < ez1):
+            raise ValueError(
+                f"the plane wave's box {((x0, z0), (x1, z1))} leaves no room for its band "
+                f"(one element around it) inside the model {self.shape}")
+        origin = None if wave.origin is None else self._coords(wave.origin)
+        return injection_band(eq, wave, rows=(ez0, ez1), cols=(ex0, ex1),
+                              nex=self._elems_pad[-1], top_free=top_free, origin=origin)
+
+    def free_field(self, wavelet, wave, points, models):
+        """The plane wave ``wave`` of the background ``models`` have outside its box --
+        what the records inside the box would be with nothing there to scatter -- at
+        ``points`` ``(n, 2)`` (model grid units, x first): the displacement ``(n, nt, 2)``
+        (z down; SH's ``u_y``: ``(n, nt, 1)``; float64) at the records' times."""
+        if self._use_c:
+            raise NotImplementedError("plane-wave incidence runs on impl='eager'")
+        self._set_nt(wavelet)
+        eq, pershot = self._resolve_model_batch(models)
+        if pershot is not None:
+            raise ValueError("free_field takes one model, not a per-shot batch")
+        free = self._plane_wave_band(eq, wave).free
+        xz = torch.tensor([self._coords(q) for q in torch.as_tensor(points).reshape(-1, 2)],
+                          dtype=torch.float64)
+        w = torch.as_tensor(wavelet).to(device=self.dev, dtype=torch.float64)
+        # the record of step n is the state it makes, at (n + 1) dt
+        u = free.displacement(xz[:, 0], xz[:, 1], w, self.dt, self.nt, t0=self.dt)
+        return u.transpose(1, 2)
+
+    def _forward_plane_wave(self, wavelet, wave, receivers, models, snap_steps, *,
+                            source_vector=None, pml_guard="warn"):
+        """``_forward_fields`` for a :class:`~sweep.sem.plane_wave.PlaneWave`: one shot,
+        the band's loads as per-source series on its nodes, through the eager runners."""
+        from .plane_wave import band_injection
+        from .propagator import _check_pml_placement, build_point_stamps, locate_points
+        if self._use_c:
+            raise NotImplementedError(
+                "plane-wave incidence runs on impl='eager': its loads are a time series per "
+                "band node, and the C kernels take one shared wavelet")
+        if source_vector is not None:
+            raise ValueError("source_vector is a point force's direction; a plane wave "
+                             "carries its own load")
+        if self._source_type_given:
+            raise ValueError(
+                f"source_type={self.source_type} is what a point source drives; a plane wave "
+                "carries its own load (forces on its band): build the propagator without "
+                "source_type for it")
+        wavelet = torch.as_tensor(wavelet)
+        if wavelet.dim() != 1:
+            raise ValueError(f"a plane wave takes one (nt,) wavelet; got "
+                             f"{tuple(wavelet.shape)}")
+        receivers = torch.as_tensor(receivers)
+        if receivers.dim() != 3 or receivers.shape[0] != 1 or receivers.shape[2] != 2:
+            raise ValueError(f"a plane wave is one shot: receivers must be (1, nrec, 2); "
+                             f"got {tuple(receivers.shape)}")
+        eq, pershot = self._resolve_model_batch(models)
+        if pershot is not None and len(pershot) != 1:
+            raise ValueError(f"a plane wave is one shot; the per-shot models carry "
+                             f"B={len(pershot)}")
+        inj = band_injection(eq, self._plane_wave_band(eq, wave), wavelet, self.dt, self.nt)
+
+        self._refuse_above_surface(receivers, "receiver")     # as _Acq does
+        xz = self._rec_row(receivers, 0)
+        _check_pml_placement(eq, [], xz, pml_guard)
+        locate_points(eq.mesh, xz)
+        prop = inj.propagator(eq, self.dt, self.nt,
+                              self._with_gradients(build_point_stamps(eq.mesh, xz), xz),
+                              receiver_type=list(self._recv_base))
+        prop.grid_label = self._grid_label()
+        acq = _PlaneWaveShot(receivers, inj.wavelet(self.dtype))
+        self._spatial_call = (receivers, eq, pershot) if self._spatial else None
+        self._illumination = self._illumination_for(models, snap_steps)
+        compile_options = self._compile_options()
+        if snap_steps is not None:
+            return self._forward_snapshots([prop], acq, snap_steps,
+                                           compile_options=compile_options)
+        return self._forward_eager(eq, pershot, [prop], acq, memory=self._memory,
+                                   compile_options=compile_options,
+                                   checkpoint_chunk=self._ckpt_chunk,
+                                   store_dtype=self._bs_store,
+                                   illumination=self._illumination)
+
+    def _illumination_for(self, models, snap_steps):
+        """This call's illumination holder, or ``None`` when it is off."""
+        if not self.compute_illumination:
+            return None
+        if snap_steps is not None:
+            raise ValueError("compute_illumination and return_wavefield are exclusive.")
+        from .illumination import Illumination
+        s = tuple(models[0].shape)
+        grid = s == tuple(self.shape) or s[1:] == tuple(self.shape)
+        return Illumination(self, gll_native=not grid)
 
     # ------------------------------------------------------------------ #
     # The eager propagator factory: acquisition -> one SEMPropagator per shot
@@ -1886,8 +2159,60 @@ class PropSEM:
                 receiver_xz=self._rec_row(acq.receivers, b),
                 receiver_type=self._recv_base,
                 pml_guard=pml_guard, **extra))
+            props[-1].receivers = self._with_gradients(props[-1].receivers,
+                                                       self._rec_row(acq.receivers, b))
             props[-1].grid_label = self._grid_label()
         return props
+
+    def _with_gradients(self, stamps, xz):
+        """The receivers' stamps followed, axis by axis, by their gradient stamps when a
+        spatial receiver component is asked for (see :mod:`sweep.sem.receivers`): the
+        propagators record every base field there as at any receiver, and
+        :meth:`_apply_derived_receivers` combines the derivatives. A field's gradient jumps
+        across element edges, so a receiver on one takes every element there, as a moment
+        source is stamped in each (:class:`~sweep.sem.propagator.EdgeStamp`): ``2**ndim``
+        slots per receiver and axis, the parts after the first repeated with no weight
+        (:meth:`_gradient_weights`), so that every shot has the same number."""
+        if not self._grad_axes:
+            return stamps
+        from .propagator import GradientStamp
+        parts = [self._edge_parts(c)[0] for c in xz]
+        k = 2 ** self.ndim
+        parts = [ps + [ps[-1]] * (k - len(ps)) for ps in parts]
+        return list(stamps) + [GradientStamp(ps[q], a) for a in self._grad_axes
+                               for q in range(k) for ps in parts]
+
+    def _edge_parts(self, xz):
+        """``(stamps, shares)`` of a receiver point: one stamp in its element inside it,
+        one in every element that meets at it on an edge or corner (their sector shares)."""
+        from .propagator import EdgeStamp, build_moment_stamp
+        st = build_moment_stamp(self.mesh, *xz)
+        if isinstance(st, EdgeStamp):
+            return list(st.parts), [float(w) for w in st.weights]
+        return [st], [1.0]
+
+    def _gradient_weights(self, xz, eq):
+        """``(nrec, 2**ndim)``: each gradient slot's share in its receiver's derivative. On
+        an edge, the elements of the receiver's own medium only (a fluid-solid form's other
+        field is dead there), renormalised."""
+        k = 2 ** self.ndim
+        domain = getattr(eq, "domain", None)
+        rows = []
+        for c, home in zip(xz, self._located(xz)):
+            parts, shares = self._edge_parts(c)
+            if domain is not None:
+                same = [bool(domain.is_elastic[p.elem_id]) == bool(domain.is_elastic[home])
+                        for p in parts]
+                shares = [w if ok else 0.0 for w, ok in zip(shares, same)]
+                total = sum(shares)
+                shares = [w / total for w in shares]
+            rows.append(shares + [0.0] * (k - len(shares)))
+        return torch.tensor(rows, dtype=torch.float64)
+
+    def _located(self, xz):
+        """The element every receiver point is located in (its plain stamp's)."""
+        from .propagator import build_point_stamps
+        return [st.elem_id for st in build_point_stamps(self.mesh, xz)]
 
     def _grid_label(self):
         """How compile notices name this problem's size: the model grid."""
@@ -2009,7 +2334,7 @@ class PropSEM:
     # ------------------------------------------------------------------ #
     def _forward_eager(self, eq, pershot_eqs, props, acq, *, memory=None,
                        compile_options=None, checkpoint_chunk=None,
-                       store_dtype=None):
+                       store_dtype=None, illumination=None):
         """Run the built props under one memory mode -> ``(nshots, nt, nrec,
         ncomp)``. Reads like ``prop_c.sem_c_forward_shot_batch``: the props carry
         the acquisition, the keywords carry the mode, and the body is the runner
@@ -2040,6 +2365,20 @@ class PropSEM:
         """
         recv_idxs = self._recv_idxs(eq)
         nshots = acq.nshots
+
+        if illumination is not None:
+            # the adjoint wavefield is read off the tape: the full one, shot by
+            # shot. The default strategy gives way, as for snapshots.
+            if (memory == "boundary" or checkpoint_chunk) and self._memory_explicit:
+                raise ValueError(
+                    "compute_illumination on impl='eager' reads the adjoint wavefield "
+                    "off the full tape: it is not available with memory="
+                    f"{'BoundarySaving' if memory == 'boundary' else 'Ckpt'}() there "
+                    "(impl='c' keeps it under boundary saving).")
+            return torch.stack([props[b].forward(acq.wav_per_shot[b],
+                                                 compile_options=compile_options,
+                                                 illumination=illumination)
+                                for b in range(nshots)], 0)
 
         if memory == "boundary":
             if nshots == 1:                          # single shot: no vmap overhead
@@ -2364,7 +2703,9 @@ class PropSEM:
             self._c_src_stamps = [[build_moment_stamp(self.mesh, *xz) for xz in s] for s in shot_src]
         else:
             self._c_src_stamps = [build_point_stamps(self.mesh, s) for s in shot_src]
-        row_cache = {row: build_point_stamps(self.mesh, self._rec_row(receivers, b))
+        row_cache = {row: self._with_gradients(
+                         build_point_stamps(self.mesh, self._rec_row(receivers, b)),
+                         self._rec_row(receivers, b))
                      for row, b in first.items()}     # dedupe expanded receiver rows
         self._c_rec_stamps = [row_cache[row] for row in rec_rows]
         self._c_stamp_key = key
@@ -2390,12 +2731,14 @@ class PropSEM:
             kind, payload = "moment_tensor", self._src_moment
         else:
             kind, payload = "force", sv
-        return SEMCudaPropagator(
+        prop = SEMCudaPropagator(
             eq=eq, dt=self.dt, nt=self.nt, sources=srcs,
             receivers=self._c_rec_stamps[b],
             source_kinds=[kind] * len(srcs),
             source_payloads=[payload] * len(srcs),
             receiver_type=self._recv_base)
+        prop.illumination = self._illumination
+        return prop
 
     def _forward_c_batched(self, eq, nsh, wav_per_shot, sv, memory,
                            store_dtype, store_dtype_elem):
