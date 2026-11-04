@@ -140,7 +140,7 @@ def refuse_free_surface_if_anisotropic(equation, requested, how):
 
 def resolve_boundary_spec(free_surface, abcn, ndim, equation, topography,
                           *, normalize_free_surface, normalize_pad,
-                          is_top_only_or_none):
+                          is_top_only_or_none, refuse_free_plate):
     """`(free_surface, abcn)` -> `(fs_faces, pad, abcn_scalar)`, or a refusal.
 
     The normalisers are injected rather than imported so this module stays free
@@ -155,6 +155,12 @@ def resolve_boundary_spec(free_surface, abcn, ndim, equation, topography,
     * a per-edge free surface or per-edge PML in 3-D, or on an equation that has
       not opted in;
     * a per-edge free surface combined with topography.
+
+    One layout is refused on physical grounds instead: for an equation with a
+    solid (`free_plate_unstable`), a PML that runs between two unabsorbed faces
+    of another axis, one of them free.  That solid is a plate whose backward
+    Lamb modes the PML amplifies, so the run grows without bound
+    (`refuse_free_plate`).
 
     The `isinstance(abcn, bool)` exclusion below is belt-and-braces: `normalize_pad`
     already rejects a bool `abcn` outright, so this branch is never the guard that
@@ -192,6 +198,8 @@ def resolve_boundary_spec(free_surface, abcn, ndim, equation, topography,
             raise NotImplementedError(
                 "per-edge free surface cannot be combined with topography= yet."
             )
+    if getattr(equation, "free_plate_unstable", False):
+        refuse_free_plate(fs_faces, pad, ndim, type(equation).__name__)
     return fs_faces, pad, abcn_scalar
 
 

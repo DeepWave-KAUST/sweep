@@ -320,6 +320,18 @@ and this project adheres to
   move by round-off (3e-14 in float64) unless that separation acted: then by
   8e-7 at surface receivers, and 3e-5 with the source and receivers next to
   that corner.
+- 2-D `Elastic`, `ElasticBorn` and `ViscoElastic` refuse a PML that runs
+  between two faces of the other axis that have none, one of them free --
+  `free_surface=["top", "bottom"]`, `["top", "left", "right"]` and the four
+  other such layouts, or a free face opposite an `abcn` 0 face -- with a
+  `ValueError` naming the faces. The solid between them is a plate whose
+  backward-propagating Lamb modes a PML amplifies (Loh et al. 2009): on eager
+  and `impl='c'` these runs grew 1e2-1e4 times every 1.25 s from about 2 s on,
+  the growth converges under grid refinement at the plate's S1
+  zero-group-velocity frequency, and no PML width, CFS shift or damping stops
+  it. Keep one face of the pair absorbing, or free all four. `Acoustic` and
+  `ViscoAcoustic` accept every layout; an equation declares a solid with
+  `free_plate_unstable`.
 
 ## [0.3.6] - 2026-10-29
 

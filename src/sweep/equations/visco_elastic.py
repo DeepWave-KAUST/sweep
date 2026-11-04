@@ -295,6 +295,9 @@ class ViscoElastic(FirstOrderEquation):
     default_pml_type = "cpmls"   # staggered-grid CPML (8 profiles)
     supports_per_edge_free_surface = True
     supports_per_edge_free_surface_c = True
+    # Attenuation does not stop a PML amplifying a plate's backward Lamb modes
+    # (measured at Q 100): the layout is refused as for Elastic.
+    free_plate_unstable = True
     # No interior_substeps: the attenuation is dissipative, so boundary saving
     # (reverse reconstruction) is refused and impl='c' defaults to 'full'.
     supports_boundary_saving_c = False
