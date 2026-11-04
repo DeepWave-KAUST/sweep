@@ -1590,9 +1590,7 @@ class PropSEM:
         """(nshots, nt, nrec, n_base) -> (nshots, nt, nrec, n_requested). With spatial
         components the propagators recorded ``nrec`` more receivers per derivative axis
         (:meth:`_with_gradients`), which these combine. ``pressure_run``: ``out`` is the
-        potential-form run driven by the wavelet itself (:meth:`forward`); a spatial
-        component then takes the base fields' conversion before its own operators (the
-        two commute: the equations are linear and time-invariant)."""
+        potential-form run driven by the wavelet itself (:meth:`forward`)."""
         if self._recv_identity:
             return out                    # bit-untouched default path
         k = 2 ** self.ndim
@@ -1609,15 +1607,10 @@ class PropSEM:
                 blk = out[:, :, nrec * (1 + i * k):nrec * (1 + (i + 1) * k)]
                 blk = blk.reshape(S, out.shape[1], k, nrec, out.shape[3])
                 grads[a] = torch.einsum("stqjc,sjq->stjc", blk, w)
-        if pressure_run and self._spatial:
-            base = lambda t: self._trace_from_pressure_run(t, None, self.dt)
-            real_s, grads_s = base(real), {a: base(g) for a, g in grads.items()}
-        else:
-            real_s, grads_s = real, grads
         comps = []
         for col, op in self._recv_plan:
             if isinstance(op, tuple):
-                comps.append(self._spatial_component(op[1], real_s, grads_s))
+                comps.append(self._spatial_component(op[1], real, grads, pressure_run))
                 continue
             x = real[..., col]
             if pressure_run:
@@ -1631,10 +1624,13 @@ class PropSEM:
             comps.append(x)
         return torch.stack(comps, -1)
 
-    def _spatial_component(self, name, real, grads):
+    def _spatial_component(self, name, real, grads, pressure_run=False):
         """One spatial receiver component ``(nshots, nt, nrec)`` from the recorded fields
         (``real``) and their derivatives (``grads``), with its material factor at every
-        receiver and its time operator (see :mod:`sweep.sem.receivers`)."""
+        receiver and its time operator (see :mod:`sweep.sem.receivers`). ``pressure_run``:
+        the fields are those of the run the wavelet drives (:meth:`forward`), so the time
+        operator is composed with their conversion to the base fields
+        (:meth:`_trace_from_pressure_run`) -- no difference of a double integral."""
         from .propagator import build_point_stamps
         receivers, eq, pershot = self._spatial_call
         nshots = real.shape[0]
@@ -1662,7 +1658,17 @@ class PropSEM:
             elif scale is not None:
                 raise AssertionError(f"unknown spatial receiver scale {scale!r}")
             time = r.get("time")
-            if time == "velocity":
+            if pressure_run:
+                if time in (None, "velocity"):
+                    x = self._trace_from_pressure_run(x, time, self.dt)
+                elif time == "acceleration":
+                    x = -x
+                elif time == "integral":
+                    x = torch.cumsum(self._trace_from_pressure_run(x, None, self.dt),
+                                     dim=1) * self.dt
+                elif time != "neg_acceleration":
+                    raise AssertionError(f"unknown spatial receiver time operator {time!r}")
+            elif time == "velocity":
                 x = self._trace_ddt(x, self.dt)
             elif time == "acceleration":
                 x = -self._trace_neg_d2dt2(x, self.dt)
