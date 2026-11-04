@@ -1780,7 +1780,7 @@ class SEMModelParallel:
         ``'bf16'`` (2x) or ``'int8'`` (4x, one amax scale per field and step).
         The propagator's ``bs_store_dtype_elem`` overrides it for the ELEMENT
         rings, which the elastic and fluid-solid paths carry; on the elastic
-        path they are 82% of the ring memory and quantise ~70x better than the
+        path they are 82% of the ring memory and quantise ~9x better than the
         node rings, so ``storage_dtype='fp32', bs_store_dtype_elem='int8'`` is
         the setting that actually pays there. Refused on paths that ring nodes
         only."""

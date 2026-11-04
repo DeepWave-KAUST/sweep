@@ -1087,21 +1087,27 @@ restarts from.
 **The elastic ring is coarser.** It is two rings — `u` on band nodes and six
 element-local history buffers on band ELEMENTS — and int8 keeps one amax per
 (field, step) for the first and per (field, step, *element*) for the second.
-Even so it only reaches a few percent on the gradient (measured on a
-32×16-element grid with a 5-element rim, band 82%, source outside it: bf16
-L2 2.2–4.7e-04 at cos 1.000000, int8 1.6–4.3e-02 at cos 0.9991–0.9999).
+Even so int8 lands about 8× above bf16 on the gradient (measured on a
+32×16-element model with a 5-element C-PML rim added outside it, band 59% of
+the nodes, source outside it: bf16 L2 0.9–2.6e-04 at cos 1.000000, int8
+1.0–2.0e-03 at cos 0.999998–0.999999).
 **Prefer `bfloat16` on the elastic path**, or better, split the two ring
 families — see below.
 
 Where that cost sits is worth knowing, because it is not spread evenly.
-Quantising one ring family at a time (in Python, against the same amax
-contract — it reproduces the real int8 number to three digits) gives:
+Quantising one ring family at a time to int8, the other kept fp32, gives:
 
 | family quantised | vp | vs | rho |
 |---|---|---|---|
-| the two `u` NODE rings | 2.5e-02 | 4.3e-02 | 1.6e-02 |
-| all six ELEMENT rings | 3.6e-04 | 1.6e-04 | 2.5e-04 |
-| everything | 2.5e-02 | 4.3e-02 | 1.6e-02 |
+| the two `u` NODE rings | 2.0e-03 | 1.4e-03 | 1.0e-03 |
+| all six ELEMENT rings | 2.3e-04 | 5.5e-05 | 1.1e-04 |
+| everything | 2.0e-03 | 1.4e-03 | 1.0e-03 |
+
+These are model gradients. Most of the `u` rings' error never reaches them:
+it lands on the gradient of the absorbing layer, which sits outside the
+model and is not returned. Over the whole mesh, layer included, all-int8
+sits ~120× above element-only int8 (2.9e-02 / 4.7e-02 / 1.7e-02 against
+3.9e-04 / 1.6e-04 / 2.9e-04), not ~9×.
 
 So the whole cost is the `u` rings — which are only **18%** of the ring
 memory, the six element rings being the other 82%. That is what
@@ -1118,15 +1124,15 @@ the three material gradients against the fp32 ring):
 
 | store | peak | gradient |
 |---|---|---|
-| save-all tape | 326 MB | — |
-| fp32 ring | 266 MB | — |
-| all bf16 | 140 MB | 4.7e-04 |
-| all int8 | 89 MB | 4.3e-02 |
-| nodes fp32, elements int8 | 123 MB | 3.6e-04 |
-| **nodes bf16, elements int8** | **100 MB** | **5.6e-04** |
+| save-all tape | 681 MB | — |
+| fp32 ring | 411 MB | — |
+| all bf16 | 224 MB | 2.6e-04 |
+| all int8 | 143 MB | 2.0e-03 |
+| nodes fp32, elements int8 | 194 MB | 2.3e-04 |
+| **nodes bf16, elements int8** | **160 MB** | **3.4e-04** |
 
 The last row is the one to use on this path: 12% more memory than all-int8
-for 77× the accuracy, and 29% less than all-bf16 at the same accuracy. The
+for 6× the accuracy, and 29% less than all-bf16 at 1.3× its error. The
 flag is refused on paths that ring nodes only, rather than silently doing
 nothing. Read the split as `u` being inside the
 march recursion (`march_fin` injects it, `march_asm` reads it back to

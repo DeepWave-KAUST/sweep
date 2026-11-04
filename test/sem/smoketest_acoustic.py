@@ -1,7 +1,8 @@
 """Visual + numerical smoketest for the SEM acoustic 2-D PoC.
 
-Runs a Ricker source in a uniform vp medium, with Stacey absorbing on
-left/right/bottom and free top. Saves:
+Runs a Ricker source in a uniform vp medium in a bare SEM box: free
+(pressure-release) top, reflecting left/right/bottom, no absorbing
+boundary. Saves:
   - snapshot grid (PNG) showing the wave at several times
   - one trace at a receiver to inspect the time series
 
@@ -18,7 +19,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from sweep.sem import AcousticSEM2D, SEMPropagator, build_quad4_mesh
+from sweep.sem import (AcousticSEM2D, SEMPropagator, build_quad4_mesh,
+                       gll_nodes_weights)
 
 
 def ricker(t: torch.Tensor, f0: float, delay: float) -> torch.Tensor:
@@ -65,8 +67,11 @@ def main(out_dir: str):
 
     prop = SEMPropagator.build(eq, dt=dt, nt=nt,
                                source_xz=src_xz, receiver_xz=rec_xz)
-    print(f"CFL estimate (informational): dt_max ≈ {prop.cfl_estimate():.4g} s, "
-          f"chosen dt = {dt}")
+    # Courant number on the smallest GLL spacing (N=4 limit ~0.4-0.5).
+    xi, _ = gll_nodes_weights(mesh.n_order)
+    dx_min = float((xi[1:] - xi[:-1]).min()) * min(mesh.dx_e, mesh.dz_e) / 2.0
+    print(f"Courant (informational): vp*dt/dx_min = "
+          f"{vp_const * dt / dx_min:.3f}, chosen dt = {dt}")
 
     seis_t, snaps_t = prop.forward(src, record_field_every=50)
     seis = seis_t[..., 0].T.numpy()                         # (n_rec, nt)

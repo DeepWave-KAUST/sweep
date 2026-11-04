@@ -231,7 +231,7 @@ def main():
     #    can SEE how each backend's BC accumulates reflections. With
     #    domain 1000×750 m and c=2000 m/s, a wave from centre reaches the
     #    nearest boundary at ~0.18 s and returns at ~0.36 s; long-time
-    #    samples reveal Stacey vs CPML leakage.
+    #    samples reveal each backend's C-PML leakage.
     target_t = np.array([0.10, 0.20, 0.40, 0.70, 1.00, 1.40, 1.80, 2.20])
     nearest = []
     for tt in target_t:
