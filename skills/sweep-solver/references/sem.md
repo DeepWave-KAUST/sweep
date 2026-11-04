@@ -78,6 +78,8 @@ the FD classes. `models=` per class: `api-signatures.md`.
 | `ElasticVSSEM3DDeformed` | hex27 | `vp, vs, rho` | no | yes | 3-D elastic, topography + absorbing |
 | `ElasticVTISEM2DDeformed` | quad9 | `vp, vs, rho, epsilon, delta` | no | yes | VTI |
 | `ElasticTTISEM2DDeformed` | quad9 | `vp, vs, rho, epsilon, delta, theta` | no | yes | TTI: the VTI medium tilted by `theta` (radians, the FD `ElasticTTI2nd`'s tilt) |
+| `ElasticVTISEM3D` / `ElasticVTISEM3DDeformed` | hex8 / hex27 | `vp, vs, rho, epsilon, delta, gamma` | no | yes | 3-D VTI (Thomsen) |
+| `ElasticTTISEM3D` / `ElasticTTISEM3DDeformed` | hex8 / hex27 | `vp, vs, rho, epsilon, delta, gamma, theta, phi` | no | yes | 3-D TTI: tilt `theta`, azimuth `phi` (radians), the FD `ElasticTTISG3D`'s parameters; 21 stiffnesses |
 | `ViscoElasticVSSEM2DDeformed` | quad9 | `vp, vs, rho, Qp, Qs` | no | yes | GSLS attenuation; `f_ref`, `f_band`, `n_sls` via `equation_options`; no boundary saving |
 | `ViscoElasticVSSEM3D` | hex8 | `vp, vs, rho, Qp, Qs` | no | yes | 3-D GSLS attenuation, flat; options as the 2-D class; no boundary saving |
 | `ViscoElasticVSSEM3DDeformed` | hex27 | `vp, vs, rho, Qp, Qs` | no | yes | 3-D GSLS attenuation with topography + absorbing |

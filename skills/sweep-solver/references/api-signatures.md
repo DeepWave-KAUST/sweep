@@ -207,10 +207,14 @@ __call__(wavelet, sources, receivers, models=None, **kw)
 | `ElasticSEM3DDeformed` | `['vp', 'vs', 'rho']` |
 | `ElasticSHSEM2DDeformed` | `['vs', 'rho']` |
 | `ElasticTTISEM2DDeformed` | `['vp', 'vs', 'rho', 'epsilon', 'delta', 'theta']` |
+| `ElasticTTISEM3D` | `['vp', 'vs', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']` |
+| `ElasticTTISEM3DDeformed` | `['vp', 'vs', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']` |
 | `ElasticVSSEM2DDeformed` | `['vp', 'vs', 'rho']` |
 | `ElasticVSSEM3D` | `['vp', 'vs', 'rho']` |
 | `ElasticVSSEM3DDeformed` | `['vp', 'vs', 'rho']` |
 | `ElasticVTISEM2DDeformed` | `['vp', 'vs', 'rho', 'epsilon', 'delta']` |
+| `ElasticVTISEM3D` | `['vp', 'vs', 'rho', 'epsilon', 'delta', 'gamma']` |
+| `ElasticVTISEM3DDeformed` | `['vp', 'vs', 'rho', 'epsilon', 'delta', 'gamma']` |
 | `ViscoAcousticPotentialSEM2D` | `['vp', 'Qk']` |
 | `ViscoBiotVSSEM2DDeformed` | `['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b', 'Qp', 'Qs']` |
 | `ViscoElasticSEM2DDeformed` | `['vp', 'vs', 'rho', 'Qk', 'Qmu']` |

@@ -117,4 +117,15 @@ receivers of a marine survey. The
 
     [:material-notebook-outline: Open notebook](../../notebooks/59_sem_visco_elastic3d.ipynb)
 
+-   ![SEM anisotropy in 3-D](../../figures/gallery/60_sem_tti3d.png){ loading=lazy }
+
+    **Anisotropy in 3-D**
+
+    ---
+
+    `ElasticVTISEM3D` and `ElasticTTISEM3D`: the wavefronts of a point force in a VTI
+    and a tilted medium, and a shear wave splitting across a horizontal symmetry axis.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/60_sem_tti3d.ipynb)
+
 </div>

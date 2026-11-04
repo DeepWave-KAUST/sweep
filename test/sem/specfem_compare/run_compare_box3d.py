@@ -20,7 +20,13 @@ element faces and edges and on the surface.
   SPECFEM3D's ``grad(chi') / rho``, in the rock ``v``. Eliminating ``q`` leaves ``p`` the
   second-order pressure equation with the potential's stiffness, and ``-chi''`` of SPECFEM3D's
   potential obeys the same leapfrog, the coupling through the same ``v^(n+1/2)`` and ``p^n``:
-  the two are one scheme.
+  the two are one scheme;
+* a transversely isotropic rock (SPECFEM3D's ``ANISOTROPY``, its ``model_aniso.f90`` given the
+  21 stiffnesses the case generator writes): ElasticVTISEM3D and ElasticVTISEM3DDeformed (a flat
+  Hex27 mesh) for the vertical axis, ElasticTTISEM3D and ElasticTTISEM3DDeformed for the tilted
+  one, after checking that the stiffnesses they build are those (the generator's are an
+  independent numpy Bond rotation; SPECFEM3D's z up flips the eight entries with one index in
+  ``yz`` or ``xz``).
 
 SPECFEM3D's attenuation: ``sigma = C_U eps - sum_l R_l``, ``dR_l/dt = -R_l / tau_sigma_l + 2
 mu_U c_l eps_dev / tau_sigma_l`` (and ``kappa_U c_kappa_l tr(eps)`` for the bulk part), ``c_l
@@ -64,12 +70,15 @@ import torch
 
 from sweep.equations.biot_params import biot_elastic, biot_fluid
 from sweep.propagator import EagerOptions, Full
-from sweep.sem import (BiotVSSEM3DDeformed, ElasticSEM3D, ElasticVSSEM3D,
-                       ElasticVSSEM3DDeformed, PropSEM, ViscoElasticVSSEM3D)
+from sweep.sem import (BiotVSSEM3DDeformed, ElasticSEM3D, ElasticTTISEM3D,
+                       ElasticTTISEM3DDeformed, ElasticVSSEM3D, ElasticVSSEM3DDeformed,
+                       ElasticVTISEM3D, ElasticVTISEM3DDeformed, PropSEM, ViscoElasticVSSEM3D)
 from sweep.sem.equations.visco_elastic_vs3d import gsls_memory_specs3
 from sweep.sem.fields import FieldSpec
 
-CASES = ("iso3d_force", "visco3d_force", "visco3d_km_force", "sea3d_force")
+CASES = ("iso3d_force", "visco3d_force", "visco3d_km_force", "sea3d_force", "vti3d_force",
+         "tti3d_force")
+TI = (ElasticVTISEM3D, ElasticVTISEM3DDeformed, ElasticTTISEM3D, ElasticTTISEM3DDeformed)
 COMPS = ("X", "Y", "Z")
 N_SLS = 3                             # SPECFEM3D's constants.h
 
@@ -237,6 +246,9 @@ def specfem_attenuation(run, g):
 def equations(g):
     if "water" in g:
         return [BiotVSSEM3DDeformed]
+    if "aniso" in g:
+        return ([ElasticVTISEM3D, ElasticVTISEM3DDeformed] if g["aniso"]["theta"] == 0.0
+                else [ElasticTTISEM3D, ElasticTTISEM3DDeformed])
     if not g["attenuation"]:
         return [ElasticVSSEM3D, ElasticVSSEM3DDeformed, ElasticSEM3D]
     qk, qmu = g["q"]
@@ -293,6 +305,11 @@ def run_sem(g, eq, device, dtype, n_order=4):
     rec = np.array(g["receivers"])[None] / dh
     kw = {}
     models = [full(g[k]) for k in ("vp", "vs", "rho")]
+    if eq in TI:
+        an = g["aniso"]
+        models += [full(an[k]) for k in ("epsilon", "delta", "gamma")]
+        if eq in (ElasticTTISEM3D, ElasticTTISEM3DDeformed):
+            models += [full(an[k]) for k in ("theta", "phi")]
     if g["attenuation"]:
         models += [full(q) for q in g["q"]]
         kw["equation_options"] = {"f_ref": g["f0_ref"], "n_sls": N_SLS,
@@ -302,6 +319,15 @@ def run_sem(g, eq, device, dtype, n_order=4):
                    f_dominant=g["f0"], dev=device, dtype=dtype, impl="eager",
                    memory=Full(), eager_options=EagerOptions(use_compile=False),
                    source_type=["vz"], receiver_type=["vx", "vy", "vz"], **kw)
+    if eq in TI:                                # the stiffnesses the case gave SPECFEM3D
+        built = prop._build_eq(models)
+        ref = g["aniso"]["cij"]
+        scale = max(abs(v) for v in ref.values())
+        for k, v in ref.items():
+            c = getattr(built, f"_c{k}", None)
+            got = 0.0 if c is None else float(c.flatten()[0])
+            assert abs(got - v) <= 1e-13 * scale, (eq.__name__, k, got, v)
+            assert c is None or float(c.max() - c.min()) <= 1e-13 * scale
     with torch.no_grad():
         out = prop(torch.from_numpy(w).to(dtype), src, rec, models=models)[0]
     out = out.double().cpu().numpy()
@@ -341,7 +367,8 @@ def direct_window(g):
             images.append(m)
     r = np.array(g["receivers"])
     dist = np.min([np.linalg.norm(r - m, axis=1) for m in images], 0)
-    return dist / g["vp"] - 1.0 / g["f0"]
+    v = g["vp"] * math.sqrt(1.0 + 2.0 * max(0.0, g.get("aniso", {}).get("epsilon", 0.0)))
+    return dist / v - 1.0 / g["f0"]
 
 
 def main():

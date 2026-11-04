@@ -35,6 +35,18 @@ and this project adheres to
   the visco-elastic Green's function (the elastic one with the GSLS complex moduli) to
   0.7e-3 to 1.2e-3 in relative L2, where the attenuation changes the records by 12% to 47%
   (`test/sem/test_sem_visco_elastic3d.py`). Eager; no boundary saving (dissipative).
+- **`ElasticVTISEM3D`, `ElasticTTISEM3D` (and their `...Deformed` versions on Hex27):
+  transversely isotropic media on the 3-D SEM.** The velocity-stress step of `ElasticVSSEM3D`
+  with the stiffnesses of a VTI medium (`vp, vs, rho, epsilon, delta, gamma`) or of one whose
+  symmetry axis is tilted by `theta` toward the azimuth `phi` (radians): the parameters and the
+  Bond rotation of the FD `ElasticTTISG3D` (`sweep.sem.thomsen_to_cij3d`), all 21 stiffnesses
+  in the step, the C-PML, the free surface, topography and the gradients of the parent. A TTI
+  medium without tilt is the VTI step bit for bit, while the gradient in `theta` there stays the
+  rotation's, so an inversion can start from a vertical axis. An axis tilted by 90 degrees
+  toward x or y reproduces the turned VTI problem to round-off, and against SPECFEM3D's
+  anisotropic medium (its `model_aniso.f90` given the same stiffnesses) the records agree to
+  5e-14 for a vertical and a tilted axis (`test/sem/test_sem_tti3d.py`,
+  `run_compare_box3d.py`). Notebook 60: wavefronts and shear-wave splitting. Eager.
 - **The 3-D SEM against SPECFEM3D.** `test/sem/specfem_compare/run_compare_box3d.py` runs the
   3-D classes against SPECFEM3D 4.1.1 in double precision on a box with six free sides
   (`make_specfem3d_box_cases.py`: a point force, stations inside elements, on faces and edges

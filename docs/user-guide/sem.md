@@ -873,6 +873,50 @@ force and with an explosion. They need the box with free sides, because SPECFEM2
 and Stacey conditions use isotropic moduli in anisotropic elements. Against SPECFEM2D in its
 default single precision the records agree to 3-5e-5, the round-off of a 6000-step fp32 run.
 
+### Anisotropy in 3-D
+
+`ElasticVTISEM3D` and `ElasticTTISEM3D` (Hex8), with `ElasticVTISEM3DDeformed` and
+`ElasticTTISEM3DDeformed` on the Hex27 mesh of a topography, are the 3-D velocity-stress SEM
+in a transversely isotropic medium. The VTI models are `vp`, `vs` (the vertical velocities),
+`rho` and Thomsen's `epsilon`, `delta` and `gamma`; the TTI classes add the tilt `theta` of
+the symmetry axis from the vertical and its azimuth `phi` from x toward y (radians). The
+parameters and the Bond rotation are those of the FD `ElasticTTISG3D`
+(`sweep.sem.constitutive.thomsen_to_cij3d`), so at `phi = 0` the tilt is that of
+`ElasticTTISEM2DDeformed`. As in 2-D only the stress update changes: the stiffnesses (21 for
+the TTI classes, 9 for VTI) act on the six strain rates, and the time loop, the C-PML, the
+free surface, the sources and receivers and the gradients are those of `ElasticVSSEM3D`.
+
+```python
+from sweep.sem import ElasticTTISEM3DDeformed, PropSEM
+
+solver = PropSEM(ElasticTTISEM3DDeformed, shape=(nz, ny, nx), dh=10.0, dt=5e-4,
+                 topography=topo, free_surface=True, source_type=["vz"],
+                 receiver_type=["vx", "vy", "vz"])
+seis = solver(wavelet, sources, receivers,
+              models=[vp, vs, rho, epsilon, delta, gamma, theta, phi])
+```
+
+Where `|theta|` is below 1e-7 the stiffnesses are exactly the VTI ones, and a TTI medium
+without tilt runs the VTI step bit for bit. The gradient in `theta` there is still the
+rotation's, so an inversion that starts from a vertical axis can update the tilt; the FD
+class switches to the VTI entries there, which removes that gradient. The time step has to
+allow for the fastest wave, `vp sqrt(1 + 2 epsilon)` along the plane of isotropy for a
+positive `epsilon`.
+
+`test/sem/test_sem_tti3d.py` checks the isotropic limit on both meshes and the TTI class
+without tilt against the VTI class, bit for bit. It also checks an axis tilted by 90 degrees
+toward x and toward y against the VTI problem turned by the same rotation, which the cubic
+mesh maps onto itself; the records agree to round-off, which checks all 21 stiffnesses in the
+step. Further checks: the stiffnesses against `ElasticTTISG3D`'s, the gradient in the tilt at
+zero tilt against central differences, boundary saving against the full tape in a box
+without absorbing layers, a flat Hex27 mesh against Hex8, and a tilted medium in the C-PML
+over 2 s. The C-PML stretches the coordinates as for an isotropic medium; in a strongly
+anisotropic medium such a layer can become unstable, as any perfectly matched layer can, so
+long runs in such media need checking. Against SPECFEM3D's anisotropic medium, given the same
+21 stiffnesses, the records agree to 5e-14 for a vertical and for a tilted axis (see
+[Against SPECFEM3D](#against-specfem3d)). Notebook 60 shows the wavefronts and shear-wave
+splitting.
+
 ## Visco-elastic attenuation
 
 `ViscoElasticVSSEM2DDeformed` adds attenuation to `ElasticVSSEM2DDeformed` with the
@@ -1902,8 +1946,8 @@ The Biot classes discretize the poroelastic equations differently from SPECFEM2D
 `make_specfem3d_box_cases.py`:
 
 - a homogeneous rock (vp 2000, vs 1000 m/s, rho 2000 kg/m³) in a 320 m cube of 10 m Hex8
-  elements from SPECFEM3D's internal mesher, with all six sides free, or the same rock under
-  80 m of water;
+  elements from SPECFEM3D's internal mesher, with all six sides free; the same rock under
+  80 m of water; or the rock transversely isotropic;
 - a vertical point force inside an element, a 25 Hz Ricker that SPECFEM3D reads as an
   external source time function;
 - ten stations inside elements, on element faces and edges, and on the free surface;
@@ -1917,6 +1961,8 @@ as follows (relative L2 over all traces, each component scaled by its peak):
 | `ElasticVSSEM3D`, `ElasticVSSEM3DDeformed` (flat), `ElasticSEM3D` | the elastic rock | 5e-14, 5e-14, 8e-14 |
 | `ViscoElasticVSSEM3D` | Qkappa = Qmu = 30, SPECFEM3D's band (2.5 to 250 Hz, three mechanisms), the velocities read at 25 Hz (`velocities="real_modulus"`) | 3.8e-3 |
 | `ViscoElasticVSSEM3D` on SPECFEM3D's mechanisms | the same; Qkappa = 60, Qmu = 20 | 3.6e-3, 4.4e-3; 1.3e-14 with SPECFEM3D's memory update |
+| `ElasticVTISEM3D`, `ElasticVTISEM3DDeformed` (flat) | the rock transversely isotropic (`epsilon = 0.25`, `delta = 0.1`, `gamma = 0.15`), a vertical axis | 5e-14 |
+| `ElasticTTISEM3D`, `ElasticTTISEM3DDeformed` (flat) | the same medium, its axis tilted by 30° toward the azimuth 40° | 5e-14 |
 | `BiotVSSEM3DDeformed`, fluid and dry elastic regions | 80 m of water over the rock, the force in the rock: the pressure and the fluid velocity in the water, the velocity in the rock | 2e-12; 2e-3 to 5e-3 for the fluid velocity across the element faces a station sits on |
 
 On SPECFEM3D's mechanisms our class takes its relaxation times, its strengths (its simplex
@@ -1952,6 +1998,12 @@ stations inside elements agree to round-off. A station on an element face is the
 the fluid velocity, a gradient of the pressure or potential, jumps across the face.
 SPECFEM3D takes it from the element it located the station in, and ours averages the
 elements, so the component normal to that face differs by 2e-3 to 5e-3.
+
+SPECFEM3D takes an anisotropic medium from its `model_aniso.f90`, a routine its users edit,
+by the anisotropy flag of the material. The case generator writes the 21 stiffnesses of each
+case (`sweep_aniso_cij.inc`) for that routine to include; in SPECFEM3D's z-up axes the eight
+entries with one index in `yz` or `xz` change sign. The generator computes them with its own
+numpy Bond rotation, and the comparison first checks that the classes build the same ones.
 
 ## Backend parity
 

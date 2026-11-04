@@ -3,8 +3,8 @@
 These are pure point-wise tensor functions — they do not know about the SEM
 mesh, GLL nodes, or the FD grid, so the same code can (in principle) back both
 the SEM velocity-stress equations and the FD-eager constitutive step. They map
-material parameters to the 2-D plane (x, z) Voigt stiffness coefficients used by
-the velocity-stress update ``dσ = dt · C : ∇v``.
+material parameters to the Voigt stiffness coefficients used by the velocity-stress
+update ``dσ = dt · C : ∇v``: those of the 2-D plane (x, z) and the 21 of 3-D.
 """
 
 from __future__ import annotations
@@ -70,3 +70,50 @@ def thomsen_to_tti_cij(vp, vs, epsilon, delta, rho, theta):
             c11 * st2 * st2 + c33 * ct2 * ct2 + mix * s2c2,
             a * st2 * st * ct - b * st * ct2 * ct,
             (c11 + c33 - 2.0 * c13) * s2c2 + c55 * (ct2 - st2) ** 2)
+
+
+def thomsen_to_cij3d(vp, vs, epsilon, delta, gamma, rho, theta=None, phi=None):
+    """The 21 Voigt stiffnesses of a transversely isotropic medium in 3-D, in the order of the
+    FD ``ElasticTTISG3D``'s ``STIFFNESS_KEYS_3D`` (``c11, c12, ..., c66``; rows and columns
+    ``xx, yy, zz, yz, xz, xy``; z down).
+
+    The VTI medium has the vertical velocities ``vp``, ``vs`` and Thomsen's ``epsilon``,
+    ``delta``, ``gamma``::
+
+        c33 = rho vp^2,  c44 = c55 = rho vs^2,  c11 = c22 = c33 (1 + 2 epsilon),
+        c66 = c44 (1 + 2 gamma),  c12 = c11 - 2 c66,
+        c13 = c23 = sqrt(2 delta c33 (c33 - c44) + (c33 - c44)^2) - c44
+
+    (the 2-D :func:`thomsen_to_vti_cij` with ``c44``). ``theta`` (radians) tilts its symmetry
+    axis from the vertical toward the azimuth ``phi`` (radians, from x toward y): the Bond
+    rotation of ``ElasticTTISG3D`` (its ``R(theta, phi)``), which at ``phi = 0`` is the 2-D
+    :func:`thomsen_to_tti_cij`. ``theta=None`` returns the VTI entries (the twelve others
+    zero). Where ``|theta| < 1e-7`` the values are the VTI ones exactly, while the gradient stays
+    the rotation's: an inversion that starts from ``theta = 0`` still sees ``d/d theta``,
+    which the FD class's switch to the VTI entries there cuts.
+    """
+    from ..equations.elastic_tti import ElasticTTI
+    from ..equations.elastic_tti_sg3d import _KEY_TO_VOIGT, STIFFNESS_KEYS_3D, ElasticTTISG3D
+
+    c33 = rho * vp * vp
+    c44 = rho * vs * vs
+    c11 = c33 * (1.0 + 2.0 * epsilon)
+    c66 = c44 * (1.0 + 2.0 * gamma)
+    radicand = 2.0 * delta * c33 * (c33 - c44) + (c33 - c44) ** 2
+    c13 = torch.sqrt(torch.clamp(radicand, min=0.0)) - c44
+    zero = torch.zeros_like(c11)
+    vti = {"C11": c11, "C12": c11 - 2.0 * c66, "C13": c13, "C22": c11, "C23": c13,
+           "C33": c33, "C44": c44, "C55": c44, "C66": c66}
+    if theta is None:
+        return tuple(vti.get(k, zero) for k in STIFFNESS_KEYS_3D)
+    if phi is None:
+        phi = torch.zeros_like(theta)
+    rot = ElasticTTISG3D._bond_matrix_torch(ElasticTTI._bond_rotation_matrix_torch(theta, phi))
+    C = rot @ ElasticTTI._vti_voigt_torch(c11, c13, c33, c44, c66) @ rot.transpose(-1, -2)
+    flat = theta.detach().abs() < 1e-7
+    out = []
+    for k in STIFFNESS_KEYS_3D:
+        i, j = _KEY_TO_VOIGT[k]
+        v = C[..., i, j]
+        out.append(v + torch.where(flat, (vti.get(k, zero) - v).detach(), zero))
+    return tuple(out)
