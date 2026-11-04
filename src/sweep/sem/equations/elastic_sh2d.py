@@ -40,6 +40,11 @@ class ElasticSHSEM2DDeformed(AcousticPotentialSEM2D):
         FieldSpec("zeta_z", internal=True, boundary_related=True),
     ]
     derived_receiver_types: ClassVar[dict] = {"vy": ("u_y", "velocity")}
+    # a force along y, recorded as u_y: none of the potential form's PropSEM conventions
+    # (the wavelet as the pressure source, the pressure by default, the fluid's particle motion)
+    spatial_receiver_types: ClassVar[dict] = {}
+    propsem_pressure_wavelet: ClassVar[bool] = False
+    propsem_default_receiver_type: ClassVar[Optional[tuple]] = None
 
     @classmethod
     def build(cls, mesh: Quad9Mesh, vs_e, rho_e, *,
