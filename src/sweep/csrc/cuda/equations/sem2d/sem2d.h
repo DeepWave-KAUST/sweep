@@ -87,4 +87,8 @@ void fluid_solid_backward(const SemFluidSolidBackwardInputCore& in);
 void elastic_vs2d_forward(const Sem2dVsForwardInputCore& in);
 void elastic_vs2d_backward(const Sem2dVsBackwardInputCore& in);
 
+// The 2-D Biot SEM (biot2d.cu): BiotVSSEM2DDeformed and BiotAnisoPermSEM2DDeformed.
+void biot2d_forward(const Sem2dBiotForwardInputCore& in);
+void biot2d_backward(const Sem2dBiotBackwardInputCore& in);
+
 } // namespace sem2d

@@ -81,9 +81,9 @@ Spectral element (sweep.sem, run with PropSEM):
   AcousticSEM2DDeformed        quad9 2-D, topography  ['vp']                                                              no             no
   AcousticSEM3D                hex8 3-D               ['vp']                                                              yes            yes
   AcousticSEM3DDeformed        hex27 3-D, topography  ['vp']                                                              yes            yes
-  BiotAnisoPermSEM2DDeformed   quad9 2-D, topography  ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b_xx', 'b_xz', 'b_zz']  no             no
-  BiotVSSEM2DDeformed          quad9 2-D, topography  ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']                     no             no
-  BiotVSSEM3DDeformed          hex27 3-D, topography  ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']                     no             no
+  BiotAnisoPermSEM2DDeformed   quad9 2-D, topography  ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b_xx', 'b_xz', 'b_zz']  yes            yes
+  BiotVSSEM2DDeformed          quad9 2-D, topography  ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']                     yes            yes
+  BiotVSSEM3DDeformed          hex27 3-D, topography  ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b']                     yes            yes
   ElasticSEM2D                 quad4 2-D              ['vp', 'vs', 'rho']                                                 no             no
   ElasticSEM2DDeformed         quad9 2-D, topography  ['vp', 'vs', 'rho']                                                 yes            yes
   ElasticSEM3D                 hex8 3-D               ['vp', 'vs', 'rho']                                                 yes            yes
@@ -99,7 +99,7 @@ Spectral element (sweep.sem, run with PropSEM):
   ElasticVTISEM3D              hex8 3-D               ['vp', 'vs', 'rho', 'epsilon', 'delta', 'gamma']                    yes            yes
   ElasticVTISEM3DDeformed      hex27 3-D, topography  ['vp', 'vs', 'rho', 'epsilon', 'delta', 'gamma']                    yes            yes
   ViscoAcousticPotentialSEM2D  quad9 2-D, topography  ['vp', 'Qk']                                                        no             no
-  ViscoBiotVSSEM2DDeformed     quad9 2-D, topography  ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b', 'Qp', 'Qs']         no             no
+  ViscoBiotVSSEM2DDeformed     quad9 2-D, topography  ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b', 'Qp', 'Qs']         yes            yes
   ViscoElasticSEM2DDeformed    quad9 2-D, topography  ['vp', 'vs', 'rho', 'Qk', 'Qmu']                                    no             no
   ViscoElasticVSSEM2DDeformed  quad9 2-D, topography  ['vp', 'vs', 'rho', 'Qp', 'Qs']                                     yes            yes
   ViscoElasticVSSEM3D          hex8 3-D               ['vp', 'vs', 'rho', 'Qp', 'Qs']                                     yes            yes

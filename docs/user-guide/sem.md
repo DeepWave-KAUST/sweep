@@ -225,7 +225,7 @@ faster backend: in the table the fastest eager configuration takes 1.4–2.9× a
 long per forward step, and 1.5–2.8× as long per forward + backward step as
 `impl='c'` with `BoundarySaving()` (1.8–5.5× against `Full()`). `impl='eager'`
 runs everything else: the equations without CUDA kernels
-(`AcousticSEM2DDeformed`, `ElasticSHSEM2DDeformed` and the Biot forms), the CPU, fp64,
+(`AcousticSEM2DDeformed` and `ElasticSHSEM2DDeformed`), the CPU, fp64,
 [wavefield snapshots](#wavefield-snapshots) and second derivatives
 (`create_graph=True` with `Full()`). On a GPU, its defaults — the compiled
 step and `Ckpt(chunks=8)` — are its fastest configuration for single shots, at
@@ -1391,6 +1391,29 @@ families of Morency, Luo & Tromp (2009) that SPECFEM2D writes its kernels
 in -- `"primary"`, `"density"` (density-normalised) and `"wavespeed"` -- and
 turns a coefficient gradient into a family's kernels by the exact chain rule
 (`biot_family_kernels`).
+
+### On CUDA
+
+`BiotVSSEM2DDeformed`, `BiotAnisoPermSEM2DDeformed` and `ViscoBiotVSSEM2DDeformed` (its GSLS
+frame memories in the stress kernel, as for the visco-elastic classes) run on `impl='c'` (two
+core entries,
+`sem2d_biot_forward` / `_backward`): the same step as eager in one kernel per sub-step --
+the injected pressure and its pin, the strong pressure gradient, the stress divergence, the
+flux copies of every node advanced together with the drag's exact step (the eager class's
+`drag_operators`, whose matrix exponentials autograd differentiates), the frame stress and the
+weak flux divergence, the fluid-solid interface, the viscous memory and the C-PML on every
+derivative -- and the transposes of each. Records of all eight receiver fields and the
+gradients in every coefficient agree with eager to the two backends' run-to-run rounding,
+for every kind of source, with the C-PML or an open-pore surface, through water, porous and
+dry regions, with the viscous memory and with a drag tensor
+(`test/sem/test_sem_c_biot2d.py`). The adjoint checkpoints in chunks, PropSEM's default there,
+as for the velocity-stress classes. On an A100, a layered porous rock on 201 × 401 for 2000
+steps (order 4, forward and backward) took 1.58 s and 6.1 GB, against 7.00 s and 5.7 GB with
+eager's defaults. `BiotVSSEM3DDeformed` runs the same step with y (`sem3d_biot_forward` /
+`_backward`); its flux copies go in groups of their number (1 inside an element, 2 on a face,
+4 on an edge, 8 at a corner), one launch per group, with the eager class's blocks of the drag
+step. It agrees with eager the same way (`test/sem/test_sem_c_biot3d.py`, the fluid-solid faces
+included); on 41³ for 600 steps it took 1.04 s and 2.4 GB against 4.20 s and 4.5 GB.
 
 ### Validation
 

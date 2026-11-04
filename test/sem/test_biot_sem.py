@@ -491,12 +491,17 @@ def test_pressure_flux_and_stress_receivers_on_shots_and_snapshots():
     torch.testing.assert_close(seis, one[:1], rtol=0, atol=0)
 
 
-def test_boundary_saving_and_cuda_are_refused():
+def test_boundary_saving_is_refused_and_cuda_routes():
     from sweep.propagator.options import BoundarySaving
+    from sweep.sem.prop_c import C_SUPPORTED, _C_ROUTES
     with pytest.raises(NotImplementedError, match="no boundary saving"):
         _small(memory=BoundarySaving())
-    with pytest.raises(NotImplementedError, match="no CUDA kernel"):
-        _small(impl="c")
+    # each 2-D Biot class has its own row on the CUDA dispatch (impl='c' against eager:
+    # test_sem_c_biot2d.py)
+    from sweep.sem import ViscoBiotVSSEM2DDeformed
+    for cls in (BiotVSSEM2DDeformed, BiotAnisoPermSEM2DDeformed, ViscoBiotVSSEM2DDeformed):
+        assert cls in C_SUPPORTED
+        assert next(k for k, _, _ in _C_ROUTES if issubclass(cls, k)) is cls
 
 
 def test_source_vector_takes_one_entry_per_source_field():

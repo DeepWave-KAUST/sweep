@@ -82,13 +82,34 @@ _MODEL_VALUES = {"vp": VP, "vs": VS, "rho": RHO, "epsilon": 0.2, "delta": 0.1,
                  "gamma": 0.15, "theta": 0.4, "phi": 0.6, "Qp": 40.0, "Qs": 30.0}
 
 
+def _biot_values():
+    """A porous sandstone's Biot coefficients (and a drag tensor's three entries). The
+    permeability is high enough for the relative flow to matter: at kappa = 1e-12 the drag
+    locks the flux over a step (exp(-gamma dt) underflows fp32) and the gradient in m is
+    ~1e-19 -- fp32 noise on both backends (240% off float64 on each)."""
+    from sweep.equations.biot import biot_from_rock
+    c = [float(x) for x in biot_from_rock(k_s=36e9, rho_s=2650.0, k_f=2.25e9, rho_f=1000.0,
+                                          eta=1e-3, k_d=9e9, mu=7e9, phi=0.2, kappa=1e-10,
+                                          tortuosity=2.0)]
+    out = dict(zip(("H", "mu_b", "C", "M", "rho_b", "rho_f", "m", "b"), c))
+    out.update(b_xx=c[7], b_xz=0.3 * c[7], b_zz=2.0 * c[7], Qp=40.0, Qs=30.0)
+    return out
+
+
+_BIOT_VALUES = _biot_values()
+
+
 def _model_names(cls):
     from sweep.sem.prop_base import propsem_models
     return propsem_models(cls)
 
 
 def _models(cls, shape, grad):
-    vals = [_MODEL_VALUES[n] for n in _model_names(cls)]
+    names = _model_names(cls)
+    if "M" in names:                          # Biot: its own mu and rho
+        vals = [_BIOT_VALUES.get({"mu": "mu_b", "rho": "rho_b"}.get(n, n)) for n in names]
+    else:
+        vals = [_MODEL_VALUES[n] for n in names]
     out = [torch.full(shape, v, device="cuda") for v in vals]
     return [m.clone().requires_grad_(True) for m in out] if grad else out
 
@@ -237,7 +258,10 @@ def test_both_backends_produce_the_same_shape(cls):
     # ncomp is the equation's receiver-capable field count, NOT ndim: the
     # fluid-solid form records (chi, u_x, u_z) = 3 components in 2-D. This
     # assert used ndim and broke the day that equation became routable.
-    ncomp = sum(f.supports_receiver for f in cls.field_specs)
+    # (Biot's default receiver_type is (v_x, v_z), not its eight receiver fields)
+    default = getattr(cls, "default_receiver_type", None)
+    ncomp = (len(default) if default is not None
+             else sum(f.supports_receiver for f in cls.field_specs))
     assert c.shape[-1] == ncomp
 
 

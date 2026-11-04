@@ -86,9 +86,9 @@ the FD classes. `models=` per class: `api-signatures.md`.
 | `ViscoElasticVSSEM3DDeformed` | hex27 | `vp, vs, rho, Qp, Qs` | yes | yes | 3-D GSLS attenuation with topography + absorbing |
 | `ViscoElasticSEM2DDeformed` | quad9 | `vp, vs, rho, Qk, Qmu` | no | yes | SPECFEM2D's visco-elastic displacement scheme (its defaults: `vp`, `vs` unrelaxed) and visco-elastic C-PML; `fit="nonlinear"` (its `USE_SOLVOPT`); no boundary saving |
 | `AcousticElasticSEM2D` | quad9 | `vp, vs, rho` | yes | yes | coupled fluid-solid (ocean over seabed); records `p, vx, vz` (default) or `chi, u_x, u_z` |
-| `BiotVSSEM2DDeformed`, `BiotAnisoPermSEM2DDeformed` | quad9 | Biot set | no | yes | poroelastic; no boundary saving |
-| `ViscoBiotVSSEM2DDeformed` | quad9 | Biot set + `Qp, Qs` | no | yes | Biot with a GSLS frame; no boundary saving |
-| `BiotVSSEM3DDeformed` | hex27 | Biot set | no | yes | 3-D Biot (fluid and dry regions, isotropic drag); no boundary saving |
+| `BiotVSSEM2DDeformed`, `BiotAnisoPermSEM2DDeformed` | quad9 | Biot set | yes | yes | poroelastic; no boundary saving |
+| `ViscoBiotVSSEM2DDeformed` | quad9 | Biot set + `Qp, Qs` | yes | yes | Biot with a GSLS frame; no boundary saving |
+| `BiotVSSEM3DDeformed` | hex27 | Biot set | yes | yes | 3-D Biot (fluid and dry regions, isotropic drag); no boundary saving |
 
 ## 5. Sources and receivers
 

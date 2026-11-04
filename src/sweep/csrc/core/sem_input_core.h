@@ -1121,6 +1121,210 @@ struct Sem2dVsBackwardInputCore {
     int t1 = 0;
 };
 
+struct Sem2dBiotForwardInputCore {
+    Buf ibool;   // (E, ngll^2)
+    Buf D;
+    Buf wJ;
+    Buf ixx;
+    Buf ixz;
+    Buf iex;
+    Buf iez;
+    Buf qmask;   // (E,) 1 where there is a pore fluid
+    Buf inv_M;   // (n_global,) masked inverse masses
+    Buf inv_Mp;
+    Buf inv_M1;
+    Buf inv_Mm;
+    Buf pin_n;   // (n_global,) 0 on the open-pore nodes, else 1
+    Buf lam_d;   // (E, ngll^2) drained lambda, mu, C / M
+    Buf mu;
+    Buf alpha;
+    Buf slot_elem;   // (n_global * kmax,) int32
+    Buf wr;   // (n_global, kmax)
+    Buf share;
+    Buf dragE;   // (n_global, K, K), K = kmax (2 kmax tensor)
+    Buf dragP;
+    Buf b_xx;   // (E, ngll^2) relaxed drag (viscous memory)
+    Buf b_xz;
+    Buf b_zz;
+    Buf a_x;   // C-PML (a_n (4, n_global)); empty = bare
+    Buf b_x;
+    Buf a_z;
+    Buf b_z;
+    Buf a_n;
+    Buf dirichlet_idx;   // (k,) int64
+    Buf ifc_idx;   // interface points; empty = none
+    Buf ifc_w;
+    Buf ifc_nx;
+    Buf ifc_nz;
+    Buf pat_vx;
+    Buf pat_vz;
+    Buf pat_p;
+    Buf pat_qx;
+    Buf pat_qz;
+    Buf wavelet;
+    Buf rec_G;   // (n_rec, ngll^2): node / element-node ids
+    Buf rec_W;
+    Buf rec_Ge;
+    Buf seis;   // (8, n_rec, nt): vx vz p qx qz sxx szz sxz
+    Buf vx;   // state
+    Buf vz;
+    Buf p;
+    Buf q;
+    Buf sig;
+    Buf r;
+    Buf mp;   // C-PML memories (empty = bare)
+    Buf mv;
+    Buf msig;
+    Buf mq;
+    Buf Rx;   // scratch
+    Buf Rz;
+    Buf P;
+    Buf Pq;
+    Buf gp;
+    Buf f;
+    Buf adiv;
+    Buf divq;
+    Buf dp;
+    Buf save_f;   // histories (OPTIONAL)
+    Buf save_qs;
+    Buf save_rs;
+    Buf save_rhs;
+    Buf save_gv;
+    Buf save_q;
+    double dt = 0.0;   // viscous memory: r <- decay r + gain B q
+    double decay = 1.0;
+    double gain = 0.0;
+    int nt = 0;
+    int ngll = 0;
+    int n_elements = 0;
+    int n_global = 0;
+    int n_rec = 0;
+    int ndim = 2;
+    int batch = 1;
+    int kmax = 0;
+    int tensor_drag = 0;
+    int velocity_mode = 0;
+    int viscous = 0;
+    int nsls = 0;
+    Buf ptau;
+    Buf mtau;
+    Buf gsls_w;
+    Buf rmem;
+    int t0 = 0;
+    int t1 = 0;
+};
+
+struct Sem2dBiotBackwardInputCore {
+    Buf ibool;
+    Buf D;
+    Buf wJ;
+    Buf ixx;
+    Buf ixz;
+    Buf iex;
+    Buf iez;
+    Buf qmask;
+    Buf inv_M;
+    Buf inv_Mp;
+    Buf inv_M1;
+    Buf inv_Mm;
+    Buf pin_n;
+    Buf lam_d;
+    Buf mu;
+    Buf alpha;
+    Buf slot_elem;
+    Buf wr;
+    Buf share;
+    Buf dragE;
+    Buf dragP;
+    Buf b_xx;
+    Buf b_xz;
+    Buf b_zz;
+    Buf a_x;
+    Buf b_x;
+    Buf a_z;
+    Buf b_z;
+    Buf a_n;
+    Buf dirichlet_idx;
+    Buf ifc_idx;
+    Buf ifc_w;
+    Buf ifc_nx;
+    Buf ifc_nz;
+    Buf pat_vx;
+    Buf pat_vz;
+    Buf pat_p;
+    Buf pat_qx;
+    Buf pat_qz;
+    Buf wavelet;
+    Buf rec_G;
+    Buf rec_W;
+    Buf rec_Ge;
+    Buf grad_seis;   // (8, n_rec, nt) upstream
+    Buf save_f;
+    Buf save_qs;
+    Buf save_rs;
+    Buf save_rhs;
+    Buf save_gv;
+    Buf save_q;
+    Buf lvx;
+    Buf lvz;
+    Buf lp;
+    Buf lq;
+    Buf lsig;
+    Buf lr;
+    Buf lmp;
+    Buf lmv;
+    Buf lmsig;
+    Buf lmq;
+    Buf lRx;
+    Buf lRz;
+    Buf lP;
+    Buf lPq;
+    Buf lf;
+    Buf ldp;
+    Buf ldivq;
+    Buf lgp;
+    Buf lgv;
+    Buf lg;
+    Buf grad_inv_M;
+    Buf grad_inv_Mp;
+    Buf grad_inv_M1;
+    Buf grad_inv_Mm;
+    Buf grad_lam_d;
+    Buf grad_mu;
+    Buf grad_alpha;
+    Buf grad_wr;
+    Buf grad_share;
+    Buf grad_dragE;
+    Buf grad_dragP;
+    Buf grad_b_xx;
+    Buf grad_b_xz;
+    Buf grad_b_zz;
+    Buf grad_wavelet;
+    double dt = 0.0;
+    double decay = 1.0;
+    double gain = 0.0;
+    int nt = 0;
+    int ngll = 0;
+    int n_elements = 0;
+    int n_global = 0;
+    int n_rec = 0;
+    int ndim = 2;
+    int batch = 1;
+    int kmax = 0;
+    int tensor_drag = 0;
+    int velocity_mode = 0;
+    int viscous = 0;
+    int nsls = 0;
+    Buf ptau;
+    Buf mtau;
+    Buf gsls_w;
+    Buf lrmem;
+    Buf grad_ptau;
+    Buf grad_mtau;
+    int t0 = 0;
+    int t1 = 0;
+};
+
 struct Sem3dForwardInputCore {
     Buf ibool;   // (E, ngll^3) int64, flattened (kz,ky,kx)
     Buf D;   // (ngll, ngll) f32
@@ -1796,6 +2000,230 @@ struct Sem3dVsBackwardInputCore {
     int t1 = 0;
 };
 
+struct Sem3dBiotForwardInputCore {
+    Buf ibool;   // (E, ngll^3)
+    Buf D;
+    Buf wJ;
+    Buf ixx;
+    Buf ixy;
+    Buf ixz;
+    Buf iex;
+    Buf iey;
+    Buf iez;
+    Buf igx;
+    Buf igy;
+    Buf igz;
+    Buf qmask;   // (E,)
+    Buf inv_M;   // (n_global,)
+    Buf inv_Mp;
+    Buf inv_M1;
+    Buf inv_Mm;
+    Buf pin_n;
+    Buf lam_d;   // (E, ngll^3)
+    Buf mu;
+    Buf alpha;
+    Buf b;
+    Buf perm;   // (E ngll^3,), (n_global,) int32
+    Buf node_order;
+    Buf wr;   // (E ngll^3,) in perm order
+    Buf share;
+    Buf dragE;   // the groups' blocks, flattened
+    Buf dragP;
+    Buf a_x;   // C-PML (a_n (6, n_global)); empty = bare
+    Buf b_x;
+    Buf a_y;
+    Buf b_y;
+    Buf a_z;
+    Buf b_z;
+    Buf a_n;
+    Buf dirichlet_idx;   // (k,) int64
+    Buf ifc_idx;   // interface points; empty = none
+    Buf ifc_w;
+    Buf ifc_nx;
+    Buf ifc_ny;
+    Buf ifc_nz;
+    Buf pat_vx;
+    Buf pat_vy;
+    Buf pat_vz;
+    Buf pat_p;
+    Buf pat_qx;
+    Buf pat_qy;
+    Buf pat_qz;
+    Buf wavelet;
+    Buf rec_G;   // (n_rec, ngll^3)
+    Buf rec_W;
+    Buf rec_Ge;
+    Buf seis;   // (13, n_rec, nt): v xyz, p, q xyz, sig x6
+    Buf vx;   // state: q (3, Em), sig (6, Em), r (3, Em)
+    Buf vy;
+    Buf vz;
+    Buf p;
+    Buf q;
+    Buf sig;
+    Buf r;
+    Buf mp;   // C-PML: (3, Em), (9, Em), (9, ng), (3, ng)
+    Buf mv;
+    Buf msig;
+    Buf mq;
+    Buf Rx;   // scratch
+    Buf Ry;
+    Buf Rz;
+    Buf P;
+    Buf Pq;
+    Buf gp;
+    Buf f;
+    Buf adiv;
+    Buf divq;
+    Buf dp;
+    Buf save_f;   // histories (OPTIONAL)
+    Buf save_qs;
+    Buf save_rs;
+    Buf save_rhs;
+    Buf save_gv;
+    Buf save_q;
+    double dt = 0.0;
+    double decay = 1.0;
+    double gain = 0.0;
+    int nt = 0;
+    int ngll = 0;
+    int n_elements = 0;
+    int n_global = 0;
+    int n_rec = 0;
+    int ndim = 3;
+    int batch = 1;
+    int velocity_mode = 0;
+    int viscous = 0;
+    int g0_k = 0;
+    int g0_n = 0;
+    int g1_k = 0;
+    int g1_n = 0;
+    int g2_k = 0;
+    int g2_n = 0;
+    int g3_k = 0;
+    int g3_n = 0;
+    int t0 = 0;
+    int t1 = 0;
+};
+
+struct Sem3dBiotBackwardInputCore {
+    Buf ibool;
+    Buf D;
+    Buf wJ;
+    Buf ixx;
+    Buf ixy;
+    Buf ixz;
+    Buf iex;
+    Buf iey;
+    Buf iez;
+    Buf igx;
+    Buf igy;
+    Buf igz;
+    Buf qmask;
+    Buf inv_M;
+    Buf inv_Mp;
+    Buf inv_M1;
+    Buf inv_Mm;
+    Buf pin_n;
+    Buf lam_d;
+    Buf mu;
+    Buf alpha;
+    Buf b;
+    Buf perm;
+    Buf node_order;
+    Buf wr;
+    Buf share;
+    Buf dragE;
+    Buf dragP;
+    Buf a_x;
+    Buf b_x;
+    Buf a_y;
+    Buf b_y;
+    Buf a_z;
+    Buf b_z;
+    Buf a_n;
+    Buf dirichlet_idx;
+    Buf ifc_idx;
+    Buf ifc_w;
+    Buf ifc_nx;
+    Buf ifc_ny;
+    Buf ifc_nz;
+    Buf pat_vx;
+    Buf pat_vy;
+    Buf pat_vz;
+    Buf pat_p;
+    Buf pat_qx;
+    Buf pat_qy;
+    Buf pat_qz;
+    Buf wavelet;
+    Buf rec_G;
+    Buf rec_W;
+    Buf rec_Ge;
+    Buf grad_seis;   // (13, n_rec, nt) upstream
+    Buf save_f;
+    Buf save_qs;
+    Buf save_rs;
+    Buf save_rhs;
+    Buf save_gv;
+    Buf save_q;
+    Buf lvx;
+    Buf lvy;
+    Buf lvz;
+    Buf lp;
+    Buf lq;
+    Buf lsig;
+    Buf lr;
+    Buf lmp;
+    Buf lmv;
+    Buf lmsig;
+    Buf lmq;
+    Buf lRx;
+    Buf lRy;
+    Buf lRz;
+    Buf lP;
+    Buf lPq;
+    Buf lf;
+    Buf ldp;
+    Buf ldivq;
+    Buf lgp;
+    Buf lgv;
+    Buf lg;
+    Buf grad_inv_M;
+    Buf grad_inv_Mp;
+    Buf grad_inv_M1;
+    Buf grad_inv_Mm;
+    Buf grad_lam_d;
+    Buf grad_mu;
+    Buf grad_alpha;
+    Buf grad_b;
+    Buf grad_wr;
+    Buf grad_share;
+    Buf grad_dragE;
+    Buf grad_dragP;
+    Buf grad_wavelet;
+    double dt = 0.0;
+    double decay = 1.0;
+    double gain = 0.0;
+    int nt = 0;
+    int ngll = 0;
+    int n_elements = 0;
+    int n_global = 0;
+    int n_rec = 0;
+    int ndim = 3;
+    int batch = 1;
+    int velocity_mode = 0;
+    int viscous = 0;
+    int g0_k = 0;
+    int g0_n = 0;
+    int g1_k = 0;
+    int g1_n = 0;
+    int g2_k = 0;
+    int g2_n = 0;
+    int g3_k = 0;
+    int g3_n = 0;
+    int t0 = 0;
+    int t1 = 0;
+};
+
 #include <type_traits>
 // These cross the C boundary (core/capi.h): plain memory, no std:: members.
 static_assert(std::is_standard_layout<SemForwardInputCore>::value, "SemForwardInputCore crosses the C boundary");
@@ -1810,6 +2238,8 @@ static_assert(std::is_standard_layout<SemElasticCpmlBackwardInputCore>::value, "
 static_assert(std::is_standard_layout<SemElasticBackwardInputCore>::value, "SemElasticBackwardInputCore crosses the C boundary");
 static_assert(std::is_standard_layout<Sem2dVsForwardInputCore>::value, "Sem2dVsForwardInputCore crosses the C boundary");
 static_assert(std::is_standard_layout<Sem2dVsBackwardInputCore>::value, "Sem2dVsBackwardInputCore crosses the C boundary");
+static_assert(std::is_standard_layout<Sem2dBiotForwardInputCore>::value, "Sem2dBiotForwardInputCore crosses the C boundary");
+static_assert(std::is_standard_layout<Sem2dBiotBackwardInputCore>::value, "Sem2dBiotBackwardInputCore crosses the C boundary");
 static_assert(std::is_standard_layout<Sem3dForwardInputCore>::value, "Sem3dForwardInputCore crosses the C boundary");
 static_assert(std::is_standard_layout<Sem3dBackwardInputCore>::value, "Sem3dBackwardInputCore crosses the C boundary");
 static_assert(std::is_standard_layout<Sem3dCpmlForwardInputCore>::value, "Sem3dCpmlForwardInputCore crosses the C boundary");
@@ -1818,3 +2248,5 @@ static_assert(std::is_standard_layout<Sem3dElasticForwardInputCore>::value, "Sem
 static_assert(std::is_standard_layout<Sem3dElasticBackwardInputCore>::value, "Sem3dElasticBackwardInputCore crosses the C boundary");
 static_assert(std::is_standard_layout<Sem3dVsForwardInputCore>::value, "Sem3dVsForwardInputCore crosses the C boundary");
 static_assert(std::is_standard_layout<Sem3dVsBackwardInputCore>::value, "Sem3dVsBackwardInputCore crosses the C boundary");
+static_assert(std::is_standard_layout<Sem3dBiotForwardInputCore>::value, "Sem3dBiotForwardInputCore crosses the C boundary");
+static_assert(std::is_standard_layout<Sem3dBiotBackwardInputCore>::value, "Sem3dBiotBackwardInputCore crosses the C boundary");

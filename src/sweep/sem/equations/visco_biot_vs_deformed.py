@@ -13,7 +13,8 @@ The memories are element-local, as the total stress is, and enter its frame part
 
 In a dry solid (``M = 0``) the class is ViscoElasticVSSEM2DDeformed to round-off, which is how
 it is checked against SPECFEM2D; element arrays of ``Q = inf`` give BiotVSSEM2DDeformed bit for
-bit. Eager only, with no boundary saving (the drag and the frame are dissipative).
+bit. ``impl='c'`` runs it on the 2-D Biot kernels with the memories in the stress kernel;
+no boundary saving on either backend (the drag and the frame are dissipative).
 """
 
 from __future__ import annotations

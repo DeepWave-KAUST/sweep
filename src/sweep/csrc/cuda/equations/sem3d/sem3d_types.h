@@ -377,3 +377,61 @@ struct Sem3dVsBackwardInput {
 };
 
 } // namespace sem3d
+
+// SEM 3D Biot poroelastic velocity-stress (BiotVSSEM3DDeformed) on Hex27, save-all or
+// chunked (t0, t1): sem2d's Sem2dBiotForwardInput with y. The flux copies of a node
+// are grouped by their number k (1, 2, 4, 8; the eager class's _flux_blocks): the
+// per-copy arrays (wr, share, the histories) run in that order -- perm maps a copy
+// to its element node -- node_order lists the groups' nodes, and E / Psi are the
+// groups' (n_k, k, k) blocks flattened one after the other. Isotropic drag b
+// (E, ngll^3) for the viscous memory. See sem3d/biot3d_kernels.cuh.
+struct Sem3dBiotForwardInput {
+    torch::Tensor ibool, D, wJ, ixx, ixy, ixz, iex, iey, iez, igx, igy, igz;  // (E, ngll^3)
+    torch::Tensor qmask;                             // (E,)
+    torch::Tensor inv_M, inv_Mp, inv_M1, inv_Mm, pin_n;   // (n_global,)
+    torch::Tensor lam_d, mu, alpha, b;               // (E, ngll^3)
+    torch::Tensor perm, node_order;                  // (E ngll^3,), (n_global,) int32
+    torch::Tensor wr, share;                         // (E ngll^3,) in perm order
+    torch::Tensor dragE, dragP;                      // the groups' blocks, flattened
+    torch::Tensor a_x, b_x, a_y, b_y, a_z, b_z, a_n; // C-PML (a_n (6, n_global)); empty = bare
+    torch::Tensor dirichlet_idx;                     // (k,) int64
+    torch::Tensor ifc_idx, ifc_w, ifc_nx, ifc_ny, ifc_nz;   // interface points; empty = none
+    torch::Tensor pat_vx, pat_vy, pat_vz, pat_p, pat_qx, pat_qy, pat_qz, wavelet;
+    torch::Tensor rec_G, rec_W, rec_Ge;              // (n_rec, ngll^3)
+    torch::Tensor seis;                              // (13, n_rec, nt): v xyz, p, q xyz, sig x6
+    torch::Tensor vx, vy, vz, p, q, sig, r;          // state: q (3, Em), sig (6, Em), r (3, Em)
+    torch::Tensor mp, mv, msig, mq;                  // C-PML: (3, Em), (9, Em), (9, ng), (3, ng)
+    torch::Tensor Rx, Ry, Rz, P, Pq, gp, f, adiv, divq, dp;   // scratch
+    torch::Tensor save_f, save_qs, save_rs, save_rhs, save_gv, save_q;  // histories (OPTIONAL)
+    double dt = 0.0, decay = 1.0, gain = 0.0;
+    int nt = 0, ngll = 0, n_elements = 0, n_global = 0, n_rec = 0;
+    int ndim = 3, batch = 1;
+    int velocity_mode = 0, viscous = 0;
+    // the groups, k ascending: (k, number of nodes) each, unused ones 0
+    int g0_k = 0, g0_n = 0, g1_k = 0, g1_n = 0, g2_k = 0, g2_n = 0, g3_k = 0, g3_n = 0;
+    int t0 = 0, t1 = 0;
+};
+
+// Backward of Sem3dBiotForwardInput. Fills the gradients of the leaves.
+struct Sem3dBiotBackwardInput {
+    torch::Tensor ibool, D, wJ, ixx, ixy, ixz, iex, iey, iez, igx, igy, igz, qmask;
+    torch::Tensor inv_M, inv_Mp, inv_M1, inv_Mm, pin_n;
+    torch::Tensor lam_d, mu, alpha, b, perm, node_order, wr, share, dragE, dragP;
+    torch::Tensor a_x, b_x, a_y, b_y, a_z, b_z, a_n;
+    torch::Tensor dirichlet_idx, ifc_idx, ifc_w, ifc_nx, ifc_ny, ifc_nz;
+    torch::Tensor pat_vx, pat_vy, pat_vz, pat_p, pat_qx, pat_qy, pat_qz, wavelet;
+    torch::Tensor rec_G, rec_W, rec_Ge;
+    torch::Tensor grad_seis;                         // (13, n_rec, nt) upstream
+    torch::Tensor save_f, save_qs, save_rs, save_rhs, save_gv, save_q;
+    torch::Tensor lvx, lvy, lvz, lp, lq, lsig, lr, lmp, lmv, lmsig, lmq;
+    torch::Tensor lRx, lRy, lRz, lP, lPq, lf, ldp, ldivq, lgp, lgv, lg;
+    torch::Tensor grad_inv_M, grad_inv_Mp, grad_inv_M1, grad_inv_Mm;
+    torch::Tensor grad_lam_d, grad_mu, grad_alpha, grad_b, grad_wr, grad_share;
+    torch::Tensor grad_dragE, grad_dragP, grad_wavelet;
+    double dt = 0.0, decay = 1.0, gain = 0.0;
+    int nt = 0, ngll = 0, n_elements = 0, n_global = 0, n_rec = 0;
+    int ndim = 3, batch = 1;
+    int velocity_mode = 0, viscous = 0;
+    int g0_k = 0, g0_n = 0, g1_k = 0, g1_n = 0, g2_k = 0, g2_n = 0, g3_k = 0, g3_n = 0;
+    int t0 = 0, t1 = 0;
+};

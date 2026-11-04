@@ -44,6 +44,27 @@ and this project adheres to
   SPECFEM3D to 3e-14 across a curved interface. A curved sea floor for
   `BiotVSSEM3DDeformed` (water and rock, each element wholly one medium) is the case that needs
   it (`test/sem/test_sem_interfaces3d.py`); notebook 61: a seamount.
+- **`impl='c'` for `BiotVSSEM3DDeformed`** (core entries `sem3d_biot_forward` / `_backward`,
+  `sem3d/biot3d.cu`): the 2-D Biot kernels' step with y, the flux copies advanced in groups of
+  their number (one launch per group, the eager class's drag blocks), the stress divergence of
+  `ElasticVSSEM3DDeformed`. Records of the thirteen receiver fields and every coefficient's
+  gradient agree with eager to the run-to-run rounding for each kind of source, with the C-PML
+  or an open-pore surface, water over the porous rock and the viscous memory
+  (`test/sem/test_sem_c_biot3d.py`). 41^3 for 600 steps: 1.04 s and 2.4 GB against 4.20 s and
+  4.5 GB on eager's defaults (A100).
+- **`impl='c'` for `BiotVSSEM2DDeformed`, `BiotAnisoPermSEM2DDeformed` and
+  `ViscoBiotVSSEM2DDeformed`** (the GSLS frame's memories in the stress kernel; core entries
+  `sem2d_biot_forward` / `_backward`, `sem2d/biot2d.cu`): the eager step one kernel per
+  sub-step -- the pressure injection and pin, the strong grad p, the stress divergence, the
+  flux copies of every node advanced with the drag's exact step, the frame stress, the weak
+  div q, the fluid-solid interface, the viscous memory, the C-PML on every derivative -- and
+  their transposes; the gradients go on to the eight coefficients through the class's build
+  and its `drag_operators`. Records of the eight receiver fields and every coefficient's
+  gradient agree with eager to the run-to-run rounding for each kind of source, with the
+  C-PML or an open-pore surface, through water, porous and dry regions, with the viscous
+  memory and a drag tensor (`test/sem/test_sem_c_biot2d.py`); the adjoint checkpoints in
+  chunks by default. 201 x 401 for 2000 steps: 1.58 s and 6.1 GB against 7.00 s and 5.7 GB
+  on eager's defaults (A100).
 - **`memory=Ckpt(chunks=K)` on `impl='c'` for the velocity-stress classes**, 2-D and 3-D,
   and PropSEM's default there (`K = 64`; it was the save-all). The forward keeps the state
   at the start of every `K`-step chunk; the backward reruns each chunk from its checkpoint

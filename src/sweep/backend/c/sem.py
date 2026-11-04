@@ -52,6 +52,10 @@ RETURNS = {
     "sem3d_elastic_vs_backward": ('grad_lam', 'grad_mu', 'grad_lam2mu', 'grad_inv_M', 'grad_wavelet'),
     "sem2d_elastic_vs_forward": ('seis_x', 'seis_z'),
     "sem2d_elastic_vs_backward": ('grad_lam', 'grad_mu', 'grad_lam2mu', 'grad_inv_M', 'grad_wavelet'),
+    "sem2d_biot_forward": ('seis',),
+    "sem2d_biot_backward": ('grad_wavelet',),
+    "sem3d_biot_forward": ('seis',),
+    "sem3d_biot_backward": ('grad_wavelet',),
 }
 
 # The pybind docstrings, kept on the wrappers.
@@ -101,6 +105,10 @@ DOCS = {
     "sem3d_elastic_vs_backward": 'SEM 3D velocity-stress elastic backward (adjoint; CUDA only, fp32)',
     "sem2d_elastic_vs_forward": 'SEM 2D velocity-stress elastic forward (CUDA only, fp32)',
     "sem2d_elastic_vs_backward": 'SEM 2D velocity-stress elastic backward (adjoint; CUDA only, fp32)',
+    "sem2d_biot_forward": 'SEM 2D Biot poroelastic forward (CUDA only, fp32)',
+    "sem2d_biot_backward": 'SEM 2D Biot poroelastic backward (adjoint; CUDA only, fp32)',
+    "sem3d_biot_forward": 'SEM 3D Biot poroelastic forward (CUDA only, fp32)',
+    "sem3d_biot_backward": 'SEM 3D Biot poroelastic backward (adjoint; CUDA only, fp32)',
 }
 
 

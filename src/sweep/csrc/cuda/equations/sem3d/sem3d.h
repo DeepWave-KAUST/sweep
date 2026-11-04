@@ -34,4 +34,8 @@ void elastic3d_backward(const Sem3dElasticBackwardInputCore& in);
 void elastic_vs3d_forward(const Sem3dVsForwardInputCore& in);
 void elastic_vs3d_backward(const Sem3dVsBackwardInputCore& in);
 
+// The 3-D Biot SEM (biot3d.cu): BiotVSSEM3DDeformed.
+void biot3d_forward(const Sem3dBiotForwardInputCore& in);
+void biot3d_backward(const Sem3dBiotBackwardInputCore& in);
+
 } // namespace sem3d

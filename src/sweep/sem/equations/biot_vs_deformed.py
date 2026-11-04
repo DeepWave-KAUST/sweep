@@ -100,7 +100,9 @@ Sources
   ``v`` jumps by ``dt src / M_rho`` with the flux unchanged, or every flux copy by
   ``dt src / A(w m)`` with ``v`` unchanged.
 
-Eager only, no boundary saving: the viscous drag is dissipative at every node, so the
+``impl='c'`` runs this class and :class:`BiotAnisoPermSEM2DDeformed` on the kernels of
+``sem2d/biot2d.cu`` (:mod:`sweep.sem.drivers.biot2d`). No boundary saving on either backend:
+the viscous drag is dissipative at every node, so the
 reverse reconstruction does not exist (as on the FD ``Biot``).
 """
 

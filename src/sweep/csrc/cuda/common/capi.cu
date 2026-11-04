@@ -208,9 +208,13 @@ const char* const ENTRY_NAMES[SWEEP_ENTRY_COUNT] = {
     "elastic_born2d_backward_ckpt",
     "elastic_born2d_backward_recursive_ckpt",
     "sem2d_elastic_vs_forward",
-    "sem2d_elastic_vs_backward"
+    "sem2d_elastic_vs_backward",
+    "sem2d_biot_forward",
+    "sem2d_biot_backward",
+    "sem3d_biot_forward",
+    "sem3d_biot_backward"
 };
-const int ENTRY_KINDS[SWEEP_ENTRY_COUNT] = { 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 0, 1, 1, 1, 1, 3, 3 };
+const int ENTRY_KINDS[SWEEP_ENTRY_COUNT] = { 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 0, 1, 1, 1, 1, 3, 3, 3, 3, 3, 3 };
 
 void fill_err(char* err, int cap, const char* what)
 {
@@ -233,10 +237,14 @@ int guarded(F f, char* err, int cap)
 constexpr int SEM_FIRST = SWEEP_ENTRY_SEM2D_ACOUSTIC_FORWARD;
 constexpr int SEM_END = SWEEP_ENTRY_SEM3D_ELASTIC_VS_BACKWARD + 1;
 constexpr int SEM2_FIRST = SWEEP_ENTRY_SEM2D_ELASTIC_VS_FORWARD;
-constexpr int SEM2_END = SWEEP_ENTRY_SEM2D_ELASTIC_VS_BACKWARD + 1;
+constexpr int SEM2_END = SWEEP_ENTRY_SEM3D_BIOT_BACKWARD + 1;
 const char* const SEM2_STRUCTS[SEM2_END - SEM2_FIRST] = {
     "Sem2dVsForwardInputCore",
-    "Sem2dVsBackwardInputCore"
+    "Sem2dVsBackwardInputCore",
+    "Sem2dBiotForwardInputCore",
+    "Sem2dBiotBackwardInputCore",
+    "Sem3dBiotForwardInputCore",
+    "Sem3dBiotBackwardInputCore"
 };
 inline bool is_sem_entry(int entry)
 {
@@ -337,6 +345,10 @@ void sem_dispatch(int entry, const void* in, int64_t arg)
         case SWEEP_ENTRY_SEM3D_ELASTIC_VS_BACKWARD: sem3d::elastic_vs3d_backward(*static_cast<const Sem3dVsBackwardInputCore*>(in)); return;
         case SWEEP_ENTRY_SEM2D_ELASTIC_VS_FORWARD: sem2d::elastic_vs2d_forward(*static_cast<const Sem2dVsForwardInputCore*>(in)); return;
         case SWEEP_ENTRY_SEM2D_ELASTIC_VS_BACKWARD: sem2d::elastic_vs2d_backward(*static_cast<const Sem2dVsBackwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM2D_BIOT_FORWARD: sem2d::biot2d_forward(*static_cast<const Sem2dBiotForwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM2D_BIOT_BACKWARD: sem2d::biot2d_backward(*static_cast<const Sem2dBiotBackwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM3D_BIOT_FORWARD: sem3d::biot3d_forward(*static_cast<const Sem3dBiotForwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM3D_BIOT_BACKWARD: sem3d::biot3d_backward(*static_cast<const Sem3dBiotBackwardInputCore*>(in)); return;
         default: SWEEP_CHECK(false, "sweep_sem_call: entry ", entry, " is not a SEM entry");
     }
 }

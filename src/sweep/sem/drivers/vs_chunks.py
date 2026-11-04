@@ -1,4 +1,5 @@
-"""Checkpointing in chunks for the velocity-stress CUDA drivers (2-D and 3-D).
+"""Checkpointing in chunks for the velocity-stress CUDA drivers (2-D and 3-D,
+elastic and Biot).
 
 The save-all adjoint keeps, per step, the velocities and the stretched velocity
 gradients -- four (2-D) or nine (3-D) element-local arrays, several times the state
@@ -16,7 +17,8 @@ from __future__ import annotations
 # what a velocity-stress forward carries from one step to the next (the divergence
 # and its split are rebuilt every step); the fields a struct lacks or leaves empty
 # (no y in 2-D, no C-PML, no GSLS memories) are skipped
-_STATE = ("vx", "vy", "vz", "sig", "mvel", "msig", "rmem")
+_STATE = ("vx", "vy", "vz", "sig", "mvel", "msig", "rmem",
+          "p", "q", "r", "mp", "mv", "mq")          # the last six: Biot's
 
 
 def state_fields(s):
