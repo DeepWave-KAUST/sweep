@@ -507,17 +507,23 @@ class PointStamp:
 
 @dataclass
 class PointStamp3D:
-    """3-D Lagrange weights at one point for a :class:`Hex8Mesh` element.
+    """3-D Lagrange weights, their derivatives and the local inverse Jacobian at
+    one point of a :class:`Hex8Mesh` / :class:`Hex27Mesh` element.
 
     The axis order matches ``ibool[elem]`` = ``(kz, ky, kx)`` ↔ ``(z, y, x)``,
     so every stamp tensor is ``w_gamma ⊗ w_eta ⊗ w_xi`` (z ⊗ y ⊗ x). Covers the
-    scalar (acoustic) source, the 3-component body force, and field gather.
-    Moment-tensor sources are not yet surfaced in 3-D.
+    scalar (acoustic) source, the 3-component body force, the moment-tensor
+    source (with the derivatives and ``inv``, ``inv[m][d] = ∂ξ_m/∂x_d`` over
+    ``(ξ, η, γ) x (x, y, z)``) and field gather.
     """
     elem_id: int
     w_gamma: torch.Tensor     # (ngll,) ℓ_(z)(γ_s)
     w_eta:   torch.Tensor     # (ngll,) ℓ_(y)(η_s)
     w_xi:    torch.Tensor     # (ngll,) ℓ_(x)(ξ_s)
+    dw_gamma: Optional[torch.Tensor] = None     # (ngll,) ℓ'_(z)(γ_s)
+    dw_eta:   Optional[torch.Tensor] = None
+    dw_xi:    Optional[torch.Tensor] = None
+    inv: Optional[tuple] = None
 
     def _outer(self) -> torch.Tensor:
         return (self.w_gamma[:, None, None]
@@ -531,12 +537,58 @@ class PointStamp3D:
         outer = self._outer()
         return F_x * outer, F_y * outer, F_z * outer
 
+    def moment_tensor_stamp(self, Mxx, Myy, Mzz, Mxy, Mxz, Myz):
+        """``-M : ∇φ_a(x_s)``, the load on ``(x, y, z)``: the 3-D
+        :meth:`PointStamp.moment_tensor_stamp`."""
+        g, e, x = self.w_gamma, self.w_eta, self.w_xi
+        d_ref = (g[:, None, None] * e[None, :, None] * self.dw_xi[None, None, :],     # ∂/∂ξ
+                 g[:, None, None] * self.dw_eta[None, :, None] * x[None, None, :],    # ∂/∂η
+                 self.dw_gamma[:, None, None] * e[None, :, None] * x[None, None, :])  # ∂/∂γ
+        grad = [sum(d_ref[m] * self.inv[m][d] for m in range(3)) for d in range(3)]
+        M = ((Mxx, Mxy, Mxz), (Mxy, Myy, Myz), (Mxz, Myz, Mzz))
+        return tuple(-(M[i][0] * grad[0] + M[i][1] * grad[1] + M[i][2] * grad[2])
+                     for i in range(3))
+
     def gather(self, field_e: torch.Tensor) -> torch.Tensor:
         return torch.einsum("z,y,x,zyx->", self.w_gamma, self.w_eta,
                             self.w_xi, field_e)
 
     def gather_weights(self) -> torch.Tensor:
         return self._outer().reshape(-1)
+
+
+@dataclass
+class GradientStamp:
+    """The derivative along ``axis`` (0 is x, 1 is y in 3-D, the last is z) of a field at a
+    point: the gradient of :class:`PointStamp`'s / :class:`PointStamp3D`'s basis, the pattern of
+    their moment-tensor stamps. A receiver made of it records the derivative through the same
+    weighted gather (:meth:`gather_weights`, aligned with ``ibool[elem]``) as a plain one records
+    the field, on either backend (:mod:`sweep.sem.receivers`)."""
+    point: object
+    axis: int
+
+    @property
+    def elem_id(self) -> int:
+        return self.point.elem_id
+
+    def _pattern(self) -> torch.Tensor:
+        p = self.point
+        if isinstance(p, PointStamp):
+            w_b_da = p.w_eta[:, None] * p.dw_xi[None, :]     # ∂/∂ξ pattern
+            w_da_b = p.dw_eta[:, None] * p.w_xi[None, :]     # ∂/∂η pattern
+            return (w_b_da * p.ixx + w_da_b * p.iex if self.axis == 0
+                    else w_b_da * p.ixz + w_da_b * p.iez)
+        g, e, x = p.w_gamma, p.w_eta, p.w_xi
+        d_ref = (g[:, None, None] * e[None, :, None] * p.dw_xi[None, None, :],
+                 g[:, None, None] * p.dw_eta[None, :, None] * x[None, None, :],
+                 p.dw_gamma[:, None, None] * e[None, :, None] * x[None, None, :])
+        return sum(d_ref[m] * p.inv[m][self.axis] for m in range(3))
+
+    def gather(self, field_e: torch.Tensor) -> torch.Tensor:
+        return (self._pattern() * field_e).sum()
+
+    def gather_weights(self) -> torch.Tensor:
+        return self._pattern().reshape(-1)
 
 
 def _cached_stamp(mesh, kind, coords, build):
@@ -613,13 +665,34 @@ def _hex8_local(mesh, x, y, z):
             2.0 * (z - ez * mesh.dz_e) / mesh.dz_e - 1.0)
 
 
+def _hex_jacobian(mesh, elem, xi, eta, gam):
+    """``J[p, d, m] = ∂x_d/∂ξ_m`` of element ``elem[p]`` at ``(ξ, η, γ)[p]``, float64,
+    ``(P, xyz, ξηγ)``: the half element sizes on a :class:`Hex8Mesh`, the Q2 map of
+    a :class:`Hex27Mesh`."""
+    if isinstance(mesh, Hex8Mesh):
+        J = np.diag([0.5 * mesh.dx_e, 0.5 * mesh.dy_e, 0.5 * mesh.dz_e])
+        return np.broadcast_to(J, (len(elem), 3, 3)).copy()
+    c = _locate_geometry(mesh)["control"][np.asarray(elem, dtype=np.int64)]
+    (px, dpx), (pe, dpe), (pg, dpg) = (_q2_np(np.asarray(t, dtype=np.float64))
+                                       for t in (xi, eta, gam))
+    return np.stack([np.einsum("nk,ni,nj,nkijd->nd", pg, pe, dpx, c),
+                     np.einsum("nk,ni,nj,nkijd->nd", pg, dpe, px, c),
+                     np.einsum("nk,ni,nj,nkijd->nd", dpg, pe, px, c)], -1)
+
+
 def _hex_stamps(mesh, elem, xi, eta, gam):
-    """The :class:`PointStamp3D` of each ``(elem_id, ξ, η, γ)``, their weights
-    moved to the mesh's device in one copy (the stamps hold views of it)."""
+    """The :class:`PointStamp3D` of each ``(elem_id, ξ, η, γ)``: Lagrange weights
+    and derivatives, the inverse Jacobian in float64, and the weights moved to
+    the mesh's device in one copy (the stamps hold views of it)."""
     nodes = mesh.xi.detach().cpu().numpy().astype(np.float64)
-    w = np.stack([_lagrange_np(nodes, np.asarray(t, dtype=np.float64)) for t in (gam, eta, xi)], 1)
+    loc = [np.asarray(t, dtype=np.float64) for t in (gam, eta, xi)]
+    w = np.stack([_lagrange_np(nodes, t) for t in loc]
+                 + [_lagrange_deriv_np(nodes, t) for t in loc], 1)
     W = torch.as_tensor(w, dtype=mesh.xi.dtype, device=mesh.xi.device)
-    return [PointStamp3D(elem_id=int(e), w_gamma=W[p, 0], w_eta=W[p, 1], w_xi=W[p, 2])
+    inv = np.linalg.inv(_hex_jacobian(mesh, elem, xi, eta, gam))   # [p, m, d] = ∂ξ_m/∂x_d
+    return [PointStamp3D(elem_id=int(e), w_gamma=W[p, 0], w_eta=W[p, 1], w_xi=W[p, 2],
+                         dw_gamma=W[p, 3], dw_eta=W[p, 4], dw_xi=W[p, 5],
+                         inv=tuple(tuple(float(v) for v in row) for row in inv[p]))
             for p, e in enumerate(elem)]
 
 
@@ -694,7 +767,8 @@ class EdgeStamp:
     ``n_order`` cells. The limit of a symmetric source shrunk onto the point
     instead gives each element the share of a small disk it holds: ``weights``
     are the sector angles over ``2π`` -- 1/2 a side on an edge, the corner
-    angles at a corner, the half-disk inside the domain on its boundary.
+    angles at a corner, the half-disk inside the domain on its boundary. In 3-D
+    the disk is a ball and the angles solid (:func:`_solid_angle`).
 
     Force and scalar stamps need none of this: the Lagrange weights agree on
     the shared nodes and vanish off them, so one element carries them exactly.
@@ -739,14 +813,88 @@ def build_moment_stamp(mesh, *coords):
     """:func:`build_point_stamp` for a source that differentiates the basis.
 
     Inside an element it IS that function's stamp. On an element edge or
-    corner it is an :class:`EdgeStamp` over every element whose closure holds
-    the point. 3-D meshes have no moment-tensor stamp; they get the plain one.
-    Kept on the mesh, as :func:`build_point_stamp` keeps its stamps.
+    corner (in 3-D a face, an edge or a corner) it is an :class:`EdgeStamp`
+    over every element whose closure holds the point. Kept on the mesh, as
+    :func:`build_point_stamp` keeps its stamps.
     """
     return _cached_stamp(mesh, "moment", coords, _build_moment_stamp)
 
 
+def _hex_local_in(mesh, e, xyz, start):
+    """``(ξ, η, γ)`` of the point in element ``e`` (unclamped), or ``None`` if the
+    locate fails: :func:`_local_in` in 3-D, Hex27 solved in float64."""
+    if isinstance(mesh, Hex8Mesh):
+        ex, ey, ez = e % mesh.nex, (e // mesh.nex) % mesh.ney, e // (mesh.nex * mesh.ney)
+        return tuple(2.0 * (c - k * d) / d - 1.0 for c, k, d in
+                     zip(xyz, (ex, ey, ez), (mesh.dx_e, mesh.dy_e, mesh.dz_e)))
+    target = np.array([xyz], dtype=np.float64)
+    loc, ok = _newton_q2(_locate_geometry(mesh)["control"][e][None], target,
+                         np.atleast_1d(_newton_tol(target)),
+                         np.array([start], dtype=np.float64))
+    return tuple(float(v) for v in loc[0]) if ok[0] else None
+
+
+def _solid_angle(mesh, e, loc):
+    """The solid angle element ``e`` subtends at its local point ``loc`` (snapped
+    to ±1 on the faces it lies on): ``2π`` on a face, twice the dihedral angle on
+    an edge, the trihedral angle at a corner -- :func:`_sector_angle` in 3-D."""
+    on = [m for m in range(3) if abs(loc[m]) == 1.0]
+    if len(on) == 1:
+        return 2.0 * np.pi
+    J = _hex_jacobian(mesh, [e], [loc[0]], [loc[1]], [loc[2]])[0]
+    inward = [-loc[m] * J[:, m] for m in on]                  # along ∓ξ_m, into e
+    if len(on) == 2:
+        free = next(m for m in range(3) if m not in on)
+        axis = J[:, free] / np.linalg.norm(J[:, free])
+        a, b = (t - (t @ axis) * axis for t in inward)        # across the edge
+        cos = float(a @ b) / float(np.linalg.norm(a) * np.linalg.norm(b))
+        return 2.0 * float(np.arccos(max(-1.0, min(1.0, cos))))
+    a, b, c = inward                                          # Van Oosterom-Strackee
+    na, nb, nc = (float(np.linalg.norm(v)) for v in inward)
+    den = na * nb * nc + float(a @ b) * nc + float(a @ c) * nb + float(b @ c) * na
+    return 2.0 * float(np.arctan2(abs(float(a @ np.cross(b, c))), den))
+
+
+def _build_moment_stamp3(mesh, x, y, z):
+    """:func:`_build_moment_stamp` on a hex mesh: the elements that meet at a
+    point on a face, an edge or a corner share it by the solid angle each holds
+    there (1/2, 1/4, 1/8 on an axis-aligned mesh)."""
+    (e0, xi0, eta0, gam0), = locate_points(mesh, [(x, y, z)])
+    e0 = int(e0)
+    stamp = build_point_stamp(mesh, x, y, z)
+    tol = _on_edge_tol(mesh)
+    loc = _hex_local_in(mesh, e0, (x, y, z), (xi0, eta0, gam0)) or (xi0, eta0, gam0)
+    on = [abs(v) >= 1 - tol for v in loc]
+    if not any(on):
+        return stamp
+    snap = lambda v: max(-1.0, min(1.0, v)) if abs(v) < 1 - tol else (1.0 if v > 0 else -1.0)
+    nex, ney, nez = mesh.nex, mesh.ney, mesh.nez
+    ex0, ey0, ez0 = e0 % nex, (e0 // nex) % ney, e0 // (nex * ney)
+    found = []
+    for dz in ((-1, 0, 1) if on[2] else (0,)):
+        for dy in ((-1, 0, 1) if on[1] else (0,)):
+            for dx in ((-1, 0, 1) if on[0] else (0,)):
+                ex, ey, ez = ex0 + dx, ey0 + dy, ez0 + dz
+                if not (0 <= ex < nex and 0 <= ey < ney and 0 <= ez < nez):
+                    continue
+                e = (ez * ney + ey) * nex + ex
+                got = _hex_local_in(mesh, e, (x, y, z),
+                                    (loc[0] - 2 * dx, loc[1] - 2 * dy, loc[2] - 2 * dz))
+                if got is None or max(abs(v) for v in got) > 1 + 10 * tol:
+                    continue
+                found.append((e, tuple(snap(v) for v in got)))
+    if len(found) < 2:                     # on the outer boundary, one element
+        return stamp
+    angles = [_solid_angle(mesh, e, local) for e, local in found]
+    total = sum(angles)
+    parts = _hex_stamps(mesh, [e for e, _ in found],
+                        *([local[m] for _, local in found] for m in range(3)))
+    return EdgeStamp(parts=parts, weights=[a / total for a in angles])
+
+
 def _build_moment_stamp(mesh, *coords):
+    if isinstance(mesh, (Hex8Mesh, Hex27Mesh)):
+        return _build_moment_stamp3(mesh, *coords)
     if not isinstance(mesh, (Quad4Mesh, Quad9Mesh)):
         return build_point_stamp(mesh, *coords)
     x, z = coords
@@ -786,8 +934,9 @@ def _stamp_components(stamp, kind, payload):
     two/three moment-tensor components for ``moment_tensor`` / ``explosion``.
 
     A ``force`` payload has one entry per source field (Biot's three: ``v_x,
-    v_z, p``), a 2-D ``moment_tensor`` one ``(Mxx, Mzz, Mxz)`` block per pair
-    of them; fields past the payload take no load.
+    v_z, p``), a ``moment_tensor`` one block per two (2-D: ``(Mxx, Mzz, Mxz)``)
+    or three (3-D: ``(Mxx, Myy, Mzz, Mxy, Mxz, Myz)``) of them; fields past the
+    payload take no load.
     """
     if kind == "scalar":
         return [stamp.scalar_stamp(payload[0])]
@@ -795,15 +944,20 @@ def _stamp_components(stamp, kind, payload):
         # one Lagrange stamp per entry: force_stamp's ``F * outer`` product, for
         # any number of source fields
         return [stamp.scalar_stamp(f) for f in payload]
+    three = isinstance(stamp, PointStamp3D)
     if kind == "moment_tensor":
-        if len(payload) % 3:
+        n = 6 if three else 3
+        if len(payload) % n:
             raise ValueError(
-                f"a moment_tensor payload is (Mxx, Mzz, Mxz) blocks; got "
-                f"{len(payload)} entries")
-        return [c for k in range(0, len(payload), 3)
-                for c in stamp.moment_tensor_stamp(*payload[k:k + 3])]
-    if kind == "explosion":                       # isotropic Mxx = Mzz = M0, Mxz = 0
+                f"a {'3' if three else '2'}-D moment_tensor payload is "
+                f"{'(Mxx, Myy, Mzz, Mxy, Mxz, Myz)' if three else '(Mxx, Mzz, Mxz)'} "
+                f"blocks; got {len(payload)} entries")
+        return [c for k in range(0, len(payload), n)
+                for c in stamp.moment_tensor_stamp(*payload[k:k + n])]
+    if kind == "explosion":                       # isotropic M = M0 I
         m0 = payload[0]
+        if three:
+            return list(stamp.moment_tensor_stamp(m0, m0, m0, 0.0, 0.0, 0.0))
         return list(stamp.moment_tensor_stamp(m0, m0, 0.0))
     raise ValueError(f"unknown source kind {kind!r}")
 
@@ -879,21 +1033,27 @@ def _pml_offenders(mesh, sides, thickness, coords):
     (``2·thickness ≥ extent``) has no interior at all — a degenerate all-absorbing
     domain (e.g. a tiny unit-test box), where flagging every point is noise rather
     than a placement mistake — so that axis is skipped. Returns
-    ``[(i, coord_tuple, reason), ...]``."""
+    ``[(i, coord_tuple, reason), ...]``.
+
+    A point ON the band's inner edge is in the interior: PropSEM puts the
+    model's edge column there, and the extents and ``thickness`` come out of
+    float32 mesh coordinates (``200.00002`` for a 200 m band), so the
+    comparison carries a round-off tolerance."""
     xmax, zmax = float(mesh.x_max), float(mesh.z_max)
     x_interior = 2.0 * thickness < xmax     # opposite bands leave an interior?
     z_interior = 2.0 * thickness < zmax
+    tol = 1e-6 * max(xmax, zmax)
     out = []
     for i, c in enumerate(coords):
         x, z = float(c[0]), float(c[-1])          # (x, z) or (x, y, z)
         hits = []
-        if x_interior and "left" in sides and x < thickness:
+        if x_interior and "left" in sides and x < thickness - tol:
             hits.append(f"left band (x<{thickness:.1f})")
-        if x_interior and "right" in sides and x > xmax - thickness:
+        if x_interior and "right" in sides and x > xmax - thickness + tol:
             hits.append(f"right band (x>{xmax - thickness:.1f})")
-        if z_interior and "top" in sides and z < thickness:
+        if z_interior and "top" in sides and z < thickness - tol:
             hits.append(f"top band (z<{thickness:.1f})")
-        if z_interior and "bottom" in sides and z > zmax - thickness:
+        if z_interior and "bottom" in sides and z > zmax - thickness + tol:
             hits.append(f"bottom band (z>{zmax - thickness:.1f})")
         if hits:
             out.append((i, tuple(round(float(v), 2) for v in c), ", ".join(hits)))
@@ -923,8 +1083,11 @@ def _check_pml_placement(eq, source_xz, receiver_xz, guard):
         detail = "; ".join(f"{label}[{i}] {c} in {why}" for i, c, why in bad)
         msg = (f"{len(bad)} {label}(s) fall inside the C-PML absorbing band, where "
                f"the field is artificially damped (non-physical): {detail}. "
-               f"Move them into the interior, enlarge the domain / reduce "
-               f"pml_thickness_elements, or pass pml_guard='off' to silence.")
+               f"Move them into the interior: PropSEM adds its abcn layer "
+               f"outside the model, so there they are outside the model grid; "
+               f"on a hand-built C-PML a smaller pml_thickness_elements also "
+               f"frees them. pml_guard='off' (a PropSEM forward option, as on "
+               f"SEMPropagator.build) silences this check.")
         if guard == "error":
             raise ValueError(msg)
         warnings.warn(msg, stacklevel=3)
@@ -1099,6 +1262,7 @@ class SEMPropagator:
         memory: str | None = None,
         bs_store_dtype=None,
         checkpoint_chunk: int | None = None,
+        illumination=None,
     ):
         """Run the time loop.
 
@@ -1135,6 +1299,10 @@ class SEMPropagator:
         equation, so acoustic gives ``ncomp = 1`` and elastic gives 2 (2-D) or
         3 (3-D).
 
+        ``illumination`` (a :class:`sweep.sem.illumination.Illumination`)
+        accumulates this shot's source illumination as it steps and hooks its
+        wavefields for the receiver one; full tape only.
+
         With ``record_field_every=k`` it returns ``(seis, snaps)`` instead --
         the same shape as FD/JAX's ``(record, wavefield)`` pair -- where
         ``snaps`` is ``(nsnap, ncomp, n_global)`` sampled at time steps
@@ -1151,6 +1319,9 @@ class SEMPropagator:
         layouts = field_layouts(self.eq, recv)
         source_spec, like = self._source_term(per_source, device, dtype)
         step_fn = self._step_fn(compile_options)
+        if illumination is not None and (checkpoint_chunk or memory == "boundary"):
+            raise ValueError("illumination reads the full tape: no checkpointing or "
+                             "boundary saving with it.")
 
         if checkpoint_chunk:
             return self._run_checkpointed(
@@ -1168,6 +1339,8 @@ class SEMPropagator:
                   receiver_gather(self.eq.mesh, self.receivers, lay)[0].to(device)
                   for i, lay in zip(recv, layouts)} if n_rec else {}
         state = self.eq.init_state(self.dt, device, dtype)     # positional tuple
+        sink = (illumination.sink(self.eq, self.dt, state[0])
+                if illumination is not None else None)
         seis = {i: torch.zeros(n_rec, self.nt, dtype=dtype, device=device)
                 for i in recv}
         snaps = {i: [] for i in recv}
@@ -1181,7 +1354,9 @@ class SEMPropagator:
                 s_val = source_wavelet[n]
                 src = [p * s_val for p in source_spec]
             step = step_fn if settled.compiled(n, state) else self.eq.step
-            state = step(state, src, self.dt)
+            old, state = state, step(state, src, self.dt)
+            if sink is not None:
+                sink.after_step(old, state)
 
             if n_rec > 0:
                 for i in recv:

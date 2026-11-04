@@ -56,6 +56,7 @@ from ..cpml.elastic_vs import (SimpleElasticCPMLProfile, build_simple_elastic_cp
                                pin_outer_edge)
 from ..fields import DerivedInitState, FieldSpec, check_element_arrays
 from ..mesh.quad9 import Quad9Mesh, boundary_element_edges
+from ..receivers import solid_receivers
 
 
 def _first(ibool, mesh):
@@ -120,6 +121,8 @@ class ElasticVSSEM2DDeformed(DerivedInitState):
 
     # FD-aligned receiver components: velocity-stress evolves velocities natively: FD-name aliases only.
     derived_receiver_types: ClassVar[dict] = {"vx": ("v_x", None), "vz": ("v_z", None)}
+    # strain, rotation, pressure / particle motion at a point (sweep.sem.receivers)
+    spatial_receiver_types: ClassVar[dict] = solid_receivers(("v_x", "v_z"), native="velocity")
 
     mesh: Quad9Mesh
     vp_e: torch.Tensor                 # (E, ngll, ngll)

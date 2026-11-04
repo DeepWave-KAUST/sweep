@@ -1,4 +1,4 @@
-"""Visual demo: no-absorption vs Stacey vs CPML on the same SEM domain.
+"""Visual demo: no-absorption vs CPML on the same SEM domain.
 
 Renders snapshots at late times so you can see how much energy leaks back
 from each boundary treatment.
@@ -44,14 +44,7 @@ def main():
         eq_none, dt=dt, nt=nt, source_xz=[src_xz], receiver_xz=[(0.0, 0.0)],
     ).forward(src, record_field_every=20)[1][:, 0].numpy()
 
-    # 2. Stacey first-order on three sides
-    eq_stacey = AcousticSEM2D.build(mesh, vp_e,
-                                    dirichlet=("top",))
-    runs["Stacey 1st-order"] = SEMPropagator.build(
-        eq_stacey, dt=dt, nt=nt, source_xz=[src_xz], receiver_xz=[(0.0, 0.0)],
-    ).forward(src, record_field_every=20)[1][:, 0].numpy()
-
-    # 3. CPML on three sides (free top)
+    # 2. CPML on three sides (free top)
     cpml = build_cpml(mesh, dt=dt,
                       sides=("left", "right", "bottom"),
                       pml_thickness_elements=4,
@@ -105,7 +98,7 @@ def main():
                 ax.set_ylabel(f"t = {t_phys:.3f}s", fontsize=9)
             ax.tick_params(labelsize=7)
     fig.tight_layout()
-    fpath = out / "cpml_vs_stacey_vs_none.png"
+    fpath = out / "cpml_vs_none.png"
     fig.savefig(fpath, dpi=180, bbox_inches="tight")
     print(f"Saved: {fpath.resolve()}")
 

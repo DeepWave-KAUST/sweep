@@ -953,6 +953,30 @@ def _ifc_subset(eq_g, ex0, ex1, no, nxg, gidx, dev):
             flat(ifc.nz).to(dev, torch.float32).contiguous())
 
 
+def _ifc_pml_subset(eq_g, ex0, ex1, no, nxg, gidx, dev):
+    """This strip's band interface points (``coupling.InterfaceCPML``), in
+    LOCAL numbering, by the face rule of :func:`_ifc_subset`: a point is the
+    strip's when its face is, so a cut node's two faces each keep their own
+    point -- and memories -- and the exchange sums their loads. ``None`` when
+    the strip has none."""
+    ic = eq_g.ifc_cpml
+    if ic is None:
+        return None
+    nodes = eq_g.ifc.node_idx.reshape(eq_g.ifc.node_idx.shape[0], -1)   # (n_face, ngll)
+    face = ic.pt_flat // nodes.shape[1]
+    col0 = (nodes.min(dim=1).values % nxg) // no
+    keep = torch.nonzero((col0[face] >= ex0) & (col0[face] < ex1)).reshape(-1)
+    if keep.numel() == 0:
+        return None
+    lut = torch.full((max(int(gidx.max()), int(nodes.max())) + 1,), -1,
+                     dtype=torch.int64, device=gidx.device)
+    lut[gidx] = torch.arange(gidx.numel(), device=gidx.device)
+    loc = lut[ic.pt_g[keep].to(gidx.device)]
+    assert int((loc < 0).sum()) == 0, "band interface point outside its strip"
+    return (loc.contiguous().to(dev),
+            ic.table()[keep].to(dev, torch.float32).contiguous())
+
+
 def _pin_mask_global(eq_g):
     """(n_global,) 0/1 rigid-wall mask of the GLOBAL elastic C-PML: 0 on the
     outer PML edge where u is pinned. Sliced per strip like every other
@@ -1729,6 +1753,9 @@ class SEMModelParallel:
         c["band_idx"] = _band_nodes(
             s.ml, (c["b_x"], c["b_z"], c["dbx_dx"], c["dbz_dz"]),
             _strip_model_nodes(ctx, s, [cp_ac.b_x, cp_ac.b_z]), mode=ctx.bmode)
+        pml = _ifc_pml_subset(eq_g, s.ex0, s.ex1, ctx.no, ctx.nxg, s.gidx, dev)
+        if pml is not None:     # the band points' stretching of both loads
+            c["ifc_pml_g"], c["ifc_pml_cf"] = pml
         _elastic_cpml_consts(c, cp_el, el)
         mat = (ac._inv_rho[s.eids].to("cuda", torch.float32),   # _FS_MATS order
                ac._inv_M[s.gm].to("cuda", torch.float32),
@@ -1753,11 +1780,15 @@ class SEMModelParallel:
         ``'bf16'`` (2x) or ``'int8'`` (4x, one amax scale per field and step).
         The propagator's ``bs_store_dtype_elem`` overrides it for the ELEMENT
         rings, which the elastic and fluid-solid paths carry; on the elastic
-        path they are 82% of the ring memory and quantise ~70x better than the
+        path they are 82% of the ring memory and quantise ~9x better than the
         node rings, so ``storage_dtype='fp32', bs_store_dtype_elem='int8'`` is
         the setting that actually pays there. Refused on paths that ring nodes
         only."""
         p = self.prop
+        if getattr(p, "compute_illumination", False):
+            raise NotImplementedError(
+                "compute_illumination is not wired on domain decomposition; run the "
+                "shot on one GPU (impl='c') or on impl='eager'.")
         p._set_nt(wavelet)
         # Flat 3-D acoustic: build the compact source instead of the global
         # equation. Same numbers (the consts contract test pins bit-identity),

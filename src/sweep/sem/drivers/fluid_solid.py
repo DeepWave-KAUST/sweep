@@ -18,8 +18,9 @@ from __future__ import annotations
 import torch
 
 from ..cdrive import (AC_CPML_FIELDS, EL_CPML_FLAT, Alloc, check_filled,
-                      dd_grads, dims, fill, give, grads_or_none, memory_mode,
-                      put, roll, swap, take)
+                      dd_grads, dims, fill, give, grads_or_none, illum_alloc,
+                      illum_receiver, illum_source, memory_mode, put, roll,
+                      swap, take)
 
 _FS_CONSTS = ("ibool", "D", "wJ", "w1d", "ixx", "ixz", "iex", "iez",
               "ac_mask_e", "el_mask_e", "dirichlet_idx",
@@ -47,7 +48,24 @@ _FS_REC_R6 = ("rec_rxx", "rec_rxz", "rec_rzx", "rec_rzz", "rec_rdx", "rec_rdz")
 _FS_REC_NODE = ("rec_chi_dd", "rec_Acc_x", "rec_Acc_z", "rec_f_x", "rec_f_z")
 _FS_CARRY = (_FS_TAPES + _FS_RINGS_AC + _FS_RINGS_EL + _FS_FIN + _FS_CK + _FS_BANDS
              + ("ckpt_every", "band_scale", "band_scale_e", "band_kind",
-                "band_kind_e", "bs"))
+                "band_kind_e", "bs", "ifc_pml_tape"))
+_FS_PML = ("ifc_pml_g", "ifc_pml_cf")      # the band interface points (coupling.InterfaceCPML)
+
+
+def _fs_pml(s, c, A, B, nt, mode):
+    """The band interface points' table, their four memories and -- when a
+    backward will run, in either memory mode -- the per-step tape of their
+    loads (``(nt, B, n_p, 3)``, a few kB a step)."""
+    if "ifc_pml_g" not in c:
+        put(s, _FS_PML + ("ifc_pml_mem", "ifc_pml_tape"), A.empty)
+        s.ifc_pml_g = A.empty.to(torch.int64)
+        return
+    fill(s, c, _FS_PML)
+    n_p = int(c["ifc_pml_g"].numel())
+    s.ifc_pml_mem = A.zeros(B * n_p * 4)
+    s.ifc_pml_tape = (torch.zeros(nt, B * n_p * 3, dtype=torch.float32,
+                                  device=c["ifc_pml_cf"].device)
+                      if mode != "none" else A.empty)
 
 
 def _fs_forward_input(c, mats, wavelet, mode, B=1):
@@ -129,6 +147,8 @@ def _fs_forward_input(c, mats, wavelet, mode, B=1):
             (lambda: A.hist(zero=False)) if cp else A.empty)
         put(s, tuple("save_" + f for f in _FS_HIST),
             (lambda: A.hist(B * E * m, zero=False)) if cp else A.empty)
+    _fs_pml(s, c, A, B, nt, mode)
+    s.illum = illum_alloc(c, A)
     dims(s, c, 2, has_cpml=int(cp))
     return check_filled(s)
 
@@ -161,6 +181,13 @@ def _fs_backward_input(c, mats, wavelet, carry, grads, B=1, own=None):
     else:
         put(b, ("elem_band",), lambda: A.empty.to(torch.int32))
     give(b, carry)
+    if "ifc_pml_g" in c:
+        fill(b, c, _FS_PML)
+        n_p = int(c["ifc_pml_g"].numel())
+        b.ifc_pml_lmem, b.ifc_pml_scr = A.zeros(B * n_p * 4), A.zeros(B * n_p * 2)
+    else:
+        put(b, ("ifc_pml_cf", "ifc_pml_lmem", "ifc_pml_scr"), A.empty)
+        b.ifc_pml_g = A.empty.to(torch.int64)
     b.grad_schi, b.grad_sx, b.grad_sz = grads
     put(b, _FS_LEVELS + _FS_R4 + _FS_REC + _FS_REC_R6 + _FS_REC_NODE, A.empty)
     if b.bs:
@@ -195,6 +222,7 @@ def _fs_backward_input(c, mats, wavelet, carry, grads, B=1, own=None):
     put(b, ("grad_ac_inv_M", "grad_ac_kappa", "grad_el_inv_M"), A.zeros)
     b.grad_ac_inv_Mg = A.zeros() if cp else A.empty
     b.grad_wavelet = torch.zeros(*lead, nt, dtype=torch.float32, device=dev)
+    b.illum = illum_alloc(c, A)
     dims(b, c, 2, has_cpml=int(cp))
     return check_filled(b)
 
@@ -228,9 +256,10 @@ class _SEMFluidSolidC(torch.autograd.Function):
         need_bwd = any(t.requires_grad for t in mats + (wavelet,))
         s = _fs_forward_input(c, mats, wavelet, memory_mode(c, need_bwd), B)
         seis_chi, seis_x, seis_z = _C.sem2d_fluid_solid_forward(s)
+        part = illum_source(c, s.illum, B, c["n_global"])
         if need_bwd:
             ctx.save_for_backward(*mats, wavelet)
-            ctx.c, ctx.B = c, B
+            ctx.c, ctx.B, ctx.illum = c, B, part
             ctx.carry = take(s, _FS_CARRY)
         return seis_chi, seis_x, seis_z
 
@@ -243,6 +272,7 @@ class _SEMFluidSolidC(torch.autograd.Function):
                                tuple(g.contiguous().float() for g in (g_chi, g_sx, g_sz)), B)
         (g_air, g_aim, g_akp, g_lam, g_mu, g_l2m,
          g_eim, g_wrj, g_w) = _C.sem2d_fluid_solid_backward(b)
+        illum_receiver(ctx.illum, b.illum, B, ng)
         if B > 1:                  # one model for every shot: sum the per-shot grads
             g_air, g_lam, g_mu, g_l2m, g_wrj = (
                 g_air.sum(0), g_lam.sum(0), g_mu.sum(0), g_l2m.sum(0), g_wrj.sum(0))
@@ -287,7 +317,7 @@ class _SEMFluidSolidDDC(torch.autograd.Function):
 
         for n in range(nt):
             for s in inps:
-                _C.sem2d_fluid_solid_dd_asm(s)
+                _C.sem2d_fluid_solid_dd_asm(s, n)
             many(("gx", "gz", "kx", "kz", "gax", "gaz", "s_ac"))
             for s in inps:
                 _C.sem2d_fluid_solid_dd_mid(s, n)

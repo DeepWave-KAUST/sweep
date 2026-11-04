@@ -36,6 +36,7 @@ ROCK = dict(k_s=12.2e9, rho_s=2650.0, k_f=1.985e9, rho_f=880.0, k_d=9.6e9, mu=5.
 CASES = {   # source, eta, (kxx, kxz, kzz) z up, viscous_q
     "force_z": ("force", 0.0, (1e-9, 0.0, 1e-9), None),
     "aniso_k": ("explosion", 1e-3, (2e-9, 5e-10, 5e-10), None),
+    "aniso_diag": ("explosion", 1e-3, (2e-9, 0.0, 5e-10), None),
     "visc": ("explosion", 1e-3, (1e-9, 0.0, 1e-9), None),
     "visc_atten": ("explosion", 1e-3, (1e-9, 0.0, 1e-9), (5.0, 30.0)),
 }

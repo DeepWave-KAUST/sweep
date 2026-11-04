@@ -3,9 +3,11 @@
 The spectral-element solver, `sweep.sem.PropSEM`: `PropTorch`'s call on a
 Quad9 mesh that follows the free surface. Start with *Hello · SEM* for one
 forward and one gradient, then the eight short *SEM basics* notebooks, each on
-one part of the API, from the mesh to 3-D and to anisotropic and porous rocks. The examples after them compare
-topography against the finite-difference solvers and run FWI on Marmousi, one
-model and every shot's window in one batched call. The
+one part of the API, from the mesh to 3-D and to anisotropic and porous rocks.
+The examples after them compare topography against the finite-difference
+solvers, run FWI on Marmousi (one model and every shot's window in one batched
+call), and then turn to marine receivers, illumination, attenuation and plane
+waves. The
 [SEM user guide](../../user-guide/sem.md) has the rest of the API.
 
 ## Basics
@@ -156,5 +158,53 @@ model and every shot's window in one batched call. The
     from a smooth start.
 
     [:material-notebook-outline: Open notebook](../../notebooks/44_sem_batched_local_window_fwi.ipynb)
+
+-   ![SEM receivers](../../figures/gallery/47_sem_receivers.png){ loading=lazy }
+
+    **Receivers · pressure, particle velocity, rotation, DAS**
+
+    ---
+
+    One marine run records every sensor where it sits: a dual-sensor streamer
+    in the water, nodes on the sea floor (velocity, pressure, rotation) and a
+    DAS fibre's strain rate, the gradient receivers checked against differences.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/47_sem_receivers.ipynb)
+
+-   ![SEM illumination](../../figures/gallery/48_sem_illumination.png){ loading=lazy }
+
+    **Illumination · RTM under a hill**
+
+    ---
+
+    An RTM image under a hill, compensated by the source illumination
+    (`compute_illumination`, the pseudo-Hessian), with the receiver
+    illumination beside it.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/48_sem_illumination.ipynb)
+
+-   ![SEM attenuation](../../figures/gallery/49_sem_attenuation.png){ loading=lazy }
+
+    **Attenuation · nonlinear Q fit, attenuating C-PML**
+
+    ---
+
+    SPECFEM2D's nonlinear constant-Q fit (`fit="nonlinear"`) against the
+    linear one, in Q(f) and in a strongly attenuated P wave, and the absorbing
+    layer that now attenuates as the medium does.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/49_sem_attenuation.ipynb)
+
+-   ![SEM plane waves](../../figures/gallery/58_sem_plane_wave.png){ loading=lazy }
+
+    **Plane waves · P, SV, SH, Rayleigh through an injection band**
+
+    ---
+
+    SPECFEM2D's `initialfield` on the C-PML: a plane wave from below, past the
+    critical angle, or a Rayleigh wave, entering through a band around a box,
+    then a hill, a canyon and a soft basin inside it.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/58_sem_plane_wave.ipynb)
 
 </div>

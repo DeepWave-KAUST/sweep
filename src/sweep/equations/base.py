@@ -122,6 +122,13 @@ class WaveEquation:
     # only once its CUDA forward + adjoint honour ``fs_faces`` per edge.
     supports_per_edge_free_surface_c = False
 
+    # Whether the medium has a solid, whose plates carry backward-propagating
+    # (Lamb) modes that a PML amplifies.  When True the propagator refuses a PML
+    # that runs between two unabsorbed faces of another axis, one of them free
+    # (``_edges.refuse_free_plate``).  Defaults to False (fluids have no backward
+    # modes); Elastic, ElasticBorn and ViscoElastic override to True.
+    free_plate_unstable = False
+
     # Whether the eager ``func`` applies the image-method topography staircase
     # (it reads ``_topo_rows_runtime``).  Without this flag, ``topography=``
     # with ``topo_method='image'`` on an equation whose step ignores the rows

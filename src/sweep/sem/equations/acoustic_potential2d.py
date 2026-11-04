@@ -2,7 +2,10 @@
 
     (1/κ) ∂²χ/∂t² = ∇·((1/ρ) ∇χ) + s        κ = ρ c²
 
-with displacement ``u = (1/ρ) ∇χ`` and pressure ``p = −∂²χ/∂t²``. Weak form::
+with displacement ``u = (1/ρ) ∇χ`` and pressure ``p = −∂²χ/∂t²``. ``s`` is the
+source this class is given; PropSEM gives it minus the double time integral
+of its wavelet, so that the wavelet is the pressure source, as on the pressure
+form (see ``PropSEM.forward``). Weak form::
 
     ∫ (1/κ) v χ̈ dΩ  +  ∫ (1/ρ) ∇v · ∇χ dΩ  =  ∫ v s dΩ   (+ surface terms)
 
@@ -46,11 +49,15 @@ from ..fields import DerivedInitState, DirichletNodes, FieldSpec
 from ..mesh.domains import DomainMask, masked_inv_mass
 from ..mesh.nodes import node_field
 from ..mesh.quad9 import Quad9Mesh
+from ..receivers import fluid_receivers
 
 
 @dataclass
 class AcousticPotentialSEM2D(DerivedInitState, DirichletNodes):
     """SPECFEM-normalized variable-density acoustic (potential χ) on Quad9."""
+
+    # PropSEM fills ``rho`` from its ``density=`` and takes ``models=[vp, ...]``
+    takes_density: ClassVar[bool] = True
 
     field_specs: ClassVar[list] = [
         FieldSpec("chi", supports_source=True, supports_receiver=True,
@@ -64,6 +71,16 @@ class AcousticPotentialSEM2D(DerivedInitState, DirichletNodes):
 
     # FD-aligned receiver components: SPECFEM potential normalization: p = -chi_ddot (module docstring).
     derived_receiver_types: ClassVar[dict] = {"p": ("chi", "pressure")}
+    # strain, rotation, pressure / particle motion at a point (sweep.sem.receivers)
+    spatial_receiver_types: ClassVar[dict] = fluid_receivers("chi")
+
+    # PropSEM's wavelet is the PRESSURE source, as on the pressure form and
+    # PropTorch: the records are those of chi driven by minus its double time
+    # integral, so p = -chi_ddot has the wavelet's waveform (PropSEM.forward).
+    propsem_pressure_wavelet: ClassVar[bool] = True
+    # ...and records it by default, as PropTorch's Acoustic does; chi, the
+    # pressure's double time integral, is a near-DC tail to fit
+    propsem_default_receiver_type: ClassVar[tuple] = ("p",)
 
     mesh: Quad9Mesh
     vp_e: torch.Tensor            # (E, ngll, ngll)

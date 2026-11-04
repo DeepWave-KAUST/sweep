@@ -40,3 +40,33 @@ def thomsen_to_vti_cij(vp, vs, epsilon, delta, rho):
     radicand = 2.0 * delta * c33 * (c33 - c55) + (c33 - c55) ** 2
     c13 = torch.sqrt(torch.clamp(radicand, min=0.0)) - c55
     return c11, c13, c33, c55
+
+
+def thomsen_to_tti_cij(vp, vs, epsilon, delta, rho, theta):
+    """TTI (tilted transverse isotropy) Voigt stiffnesses: the VTI medium of
+    :func:`thomsen_to_vti_cij` with its symmetry axis tilted by ``theta``
+    (radians) in the (x, z) plane.
+
+    Returns ``(c11, c13, c15, c33, c35, c55)`` for the velocity-stress update
+
+        σ_xx += dt (c11 ∂x v_x + c13 ∂z v_z + c15 (∂z v_x + ∂x v_z))
+        σ_zz += dt (c13 ∂x v_x + c33 ∂z v_z + c35 (∂z v_x + ∂x v_z))
+        σ_xz += dt (c15 ∂x v_x + c35 ∂z v_z + c55 (∂z v_x + ∂x v_z))
+
+    by the closed-form 2-D Bond rotation of the FD ``ElasticTTI2nd`` (Oh et al.
+    2020, eq. 10), in its axes (z down) and with its sign of ``theta``.
+    ``theta = 0`` gives the VTI stiffnesses exactly, with ``c15 = c35 = 0``.
+    """
+    c11, c13, c33, c55 = thomsen_to_vti_cij(vp, vs, epsilon, delta, rho)
+    ct, st = torch.cos(theta), torch.sin(theta)
+    ct2, st2 = ct * ct, st * st
+    s2c2 = st2 * ct2
+    mix = 2.0 * c13 + 4.0 * c55
+    a = c13 - c11 + 2.0 * c55
+    b = c13 - c33 + 2.0 * c55
+    return (c11 * ct2 * ct2 + c33 * st2 * st2 + mix * s2c2,
+            (c11 + c33 - 4.0 * c55) * s2c2 + c13 * (st2 * st2 + ct2 * ct2),
+            a * ct2 * ct * st - b * ct * st2 * st,
+            c11 * st2 * st2 + c33 * ct2 * ct2 + mix * s2c2,
+            a * st2 * st * ct - b * st * ct2 * ct,
+            (c11 + c33 - 2.0 * c13) * s2c2 + c55 * (ct2 - st2) ** 2)

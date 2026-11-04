@@ -54,6 +54,7 @@ import torch
 from .._assembly import assemble_each, contract
 from ..fields import DerivedInitState, FieldSpec, check_element_arrays
 from ..mesh.hex27 import Hex27Mesh
+from ..receivers import solid_receivers
 
 
 # reference-derivative + transpose einsums on (E, kz, ky, kx) tensors
@@ -84,6 +85,8 @@ class ElasticSEM3DDeformed(DerivedInitState):
     # FD-aligned receiver components: particle velocity from the displacement trace: v = u_dot.
     derived_receiver_types: ClassVar[dict] = {"vx": ("u_x", "velocity"), "vy": ("u_y", "velocity"),
         "vz": ("u_z", "velocity")}
+    # strain, rotation, pressure / particle motion at a point (sweep.sem.receivers)
+    spatial_receiver_types: ClassVar[dict] = solid_receivers(("u_x", "u_y", "u_z"))
 
     mesh: Hex27Mesh
     vp_e: torch.Tensor

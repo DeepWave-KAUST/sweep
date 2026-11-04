@@ -26,6 +26,164 @@ and this project adheres to
   skill.  The docs page *AI assistants (Agent Skills)* covers the install,
   and `test/test_skill_snippets.py` runs every code block of the skill so
   its examples cannot fall behind the API.
+- **Plane-wave incidence on the SEM, SPECFEM2D's `initialfield`: `sweep.sem.PlaneWave` in
+  place of the source coordinates** (`prop(wavelet, PlaneWave("SV", 30.0), receivers, ...)`).
+  A plane P or SV wave from below at any angle, a Rayleigh wave along the surface, or a plane
+  SH wave, with the half-space's reflected and converted waves under a free top, the incident
+  wave alone under an absorbing one. On `ElasticSEM2DDeformed`, `ViscoElasticSEM2DDeformed`
+  and `ElasticSHSEM2DDeformed`, `impl='eager'`, every memory mode. The wave enters through a
+  band of elements one element thick around a box (the domain reduction method; the loads
+  `-K_be u0_e` and `K_eb u0_b` on the band's nodes): inside the box the run carries the whole
+  field, from the band out only what the box scatters, which the C-PML absorbs. SPECFEM2D
+  feeds the wave through its Stacey edges instead (Bielak's conditions). The plane wave is
+  computed in the frequency domain from the wavelet's samples, one traction-free solve below,
+  at and past the critical angle (where the reflected P wave is evanescent);
+  `PropSEM.free_field` gives it at any points. Inside the box the medium is free (a
+  topography, a basin, attenuation); outside it must be the uniform elastic background under a
+  flat surface, and anything else is refused, as are `impl='c'` (one wavelet per shot) and a
+  wave already on the band at the first step. In a flat half-space the records inside the box
+  are the plane wave to the leapfrog's error. Against SPECFEM2D 8.1.0 (double precision,
+  `test/sem/specfem_compare/run_compare_planewave.py`): in a domain whose Stacey edges are far
+  from the receivers the two agree to 1.3e-4 to 2.5e-4, under a soft basin too; in a small one
+  SPECFEM2D's edges put 2e-3 to 5e-3 of their own into its records, where ours meet the plane
+  wave to 1.6e-4 to 4.2e-4, past the critical angle and for the Rayleigh wave as well. In SH
+  SPECFEM2D's Stacey edges take no Bielak terms, and its records near them miss the plane wave
+  by up to 20% (`test/sem/test_sem_plane_wave.py`). Notebook 58.
+- **The nonlinear constant-Q fit, SPECFEM2D's `USE_SOLVOPT`: `fit="nonlinear"`** on
+  `ViscoElasticSEM2DDeformed` and `ViscoAcousticPotentialSEM2D` (`equation_options`). The
+  relaxation frequencies are fitted with the strengths, for each Q, both kept positive, by
+  the least squares of the linear fit's residual `Q Im M - Re M` at `4 n_sls` frequencies
+  (`n_fit=None`). Over SPECFEM2D's band at Q = 30 the largest error of `Q(f)` drops from 5.1%
+  (the linear fit at its `2 n_sls - 1` frequencies) to 3.3% with three mechanisms and from
+  3.4% to 0.7% with four; strengths stay positive down to Q = 1, where the linear fit refuses
+  Q below 1.5-1.8. Each node then has its own relaxation times, the bulk ones from `Qkappa`
+  and the shear ones from `Qmu`. `sweep.equations.gsls_nonlinear.GSLSNonlinearFit` solves the
+  fit by Levenberg-Marquardt at the Chebyshev nodes of `1 / Q` once per number of mechanisms,
+  band ratio and number of frequencies, and maps a model's Q through the Chebyshev series, so
+  Q stays differentiable and `Q = inf` gives zero strengths. Its mechanisms agree with those of
+  SPECFEM2D's own SolvOpt to 2.5e-4, which stops at four digits
+  (`test/sem/specfem_compare/specfem_solvopt_driver.f90`, `test/sem/test_sem_gsls_nonlinear.py`);
+  against SPECFEM2D run with `USE_SOLVOPT` the records differ by 1.8e-5, and agree to 6e-14 on
+  its own mechanisms.
+  `fit` also takes an object with `q_min` and `params(Q)`. Notebook 49.
+- **Illumination on the SEM: `PropSEM.compute_illumination`.** PropTorch's switch and pair,
+  read back after a call: `source_illumination`, `sum_t |a|^2` with `a` the wavefields'
+  second time derivative (the pseudo-Hessian of Shin et al. 2001, SPECFEM2D's first
+  `APPROXIMATE_HESS_KL` kernel), and after its backward `receiver_illumination`,
+  `sum_t |M^-1 dL/df|^2` (the adjoint wavefield). Both are shaped like the models, the way
+  the gradient is: `w |J|` at each element node, and the interpolation's transpose for a
+  grid model. On `impl='eager'` on the full tape, and on `impl='c'` for the 2-D C-PML paths
+  (`AcousticPotentialSEM2D`, `ElasticSEM2DDeformed`, `AcousticElasticSEM2D`), there in the
+  shot batch and under boundary saving, too. The eager and CUDA values agree to 1e-5; the
+  sums are fp64. Turning it on does not move the gradient (`test/sem/test_sem_illumination.py`).
+  Notebook 48 compensates an RTM image under a hill with it.
+- **`ViscoElasticSEM2DDeformed`: SPECFEM2D's visco-elastic displacement scheme on the SEM.**
+  `ElasticSEM2DDeformed` with SPECFEM2D's `ATTENUATION_VISCOELASTIC` as its Newmark path runs
+  it: mechanisms on the bulk and the shear modulus (models `vp, vs, rho, Qk, Qmu`), element
+  memories `e = A^2 e + B (s + A s_old)` of the dilatation, the deviatoric and the shear strain,
+  and SPECFEM2D's defaults: the band `f_ref / 10 .. 10 f_ref`, the fit at `2 n_sls - 1`
+  frequencies, and `vp`, `vs` read as unrelaxed (`"real_modulus"` is its
+  `READ_VELOCITIES_AT_f0`). The C-PML layer attenuates too, as SPECFEM2D's visco-elastic C-PML
+  does: there the memories take the stretched strains, a second copy of each on the band for
+  `sigma_zz` and `sigma_xz`, the relaxation run on the stretched strain where SPECFEM2D expands
+  the product in partial fractions (whose coefficients blow up where a relaxation frequency
+  meets a C-PML `alpha` or `beta`). With the layer elastic the jump of the modulus at its edge
+  reflected 5.1e-2 of the record (Qkappa 30, Qmu 20), attenuating 4.7e-4, below the elastic
+  medium's C-PML (1.0e-3); against SPECFEM2D's visco-elastic C-PML the records agree to 2.5e-7
+  and the two layers reflect alike, 9.3e-5 (`test/sem/specfem_compare/run_compare_absorb_visco.py`).
+  `Q = inf` is the elastic step bit for bit, and all five models are differentiable. Against SPECFEM2D 8.1.0 the records
+  agree to 7e-14, with `Qkappa = Qmu = 30` read at 15 Hz and with `Qkappa = 60`, `Qmu = 20`
+  read as unrelaxed, where the velocity-stress class keeps 2e-4. Eager, 2-D; no boundary saving
+  (dissipative).
+- **`ElasticSHSEM2DDeformed`: SH waves on the SEM.** The out-of-plane displacement `u_y`
+  (SPECFEM2D's `P_SV = .false.`), as the potential form's scalar equation with `vp = vs` and
+  the density `1 / (rho vs^2)`: its operators, C-PML and exact boundary saving, a traction-free
+  surface, models `vs, rho`, a force along y and the receivers `u_y`, `vy`. Against SPECFEM2D:
+  1e-13 flat, 2e-12 under a hill. `PropSEM` reads whether an equation takes `density=` from its
+  `takes_density` flag.
+- **`ViscoAcousticPotentialSEM2D`: visco-acoustic attenuation on the SEM.** The potential
+  form with SPECFEM2D's `ATTENUATION_VISCOACOUSTIC`: its weak form, node memories and Newmark
+  update, models `vp, Qk` and `density=`, and the visco-elastic class's `f_ref`, `f_band`,
+  `n_sls`, `n_fit` and `velocities` (with `"unrelaxed"`, SPECFEM2D's reading without
+  `READ_VELOCITIES_AT_f0`, now on both classes). `Qk = inf` is the potential step bit for bit,
+  and all models are differentiable. Against SPECFEM2D 8.1.0 the records differ by 2.8% at Q =
+  30; its `update_memory_var_acous_weak_form` sets `dot_e1_old = dot_e1` inside the loop over
+  the mechanisms, and with that line reproduced they agree to 8e-13. Eager, 2-D; no boundary
+  saving (dissipative).
+- **Curved internal interfaces on the 2-D SEM mesh.** `PropSEM(interfaces=[...])` takes
+  internal interfaces like `topography`, one row per column and top-down, and its Quad9 mesh
+  follows them: each layer gets whole element rows (`interface_elements`, by default shared
+  by the layers' mean thicknesses), graded linearly between its two interfaces in every
+  column, as SPECFEM2D's internal mesher grades the layers of its `interfaces.dat`.
+  `element_layer` gives each element's layer and `layered_model(values)` a GLL-native model of
+  one value per layer, which steps at the interfaces instead of being interpolated across
+  them. The mesh is `sweep.sem.build_layered_quad9` (one layer is `build_topography_quad9`'s).
+  Against SPECFEM2D's mesh of the same interfaces (a curved sea floor under water, a
+  sinusoidal interface between two rocks) the records agree to 4e-12.
+- **The 2-D SEM against SPECFEM2D to round-off.** `test/sem/specfem_compare/run_compare_box.py`
+  runs the 2-D classes against SPECFEM2D built in double precision on the cases of
+  `make_specfem_box_cases.py`: homogeneous media in a box with all four sides free, a Ricker,
+  6000 steps, no shift or scale fitted. The elastic classes (`ElasticVSSEM2DDeformed`,
+  `ElasticSEM2DDeformed`, `ElasticSEM2D`, the VTI and TTI ones) agree to 1e-13, and to 3e-12
+  under a Gaussian hill. The acoustic ones (`AcousticPotentialSEM2D`, `AcousticSEM2D`) agree
+  to 1e-12 in pressure, and `AcousticElasticSEM2D` (water over rock) to 2e-12. The
+  visco-elastic class agrees to 2e-4 with SPECFEM2D's conventions; its memory variables'
+  time scheme differs. The conventions the comparison matches are in the SEM guide's
+  "Against SPECFEM2D".
+- **`ElasticTTISEM2DDeformed`: tilted transverse isotropy on the SEM.** The VTI
+  velocity-stress SEM with its symmetry axis tilted by a sixth model, `theta` (radians), by
+  the closed-form Bond rotation of the FD `ElasticTTI2nd`, in its axes and with its sign of
+  `theta` (`sweep.sem.thomsen_to_tti_cij`); the tilt adds the `c15`, `c35` couplings to the
+  stress update. `theta = 0` is `ElasticVTISEM2DDeformed`, and all six models are
+  differentiable, under boundary saving too. Both classes agree with SPECFEM2D's anisotropic
+  elastic medium (material type 2) to 1e-13 in relative L2 with SPECFEM2D built in double
+  precision: a VTI shale with a vertical and a 30° axis, a force and an explosion, all sides
+  free (`test/sem/specfem_compare/run_compare_box.py`, cases from
+  `make_specfem_box_cases.py`). Eager, 2-D.
+- **`BiotVSSEM3DDeformed`: the Biot SEM in 3-D.** The velocity-stress Biot SEM of
+  `BiotVSSEM2DDeformed` on the Hex27 mesh of `ElasticVSSEM3DDeformed` (flat or under a
+  topography): the same coefficients, placement and exact per-node drag, the open-pore
+  surface, the C-PML and `viscous_q`. Porous, dry and fluid elements (the fluid-solid faces
+  through `sweep.sem.coupling.FluidSolidInterface3D`, a sea floor across the C-PML's x-y corner
+  columns allowed), an isotropic drag, and the 2-D class's sources with `y` (the explosion the
+  default). The drag's exponentials are stored per number of element copies at a node (1, 2,
+  4, 8), about 2.7 kB per element. A dry solid is `ElasticVSSEM3DDeformed` to round-off; a point
+  pore-pressure injection and the split source match the analytic fast and slow P waves to
+  1% (`test/sem/test_biot_sem3d.py`). Eager. `sweep.sem._assembly.vector_divergence3` is the
+  weak divergence of an element-local vector.
+- **Moment-tensor sources in 3-D.** `PropSEM`'s stress source names (`sxx`, `syy`, `szz`,
+  `sxy`, `sxz`, `syz`) on the 3-D elastic equations, which refused them: the point stamp
+  `-M : grad(phi)` on Hex8 and Hex27 meshes (`PointStamp3D.moment_tensor_stamp`), shared on a
+  face, an edge or a corner among the elements there by the solid angle each holds. On both
+  backends, as in 2-D (the kernels see the assembled patterns).
+- **`ViscoElasticVSSEM2DDeformed`: visco-elastic attenuation on the SEM.** The velocity-stress
+  elastic SEM with the generalized standard linear solid of the FD `ViscoElastic`, which is
+  SPECFEM2D's: models `vp, vs, rho, Qp, Qs` (velocities at `f_ref`), `f_ref`, `f_band` and
+  `n_sls` through `equation_options`, element-local memory variables advanced with the
+  trapezoidal rule, all five models differentiable, `Q = inf` the elastic step bit for bit.
+  Against SPECFEM2D's `ATTENUATION_VISCOELASTIC` (Q = 30, half-space, its band
+  `f0 / 10 .. 10 f0`) the records agree to 1.2% in relative L2 (1.7% for the elastic pair)
+  and the visco/elastic spectral ratios to 0.1-1.1% in amplitude
+  (`test/sem/specfem_compare/run_compare_visco.py`). SPECFEM2D's reading of the velocities
+  at `f_ref` (`velocities="real_modulus"`: `rho v^2` is the real part of the modulus there,
+  which puts the phase velocity about `3 / (8 Q^2)` above `v`) and its fit's frequencies
+  (`n_fit = 2 n_sls - 1`) are options; with both, the records agree with SPECFEM2D's to 2e-4
+  in a box with free sides, SPECFEM2D in double precision (0.9% with the defaults), the rest
+  being the memory variables' time scheme (second order: 4.2e-5 at half the step). Eager,
+  2-D; no boundary saving (dissipative). The band and the moduli factors of the fit are shared with the FD class
+  (`sweep.equations.visco_elastic.gsls_band`, `gsls_moduli_factors`); the default band, a
+  factor 12, is that of SPECFEM2D's original fit, not of its current one.
+- **`ViscoBiotVSSEM2DDeformed`: Biot with an attenuating frame.** The models of
+  `BiotVSSEM2DDeformed` and the frame's `Qp` (drained P modulus) and `Qs` (shear), the GSLS
+  of the visco-elastic class on the frame part of the total stress; the pore fluid's share
+  of `H` does not relax and `viscous_q` works as before. A dry solid gives the visco-elastic
+  class's records to round-off, `Q = inf` Biot's bit for bit. Against SPECFEM2D's
+  attenuating poroelastic frame (its `poroelastic_acoustic` example, `Qmu = 50`) the
+  attenuation's effect agrees to 0.5% once three SPECFEM2D 8.1.0 bugs are fixed (memory
+  variables updated four times per step, the previous step's term of their convolution
+  zero, `mu` for `lambda` in the fluid routine's attenuated stress; as released its frame Q
+  is about 115 for 50) and the frame takes SPECFEM2D's mechanisms
+  (`test/sem/specfem_compare/run_compare_visco_biot.py`).
 - **`PropSEM(impl='eager', memory=Ckpt(chunks=K))` checkpoints single shots and
   per-shot models**, which it used to refuse (`nshots=1`) or loop without
   (per-shot models): `sweep.sem.ckpt_rollout` keeps one state per `K` steps and
@@ -42,6 +200,20 @@ and this project adheres to
   raises); an `nt` that `K` does not divide is padded with zero-wavelet steps
   whose records are dropped. Records equal the full tape's; gradients agree to
   round-off.
+- **SEM receivers that record a spatial derivative**: the strain (`exx`, `ezz`, `exz`; 3-D
+  `eyy`, `exy`, `eyz` too), the rotation `curl(u) / 2` (`rot_y`; 3-D `rot_x`, `rot_y`, `rot_z`),
+  their rates (`_t`, what DAS records), the pressure `-kappa div u` in an isotropic solid (`p`)
+  and a potential fluid's particle displacement, velocity and acceleration (`ux`, `vx`, `ax`,
+  ...) -- SPECFEM2D's `seismotype` 1-5 in both media. A receiver takes the gradient of its
+  element's basis (`sweep.sem.GradientStamp`), so every backend, shot batch and memory mode
+  records it, and the gradient reaches the model through it and its material factor.
+  `AcousticElasticSEM2D`'s `vx`, `vz` and `p` take the medium of each receiver's element: the
+  particle velocity and the pressure are the water's above the sea floor and the rock's
+  below (before, `vx` read the dead solid field in the water and `p` the dead potential in the
+  rock). On an element edge, where the gradient jumps, a receiver takes the elements that meet
+  there by their shares, as a moment source is spread over them. Against SPECFEM2D inside an
+  element: round-off (4e-12..5e-12); on an edge SPECFEM2D takes one element (1e-4..2e-4).
+  `test/sem/test_sem_spatial_receivers.py`, notebook `47_sem_receivers`.
 
 ### Changed
 - The CPU test workflow runs as four parallel jobs (`sem-biot`, `sem`,
@@ -133,6 +305,35 @@ and this project adheres to
   at 801x1601 (A100), forward | forward+backward: uncompiled 2.6x | 2.0x faster,
   compiled 2.2x | 1.3x on top of the unrolled contractions. A memory field is
   indexed by band row, not by element id.
+- **The displacement-form elastic C-PML centres its damping in time, as SPECFEM2D's Newmark
+  scheme does** (`ElasticSEM2DDeformed` and the classes on it: `AcousticElasticSEM2D`'s solid,
+  `ViscoElasticSEM2DDeformed`). The mass the step divides by takes `dt/2` times the
+  acceleration term's velocity coefficient (`La1 = d_x + d_z`), so the damping no longer acts
+  on the backward-difference velocity alone. The records now agree with SPECFEM2D's C-PML to
+  7e-7 of the record on its half-space (2.5e-4 before), and the layer reflects 1.6e-4 there
+  (2.9e-4 before); a two-element layer 2.2e-3 instead of 6.4e-3
+  (`test/sem/test_sem_vs_cpml_absorption.py`). The profile keeps the `dt` it was built for.
+
+- **`PropSEM`'s wavelet is the pressure source on the potential forms too**
+  (`AcousticPotentialSEM2D`, the water of `AcousticElasticSEM2D`). The
+  wavelet used to drive chi, so `p = -d2(chi)/dt2` came out two time
+  derivatives off the pressure form's `p` (`AcousticSEM2DDeformed`, FD's
+  `Acoustic`) for the same wavelet. The records are now those of chi driven by
+  minus the wavelet's double time integral: the same `p` waveform on both
+  forms (to 2e-13 in float64; the amplitude still differs by `rho*c^2` at the
+  source), and the fluid-solid `vx`/`vz` stay consistent with that `p`.
+  **`chi`, `u_x`, `u_z` and `vx`/`vz` records change accordingly**: observed
+  data made with the old convention no longer matches. PropSEM takes them from
+  the run the wavelet itself drives -- linear and time-invariant, that run
+  records `p` sample for sample and the rest are its running integrals -- so
+  float32 never differences a double integral; `return_wavefield=True` runs
+  the integrated wavelet instead, so the snapshots are chi and u.
+  `SEMPropagator` and `SEMModelParallel` keep the wavelet as the chi source.
+  **PropSEM's default records are now the pressure** on these forms --
+  `['p']` on the potential form, `['p', 'vx', 'vz']` on the fluid-solid class
+  -- as on PropTorch: chi is now a near-DC tail (fitting it, bf16/int8
+  boundary-saving gradients fell to cos 0.1-0.4 of the full tape's). Ask for
+  `chi` / `u_x` / `u_z` by name; the low-level propagators still record chi.
 
 ### Removed
 - Stale examples and repo-root leftovers: `examples/FWI/` and
@@ -240,6 +441,77 @@ and this project adheres to
   so the x wavenumbers were scaled by dz/dx and the Q response depended on the
   grid orientation (a transposed problem's record differed by 28%). They now
   use both spacings; uniform grids are unchanged.
+- The last sample of a `PropSEM` derived receiver component no longer spikes.
+  `p = -d2(chi)/dt2` and `vx`/`vz` = `du/dt` repeated the last base sample
+  past the end of the record, so the final `p` sample was a first difference
+  over `dt^2` (717 after 103 on a 97x193 potential-form run) and the final
+  velocity sample half a step off. The end is now the second-order one-sided
+  difference: a record cut at `nt` ends within 1-2 % of the longer record's
+  value there (was up to 9x its peak), on both backends.
+- The SEM C-PML placement guard no longer flags a source or receiver on the
+  model's edge column (`ix = 0` / `nx - 1`). PropSEM adds the layer outside
+  the model, so that column is the band's inner edge, but the band's
+  thickness comes out of float32 mesh coordinates (200.00002 for 200 m) and
+  the comparison had no tolerance: `"in left band (x<200.0)"`. Points within
+  round-off of the edge now count as inside. The warning that does fire says
+  that on PropSEM such a point is outside the model grid and names
+  `pml_guard='off'` as the forward-call option it is, instead of advising a
+  smaller `pml_thickness_elements`, which PropSEM does not take.
+- A `PropSEM` source or receiver above the `topography` is refused up front,
+  naming the point and the surface row of its column, on every backend. It
+  used to reach the curved-mesh locator, which said only `could not locate
+  (x=..., z=...) in any Quad9 element of column ex=..`. A point on the
+  surface row (fractional rows and columns too) is accepted as before.
+- The acoustic C-PML's `db/dz` on a topography or interfaces mesh. The double-convolution
+  step takes the derivative of the recursion coefficient across the layer, which both
+  builders took with column 0's z axis for the whole mesh; such a mesh grades every column
+  differently, so `db/dz` came out off by the ratio of the column heights (1.4 under a 400 m
+  hill on a 1000 m model). Every grid line now takes its own coordinates, in 2-D and 3-D
+  (`sweep.sem.cpml._axis.gradient_along`); flat meshes are unchanged bit for bit
+  (`test/sem/test_sem_acoustic_cpml_profile.py`).
+- **`AcousticElasticSEM2D`: a sea floor through a side C-PML band absorbs like the rock
+  alone.** The coupling took its plain terms inside the bands, where each domain's C-PML
+  carries its stretching into the interface: the solid's form is scaled by `s_x s_z`, so its
+  load is `(s_z*p n_x, s_x*p n_z)`, and the fluid's double-convolution form leaves
+  `(1/s_x)*u_x n_x + (1/s_z)*u_z n_z` -- on a horizontal sea floor, `s_x*p` on the solid and
+  the plain term on the fluid. With 200 m of water over rock, 10 Hz, 20 m elements and a
+  ten-element layer, the records 10 m above and below the floor and 300 m below it differed
+  from a box with no boundary within reach by up to 9e-3, 8e-3 and 4e-2; with the stretched
+  loads 1.3e-3, 2.2e-3 and 3.8e-3, the C-PML's own level on the rock alone (2.4e-3, 2.3e-3,
+  3.8e-3). SPECFEM2D stretches both loads by `s_x` (`compute_coupling_viscoelastic_ac`,
+  `compute_coupling_acoustic_el`), right for its fluid, which it scales as well; on ours the
+  `s_x` on the fluid load brings the error back to 1.3e-2. The interface points in a band
+  carry four memories each (`sweep.sem.coupling.InterfaceCPML`, the profiles' new per-axis
+  `sigma_*`/`d_*` and `alpha_*`), on both backends, the shot batch, boundary saving and
+  domain decomposition (`test/sem/test_sem_fs_cpml_interface.py`).
+- The SEM C-PML profiles no longer take a node on an absorbing layer's inner
+  edge into the layer. Its coordinate equals `lo + L` (`hi - L`) only up to
+  round-off, and `coord < lo + L` counted it in whenever it fell an ulp short:
+  `d ~ 1e-30 d_max`, `alpha = alpha_max`, and every element touching it joined
+  the band -- one physical element column or row, on that side only (287 band
+  elements instead of 272 on a 38 x 19 mesh), in the eager band split, the
+  `impl='c'` interior fast-path mask and the boundary-saving rings. It hit 576
+  of 1248 meshes scanned, float32 and float64, flat, topography and 3-D. The
+  displacement and velocity-stress elastic, acoustic 2-D/3-D and DD axis
+  profiles now count a node in only past 16 ulps of the axis extent;
+  coefficients inside the layer are bit-identical. Where such a node also lay
+  in the other axis's layer it took the corner formulas, whose separation
+  could move its `d` by a few percent; that is gone too. Records and gradients
+  move by round-off (3e-14 in float64) unless that separation acted: then by
+  8e-7 at surface receivers, and 3e-5 with the source and receivers next to
+  that corner.
+- 2-D `Elastic`, `ElasticBorn` and `ViscoElastic` refuse a PML that runs
+  between two faces of the other axis that have none, one of them free --
+  `free_surface=["top", "bottom"]`, `["top", "left", "right"]` and the four
+  other such layouts, or a free face opposite an `abcn` 0 face -- with a
+  `ValueError` naming the faces. The solid between them is a plate whose
+  backward-propagating Lamb modes a PML amplifies (Loh et al. 2009): on eager
+  and `impl='c'` these runs grew 1e2-1e4 times every 1.25 s from about 2 s on,
+  the growth converges under grid refinement at the plate's S1
+  zero-group-velocity frequency, and no PML width, CFS shift or damping stops
+  it. Keep one face of the pair absorbing, or free all four. `Acoustic` and
+  `ViscoAcoustic` accept every layout; an equation declares a solid with
+  `free_plate_unstable`.
 
 ## [0.3.6] - 2026-10-29
 

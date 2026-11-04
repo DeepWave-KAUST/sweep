@@ -336,6 +336,7 @@ void acoustic_cpml_backward(const SemAcousticCpmlBackwardInputCore& in) {
                         cudaMemcpyDeviceToDevice, stream);
     }
 
+    double* illum = in.illum.numel() ? in.illum.data_ptr<double>() : nullptr;
     for (int mm = nt; mm >= 1; --mm) {
         const int k = mm - 1;
         // data + dirichlet^T on gA and the carried memory adjoints
@@ -345,6 +346,8 @@ void acoustic_cpml_backward(const SemAcousticCpmlBackwardInputCore& in) {
             sem2d_dirichlet_fill5<<<gD, TPB, 0, stream>>>(
                 gA, lpx, lpz, lzx, lzz,
                 nullptr, nullptr, nullptr, nullptr, nullptr, didx, kdir, ng);
+        if (illum)      // gA is now the whole adjoint of chi^{k+1}
+            sem2d_illum_rec<<<gN, TPB, 0, stream>>>(gA, inv_M, msn, illum, ng);
         sem2d_scale2_b<<<gN, TPB, 0, stream>>>(kappa, gA, dt2, gw, ng, msn);   // gw = dt2 kappa gA
 
         if (k >= 1) {
@@ -867,7 +870,12 @@ void elastic_cpml_backward(const SemElasticCpmlBackwardInputCore& in) {
         cudaMemcpyAsync(u_lo_z, in.fin_uz_prev.data_ptr<float>(), ngb, cudaMemcpyDeviceToDevice, stream);
     }
 
+    double* illum = in.illum.numel() ? in.illum.data_ptr<double>() : nullptr;
     for (int n = nt - 1; n >= 0; --n) {
+        if (illum) {    // lam1 is the whole adjoint of u^{n+1}
+            sem2d_illum_rec<<<gN, TPB, 0, stream>>>(lam1_x, inv_M, 0, illum, ng);
+            sem2d_illum_rec<<<gN, TPB, 0, stream>>>(lam1_z, inv_M, 0, illum, ng);
+        }
         if (bs) {
             // swap2nd reverse of forward iteration n: feed u^{n+1} as the "prev"
             // level with the CPML memories zeroed. Exact in the reversible
@@ -1076,6 +1084,13 @@ void fluid_solid_dd_bwd_a(const SemFluidSolidBackwardInputCore& in, int64_t k) {
         sem2d_ifc_ac<<<ib, TPB, 0, stream>>>(
             in.y_x.data_ptr<float>(), in.y_z.data_ptr<float>(), ig, iw, inx, inz,
             in.lchidd.data_ptr<float>(), nifc, ng);
+        const int npp = static_cast<int>(in.ifc_pml_g.numel());
+        if (npp > 0)   // the band points' solid-load adjoint, before lchidd's exchange
+            sem2d_ifc_pml_el_T<<<(npp + TPB - 1) / TPB, TPB, 0, stream>>>(
+                in.y_x.data_ptr<float>(), in.y_z.data_ptr<float>(),
+                in.ifc_pml_g.data_ptr<int64_t>(), in.ifc_pml_cf.data_ptr<float>(),
+                in.ifc_pml_lmem.data_ptr<float>(), in.lchidd.data_ptr<float>(),
+                in.ifc_pml_scr.data_ptr<float>(), npp, ng);
         if (k >= 1) {
             // u^k: the save-all tape, or the reverse march's lower level
             const size_t o = static_cast<size_t>(k - 1) * ng;
@@ -1087,6 +1102,11 @@ void fluid_solid_dd_bwd_a(const SemFluidSolidBackwardInputCore& in, int64_t k) {
                 uxk, uzk, ig, iw, inx, inz,
                 in.s_ac.data_ptr<float>(), nifc, ng);
         }
+        if (npp > 0)   // s_ac^k's stretching, from the forward's tape
+            sem2d_ifc_pml_tape_add<<<(npp + TPB - 1) / TPB, TPB, 0, stream>>>(
+                in.ifc_pml_tape.data_ptr<float>() + static_cast<size_t>(k) * npp * 3,
+                in.ifc_pml_g.data_ptr<int64_t>(), in.s_ac.data_ptr<float>(), 0,
+                nullptr, 0, npp, ng);
     }
     SWEEP_CUDA_CHECK(cudaGetLastError());
 }
@@ -1194,6 +1214,11 @@ void fluid_solid_dd_bwd_c(const SemFluidSolidBackwardInputCore& in, int64_t k) {
         in.ac_mask_e.data_ptr<float>(), in.lchi_G.data_ptr<float>(),
         in.lapx.data_ptr<float>(), in.lapz.data_ptr<float>(),
         in.grad_ac_inv_rho.data_ptr<float>(), ngll, E, ng, 0);
+    const int npp = static_cast<int>(in.ifc_pml_g.numel());
+    if (npp > 0)   // the solid load's chi^k adjoint, before lchi_G's exchange
+        sem2d_ifc_pml_scr_add<<<(npp + TPB - 1) / TPB, TPB, 0, stream>>>(
+            in.ifc_pml_scr.data_ptr<float>(), in.ifc_pml_g.data_ptr<int64_t>(),
+            in.lchi_G.data_ptr<float>(), npp, ng);
     SWEEP_CUDA_CHECK(cudaGetLastError());
 }
 
@@ -1272,6 +1297,14 @@ void fluid_solid_dd_bwd_d(const SemFluidSolidBackwardInputCore& in, int64_t k) {
             in.ifc_nz.data_ptr<float>(), in.sc_now_x.data_ptr<float>(),
             in.sc_now_z.data_ptr<float>(), nifc, ng);
     }
+    const int npp = static_cast<int>(in.ifc_pml_g.numel());
+    if (npp > 0)   // the band points' fluid-load adjoint, before sc_now's exchange
+        sem2d_ifc_pml_ac_T<<<(npp + TPB - 1) / TPB, TPB, 0, stream>>>(
+            in.lchidd.data_ptr<float>(), in.ac_inv_M.data_ptr<float>(),
+            in.ifc_pml_g.data_ptr<int64_t>(), in.ifc_pml_cf.data_ptr<float>(),
+            in.ifc_pml_lmem.data_ptr<float>(),
+            in.sc_now_x.data_ptr<float>(), in.sc_now_z.data_ptr<float>(),
+            in.sc_prev_a_x.data_ptr<float>(), in.sc_prev_a_z.data_ptr<float>(), npp, ng);
     SWEEP_CUDA_CHECK(cudaGetLastError());
 }
 
@@ -1459,6 +1492,12 @@ void fluid_solid_dd_bwd_march_asm(const SemFluidSolidBackwardInputCore& in,
             in.ifc_nz.data_ptr<float>(), in.rec_f_x.data_ptr<float>(),
             in.rec_f_z.data_ptr<float>(), nifc, ng);
     }
+    const int npp = static_cast<int>(in.ifc_pml_g.numel());
+    if (npp > 0)   // the force^k's stretching, from the forward's tape
+        sem2d_ifc_pml_tape_add<<<(npp + TPB - 1) / TPB, TPB, 0, stream>>>(
+            in.ifc_pml_tape.data_ptr<float>() + static_cast<size_t>(k) * npp * 3,
+            in.ifc_pml_g.data_ptr<int64_t>(), in.rec_f_x.data_ptr<float>(), 1,
+            in.rec_f_z.data_ptr<float>(), 2, npp, ng);
     const size_t em2b = static_cast<size_t>(E) * m * 2 * sizeof(float);
     float* rr[6] = {in.rec_rxx.data_ptr<float>(), in.rec_rxz.data_ptr<float>(),
                     in.rec_rzx.data_ptr<float>(), in.rec_rzz.data_ptr<float>(),
@@ -1924,6 +1963,13 @@ void fluid_solid_backward(const SemFluidSolidBackwardInputCore& in) {
     const float* ifc_w = nifc > 0 ? in.ifc_w.data_ptr<float>() : nullptr;
     const float* ifc_nx = nifc > 0 ? in.ifc_nx.data_ptr<float>() : nullptr;
     const float* ifc_nz = nifc > 0 ? in.ifc_nz.data_ptr<float>() : nullptr;
+    // the band points' stretching of both loads (empty: none in a band)
+    const int npp = static_cast<int>(in.ifc_pml_g.numel());
+    const long*  pml_g = npp > 0 ? in.ifc_pml_g.data_ptr<int64_t>() : nullptr;
+    const float* pml_cf = npp > 0 ? in.ifc_pml_cf.data_ptr<float>() : nullptr;
+    const float* pml_tape = npp > 0 ? in.ifc_pml_tape.data_ptr<float>() : nullptr;
+    float* pml_lmem = npp > 0 ? in.ifc_pml_lmem.data_ptr<float>() : nullptr;
+    float* pml_scr = npp > 0 ? in.ifc_pml_scr.data_ptr<float>() : nullptr;
     const float* pat_chi = in.pat_chi.data_ptr<float>();
     const float* pat_x = in.pat_x.data_ptr<float>();
     const float* pat_z = in.pat_z.data_ptr<float>();
@@ -2081,6 +2127,8 @@ void fluid_solid_backward(const SemFluidSolidBackwardInputCore& in) {
     const size_t ngb = ngB * sizeof(float);
     const size_t Em = static_cast<size_t>(E) * m;
     const dim3 gE(E, B), gN(nb, B), gJ(rj, B), gD(db, B), gP(pb, B), gI(ib, B);
+    const dim3 gPP(npp > 0 ? (npp + TPB - 1) / TPB : 0, B);
+    double* fs_illum = in.illum.numel() ? in.illum.data_ptr<double>() : nullptr;
 
     const dim3 gBN(bs ? (nbn + TPB - 1) / TPB : 0, B);
     const dim3 gBE(bs ? (nbe * m + TPB - 1) / TPB : 0, B);
@@ -2159,6 +2207,11 @@ void fluid_solid_backward(const SemFluidSolidBackwardInputCore& in) {
                 sem2d_dirichlet_fill<<<db, TPB, 0, stream>>>(gA, didx, kdir);
             }
         }
+        if (fs_illum) { // gA, lam1: the whole adjoints of chi^{k+1}, u^{k+1}
+            sem2d_illum_rec<<<gN, TPB, 0, stream>>>(gA, in.ac_inv_M.data_ptr<float>(), 0, fs_illum, ng);
+            sem2d_illum_rec<<<gN, TPB, 0, stream>>>(lam1_x, in.el_inv_M.data_ptr<float>(), 0, fs_illum, ng);
+            sem2d_illum_rec<<<gN, TPB, 0, stream>>>(lam1_z, in.el_inv_M.data_ptr<float>(), 0, fs_illum, ng);
+        }
         // ---- solid: g = Pin(lam1), y = -dt2 invM g, lambda(force) = -y ---- //
         cudaMemcpyAsync(g_x, lam1_x, ngb, cudaMemcpyDeviceToDevice, stream);
         cudaMemcpyAsync(g_z, lam1_z, ngb, cudaMemcpyDeviceToDevice, stream);
@@ -2173,6 +2226,9 @@ void fluid_solid_backward(const SemFluidSolidBackwardInputCore& in) {
         cudaMemsetAsync(lchidd, 0, ngb, stream);
         if (nifc > 0)     // -Ifc_ac(lambda_f) with lambda_f = -y  ->  +Ifc_ac(y)
             sem2d_ifc_ac<<<gI, TPB, 0, stream>>>(y_x, y_z, ifc_g, ifc_w, ifc_nx, ifc_nz, lchidd, nifc, ng);
+        if (npp > 0)      // the band points' solid-load adjoint
+            sem2d_ifc_pml_el_T<<<gPP, TPB, 0, stream>>>(y_x, y_z, pml_g, pml_cf, pml_lmem,
+                                                        lchidd, pml_scr, npp, ng);
         sem2d_fs_axpy<<<gN, TPB, 0, stream>>>(gA, dt2, lchidd, ng);
         if (kdir > 0)
             sem2d_dirichlet_fill_b<<<gD, TPB, 0, stream>>>(lchidd, didx, kdir, ng);
@@ -2183,6 +2239,10 @@ void fluid_solid_backward(const SemFluidSolidBackwardInputCore& in) {
         cudaMemsetAsync(s_ac, 0, ngb, stream);
         if (nifc > 0 && k >= 1)
             sem2d_ifc_ac<<<gI, TPB, 0, stream>>>(uxn, uzn, ifc_g, ifc_w, ifc_nx, ifc_nz, s_ac, nifc, ng);
+        if (npp > 0)      // s_ac^k's stretching, from the forward's tape
+            sem2d_ifc_pml_tape_add<<<gPP, TPB, 0, stream>>>(
+                pml_tape + static_cast<size_t>(k) * B * npp * 3, pml_g, s_ac, 0,
+                nullptr, 0, npp, ng);
         if (cp) {
             sem2d_scale2_b<<<gN, TPB, 0, stream>>>(ac_kp, lchidd, 1.f, gw, ng, 0);
             if (k >= 1) {
@@ -2257,6 +2317,10 @@ void fluid_solid_backward(const SemFluidSolidBackwardInputCore& in) {
             if (nifc > 0)
                 sem2d_ifc_el<<<gI, TPB, 0, stream>>>(rec_chi_dd, ifc_g, ifc_w, ifc_nx, ifc_nz,
                                                      r_f_x, r_f_z, nifc, ng);
+            if (npp > 0)  // the force^k's stretching, from the forward's tape
+                sem2d_ifc_pml_tape_add<<<gPP, TPB, 0, stream>>>(
+                    pml_tape + static_cast<size_t>(k) * B * npp * 3, pml_g, r_f_x, 1,
+                    r_f_z, 2, npp, ng);
             // solid: recompute Acc^k + this step's element histories with the
             // memories zeroed (exact outside the band; the band histories are
             // then overwritten from the ring), u^{n+1} standing in as "prev"
@@ -2362,6 +2426,10 @@ void fluid_solid_backward(const SemFluidSolidBackwardInputCore& in) {
         if (nifc > 0)
             sem2d_ifc_el<<<gI, TPB, 0, stream>>>(yf, ifc_g, ifc_w, ifc_nx, ifc_nz,
                                                  sc_now_x, sc_now_z, nifc, ng);
+        if (npp > 0)      // the band points' fluid-load adjoint
+            sem2d_ifc_pml_ac_T<<<gPP, TPB, 0, stream>>>(lchidd, ac_iM, pml_g, pml_cf, pml_lmem,
+                                                        sc_now_x, sc_now_z, scp_a_x, scp_a_z,
+                                                        npp, ng);
 
         // ---- solid grads (identity + wavelet) ---- //
         const float* uxm1 = k >= 2 ? (bs ? u_km1_x : sux + static_cast<size_t>(k - 2) * ngB) : nullptr;
@@ -2379,6 +2447,8 @@ void fluid_solid_backward(const SemFluidSolidBackwardInputCore& in) {
             g_x, gprev_x, zeros, sc_now_x, scp_b_x, lamn_x, ng);
         sem2d_elastic_cpml_combine<<<gN, TPB, 0, stream>>>(
             g_z, gprev_z, zeros, sc_now_z, scp_b_z, lamn_z, ng);
+        if (npp > 0)      // the solid load's chi^k adjoint
+            sem2d_ifc_pml_scr_add<<<gPP, TPB, 0, stream>>>(pml_scr, pml_g, lchi_G, npp, ng);
         if (cp)
             sem2d_fs_ac_combine_cpml<<<gN, TPB, 0, stream>>>(
                 gA, gB, lchi_G, lpx, lpz, lzx, lzz, lapx, lapz, gw, ax, az,

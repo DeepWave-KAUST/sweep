@@ -40,6 +40,7 @@ from ..cpml.elastic_vs3d import (SimpleElasticCPML3DProfile,
                                  build_simple_elastic_cpml_3d)
 from ..fields import DerivedInitState, FieldSpec, check_element_arrays
 from ..mesh.hex8 import Hex8Mesh
+from ..receivers import solid_receivers
 
 
 @dataclass
@@ -86,6 +87,8 @@ class ElasticVSSEM3D(DerivedInitState):
 
     # FD-aligned receiver components: velocity-stress evolves velocities natively: FD-name aliases only.
     derived_receiver_types: ClassVar[dict] = {"vx": ("v_x", None), "vy": ("v_y", None), "vz": ("v_z", None)}
+    # strain, rotation, pressure / particle motion at a point (sweep.sem.receivers)
+    spatial_receiver_types: ClassVar[dict] = solid_receivers(("v_x", "v_y", "v_z"), native="velocity")
 
     mesh: Hex8Mesh
     vp_e: torch.Tensor

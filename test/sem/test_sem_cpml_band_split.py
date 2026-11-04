@@ -19,7 +19,8 @@ import pytest
 import torch
 
 from sweep.propagator import BoundarySaving, Ckpt, EagerOptions, Full
-from sweep.sem import (PropSEM, ElasticSEM2DDeformed, ElasticVSSEM2DDeformed,
+from sweep.sem import (PropSEM, AcousticSEM2DDeformed, AcousticSEM3D,
+                       ElasticSEM2DDeformed, ElasticVSSEM2DDeformed, ElasticTTISEM2DDeformed,
                        ElasticVTISEM2DDeformed, ElasticVSSEM3D, ElasticVSSEM3DDeformed)
 from sweep.sem._assembly import assemble, first_copies
 from sweep.sem.fields import FieldSpec
@@ -169,6 +170,72 @@ def test_the_split():
     assert all(tuple(st[k].shape) == (band.numel(), 5, 5, 2) for k in range(4, 10))
 
 
+def _layer_elements(p):
+    """``(E,)`` bool: the elements of ``p``'s absorbing layers, by element index."""
+    m, n, sides = p.mesh, p.abcn_elements, p._absorbing_sides()
+    grid = (m.nez, m.nex) if p.ndim == 2 else (m.nez, m.ney, m.nex)
+    idx = torch.meshgrid(*(torch.arange(k) for k in grid), indexing="ij")
+    on = lambda side, mask: mask if side in sides else torch.zeros_like(mask)
+    ez, ex = idx[0], idx[-1]
+    lay = (on("left", ex < n) | on("right", ex >= m.nex - n)
+           | on("top", ez < n) | on("bottom", ez >= m.nez - n))
+    if p.ndim == 3:
+        lay |= on("front", idx[1] < n) | on("back", idx[1] >= m.ney - n)
+    return lay.reshape(-1)
+
+
+# (61, 121) at dh 5: a 38 x 19 mesh, x_max = 760.0000000000001, so the left
+# layer's inner edge x = 80.0 sits an ulp short of lo + L = 80.00000000000001.
+# (9, 9, 17) at dh 0.3: the edges miss on more than one side.
+_EDGE_CASES = [(ElasticSEM2DDeformed, (61, 121), 5.0, 16),
+               (ElasticVSSEM2DDeformed, (61, 121), 5.0, 16),
+               (ElasticVSSEM3D, (9, 9, 17), 0.3, 4)]
+
+
+@pytest.mark.parametrize("eq, shape, dh, abcn", _EDGE_CASES,
+                         ids=["displacement", "velocity_stress", "velocity_stress_3d"])
+def test_the_band_is_the_absorbing_layers(eq, shape, dh, abcn):
+    """Regression: the band is exactly the absorbing layers, on every side.
+
+    A node on a layer's inner edge sits at ``lo + L`` only up to round-off, and
+    the strict ``coord < lo + L`` took it into the layer whenever it fell an ulp
+    short: every element touching it joined the band, one physical column on
+    that side only (287 elements on the 38 x 19 mesh, not 722 - 450 = 272).
+    Checked on the eager split and on the mask impl='c' and boundary saving
+    read (``elem_band``, the element ring)."""
+    from sweep.sem.boundary_saving import cpml_band_element_mask
+    p = PropSEM(eq, shape=shape, dh=dh, dt=1e-5, n_order=4, abcn=abcn, free_surface=True,
+                dev="cpu", dtype=torch.float64, impl="eager",
+                equation_options={"band_split": True})
+    built = p._build_eq([torch.full(shape, v, dtype=torch.float64)
+                         for v in (2400.0, 1300.0, 2000.0)])
+    layers = _layer_elements(p)
+    band = torch.zeros_like(layers)
+    band[built.band_elements] = True
+    assert torch.equal(band, layers)
+    assert torch.equal(cpml_band_element_mask(built), layers)
+    if len(shape) == 2:
+        assert int(layers.sum()) == 38 * 19 - 30 * 15
+
+
+@pytest.mark.parametrize("eq, shape, dh, abcn",
+                         [(AcousticSEM2DDeformed, (61, 121), 5.0, 16),
+                          (AcousticSEM3D, (9, 9, 17), 0.3, 4)], ids=["2d", "3d"])
+def test_the_acoustic_damped_nodes_are_the_absorbing_layers(eq, shape, dh, abcn):
+    """The same for the global-node acoustic profiles: the elements touching a
+    node with ``b != 0`` are exactly the layers. (Boundary saving and the
+    CUDA fast path also read ``db/dx``, which a central difference spreads to
+    the inner edge -- on both sides alike.)"""
+    p = PropSEM(eq, shape=shape, dh=dh, dt=1e-5, n_order=4, abcn=abcn, free_surface=True,
+                dev="cpu", dtype=torch.float64, impl="eager")
+    cp, m = p._build_eq(torch.full(shape, 2400.0, dtype=torch.float64)).cpml, p.mesh
+    damped = torch.zeros(m.n_global, dtype=torch.bool)
+    for k in ("b_x", "b_y", "b_z"):
+        if hasattr(cp, k):
+            damped |= getattr(cp, k) != 0
+    assert torch.equal(damped[m.ibool.reshape(m.n_elements, -1)].any(1), _layer_elements(p))
+
+
 class _FullMeshVSStep:
     """The velocity-stress step on every element: the C-PML recursion on the
     divergence split by derivative direction, at every node."""
@@ -223,6 +290,10 @@ class _FullMeshVTI(_FullMeshVSStep, ElasticVTISEM2DDeformed):
     pass
 
 
+class _FullMeshTTI(_FullMeshVSStep, ElasticTTISEM2DDeformed):
+    pass
+
+
 def _run_vs(eq, vals, memory=Full(), topo=False, split=None):
     x = np.arange(SHAPE[1])
     kw = dict(shape=SHAPE, dh=10.0, dt=6e-4, n_order=4, abcn=8, f_dominant=15.0, dev="cpu",
@@ -246,9 +317,10 @@ def _run_vs(eq, vals, memory=Full(), topo=False, split=None):
 
 def _vs_cases():
     """Every (split, topography, memory) for the isotropic VS; two of them for the
-    VTI, which shares the step and differs only in ``_stress_increment``."""
+    VTI and the TTI, which share the step and differ only in ``_stress_increment``."""
     vs = (ElasticVSSEM2DDeformed, _FullMeshVS, (2400.0, 1300.0, 2000.0))
     vti = (ElasticVTISEM2DDeformed, _FullMeshVTI, (2400.0, 1300.0, 2000.0, 0.1, 0.05))
+    tti = (ElasticTTISEM2DDeformed, _FullMeshTTI, (2400.0, 1300.0, 2000.0, 0.1, 0.05, 0.4))
     mem = {"full": Full(), "boundary_saving": BoundarySaving()}
     out = []
     for split in (True, False):
@@ -258,6 +330,7 @@ def _vs_cases():
                 out.append(pytest.param(*vs, mem[m], topo, split, id=tag + "-vs"))
                 if (split, topo, m) in ((True, True, "boundary_saving"), (False, False, "full")):
                     out.append(pytest.param(*vti, mem[m], topo, split, id=tag + "-vti"))
+                    out.append(pytest.param(*tti, mem[m], topo, split, id=tag + "-tti"))
     return out
 
 

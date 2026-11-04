@@ -209,6 +209,12 @@ def resolve_field_types(equation, kinds, role):
     # conversion (p = -chi_ddot, v = u_dot) instead of every caller.
     derived = getattr(equation, "derived_receiver_types", {}) \
         if role == "receiver" else {}
+    # Receivers that record a spatial derivative -- strain, rotation, the pressure in a
+    # solid, a fluid's particle motion (sweep.sem.receivers); they win over a derived
+    # component of the same name (the fluid-solid form's vx and p take the medium the
+    # receiver sits in).
+    spatial = getattr(equation, "spatial_receiver_types", {}) \
+        if role == "receiver" else {}
     if not kinds:
         # Receivers default to every component. Sources default to the LAST
         # source field, which for the elastic equations is the z displacement
@@ -225,9 +231,22 @@ def resolve_field_types(equation, kinds, role):
         return list(declared) if declared else [avail[-1].name]
     name = getattr(equation, "__name__", type(equation).__name__)
     derived_note = ("\nDerived receiver components: "
-                    + ", ".join(sorted(derived))) if derived else ""
+                    + ", ".join(sorted(set(derived) | set(spatial)))) if derived or spatial else ""
     out = []
     for want in kinds:
+        if want in spatial:
+            from .receivers import recipe_fields
+            for base in recipe_fields(spatial[want]):
+                spec = next((s for s in specs if s.name == base), None)
+                if spec is None or not getattr(spec, "supports_receiver", False):
+                    raise ValueError(
+                        f"spatial receiver '{want}' on {name} reads '{base}', which is not "
+                        f"a receiver-capable field -- the spatial_receiver_types "
+                        f"declaration is wrong.")
+            if want in out:
+                raise ValueError(f"duplicate {role}_type entry '{want}'")
+            out.append(want)
+            continue
         if want in derived:
             base = derived[want][0]
             spec = next((s for s in specs if s.name == base), None)

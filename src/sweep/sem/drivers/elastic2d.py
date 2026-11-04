@@ -17,8 +17,8 @@ from __future__ import annotations
 import torch
 
 from ..cdrive import (EL_CPML_FLAT, Alloc, check_filled, dd_grads, dims,
-                      fill, give, grads_or_none, memory_mode, put, roll,
-                      swap, take)
+                      fill, give, grads_or_none, illum_alloc, illum_receiver,
+                      illum_source, memory_mode, put, roll, swap, take)
 
 _EL2D_CONSTS = ("ibool", "D", "wJ", "ixx", "ixz", "iex", "iez", "mask_e",
                 "outer_edge_idx", "pat_x", "pat_z", "rec_G", "rec_W",
@@ -87,6 +87,7 @@ def _el2d_forward_input(c, mats, wavelet, mode, B=1):
         put(s, ("save_ux", "save_uz"), lambda: A.hist(zero=False))
         put(s, tuple("save_" + f for f in _EL2D_HIST),
             lambda: A.hist(B * E * m, zero=False))
+    s.illum = illum_alloc(c, A)
     dims(s, c, 2)
     return check_filled(s), acc
 
@@ -139,6 +140,7 @@ def _el2d_backward_input(c, mats, wavelet, carry, grads, B=1, own=None):
         setattr(b, nm, torch.zeros(*lead, *t.shape, dtype=torch.float32, device=dev))
     b.grad_inv_M = A.zeros()
     b.grad_wavelet = torch.zeros(*lead, nt, dtype=torch.float32, device=dev)
+    b.illum = illum_alloc(c, A)
     dims(b, c, 2)
     return check_filled(b)
 
@@ -163,9 +165,10 @@ class _SEMElasticCpmlC(torch.autograd.Function):
         need_bwd = any(t.requires_grad for t in mats + (wavelet,))
         s, _ = _el2d_forward_input(c, mats, wavelet, memory_mode(c, need_bwd), B)
         seis_x, seis_z = _C.sem2d_elastic_cpml_forward(s)
+        part = illum_source(c, s.illum, B, c["n_global"])
         if need_bwd:
             ctx.save_for_backward(*mats, wavelet)
-            ctx.c, ctx.B = c, B
+            ctx.c, ctx.B, ctx.illum = c, B, part
             ctx.carry = take(s, _EL2D_CARRY)
         return seis_x, seis_z
 
@@ -178,6 +181,7 @@ class _SEMElasticCpmlC(torch.autograd.Function):
                                  (grad_sx.contiguous().float(),
                                   grad_sz.contiguous().float()), B)
         g_lam, g_mu, g_l2m, g_M, g_wrJ, g_w = _C.sem2d_elastic_cpml_backward(b)
+        illum_receiver(ctx.illum, b.illum, B, ng)
         if B > 1:                  # one model for every shot: sum the per-shot grads
             g_lam, g_mu, g_l2m, g_wrJ = (g_lam.sum(0), g_mu.sum(0),
                                          g_l2m.sum(0), g_wrJ.sum(0))

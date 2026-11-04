@@ -40,7 +40,7 @@ void elastic_cpml_dd_bwd_pre(const SemElasticCpmlBackwardInputCore& in, int64_t 
 void elastic_cpml_dd_bwd_end(const SemElasticCpmlBackwardInputCore& in, int64_t n);
 
 // Coupled fluid-solid DD stepped entry points (see forward.cu / backward.cu).
-void fluid_solid_dd_asm(const SemFluidSolidForwardInputCore& in);
+void fluid_solid_dd_asm(const SemFluidSolidForwardInputCore& in, int64_t n);
 void fluid_solid_dd_mid(const SemFluidSolidForwardInputCore& in, int64_t n);
 void fluid_solid_dd_step(const SemFluidSolidForwardInputCore& in, int64_t n);
 void fluid_solid_dd_bwd_a(const SemFluidSolidBackwardInputCore& in, int64_t k);

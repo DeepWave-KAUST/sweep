@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import math
 import numbers
 
 import torch
@@ -88,6 +89,7 @@ from .equations.acoustic_potential2d import AcousticPotentialSEM2D
 from .fields import (MESH_NDIM, format_field_specs, mesh_kind, model_names,
                      resolve_field_types)
 from .propagator import SEMPropagator, field_layouts, receiver_gather
+from .receivers import recipe_axes, recipe_fields
 
 
 
@@ -130,7 +132,7 @@ def propsem_models(equation) -> list:
     exists so that callers pass ``models=[vp]`` and rho is a constant the
     adapter fills in. ``sweep show`` reads the same list.
     """
-    supplied = {"rho"} if equation is AcousticPotentialSEM2D else set()
+    supplied = {"rho"} if getattr(equation, "takes_density", False) else set()
     return [n for n in model_names(equation) if n not in supplied]
 
 
@@ -201,6 +203,52 @@ def _resolve_topography(topography, shape):
     return t
 
 
+def _resolve_interfaces(interfaces, shape, topography):
+    """``interfaces`` -> the internal interfaces' rows, float64 on the host, top-down: one
+    ``(nx,)`` array of fractional rows per interface, each below the surface (row 0, or
+    the topography) and the one above, and above the model's last row. 2-D only."""
+    if interfaces is None:
+        return None
+    if len(shape) != 2:
+        raise NotImplementedError("interfaces are 2-D only")
+    rows = [_resolve_topography(r, shape) for r in interfaces]
+    if not rows:
+        return None
+    top = topography if topography is not None else torch.zeros(shape[1], dtype=torch.float64)
+    for k, r in enumerate(rows):
+        above = top if k == 0 else rows[k - 1]
+        if not bool((r > above).all()):
+            raise ValueError(f"interface {k} must lie below the "
+                             f"{'surface' if k == 0 else f'interface {k - 1}'} in every column")
+    return rows
+
+
+def _layer_elements(bounds, total, given):
+    """Element rows per layer, top-down: ``given`` checked, or ``total`` shared by the
+    layers' mean thicknesses (``bounds``: the surface, the interfaces and the last row, in
+    rows), at least one each, by largest remainders."""
+    n_layers = len(bounds) - 1
+    if given is not None:
+        given = [int(n) for n in given]
+        if len(given) != n_layers or min(given) < 1 or sum(given) != total:
+            raise ValueError(f"interface_elements must give {n_layers} positive element-row "
+                             f"counts summing to the model's {total}; got {given}")
+        return given
+    thick = [float((bounds[k + 1] - bounds[k]).mean()) for k in range(n_layers)]
+    if total < n_layers:
+        raise ValueError(f"{n_layers} layers need at least {n_layers} element rows; the model "
+                         f"has {total}")
+    share = [max(1.0, total * t / sum(thick)) for t in thick]
+    out = [max(1, int(x)) for x in share]
+    for k in sorted(range(n_layers), key=lambda k: share[k] - out[k], reverse=True):
+        if sum(out) >= total:
+            break
+        out[k] += 1
+    while sum(out) > total:                       # the floor of 1 overshot: take from the largest
+        out[out.index(max(out))] -= 1
+    return out
+
+
 class _SurfaceRows:
     """The ``z_top`` a curved mesh is built from: the topography rows in
     metres, linear between columns -- so exact on them, which is where an
@@ -229,6 +277,14 @@ class _SurfaceRows:
             hi = z[y1, x0] + fx * (z[y1, x1] - z[y1, x0])
             out = lo + fy * (hi - lo)
         return out.to(x.dtype)
+
+
+class _FlatTop:
+    """A flat top at z = 0 for :func:`build_layered_quad9` (a class, so a propagator stays
+    picklable)."""
+
+    def __call__(self, x):
+        return torch.zeros_like(x)
 
 
 def _resolve_device(device, dev):
@@ -270,9 +326,30 @@ def _c_shared_wavelet(w):
 _FD_FORCE = {2: ("vx", "vz"), 3: ("vx", "vy", "vz")}
 _FD_STRESS = {2: ("sxx", "szz", "sxz"),
               3: ("sxx", "syy", "szz", "sxy", "sxz", "syz")}
-# 2-D (Mxx, Mzz, Mxz) slot of each stress name, the order moment_tensor_stamp
-# takes; sxz drives Mxz = Mzx, the one shear component
-_MOMENT_SLOT = {"sxx": 0, "szz": 1, "sxz": 2}
+# The slot of each stress name in the moment tensor, in the order
+# moment_tensor_stamp takes it: 2-D (Mxx, Mzz, Mxz), 3-D (Mxx, Myy, Mzz, Mxy,
+# Mxz, Myz); a shear name drives both of its symmetric components
+_MOMENT_SLOT = {2: {"sxx": 0, "szz": 1, "sxz": 2},
+                3: {"sxx": 0, "syy": 1, "szz": 2, "sxy": 3, "sxz": 4, "syz": 5}}
+
+
+def _pressure_to_potential_wavelet(wavelet, dt):
+    """The chi source that makes ``p = -d2(chi)/dt2`` the pressure a
+    pressure-form run (and PropTorch's ``Acoustic``) records for
+    ``wavelet``: minus its double running sum times dt^2, one step late.
+    Only a snapshot run is driven by it; seismograms come from the run the
+    wavelet drives (``PropSEM.forward``), which is the same record.
+
+    The potential form evolves chi by the same leapfrog the pressure form
+    evolves its field by, so -chi_ddot obeys it with the source's negated
+    second difference; the one-step lag centres that difference on the
+    wavelet's own sample. Exact to round-off on a homogeneous model, up to
+    the scale kappa = rho*c^2 at the source the potential form carries. A
+    wavelet with a non-zero mean (or first moment) leaves chi a static (or
+    ramping) offset that p does not see.
+    """
+    s = torch.cumsum(torch.cumsum(wavelet, dim=-1), dim=-1) * (-dt * dt)
+    return torch.nn.functional.pad(s[..., :-1], (1, 0))
 
 
 def _resolve_vector_source(equation, source_type, ndim):
@@ -283,13 +360,15 @@ def _resolve_vector_source(equation, source_type, ndim):
     * the equation's own source fields (``u_z``, ``v_x``, ...) and the FD
       velocity names (``vx``, ``vz``, ``vy``): a body force, one unit component
       per name -- so ``["vx", "vz"]`` is a diagonal force, not an explosion;
-    * the FD stress names (``sxx``, ``szz``, ``sxz``; 2-D only): the moment
-      tensor with a unit entry per name -- ``["sxx", "szz"]`` is FD's explosion.
+    * the FD stress names (``sxx``, ``szz``, ``sxz``; 3-D also ``syy``,
+      ``sxy``, ``syz``): the moment tensor with a unit entry per name --
+      ``["sxx", "szz"]`` is FD's 2-D explosion, ``["sxx", "syy", "szz"]`` the 3-D one.
 
     Returns the validated names, the force axes (``None`` for a moment
-    source) and ``(Mxx, Mzz, Mxz)`` (``None`` for a force). A force and a
-    moment cannot be mixed: they take the wavelet differently (see
-    :class:`_Acq`), and one call drives one time function.
+    source) and the moment tensor (``(Mxx, Mzz, Mxz)`` / ``(Mxx, Myy, Mzz, Mxy,
+    Mxz, Myz)``; ``None`` for a force). A force and a moment cannot be mixed:
+    they take the wavelet differently (see :class:`_Acq`), and one call drives
+    one time function.
     """
     own = [s.name for s in equation.field_specs if s.supports_source]
     if not source_type:
@@ -297,7 +376,7 @@ def _resolve_vector_source(equation, source_type, ndim):
         return names, frozenset(own.index(n) for n in names), None
     fd_force, fd_stress = _FD_FORCE[ndim], _FD_STRESS[ndim]
     name = equation.__name__
-    out, axes, moment = [], {}, [0.0, 0.0, 0.0]
+    out, axes, moment = [], {}, [0.0] * len(_MOMENT_SLOT[ndim])
     for want in source_type:
         if want in out:
             raise ValueError(f"duplicate source_type entry '{want}'")
@@ -309,19 +388,14 @@ def _resolve_vector_source(equation, source_type, ndim):
                     f"same force component on {name}")
             axes[ax] = want
         elif want in fd_stress:
-            if ndim == 3:
-                raise NotImplementedError(
-                    f"stress (moment-tensor) source_type '{want}' is 2-D only: "
-                    f"the 3-D point stamp carries no basis derivatives yet. "
-                    f"Use a force ({', '.join(own)} or {', '.join(fd_force)}).")
-            moment[_MOMENT_SLOT[want]] = 1.0
+            moment[_MOMENT_SLOT[ndim][want]] = 1.0
         else:
             avail = [s for s in equation.field_specs if s.supports_source]
             raise ValueError(
                 f"Unknown source_type entry '{want}' for {name}. Available "
                 f"source_type values:\n{format_field_specs(avail)}"
                 f"\nFD names: {', '.join(fd_force)} (force), "
-                f"{', '.join(fd_stress)} (stress, 2-D)")
+                f"{', '.join(fd_stress)} (stress)")
         out.append(want)
     if axes and any(moment):
         raise ValueError(
@@ -542,7 +616,8 @@ class _Acq:
     # is how two readers start disagreeing about which copy is current.
     __slots__ = ("sv", "receivers", "nshots", "shot_src", "wav_per_shot")
 
-    def __init__(self, prop, wavelet, sources, receivers, source_vector):
+    def __init__(self, prop, wavelet, sources, receivers, source_vector,
+                 potential_wavelet=False):
         nd = prop.ndim
         # elastic body-force direction (default unit vertical force, z = last).
         # FIRST, before any coercion: a bad source_vector override must keep
@@ -562,6 +637,9 @@ class _Acq:
             # integral -- without it the record is one time derivative off
             # FD's. Done here, once, so every backend sees the same series.
             wavelet = torch.cumsum(wavelet, dim=-1) * prop.dt
+        if potential_wavelet:
+            # a snapshot run: the fields themselves must be chi / u
+            wavelet = _pressure_to_potential_wavelet(wavelet, prop.dt)
 
         if sources.dim() == 2 and sources.shape[1] == nd:              # mode A
             nshots = sources.shape[0]
@@ -602,6 +680,8 @@ class _Acq:
                 f"receivers batch {receivers.shape[0]} must be 1 or match "
                 f"nshots {nshots}.")
         self.receivers = receivers
+        prop._refuse_above_surface(sources, "source")
+        prop._refuse_above_surface(receivers, "receiver")
 
     def check_pershot(self, pershot_eqs):
         """Per-shot models must carry one equation per shot."""
@@ -613,6 +693,27 @@ class _Acq:
 
 
 
+
+class _PlaneWaveShot:
+    """The acquisition of a plane-wave call, as the eager runners read an :class:`_Acq`:
+    one shot, the band's loads its per-source wavelet."""
+
+    __slots__ = ("receivers", "nshots", "wav_per_shot")
+
+    def __init__(self, receivers, loads):
+        self.receivers, self.nshots, self.wav_per_shot = receivers, 1, [loads]
+
+
+def _minus_kappa(eq):
+    """``-(lambda + 2 mu / 3)`` on a solid's elements: the factor of ``div u`` in the pressure
+    SPECFEM's seismograms take (plane strain in 2-D). The moduli the step uses, else from the
+    velocities (the fluid-solid form's solid is ``eq.el``)."""
+    el = getattr(eq, "el", eq)
+    if hasattr(el, "_lam") and hasattr(el, "_mu"):
+        return -(el._lam + (2.0 / 3.0) * el._mu)
+    return -el.rho_e * (el.vp_e ** 2 - (4.0 / 3.0) * el.vs_e ** 2)
+
+
 class PropSEM:
     """SEM propagator with the FD ``PropTorch`` constructor and call.
 
@@ -620,7 +721,10 @@ class PropSEM:
     model and ``abcn`` (grid cells, whole elements: a multiple of
     ``n_order``; default ten elements) the absorbing layer added outside it;
     ``free_surface`` takes PropTorch's edge spec (default ``False``) and
-    ``topography`` its per-column surface rows; ``memory`` is ``Full()``,
+    ``topography`` its per-column surface rows; ``interfaces`` are internal
+    interfaces given the same way, top-down, which the 2-D Quad9 mesh follows
+    in ``interface_elements`` element rows per layer (default: by the layers'
+    mean thicknesses), see :meth:`layered_model`; ``memory`` is ``Full()``,
     ``BoundarySaving(storage_dtype=...)`` or ``Ckpt(chunks=...)``; ``impl``
     ``None`` is ``'auto'``; ``eager_options`` is an ``EagerOptions`` (or its dict)
     for ``impl='eager'``, the step compiled unless ``use_compile=False``; ``nt``
@@ -646,6 +750,8 @@ class PropSEM:
         abcn=None,
         free_surface=False,
         topography=None,
+        interfaces=None,
+        interface_elements=None,
         memory=None,
         f_dominant: float = 10.0,
         impl=None,
@@ -696,6 +802,8 @@ class PropSEM:
         self._nt_given = None if nt is None else int(nt)
         self.nt = self._nt_given
         self.topography = _resolve_topography(topography, shape)
+        self.interfaces = _resolve_interfaces(interfaces, shape, self.topography)
+        self._interface_elements = interface_elements
         # resolved to a tuple of side names; an empty tuple is falsey, so the
         # places that ask "is there a free surface at all" keep working
         self.free_surface = _resolve_free_surface(
@@ -718,6 +826,23 @@ class PropSEM:
 
         self._construct_mesh(equation, shape, self.n_order, self.topography,
                              dtype, self.dev)
+        # PropTorch's illumination switch (sweep.sem.illumination): off by
+        # default; when on, each call's source / receiver illumination is read
+        # back from source_illumination / receiver_illumination
+        self.compute_illumination = False
+        self._illumination = None
+
+    @property
+    def source_illumination(self):
+        """The last call's ``sum_t |a|^2`` in its models' shape, or ``None``
+        (see :mod:`sweep.sem.illumination`)."""
+        return None if self._illumination is None else self._illumination.source()
+
+    @property
+    def receiver_illumination(self):
+        """The last call's ``sum_t |lambda|^2`` once its backward has run, or
+        ``None`` (see :mod:`sweep.sem.illumination`)."""
+        return None if self._illumination is None else self._illumination.receiver()
 
     def _resolve_memory(self, memory, bs_store_dtype_elem):
         """``memory`` as PropTorch takes it -> the three run knobs the paths
@@ -872,6 +997,8 @@ class PropSEM:
         # the FD ``source_type`` / ``receiver_type`` convention.
         _stamp = getattr(equation, "propsem_source", None)
         n_src = sum(f.supports_source for f in equation.field_specs)
+        # a plane wave carries its own load, which a source_type would not reach
+        self._source_type_given = source_type is not None
         # the vector equations (a force with one component per axis) also
         # take the FD names; see _resolve_vector_source
         self._src_force_axes, self._src_moment = None, None
@@ -895,6 +1022,12 @@ class PropSEM:
                 f"source_type selections would be positionally mis-mapped by "
                 f"the stamp layout. Use SEMPropagator with explicit "
                 f"source_kinds/source_payloads.")
+        if not receiver_type:
+            # PropSEM's own default where it differs from the fields' (the
+            # potential forms record the pressure, as PropTorch does; the
+            # low-level propagators keep recording chi)
+            receiver_type = getattr(equation, "propsem_default_receiver_type",
+                                    None)
         self.receiver_type = resolve_field_types(equation, receiver_type,
                                                  "receiver")
         # Derived receiver components (p = -chi_ddot, vx = u_x_dot, ...):
@@ -904,14 +1037,32 @@ class PropSEM:
         # list handed down; _recv_plan maps each requested component to its
         # base column and transform.
         derived = getattr(equation, "derived_receiver_types", {})
-        self._recv_base, self._recv_plan = [], []
+        spatial = getattr(equation, "spatial_receiver_types", {})
+        self._recv_base, self._recv_plan, self._spatial = [], [], {}
         for nm in self.receiver_type:
+            if nm in spatial:
+                # a spatial derivative (sweep.sem.receivers): its fields are recorded
+                # at the receivers' gradient stamps too (_with_gradients)
+                self._spatial[nm] = spatial[nm]
+                for base in recipe_fields(spatial[nm]):
+                    if base not in self._recv_base:
+                        self._recv_base.append(base)
+                self._recv_plan.append((None, ("spatial", nm)))
+                continue
             base, op = derived.get(nm, (nm, None))
             if base not in self._recv_base:
                 self._recv_base.append(base)
             self._recv_plan.append((self._recv_base.index(base), op))
+        # the potential forms take the wavelet as the PRESSURE source (see
+        # _pressure_to_potential_wavelet): their seismograms are converted on
+        # the way out even when nothing derived is asked for
+        self._pressure_wavelet = bool(
+            getattr(equation, "propsem_pressure_wavelet", False))
+        self._grad_axes = tuple(sorted(set().union(
+            *(recipe_axes(r) for r in self._spatial.values()))))
         self._recv_identity = (
-            self._recv_base == self.receiver_type
+            not self._pressure_wavelet and not self._spatial
+            and self._recv_base == self.receiver_type
             and all(op is None for _, op in self._recv_plan))
         # what return_wavefield=True copies out: the fields the receivers
         # record from (the BASE fields behind a derived p / vx), in that order
@@ -1055,7 +1206,32 @@ class PropSEM:
                       n_order=n_order, dtype=dtype, device=dev)
         if self.ndim == 3:
             common.update(ney=elems_pad[1], y_max=maxes[1])
-        if topography is None:
+        self._layer_rows = [elems_pad[0]]
+        if self.interfaces is not None:
+            if kind != "quad9":
+                raise ValueError(
+                    f"interfaces need a curved-element 2-D mesh; {equation.__name__} builds "
+                    f"on a {kind} mesh. Use the 'Deformed' variant of this equation.")
+            from .mesh.quad9 import build_layered_quad9
+            top = (self.topography if topography is not None
+                   else torch.zeros(shape[1], dtype=torch.float64))
+            bounds = [top, *self.interfaces, torch.full_like(top, float(shape[0] - 1))]
+            rows = _layer_elements(bounds, elems_int[0], self._interface_elements)
+            rows[0] += low_pad[0]                 # the layers take the pads at their sides
+            rows[-1] += high_pad[0]
+            self._layer_rows = rows
+            # the mesh's top: the topography (never padded), or flat with any top pad
+            # inside the first layer; the interfaces shift down by that pad
+            z_pad = float(self._pad0[0])
+            surfaces = [_SurfaceRows(top, self.dh, self._pad0[1:]) if topography is not None
+                        else _FlatTop()]
+            surfaces += [_SurfaceRows(r + z_pad, self.dh, self._pad0[1:])
+                         for r in self.interfaces]
+            build = (build_layered_quad9,
+                     dict(nex=elems_pad[-1], x_max=maxes[-1], z_bottom=maxes[0],
+                          surfaces=surfaces, rows=rows, n_order=n_order, dtype=dtype,
+                          device=dev))
+        elif topography is None:
             build = (flat_builder, dict(z_max=maxes[0], **common))
         else:
             # the model's first column (and row of columns, in 3-D) sits at
@@ -1081,8 +1257,27 @@ class PropSEM:
         for e in elems_pad:
             n_el *= e
         self._gll_shape = (n_el,) + (n_order + 1,) * self.ndim
-        if topography is not None:
+        if topography is not None or self.interfaces is not None:
             self.mesh
+
+    @property
+    def element_layer(self):
+        """``(E,)`` long: each element's layer, 0 at the top -- the layers ``interfaces``
+        cut, the absorbing pads in the layer they border; all zeros without interfaces."""
+        ez = torch.arange(self._gll_shape[0]) // self._elems_pad[-1]
+        edges = torch.cumsum(torch.tensor(self._layer_rows), 0)
+        return torch.bucketize(ez, edges, right=True)
+
+    def layered_model(self, values):
+        """A GLL-native model, ``(E, ngll, ngll)``, of one value per layer (top-down;
+        floats or 0-d tensors, which keep their gradients): the material steps at the
+        interfaces, as the mesh does, where a grid model would be interpolated across them."""
+        n_layers = len(self._layer_rows)
+        if len(values) != n_layers:
+            raise ValueError(f"one value per layer: {n_layers} layers, {len(values)} values")
+        v = torch.stack([torch.as_tensor(x, dtype=self.dtype) for x in values]).to(self.dev)
+        idx = self.element_layer.to(self.dev)
+        return v[idx].view(-1, *([1] * self.ndim)).expand(self._gll_shape).contiguous()
 
     @property
     def mesh(self):
@@ -1310,12 +1505,12 @@ class PropSEM:
                                  pml_thickness_elements=self.abcn_elements,
                                  c_max=c_max, f_dominant=self.f_dominant),
                     sides, self.abcn_elements, c_max, self.f_dominant)
-            if self.equation is AcousticPotentialSEM2D:   # vp + constant density
+            if getattr(self.equation, "takes_density", False):  # vp + constant density
                 rho = torch.full_like(grids[0], self._c_density)
-                return AcousticPotentialSEM2D.build(
-                    self.mesh, grids[0], rho, dirichlet=dirichlet, cpml=cpml,
+                return self.equation.build(
+                    self.mesh, grids[0], rho, *grids[1:], dirichlet=dirichlet, cpml=cpml,
                     **self._eq_options)
-            return self.equation.build(self.mesh, grids[0],
+            return self.equation.build(self.mesh, *grids,
                                        dirichlet=dirichlet, cpml=cpml,
                                        **self._eq_options)
         # elastic: vp/vs/rho and a NATURAL free surface -- traction-free is what
@@ -1371,31 +1566,85 @@ class PropSEM:
     # v = u_dot) commute with the linear receiver gather, so differentiating
     # the TRACE equals recording the derived quantity -- and the central
     # stencils below are exactly the leapfrog's own discrete derivatives.
-    # Fields are quiescent before t=0, so the left pad is a true zero; the
-    # final sample uses a one-sided difference.
+    # Fields are quiescent before t=0, so the left pad is a true zero. The
+    # record ends mid-signal, so the right pad u(nt) is extrapolated by the
+    # polynomial through the last samples: the central stencil then becomes
+    # the second-order one-sided difference there -- (3u1 - 4u2 + u3)/2dt
+    # and (2u1 - 5u2 + 4u3 - u4)/dt^2. (Repeating u(nt-1) instead made the
+    # last pressure sample a first difference over dt^2: a spike.)
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _trace_end_pad(x, degree):
+        """u(nt) of ``(nshots, nt, ...)`` traces: the degree-``degree``
+        polynomial through the last ``degree + 1`` samples (lower when the
+        trace is shorter), extrapolated one step."""
+        k = min(degree, x.shape[1] - 1) + 1
+        # u(n) = sum_j (-1)^(j+1) C(k, j) u(n-j), j = 1..k
+        return sum((-1) ** (j + 1) * math.comb(k, j) * x[:, -j:x.shape[1] - j + 1]
+                   for j in range(1, k + 1))
+
     @staticmethod
     def _trace_ddt(x, dt):
         """du/dt along dim 1 of ``(nshots, nt, nrec, ...)`` traces."""
         z = torch.zeros_like(x[:, :1])
-        pad = torch.cat([z, x, x[:, -1:]], 1)          # u(-dt)=0, u(nt)~u(nt-1)
+        pad = torch.cat([z, x, PropSEM._trace_end_pad(x, 2)], 1)   # u(-dt)=0
         return (pad[:, 2:] - pad[:, :-2]) / (2.0 * dt)
 
     @staticmethod
     def _trace_neg_d2dt2(x, dt):
         """-d2u/dt2 along dim 1 (the pressure from a chi trace)."""
         z = torch.zeros_like(x[:, :1])
-        pad = torch.cat([z, x, x[:, -1:]], 1)
+        pad = torch.cat([z, x, PropSEM._trace_end_pad(x, 3)], 1)
         return -(pad[:, 2:] - 2.0 * x + pad[:, :-2]) / (dt * dt)
 
-    def _apply_derived_receivers(self, out):
-        """(nshots, nt, nrec, n_base) -> (nshots, nt, nrec, n_requested)."""
+    @staticmethod
+    def _trace_from_pressure_run(x, op, dt):
+        """A potential-form component from the trace ``x`` of the run driven
+        by the wavelet itself, whose chi is the pressure (see :meth:`forward`).
+        The base fields are that trace under the conversion the wavelet would
+        take, ``-dt^2`` times the double running sum one step late; ``p`` is
+        the trace; ``v``, the central difference of the base field, is
+        ``-dt (sum - x/2)``."""
+        if op == "pressure":
+            return x
+        c = torch.cumsum(x, 1)
+        if op == "velocity":
+            return -dt * (c - 0.5 * x)
+        if op is not None:
+            raise AssertionError(f"unknown derived receiver op {op!r}")
+        s = torch.cumsum(c, 1) * (-dt * dt)
+        return torch.cat([torch.zeros_like(s[:, :1]), s[:, :-1]], 1)
+
+    def _apply_derived_receivers(self, out, pressure_run=False):
+        """(nshots, nt, nrec, n_base) -> (nshots, nt, nrec, n_requested). With spatial
+        components the propagators recorded ``nrec`` more receivers per derivative axis
+        (:meth:`_with_gradients`), which these combine. ``pressure_run``: ``out`` is the
+        potential-form run driven by the wavelet itself (:meth:`forward`)."""
         if self._recv_identity:
             return out                    # bit-untouched default path
+        k = 2 ** self.ndim
+        nrec = out.shape[2] // (1 + len(self._grad_axes) * k)
+        real = out[:, :, :nrec]
+        grads = {}
+        if self._grad_axes:
+            receivers, eq, pershot = self._spatial_call
+            S = out.shape[0]
+            w = torch.stack([self._gradient_weights(
+                self._rec_row(receivers, b if receivers.shape[0] > 1 else 0),
+                pershot[b] if pershot is not None else eq) for b in range(S)]).to(out)
+            for i, a in enumerate(self._grad_axes):
+                blk = out[:, :, nrec * (1 + i * k):nrec * (1 + (i + 1) * k)]
+                blk = blk.reshape(S, out.shape[1], k, nrec, out.shape[3])
+                grads[a] = torch.einsum("stqjc,sjq->stjc", blk, w)
         comps = []
         for col, op in self._recv_plan:
-            x = out[..., col]
-            if op == "velocity":
+            if isinstance(op, tuple):
+                comps.append(self._spatial_component(op[1], real, grads, pressure_run))
+                continue
+            x = real[..., col]
+            if pressure_run:
+                x = self._trace_from_pressure_run(x, op, self.dt)
+            elif op == "velocity":
                 x = self._trace_ddt(x, self.dt)
             elif op == "pressure":
                 x = self._trace_neg_d2dt2(x, self.dt)
@@ -1403,6 +1652,70 @@ class PropSEM:
                 raise AssertionError(f"unknown derived receiver op {op!r}")
             comps.append(x)
         return torch.stack(comps, -1)
+
+    def _spatial_component(self, name, real, grads, pressure_run=False):
+        """One spatial receiver component ``(nshots, nt, nrec)`` from the recorded fields
+        (``real``) and their derivatives (``grads``), with its material factor at every
+        receiver and its time operator (see :mod:`sweep.sem.receivers`). ``pressure_run``:
+        the fields are those of the run the wavelet drives (:meth:`forward`), so the time
+        operator is composed with their conversion to the base fields
+        (:meth:`_trace_from_pressure_run`) -- no difference of a double integral."""
+        from .propagator import build_point_stamps
+        receivers, eq, pershot = self._spatial_call
+        nshots = real.shape[0]
+        stamps = [build_point_stamps(self.mesh, self._rec_row(
+            receivers, b if receivers.shape[0] > 1 else 0)) for b in range(nshots)]
+        eqs = pershot if pershot is not None else [eq] * nshots
+
+        def shot_values(field_of):
+            # an element-local array at every receiver of every shot: (nshots, nrec)
+            return torch.stack([torch.stack([st.gather(field_of(e)[st.elem_id]) for st in sts])
+                                for e, sts in zip(eqs, stamps)])
+
+        def evaluate(r):
+            if r is None:
+                return torch.zeros_like(real[..., 0])
+            x = 0.0
+            for field, axis, coef in r["terms"]:
+                col = self._recv_base.index(field)
+                x = x + coef * (real if axis is None else grads[axis])[..., col]
+            scale = r.get("scale")
+            if scale == "inv_rho":
+                x = x * shot_values(lambda e: getattr(e, "ac", e)._inv_rho)[:, None, :].to(x)
+            elif scale == "minus_kappa":
+                x = x * shot_values(_minus_kappa)[:, None, :].to(x)
+            elif scale is not None:
+                raise AssertionError(f"unknown spatial receiver scale {scale!r}")
+            time = r.get("time")
+            if pressure_run:
+                if time in (None, "velocity"):
+                    x = self._trace_from_pressure_run(x, time, self.dt)
+                elif time == "acceleration":
+                    x = -x
+                elif time == "integral":
+                    x = torch.cumsum(self._trace_from_pressure_run(x, None, self.dt),
+                                     dim=1) * self.dt
+                elif time != "neg_acceleration":
+                    raise AssertionError(f"unknown spatial receiver time operator {time!r}")
+            elif time == "velocity":
+                x = self._trace_ddt(x, self.dt)
+            elif time == "acceleration":
+                x = -self._trace_neg_d2dt2(x, self.dt)
+            elif time == "neg_acceleration":
+                x = self._trace_neg_d2dt2(x, self.dt)
+            elif time == "integral":
+                x = torch.cumsum(x, dim=1) * self.dt
+            elif time is not None:
+                raise AssertionError(f"unknown spatial receiver time operator {time!r}")
+            return x
+
+        recipe = self._spatial[name]
+        if "terms" in recipe:
+            return evaluate(recipe)
+        fluid = torch.stack([torch.tensor([not bool(e.domain.is_elastic[st.elem_id]) for st in sts])
+                             for e, sts in zip(eqs, stamps)]).to(real.device)
+        return torch.where(fluid[:, None, :], evaluate(recipe.get("fluid")),
+                           evaluate(recipe.get("solid")))
 
     def _default_source(self):
         """Is the source the equation's default -- the unit vertical force on
@@ -1461,6 +1774,46 @@ class PropSEM:
         return tuple((float(idx_row[k]) + rev_pad[k]) * self.dh
                      for k in range(self.ndim))
 
+    def _refuse_above_surface(self, idx, role):
+        """Refuse grid points ``[ix, [iy,] iz]`` above the topography.
+
+        The curved mesh starts at the surface, so such a point is in no
+        element, and the locator would only say it found none. The surface
+        row of a fractional column is the one the mesh is built from
+        (:class:`_SurfaceRows`: linear between columns); a point on it, up to
+        round-off, is in the model.
+        """
+        if self.topography is None:
+            return
+        c = idx.detach().cpu().double().reshape(-1, self.ndim)
+        rows = self.topography
+
+        def axis(p, n):
+            p = p.clamp(0.0, n - 1)
+            i0 = p.floor().long().clamp(max=n - 1)
+            return i0, (i0 + 1).clamp(max=n - 1), p - i0
+
+        x0, x1, fx = axis(c[:, 0], rows.shape[-1])
+        if self.ndim == 2:
+            surf = rows[x0] + fx * (rows[x1] - rows[x0])
+        else:
+            y0, y1, fy = axis(c[:, 1], rows.shape[0])
+            lo = rows[y0, x0] + fx * (rows[y0, x1] - rows[y0, x0])
+            hi = rows[y1, x0] + fx * (rows[y1, x1] - rows[y1, x0])
+            surf = lo + fy * (hi - lo)
+        bad = (c[:, -1] < surf - 1e-3).nonzero().flatten()
+        if bad.numel():
+            i = int(bad[0])
+            where = ", ".join(f"{v:g}" for v in c[i].tolist())
+            col = ", ".join(f"{v:g}" for v in c[i, :-1].tolist())
+            raise ValueError(
+                f"{bad.numel()} {role}(s) above the topography, e.g. "
+                f"[{where}] where the surface of column [{col}] is row "
+                f"{float(surf[i]):.2f}. Sources and receivers are model grid "
+                f"indices [ix, {'iy, ' if self.ndim == 3 else ''}iz], iz in "
+                f"rows of dh from the top of the model: put them at or below "
+                f"the surface row of their column.")
+
     # ------------------------------------------------------------------ #
     # forward — PropTorch-compatible signature
     # ------------------------------------------------------------------ #
@@ -1472,13 +1825,22 @@ class PropSEM:
         wrapper adds the derived receiver components: requested ``p`` /
         ``vx`` / ``vy`` / ``vz`` are produced from the recorded base traces
         (p = -chi_ddot, v = u_dot) so callers get FD-aligned pressure /
-        particle-velocity data without converting anything themselves."""
+        particle-velocity data without converting anything themselves.
+
+        On the potential forms the wavelet is the pressure source: what is
+        recorded is the run driven by minus its double time integral (see
+        :func:`_pressure_to_potential_wavelet`). Without snapshots that run is
+        not made: the system is linear and time-invariant, so the run driven
+        by the wavelet itself records ``p`` sample for sample, and ``chi`` /
+        ``u`` / ``v`` are its running integrals -- no difference of a float32
+        double integral, and no one-sided end sample."""
         out = self._forward_fields(wavelet, sources, receivers,
                                    models=models, **kw)
         if isinstance(out, tuple):                       # return_wavefield
             seis, snaps = out
             return self._apply_derived_receivers(seis), snaps
-        return self._apply_derived_receivers(out)
+        return self._apply_derived_receivers(
+            out, pressure_run=self._pressure_wavelet)
 
     def _set_nt(self, wavelet):
         """This call's ``nt``: the wavelet's length, which a ``nt`` given to
@@ -1560,11 +1922,25 @@ class PropSEM:
         self._set_nt(wavelet)
         snap_steps = _resolve_snapshot_steps(self.nt, return_wavefield,
                                              snapshot_times, snapshot_interval)
-        acq = _Acq(self, wavelet, sources, receivers, source_vector)
+        from .plane_wave import PlaneWave
+        if isinstance(sources, PlaneWave):
+            return self._forward_plane_wave(wavelet, sources, receivers, models, snap_steps,
+                                            source_vector=source_vector, pml_guard=pml_guard)
+        acq = _Acq(self, wavelet, sources, receivers, source_vector,
+                   potential_wavelet=self._pressure_wavelet and return_wavefield)
+        self._illumination = self._illumination_for(models, snap_steps)
 
         # 3-D acoustic on CUDA: the single-strip DD driver, BEFORE any global
         # equation is built (that build is what it saves) -- see _forward_c_dd3d
         if self._use_c and self._dd3d_route(models):
+            if self._illumination is not None:
+                raise NotImplementedError(
+                    "compute_illumination is not wired on the 3-D acoustic strip "
+                    "driver; use impl='eager'.")
+            if self._spatial:
+                raise NotImplementedError(
+                    f"receiver_type {sorted(self._spatial)} records spatial derivatives, "
+                    f"which the 3-D acoustic strip driver does not; use impl='eager'.")
             # NOTE bs_store_dtype_elem is not forwarded: this route rings
             # nodes only, and the element knob is refused there
             return self._forward_c_dd3d(acq.shot_src, acq.receivers,
@@ -1572,6 +1948,8 @@ class PropSEM:
 
         eq, pershot_eqs = self._resolve_model_batch(models)
         acq.check_pershot(pershot_eqs)
+        # what the spatial receivers' material factors are taken from (forward)
+        self._spatial_call = (acq.receivers, eq, pershot_eqs) if self._spatial else None
 
         if self._use_c:                                  # CUDA SEM backend
             # NOTE pml_guard is not forwarded: the C route locates its
@@ -1596,7 +1974,132 @@ class PropSEM:
                                    memory=self._memory,
                                    compile_options=compile_options,
                                    checkpoint_chunk=self._ckpt_chunk,
-                                   store_dtype=self._bs_store)
+                                   store_dtype=self._bs_store,
+                                   illumination=self._illumination)
+
+    # ------------------------------------------------------------------ #
+    # Plane-wave incidence (sweep.sem.plane_wave): one shot whose source is the
+    # band's nodal loads, a time series per node and component
+    # ------------------------------------------------------------------ #
+    def _plane_wave_band(self, eq, wave):
+        """The injection band of ``wave`` on ``eq``: its box (model grid units, on element
+        edges; default one element in from the model's edges, from the top down when the
+        top is free) as element ranges of the padded mesh."""
+        from .plane_wave import injection_band
+        if self.ndim != 2:
+            raise NotImplementedError("plane-wave incidence is wired for the 2-D SEM")
+        no, (pz, px), (nz, nx) = self.n_order, self._pad0, self.shape
+        # the top is free unless an absorbing layer sits on it (abcn=0: every side is)
+        top_free = "top" in self.free_surface or self.abcn_elements == 0
+        if wave.box is None:
+            (x0, z0), (x1, z1) = (no, 0 if top_free else no), (nx - 1 - no, nz - 1 - no)
+        else:
+            (x0, z0), (x1, z1) = wave.box
+
+        def edge(v, pad, name):
+            k = (float(v) + pad) / no
+            if abs(k - round(k)) > 1e-9:
+                raise ValueError(
+                    f"the plane wave's box has {name} = {v}, not on an element edge (a "
+                    f"multiple of n_order = {no} in model grid units)")
+            return int(round(k))
+
+        ex0, ex1 = edge(x0, px, "x0"), edge(x1, px, "x1")
+        ez0, ez1 = edge(z0, pz, "z0"), edge(z1, pz, "z1")
+        # the model's elements, [lo, hi) per axis: the band must lie among them
+        lo_x, lo_z = px // no, pz // no
+        hi_x, hi_z = lo_x + (nx - 1) // no, lo_z + (nz - 1) // no
+        if not (ex0 - 1 >= lo_x and ex1 + 1 <= hi_x and ez1 + 1 <= hi_z
+                and (ez0 == 0 or ez0 - 1 >= lo_z) and ex0 < ex1 and ez0 < ez1):
+            raise ValueError(
+                f"the plane wave's box {((x0, z0), (x1, z1))} leaves no room for its band "
+                f"(one element around it) inside the model {self.shape}")
+        origin = None if wave.origin is None else self._coords(wave.origin)
+        return injection_band(eq, wave, rows=(ez0, ez1), cols=(ex0, ex1),
+                              nex=self._elems_pad[-1], top_free=top_free, origin=origin)
+
+    def free_field(self, wavelet, wave, points, models):
+        """The plane wave ``wave`` of the background ``models`` have outside its box --
+        what the records inside the box would be with nothing there to scatter -- at
+        ``points`` ``(n, 2)`` (model grid units, x first): the displacement ``(n, nt, 2)``
+        (z down; SH's ``u_y``: ``(n, nt, 1)``; float64) at the records' times."""
+        if self._use_c:
+            raise NotImplementedError("plane-wave incidence runs on impl='eager'")
+        self._set_nt(wavelet)
+        eq, pershot = self._resolve_model_batch(models)
+        if pershot is not None:
+            raise ValueError("free_field takes one model, not a per-shot batch")
+        free = self._plane_wave_band(eq, wave).free
+        xz = torch.tensor([self._coords(q) for q in torch.as_tensor(points).reshape(-1, 2)],
+                          dtype=torch.float64)
+        w = torch.as_tensor(wavelet).to(device=self.dev, dtype=torch.float64)
+        # the record of step n is the state it makes, at (n + 1) dt
+        u = free.displacement(xz[:, 0], xz[:, 1], w, self.dt, self.nt, t0=self.dt)
+        return u.transpose(1, 2)
+
+    def _forward_plane_wave(self, wavelet, wave, receivers, models, snap_steps, *,
+                            source_vector=None, pml_guard="warn"):
+        """``_forward_fields`` for a :class:`~sweep.sem.plane_wave.PlaneWave`: one shot,
+        the band's loads as per-source series on its nodes, through the eager runners."""
+        from .plane_wave import band_injection
+        from .propagator import _check_pml_placement, build_point_stamps, locate_points
+        if self._use_c:
+            raise NotImplementedError(
+                "plane-wave incidence runs on impl='eager': its loads are a time series per "
+                "band node, and the C kernels take one shared wavelet")
+        if source_vector is not None:
+            raise ValueError("source_vector is a point force's direction; a plane wave "
+                             "carries its own load")
+        if self._source_type_given:
+            raise ValueError(
+                f"source_type={self.source_type} is what a point source drives; a plane wave "
+                "carries its own load (forces on its band): build the propagator without "
+                "source_type for it")
+        wavelet = torch.as_tensor(wavelet)
+        if wavelet.dim() != 1:
+            raise ValueError(f"a plane wave takes one (nt,) wavelet; got "
+                             f"{tuple(wavelet.shape)}")
+        receivers = torch.as_tensor(receivers)
+        if receivers.dim() != 3 or receivers.shape[0] != 1 or receivers.shape[2] != 2:
+            raise ValueError(f"a plane wave is one shot: receivers must be (1, nrec, 2); "
+                             f"got {tuple(receivers.shape)}")
+        eq, pershot = self._resolve_model_batch(models)
+        if pershot is not None and len(pershot) != 1:
+            raise ValueError(f"a plane wave is one shot; the per-shot models carry "
+                             f"B={len(pershot)}")
+        inj = band_injection(eq, self._plane_wave_band(eq, wave), wavelet, self.dt, self.nt)
+
+        self._refuse_above_surface(receivers, "receiver")     # as _Acq does
+        xz = self._rec_row(receivers, 0)
+        _check_pml_placement(eq, [], xz, pml_guard)
+        locate_points(eq.mesh, xz)
+        prop = inj.propagator(eq, self.dt, self.nt,
+                              self._with_gradients(build_point_stamps(eq.mesh, xz), xz),
+                              receiver_type=list(self._recv_base))
+        prop.grid_label = self._grid_label()
+        acq = _PlaneWaveShot(receivers, inj.wavelet(self.dtype))
+        self._spatial_call = (receivers, eq, pershot) if self._spatial else None
+        self._illumination = self._illumination_for(models, snap_steps)
+        compile_options = self._compile_options()
+        if snap_steps is not None:
+            return self._forward_snapshots([prop], acq, snap_steps,
+                                           compile_options=compile_options)
+        return self._forward_eager(eq, pershot, [prop], acq, memory=self._memory,
+                                   compile_options=compile_options,
+                                   checkpoint_chunk=self._ckpt_chunk,
+                                   store_dtype=self._bs_store,
+                                   illumination=self._illumination)
+
+    def _illumination_for(self, models, snap_steps):
+        """This call's illumination holder, or ``None`` when it is off."""
+        if not self.compute_illumination:
+            return None
+        if snap_steps is not None:
+            raise ValueError("compute_illumination and return_wavefield are exclusive.")
+        from .illumination import Illumination
+        s = tuple(models[0].shape)
+        grid = s == tuple(self.shape) or s[1:] == tuple(self.shape)
+        return Illumination(self, gll_native=not grid)
 
     # ------------------------------------------------------------------ #
     # The eager propagator factory: acquisition -> one SEMPropagator per shot
@@ -1656,8 +2159,60 @@ class PropSEM:
                 receiver_xz=self._rec_row(acq.receivers, b),
                 receiver_type=self._recv_base,
                 pml_guard=pml_guard, **extra))
+            props[-1].receivers = self._with_gradients(props[-1].receivers,
+                                                       self._rec_row(acq.receivers, b))
             props[-1].grid_label = self._grid_label()
         return props
+
+    def _with_gradients(self, stamps, xz):
+        """The receivers' stamps followed, axis by axis, by their gradient stamps when a
+        spatial receiver component is asked for (see :mod:`sweep.sem.receivers`): the
+        propagators record every base field there as at any receiver, and
+        :meth:`_apply_derived_receivers` combines the derivatives. A field's gradient jumps
+        across element edges, so a receiver on one takes every element there, as a moment
+        source is stamped in each (:class:`~sweep.sem.propagator.EdgeStamp`): ``2**ndim``
+        slots per receiver and axis, the parts after the first repeated with no weight
+        (:meth:`_gradient_weights`), so that every shot has the same number."""
+        if not self._grad_axes:
+            return stamps
+        from .propagator import GradientStamp
+        parts = [self._edge_parts(c)[0] for c in xz]
+        k = 2 ** self.ndim
+        parts = [ps + [ps[-1]] * (k - len(ps)) for ps in parts]
+        return list(stamps) + [GradientStamp(ps[q], a) for a in self._grad_axes
+                               for q in range(k) for ps in parts]
+
+    def _edge_parts(self, xz):
+        """``(stamps, shares)`` of a receiver point: one stamp in its element inside it,
+        one in every element that meets at it on an edge or corner (their sector shares)."""
+        from .propagator import EdgeStamp, build_moment_stamp
+        st = build_moment_stamp(self.mesh, *xz)
+        if isinstance(st, EdgeStamp):
+            return list(st.parts), [float(w) for w in st.weights]
+        return [st], [1.0]
+
+    def _gradient_weights(self, xz, eq):
+        """``(nrec, 2**ndim)``: each gradient slot's share in its receiver's derivative. On
+        an edge, the elements of the receiver's own medium only (a fluid-solid form's other
+        field is dead there), renormalised."""
+        k = 2 ** self.ndim
+        domain = getattr(eq, "domain", None)
+        rows = []
+        for c, home in zip(xz, self._located(xz)):
+            parts, shares = self._edge_parts(c)
+            if domain is not None:
+                same = [bool(domain.is_elastic[p.elem_id]) == bool(domain.is_elastic[home])
+                        for p in parts]
+                shares = [w if ok else 0.0 for w, ok in zip(shares, same)]
+                total = sum(shares)
+                shares = [w / total for w in shares]
+            rows.append(shares + [0.0] * (k - len(shares)))
+        return torch.tensor(rows, dtype=torch.float64)
+
+    def _located(self, xz):
+        """The element every receiver point is located in (its plain stamp's)."""
+        from .propagator import build_point_stamps
+        return [st.elem_id for st in build_point_stamps(self.mesh, xz)]
 
     def _grid_label(self):
         """How compile notices name this problem's size: the model grid."""
@@ -1779,7 +2334,7 @@ class PropSEM:
     # ------------------------------------------------------------------ #
     def _forward_eager(self, eq, pershot_eqs, props, acq, *, memory=None,
                        compile_options=None, checkpoint_chunk=None,
-                       store_dtype=None):
+                       store_dtype=None, illumination=None):
         """Run the built props under one memory mode -> ``(nshots, nt, nrec,
         ncomp)``. Reads like ``prop_c.sem_c_forward_shot_batch``: the props carry
         the acquisition, the keywords carry the mode, and the body is the runner
@@ -1810,6 +2365,20 @@ class PropSEM:
         """
         recv_idxs = self._recv_idxs(eq)
         nshots = acq.nshots
+
+        if illumination is not None:
+            # the adjoint wavefield is read off the tape: the full one, shot by
+            # shot. The default strategy gives way, as for snapshots.
+            if (memory == "boundary" or checkpoint_chunk) and self._memory_explicit:
+                raise ValueError(
+                    "compute_illumination on impl='eager' reads the adjoint wavefield "
+                    "off the full tape: it is not available with memory="
+                    f"{'BoundarySaving' if memory == 'boundary' else 'Ckpt'}() there "
+                    "(impl='c' keeps it under boundary saving).")
+            return torch.stack([props[b].forward(acq.wav_per_shot[b],
+                                                 compile_options=compile_options,
+                                                 illumination=illumination)
+                                for b in range(nshots)], 0)
 
         if memory == "boundary":
             if nshots == 1:                          # single shot: no vmap overhead
@@ -2134,7 +2703,9 @@ class PropSEM:
             self._c_src_stamps = [[build_moment_stamp(self.mesh, *xz) for xz in s] for s in shot_src]
         else:
             self._c_src_stamps = [build_point_stamps(self.mesh, s) for s in shot_src]
-        row_cache = {row: build_point_stamps(self.mesh, self._rec_row(receivers, b))
+        row_cache = {row: self._with_gradients(
+                         build_point_stamps(self.mesh, self._rec_row(receivers, b)),
+                         self._rec_row(receivers, b))
                      for row, b in first.items()}     # dedupe expanded receiver rows
         self._c_rec_stamps = [row_cache[row] for row in rec_rows]
         self._c_stamp_key = key
@@ -2160,12 +2731,14 @@ class PropSEM:
             kind, payload = "moment_tensor", self._src_moment
         else:
             kind, payload = "force", sv
-        return SEMCudaPropagator(
+        prop = SEMCudaPropagator(
             eq=eq, dt=self.dt, nt=self.nt, sources=srcs,
             receivers=self._c_rec_stamps[b],
             source_kinds=[kind] * len(srcs),
             source_payloads=[payload] * len(srcs),
             receiver_type=self._recv_base)
+        prop.illumination = self._illumination
+        return prop
 
     def _forward_c_batched(self, eq, nsh, wav_per_shot, sv, memory,
                            store_dtype, store_dtype_elem):

@@ -34,8 +34,10 @@ profile precomputes per element-GLL node:
    blows up around nt≈2000 even on a flat mesh.
 
 Because ``K_MAX = 1`` (no real coordinate stretching, ``κ = 1``) the PML mass
-factor ``A0`` is identically 1, so the global mass matrix is **unchanged** and
-no separate PML mass needs to be assembled.
+factor ``A0`` is identically 1. The mass the step divides by still takes
+SPECFEM2D's Newmark term ``dt/2 · w ρ |J| · La1`` (``La1 = d_x + d_z``), which
+with the step's ``La1·v`` on the backward-difference velocity centres the
+damping in time (the equation's ``build``; the profile keeps ``dt``).
 
 Region constants (implicit in ``d_x>0`` / ``d_z>0``) match SPECFEM2D
 ``setup/constants.h.in``: ``CPML_X_ONLY = 1, CPML_Z_ONLY = 2, CPML_XZ = 3``.
@@ -44,11 +46,13 @@ Region constants (implicit in ``d_x>0`` / ``d_z>0``) match SPECFEM2D
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 import torch
 
 from ..mesh.quad9 import Quad9Mesh
+from ._axis import inner_edge_tol
 
 _TINY = 1.0e-20
 
@@ -72,17 +76,21 @@ def _compute_coef_convolution(bb: torch.Tensor, dt: float):
 
 def _build_damping_axis(coord, lo, hi, *, side_low, side_high,
                         pml_L, d_max, alpha_max, poly, dtype):
-    """SPECFEM damping/frequency-shift profile along one axis."""
+    """SPECFEM damping/frequency-shift profile along one axis. A node within
+    round-off of the inner edge is outside, on both sides (``inner_edge_tol``)."""
     d = torch.zeros_like(coord)
     alpha = torch.zeros_like(coord)
+    tol = inner_edge_tol(lo, hi, coord.dtype)
     if side_low:
-        in_lo = coord < (lo + pml_L)
-        s = ((lo + pml_L - coord) / pml_L).clamp(min=0.0, max=1.0)
+        depth = lo + pml_L - coord
+        in_lo = depth > tol
+        s = (depth / pml_L).clamp(min=0.0, max=1.0)
         d = d + in_lo.to(dtype) * d_max * s.pow(poly)
         alpha = alpha + in_lo.to(dtype) * alpha_max * (1.0 - s)
     if side_high:
-        in_hi = coord > (hi - pml_L)
-        s = ((coord - (hi - pml_L)) / pml_L).clamp(min=0.0, max=1.0)
+        depth = coord - (hi - pml_L)
+        in_hi = depth > tol
+        s = (depth / pml_L).clamp(min=0.0, max=1.0)
         d = d + in_hi.to(dtype) * d_max * s.pow(poly)
         alpha = alpha + in_hi.to(dtype) * alpha_max * (1.0 - s)
     return d, alpha
@@ -249,6 +257,15 @@ class ElasticCPMLProfile:
 
     # Multiaxial-PML cross-damping fraction (0 = classical uniaxial C-PML).
     mpml_ratio: float = 0.0
+    # The time step the coefficients were built for (the mass term's dt/2),
+    # and the per-axis damping and frequency shift they were built from (after
+    # the corner separation and any M-PML cross-damping), which the fluid-solid
+    # coupling stretches its interface load with.
+    dt: Optional[float] = None
+    d_x: Optional[torch.Tensor] = None
+    alpha_x: Optional[torch.Tensor] = None
+    d_z: Optional[torch.Tensor] = None
+    alpha_z: Optional[torch.Tensor] = None
 
 
 def build_elastic_cpml(
@@ -372,7 +389,8 @@ def build_elastic_cpml(
         Sz0=Sz0, Sz1=Sz1, Sz2=Sz2, xz1=_mask(xz1), xz2=_mask(xz2),
         La1=La1, La2=La2, La3=La3, La4=La4, l1=_mask(l1), l2=_mask(l2),
         outer_edge_idx=outer_pml_edge_nodes(mesh, sides),
-        mpml_ratio=float(mpml_ratio),
+        mpml_ratio=float(mpml_ratio), dt=float(dt),
+        d_x=d_x, alpha_x=alpha_x, d_z=d_z, alpha_z=alpha_z,
     )
 
 
@@ -405,5 +423,7 @@ def mask_elastic_profile(profile: ElasticCPMLProfile,
         La3=profile.La3 * mf, La4=profile.La4 * mf,
         l1=mask_t(profile.l1), l2=mask_t(profile.l2),
         outer_edge_idx=profile.outer_edge_idx,
-        mpml_ratio=profile.mpml_ratio,
+        mpml_ratio=profile.mpml_ratio, dt=profile.dt,
+        d_x=profile.d_x, alpha_x=profile.alpha_x,
+        d_z=profile.d_z, alpha_z=profile.alpha_z,
     )

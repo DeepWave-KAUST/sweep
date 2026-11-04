@@ -159,18 +159,17 @@ def test_unknown_name_error_lists_the_fd_names():
 
 @pytest.mark.parametrize("equation,abcn", [(ElasticSEM3D, 0),
                                            (ElasticVSSEM3D, NO)])
-def test_stress_names_are_2d_only(equation, abcn):
-    with pytest.raises(NotImplementedError, match="2-D only"):
-        PropSEM(equation, shape=(9, 9, 9), dh=DH, dt=DT, nt=NT,
-                n_order=NO, free_surface=("top",),
-                abcn=abcn, f_dominant=F0, dev="cpu", impl="eager",
-                source_type=["sxx", "syy", "szz"])
-    # ... while the FD force names work there too
-    p = PropSEM(equation, shape=(9, 9, 9), dh=DH, dt=DT, nt=NT, n_order=NO,
-                free_surface=("top",),
-                abcn=abcn, f_dominant=F0, dev="cpu", impl="eager",
-                source_type=["vy"])
-    assert p._source_vector() == (0.0, 1.0, 0.0)
+def test_3d_stress_names_are_the_six_moment_components(equation, abcn):
+    # (Mxx, Myy, Mzz, Mxy, Mxz, Myz), the order the 3-D stamp takes; the stamp itself is
+    # test/sem/test_sem_moment3d.py's
+    kw = dict(shape=(9, 9, 9), dh=DH, dt=DT, nt=NT, n_order=NO, free_surface=("top",),
+              abcn=abcn, f_dominant=F0, dev="cpu", impl="eager")
+    p = PropSEM(equation, source_type=["sxx", "syy", "szz"], **kw)
+    assert p._src_moment == (1.0, 1.0, 1.0, 0.0, 0.0, 0.0)
+    assert PropSEM(equation, source_type=["syz", "sxy"], **kw)._src_moment == (
+        0.0, 0.0, 0.0, 1.0, 0.0, 1.0)
+    # ... and the FD force names work there too
+    assert PropSEM(equation, source_type=["vy"], **kw)._source_vector() == (0.0, 1.0, 0.0)
 
 
 def test_source_vector_is_refused_on_a_stress_source():

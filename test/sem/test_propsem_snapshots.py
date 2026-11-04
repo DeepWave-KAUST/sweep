@@ -60,7 +60,9 @@ TOPO = 2.0 + 3.0 * np.exp(-((np.arange(NX) - NX / 2) / 8.0) ** 2)
                                            (ElasticVSSEM2DDeformed, None),
                                            (AcousticPotentialSEM2D, TOPO)])
 def test_receiver_trace_is_the_snapshot_at_its_grid_point(equation, topo):
-    p = _prop(equation, topography=topo)
+    # the snapshot is chi on the potential form, whose default record is p
+    rtype = ["chi"] if equation is AcousticPotentialSEM2D else None
+    p = _prop(equation, topography=topo, receiver_type=rtype)
     times = [0, 37, 120, NT - 1]
     with torch.no_grad():
         seis, snaps = p(_wav(), SRC, REC, models=_models(equation),
@@ -97,12 +99,21 @@ def test_the_air_above_a_topography_is_zero():
 
 
 def test_asking_for_snapshots_does_not_change_the_record():
-    p = _prop()
-    with torch.no_grad():
-        plain = p(_wav(), SRC, REC, models=_models(AcousticPotentialSEM2D))
-        seis, _ = p(_wav(), SRC, REC, models=_models(AcousticPotentialSEM2D),
-                    return_wavefield=True, snapshot_interval=50)
-    assert torch.equal(plain, seis)
+    """Bitwise on an equation that runs the wavelet as given; to round-off
+    on the potential form, whose snapshot run takes the converted wavelet
+    (its fields must be chi) while a plain run converts the record -- there
+    p's last sample is a one-sided difference of chi, so it is left out."""
+    for eq in (ElasticVSSEM2DDeformed, AcousticPotentialSEM2D):
+        p = _prop(eq)
+        with torch.no_grad():
+            plain = p(_wav(), SRC, REC, models=_models(eq))
+            seis, _ = p(_wav(), SRC, REC, models=_models(eq),
+                        return_wavefield=True, snapshot_interval=50)
+        if eq is ElasticVSSEM2DDeformed:
+            assert torch.equal(plain, seis)
+        else:
+            err = float((plain - seis)[:, :-1].abs().max() / plain.abs().max())
+            assert err < 1e-10, err
 
 
 def test_default_is_every_step_and_interval_is_its_subsample():

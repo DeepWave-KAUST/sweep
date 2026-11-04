@@ -186,6 +186,7 @@ struct SemAcousticCpmlForwardInputCore {
     int ndim = 2;
     int B = 1;
     int Bm = 1;
+    Buf illum;
 };
 
 struct SemAcousticCpmlBackwardInputCore {
@@ -286,6 +287,7 @@ struct SemAcousticCpmlBackwardInputCore {
     int ndim = 2;
     int B = 1;
     int Bm = 1;
+    Buf illum;
 };
 
 struct SemElasticCpmlForwardInputCore {
@@ -394,6 +396,7 @@ struct SemElasticCpmlForwardInputCore {
     Buf band_scale;
     Buf band_scale_e;
     int band_kind_e = 0;
+    Buf illum;
 };
 
 struct SemFluidSolidForwardInputCore {
@@ -567,6 +570,11 @@ struct SemFluidSolidForwardInputCore {
     Buf band_scale;
     Buf band_scale_e;
     int band_kind_e = 0;
+    Buf ifc_pml_g;   // (n_p,) int64, (n_p, IFC_PML_K)
+    Buf ifc_pml_cf;
+    Buf ifc_pml_mem;   // (B, n_p, 4), zeroed
+    Buf ifc_pml_tape;
+    Buf illum;
 };
 
 struct SemFluidSolidBackwardInputCore {
@@ -799,6 +807,12 @@ struct SemFluidSolidBackwardInputCore {
     Buf band_scale;
     Buf band_scale_e;
     int band_kind_e = 0;
+    Buf ifc_pml_g;
+    Buf ifc_pml_cf;
+    Buf ifc_pml_tape;
+    Buf ifc_pml_lmem;   // (B, n_p, 4), zeroed
+    Buf ifc_pml_scr;   // (B, n_p, 2), zeroed
+    Buf illum;
 };
 
 struct SemElasticCpmlBackwardInputCore {
@@ -940,6 +954,7 @@ struct SemElasticCpmlBackwardInputCore {
     Buf band_scale;
     Buf band_scale_e;
     int band_kind_e = 0;
+    Buf illum;
 };
 
 struct SemElasticBackwardInputCore {

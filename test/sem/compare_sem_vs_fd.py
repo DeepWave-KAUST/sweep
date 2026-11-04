@@ -1,10 +1,10 @@
 """Compare SEM acoustic 2-D against sweep's FD Acoustic on the same setup.
 
-Both solvers run on a uniform vp domain with a Ricker source near the top.
-Boundary conditions don't fully match (SEM has free top + Stacey sides/bottom;
-sweep FD here uses free top + CPML on all four sides), so we restrict the
-comparison to a windowed direct arrival, before any reflection reaches the
-receivers.
+Both solvers run on a uniform vp domain with a Ricker source near the top,
+a free top and an absorbing layer on the other three sides, outside the
+compared region (SEM: a C-PML band the mesh is padded with; sweep FD: CPML,
+abcn = 40). The two layers are different discretizations, so we restrict the
+comparison to a window around the direct arrival.
 
 Run:
     PYTHONPATH=src python test/sem/compare_sem_vs_fd.py
@@ -21,7 +21,7 @@ import torch
 
 from sweep.equations import Acoustic
 from sweep.propagator.torch import PropTorch
-from sweep.sem import AcousticSEM2D, SEMPropagator, build_quad4_mesh
+from sweep.sem import AcousticSEM2D, SEMPropagator, build_cpml, build_quad4_mesh
 
 
 def ricker(t: torch.Tensor, f0: float, delay: float) -> torch.Tensor:
@@ -63,16 +63,25 @@ def main(out_dir: str):
           f"f0={f0}, dt={dt}, nt={nt}")
 
     # ------------------------------------------------------------------
-    # SEM run
+    # SEM run: the mesh is padded on the left/right/bottom by a C-PML band
+    # as thick as FD's absorbing layer (8 x 50 m = 40 cells x 10 m), so the
+    # band lies outside the compared region; x shifts by the pad.
     # ------------------------------------------------------------------
     nex, nez = 20, 15            # dh_e = 50 m, N=4 -> ~12 m GLL spacing
-    mesh = build_quad4_mesh(nex=nex, nez=nez, x_max=x_max, z_max=z_max,
+    n_pml = 8
+    pad = n_pml * x_max / nex
+    mesh = build_quad4_mesh(nex=nex + 2 * n_pml, nez=nez + n_pml,
+                            x_max=x_max + 2 * pad, z_max=z_max + pad,
                             n_order=4, dtype=torch.float64, device="cpu")
     vp_e = vp_const * torch.ones(mesh.n_elements, mesh.ngll, mesh.ngll,
                                  dtype=torch.float64)
-    sem = AcousticSEM2D.build(mesh, vp_e)
-    sem_prop = SEMPropagator.build(sem, dt=dt, nt=nt,
-                                   source_xz=[src_xz], receiver_xz=rec_xz)
+    cpml = build_cpml(mesh, dt=dt, sides=("left", "right", "bottom"),
+                      pml_thickness_elements=n_pml,
+                      c_max=vp_const, f_dominant=f0)
+    sem = AcousticSEM2D.build(mesh, vp_e, dirichlet=("top",), cpml=cpml)
+    sem_prop = SEMPropagator.build(
+        sem, dt=dt, nt=nt, source_xz=[(src_xz[0] + pad, src_xz[1])],
+        receiver_xz=[(x + pad, z) for x, z in rec_xz])
     src_wave = ricker(t, f0=f0, delay=delay)
     sem_out = sem_prop.forward(src_wave)
     sem_seis = sem_out[..., 0].T.numpy()             # (n_rec, nt)

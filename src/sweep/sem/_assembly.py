@@ -255,3 +255,15 @@ def stress_divergence3(D, ibool, inv_J, w_jac, sig, like):
             acc = t if acc is None else acc + t
         R.append(acc)
     return assemble_each(R, ibool, like)
+
+
+def vector_divergence3(D, ibool, inv_J, w_jac, vec, like):
+    """``∫ ∇φ · u dV`` assembled, for an element-local vector ``vec = (u_x, u_y, u_z)``:
+    one row of :func:`stress_divergence3`, the transpose of :func:`phys_grads3` on one
+    field (Biot's weak flux divergence ``D^T W q``)."""
+    acc = None
+    for m, ein in enumerate(("Xx,ezyX->ezyx", "Yy,ezYx->ezyx", "Zz,eZyx->ezyx")):
+        F = w_jac * sum(vec[j] * inv_J[..., m, j] for j in range(3))
+        t = contract(ein, D, F)
+        acc = t if acc is None else acc + t
+    return assemble(acc, ibool, like)

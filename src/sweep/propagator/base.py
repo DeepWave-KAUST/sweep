@@ -16,6 +16,7 @@ from sweep.equations._edges import (
     normalize_free_surface,
     normalize_pad,
     is_top_only_or_none,
+    refuse_free_plate,
     torch_pad_order,
     fs_faces_to_c_bitmask,
 )
@@ -180,6 +181,7 @@ class PropBase:
             normalize_free_surface=normalize_free_surface,
             normalize_pad=normalize_pad,
             is_top_only_or_none=is_top_only_or_none,
+            refuse_free_plate=refuse_free_plate,
         )
         # Resolve topo_method + free_surface BEFORE PML padding is
         # computed.  Two separate flags come out:

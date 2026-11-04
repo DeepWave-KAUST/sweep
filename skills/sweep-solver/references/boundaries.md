@@ -35,11 +35,18 @@ Fixed at construction (assigning `solver.free_surface` later raises `AttributeEr
 
 | Equations | Free surface |
 |---|---|
-| 2-D `Acoustic`, `Elastic`, `ViscoAcoustic`, `ViscoElastic` | any face subset, eager and c, gradients in every memory mode (ViscoAcoustic/ViscoElastic: no boundary saving on c) |
+| 2-D `Acoustic`, `Elastic`, `ViscoAcoustic`, `ViscoElastic` | any face subset (solids: not a PML between two free faces, below), eager and c, gradients in every memory mode (ViscoAcoustic/ViscoElastic: no boundary saving on c) |
 | 3-D equations, `AcousticVRZ*`, `AcousticBorn*`, `AcousticVRR`, `ElasticVRR`, `DAS*`, `Biot` | top only (`True`); face lists raise |
 | All anisotropic (`AcousticVTI*`, `AcousticTTI*`, `AcousticTariq`, `ElasticTTI*`) | refused (`NotImplementedError`) |
 | `Acoustic1st` | accepted but **not implemented** (see section 3) |
 | Under `ModelParallel` | top only |
+
+Solids (`Elastic`, `ElasticBorn`, `ViscoElastic`) raise `ValueError` for a PML that runs between
+two faces of the other axis with no PML, one of them free: `["top", "bottom"]`,
+`["top", "left", "right"]`, or a free face opposite an `abcn` 0 face. The solid between them is
+a plate whose backward Lamb modes a PML amplifies, so the run grows without bound after a few
+seconds whatever the PML width. Keep one face of the pair absorbing, or free all four faces.
+Fluids (`Acoustic`, `ViscoAcoustic`) accept every layout.
 
 ```python
 import torch

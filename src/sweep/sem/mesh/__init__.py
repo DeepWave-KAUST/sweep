@@ -20,6 +20,7 @@ from .quad9 import (
     Quad9Mesh,
     build_axis_aligned_quad9,
     build_topography_quad9,
+    build_layered_quad9,
     quad9_from_control_nodes,
 )
 from .hex8 import (
@@ -45,6 +46,7 @@ __all__ = [
     "Quad9Mesh",
     "build_axis_aligned_quad9",
     "build_topography_quad9",
+    "build_layered_quad9",
     "quad9_from_control_nodes",
     "Hex8Mesh",
     "Hex8Layout",

@@ -260,3 +260,43 @@ def test_top_free_surface_rayleigh_near_vr_3d(eqcls):
     assert 0.96 * vR < mean_vr < 1.04 * vR, (
         f"3-D top-FS Rayleigh moveout={mean_vr:.0f} m/s vs analytic vR={vR:.0f} "
         f"(~{0.92*vR:.0f} means the Robertsson tangential FS correction regressed)")
+
+
+# --- a PML between two free faces: refused, and why ---------------------------
+def _plate_prop(fs, refuse=True):
+    eq = Elastic(spatial_order=SO, device=DEV, backend="torch")
+    if not refuse:
+        eq.free_plate_unstable = False       # run the refused layout anyway
+    return PropTorch(eq, backend="torch", impl="c", use_ckpt=False, shape=(41, 41),
+                     free_surface=fs, abcn=24, dh=5.0, dt=5e-4,
+                     source_type=["sxx", "szz"], receiver_type=["vz"])
+
+
+@pytest.mark.parametrize("plate,side", [
+    (["top", "bottom"], ["top"]),
+    (["top", "left", "right"], ["top", "left"]),
+], ids=["top+bottom", "top+left+right"])
+def test_elastic_pml_between_two_free_faces_grows_over_10_s(plate, side):
+    """The refusal guards impl='c' too.  Run anyway, the plate layout leaves the
+    direct wave behind by orders of magnitude within 10 s (measured ~1e12x),
+    while the layout with one of the two free faces given the PML decays."""
+    with pytest.raises(ValueError, match="plate"):
+        _plate_prop(plate)
+    nt, win = 20000, 2500                    # 10 s, 1.25 s windows
+    t = np.arange(nt, dtype=np.float32) * 5e-4 - 0.1
+    wav = torch.tensor(((1 - 2 * (np.pi * 15 * t) ** 2) * np.exp(-(np.pi * 15 * t) ** 2))
+                       .astype(np.float32), device=DEV)
+    src, rec = np.array([[12, 20]]), np.array([[[18, 20], [18, 4], [30, 20]]])
+    models = [torch.full((41, 41), v, device=DEV) for v in (3210.0, 1792.0, 2192.0)]
+
+    def record(fs):
+        with torch.no_grad():
+            return _plate_prop(fs, refuse=False)(wav, src, rec, models=models)[0].abs()
+
+    d_plate, d_side = record(plate), record(side)
+    direct = d_side[:win].max().item()
+    late_plate, late_side = d_plate[-win:].max().item(), d_side[-win:].max().item()
+    assert not np.isfinite(late_plate) or late_plate > 1e3 * direct, (
+        f"{plate}: did not grow ({late_plate:.2e} vs direct {direct:.2e})")
+    assert late_side < 1e-3 * direct, (
+        f"{side}: did not decay ({late_side:.2e} vs direct {direct:.2e})")
