@@ -17,7 +17,8 @@ import numpy as np
 import torch
 
 from sweep.equations.biot import biot_from_biot_constants
-from sweep.sem import BiotVSSEM2DDeformed, ElasticVSSEM2DDeformed, PropSEM
+from sweep.sem import (BiotVSSEM2DDeformed, ElasticVSSEM2DDeformed, PropSEM,
+                       ViscoBiotVSSEM2DDeformed, ViscoElasticVSSEM2DDeformed)
 from test_biot import DAI1
 
 ABCN = 16                        # four elements of layer
@@ -55,5 +56,19 @@ def test_biot_layer_echo():
     """The flux q of the pressure equation took the same route as the stress."""
     models = biot_from_biot_constants(**DAI1, b=7e4, phi=0.3)
     e_vz, e_p = _echo(BiotVSSEM2DDeformed, models, 4.0, 2e-4, 900, 30.0, ["vz", "p"])
+    assert e_vz < 2e-3, f"vz echo {e_vz:.2e}"
+    assert e_p < 1e-3, f"p echo {e_p:.2e}"
+
+
+def test_visco_elastic_layer_echo():
+    """The attenuating class has its own step (Qp = 50, Qs = 30 in both models)."""
+    (e,) = _echo(ViscoElasticVSSEM2DDeformed, (2400.0, 1300.0, 2000.0, 50.0, 30.0), 10.0,
+                 6e-4, 700, 15.0, ["vz"])
+    assert e < 1e-3, f"echo {e:.2e}"
+
+
+def test_visco_biot_layer_echo():
+    models = tuple(biot_from_biot_constants(**DAI1, b=7e4, phi=0.3)) + (50.0, 30.0)
+    e_vz, e_p = _echo(ViscoBiotVSSEM2DDeformed, models, 4.0, 2e-4, 900, 30.0, ["vz", "p"])
     assert e_vz < 2e-3, f"vz echo {e_vz:.2e}"
     assert e_p < 1e-3, f"p echo {e_p:.2e}"
