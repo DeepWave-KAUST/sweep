@@ -51,7 +51,8 @@ def _to_ncdhw(u):
 # the step kernel (A100/V100 across the eager equations at order 4: forward
 # 1.2-6x, full-tape gradient 1.1-10x faster and 1.3-4x less memory; 3-D, shot
 # batches and high orders gain most).  Uncompiled eager keeps the conv -- there
-# every slice is its own launch and the conv wins.
+# every slice is its own launch and the conv wins -- with a backward that keeps
+# only the kernel (``_StencilConv`` below).
 #
 # The slice form needs the taps as Python floats, which a traced graph cannot
 # read off a tensor, so ``register_stencil`` records them on the kernel tensor
@@ -227,6 +228,83 @@ def _zero_halo_3d(out, padding):
         out[..., :, :, -pad_x:] = 0
     return out
 
+
+# ---- uncompiled stencils ----------------------------------------------------
+# A conv's autograd node saves its input, which only the kernel's gradient
+# reads.  A stencil's kernel is a constant, so that copy is dead weight: one
+# field per derivative per step, alive until the backward (2-D Acoustic kept 5
+# fields a step, 2-D Elastic 13).  ``_StencilConv`` keeps the kernel alone.  Its
+# backward is the transposed correlation with the same kernel and padding --
+# the call the conv's own backward makes for the input -- so the record and
+# every gradient stay bitwise the conv's.  ``gradient``'s halo zeroing and
+# ``apply_kernels``' channel sum run inside it, which makes a derivative one
+# autograd node instead of a conv and four CopySlices (each a full-field copy
+# in the backward).  Forward mode (``jvp``) and second derivatives work; a
+# second derivative is a plain conv with the kernel, where the conv's own also
+# ran cuDNN's weight-gradient kernels.  Compiled steps take the slice form above
+# and never get here.  The price is host time: a Python autograd node costs
+# ~25 us a call more than the conv's (RTX 6000 Ada), which a host-bound 2-D step
+# shows -- the staggered-grid elastic family ran 12-14% slower at 1000x1000
+# there, the acoustic one 7-11% faster (fewer nodes); on a V100 every equation
+# measured stayed within -5% and +0.1%.
+
+# A/B switch: False runs the uncompiled stencils as plain convs again.
+STENCIL_BACKWARD_KEEPS_KERNEL_ONLY = True
+
+
+def _stencil(u, kernel, padding, halo=None, channel_sum=False):
+    """``F.conv{2,3}d(u, kernel, padding=padding)``; its channels summed when
+    ``channel_sum``, then its ``halo`` zeroed in place."""
+    out = (F.conv2d if kernel.ndim == 4 else F.conv3d)(u, kernel, padding=padding)
+    if channel_sum and out.shape[1] != 1:
+        out = out.sum(dim=1, keepdim=True)
+    if halo is not None:
+        out = (_zero_halo if kernel.ndim == 4 else _zero_halo_3d)(out, halo)
+    return out
+
+
+class _StencilConv(torch.autograd.Function):
+    """:func:`_stencil` with a constant ``kernel``, keeping nothing but the kernel."""
+
+    @staticmethod
+    def forward(ctx, u, kernel, padding, halo, channel_sum):
+        # An undefined output gradient stays None, as it does for the conv,
+        # instead of zeros pushed through a transposed conv.
+        ctx.set_materialize_grads(False)
+        # An attribute, not save_for_backward: the kernel is a constant -- no
+        # version to check, nothing for a checkpoint to recompute -- and a
+        # saved tensor costs a pack and an unpack per call.
+        ctx.kernel, ctx.padding, ctx.halo, ctx.channel_sum = kernel, padding, halo, channel_sum
+        return _stencil(u, kernel, padding, halo, channel_sum)
+
+    @staticmethod
+    def backward(ctx, grad):
+        if grad is None:
+            return None, None, None, None, None
+        kernel = ctx.kernel
+        if kernel.dtype != grad.dtype:      # autocast: the forward ran in the cast dtype
+            kernel = kernel.to(grad.dtype)
+        if ctx.halo is not None:
+            grad = (_zero_halo if kernel.ndim == 4 else _zero_halo_3d)(grad.clone(), ctx.halo)
+        if ctx.channel_sum and kernel.shape[0] != 1:
+            grad = grad.expand(-1, kernel.shape[0], *grad.shape[2:])
+        conv_t = F.conv_transpose2d if kernel.ndim == 4 else F.conv_transpose3d
+        return conv_t(grad, kernel, padding=ctx.padding), None, None, None, None
+
+    @staticmethod
+    def jvp(ctx, u_t, *_):
+        return None if u_t is None else _stencil(u_t, ctx.kernel, ctx.padding, ctx.halo, ctx.channel_sum)
+
+
+def _conv_stencil(u, kernel, padding, halo=None, channel_sum=False):
+    """:func:`_stencil`, through :class:`_StencilConv` when a backward will
+    run (``u`` differentiated, ``kernel`` constant, not traced)."""
+    if (u.requires_grad and STENCIL_BACKWARD_KEEPS_KERNEL_ONLY and torch.is_grad_enabled()
+            and not kernel.requires_grad and not _is_compiling()):
+        return _StencilConv.apply(u, kernel, padding, halo, channel_sum)
+    return _stencil(u, kernel, padding, halo, channel_sum)
+
+
 def separable_d2_2d(u, k1d, hz=1.0, hx=1.0):
     """Separable per-axis 2nd derivatives of a 2-D wavefield.
 
@@ -255,8 +333,8 @@ def separable_d2_2d(u, k1d, hz=1.0, hx=1.0):
         kz = k1d[None, None, :, None]  # (1,1,k,1)
         kx = k1d[None, None, None, :]  # (1,1,1,k)
         pad = k1d.shape[-1] // 2
-    lapx = F.conv2d(u, kx, padding=(0, pad)) / (hx*hx)
-    lapz = F.conv2d(u, kz, padding=(pad, 0)) / (hz*hz)
+    lapx = _conv_stencil(u, kx, (0, pad)) / (hx*hx)
+    lapz = _conv_stencil(u, kz, (pad, 0)) / (hz*hz)
     return lapz, lapx
 
 def separable_d2_3d(u, k1d, hz=1.0, hy=1.0, hx=1.0):
@@ -290,9 +368,9 @@ def separable_d2_3d(u, k1d, hz=1.0, hy=1.0, hx=1.0):
         ky = k1d.view(1, 1, 1, -1, 1)
         kx = k1d.view(1, 1, 1, 1, -1)
 
-    lapz = F.conv3d(u, kz, padding=(pad, 0, 0)) / (hz * hz)
-    lapy = F.conv3d(u, ky, padding=(0, pad, 0)) / (hy * hy)
-    lapx = F.conv3d(u, kx, padding=(0, 0, pad)) / (hx * hx)
+    lapz = _conv_stencil(u, kz, (pad, 0, 0)) / (hz * hz)
+    lapy = _conv_stencil(u, ky, (0, pad, 0)) / (hy * hy)
+    lapx = _conv_stencil(u, kx, (0, 0, pad)) / (hx * hx)
 
     return lapz, lapy, lapx
 
@@ -308,9 +386,7 @@ def apply_kernels(u, kernels):
     if taps is not None:
         return _apply_taps(u, taps)
     _, _, KH, KW = kernels.shape
-    padding = (KH // 2, KW // 2)
-    conv_out = F.conv2d(u, kernels, padding=padding)
-    return conv_out if conv_out.shape[1] == 1 else conv_out.sum(dim=1, keepdim=True)
+    return _conv_stencil(u, kernels, (KH // 2, KW // 2), channel_sum=True)
 
 
 def apply_kernels_3d(u, kernels):
@@ -319,9 +395,7 @@ def apply_kernels_3d(u, kernels):
     if taps is not None:
         return _apply_taps(u, taps)
     _, _, KD, KH, KW = kernels.shape
-    padding = (KD // 2, KH // 2, KW // 2)
-    conv_out = F.conv3d(u, kernels, padding=padding)
-    return conv_out if conv_out.shape[1] == 1 else conv_out.sum(dim=1, keepdim=True)
+    return _conv_stencil(u, kernels, (KD // 2, KH // 2, KW // 2), channel_sum=True)
 
 
 def laplacian_2d(u, k1d, hz=1.0, hx=1.0):
@@ -358,15 +432,13 @@ def gradient(u, h, axis, kernels=None):
             u_nchw, restore = _to_nchw(u)
             if taps is not None:
                 return restore(_zero_halo_where(_apply_taps(u_nchw, taps) / h_axis, padding))
-            out = F.conv2d(u_nchw, kernel / h_axis, padding=padding)
-            out = _zero_halo(out, padding)
+            out = _conv_stencil(u_nchw, kernel / h_axis, padding, halo=padding)
         elif kernel.ndim == 5:
             padding = (kernel.shape[-3] // 2, kernel.shape[-2] // 2, kernel.shape[-1] // 2)
             u_ncdhw, restore = _to_ncdhw(u)
             if taps is not None:
                 return restore(_zero_halo_where(_apply_taps(u_ncdhw, taps) / h_axis, padding))
-            out = F.conv3d(u_ncdhw, kernel / h_axis, padding=padding)
-            out = _zero_halo_3d(out, padding)
+            out = _conv_stencil(u_ncdhw, kernel / h_axis, padding, halo=padding)
         else:
             raise ValueError(f"Expected 2D or 3D gradient kernel, got shape {tuple(kernel.shape)}")
         return restore(out)

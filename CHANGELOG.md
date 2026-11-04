@@ -421,6 +421,32 @@ and this project adheres to
   V100 the wall time went from 7.9x to 0.97x the full grid's. The order-4
   forward is 8-12% faster too. The second-order strips read their inner-cell
   mask as a constant built with the layout, not one built in every step.
+- **Uncompiled eager rollouts keep far fewer fields for the backward.** A conv's
+  autograd node saves its input, which only the kernel's gradient reads, and the
+  stencil kernels are constants. The uncompiled stencils (`apply_kernels`,
+  `apply_kernels_3d`, `separable_d2_2d`/`3d`, the kernel path of `gradient`) now
+  run through an autograd Function that keeps the kernel alone; its backward is
+  the transposed conv with the same kernel and padding, the call the conv's own
+  backward makes, so records and gradients are bitwise those of before, on every
+  eager equation, CPU and CUDA, forward mode included; second derivatives as
+  well, or within float round-off where the conv's double backward sums in
+  another order (a GitHub CPU runner, float64).
+  Fields kept per time step: 2-D Acoustic 5 -> 2, Elastic 13 -> 8, AcousticVTI
+  7 -> 5, ViscoElastic 20 -> 15, Elastic with a free surface 24 -> 12; 3-D
+  Elastic 28 -> 19. A 1000x1000 full-tape gradient (V100) peaks at 2.8 GB
+  instead of 6.8 (Acoustic) and 10.9 GB instead of 17.6 (Elastic), and takes as
+  long as before or up to 5% less there. Where the step is bound by host overhead
+  (2-D 1000x1000 on an RTX 6000 Ada) the acoustic equations run 7-11% faster
+  (`gradient` lost four CopySlices nodes) and the staggered-grid elastic ones
+  (Elastic, DAS) 12-14% slower: each derivative is now a Python autograd node,
+  ~25 us more host time per call than the conv's. A second derivative
+  (`create_graph=True`) no longer runs cuDNN's weight-gradient kernels, which
+  the conv's own double backward did: a Hessian-vector product on 2-D Acoustic
+  (100x200, 4 shots, V100) takes 6.0 ms a step instead of 84. Compiled steps
+  (the slice form) and runs without gradients are unchanged; `ElasticTTI`'s
+  rotated-staggered-grid derivative keeps the plain conv.
+  `sweep.operators.torch.STENCIL_BACKWARD_KEEPS_KERNEL_ONLY = False` restores
+  the plain conv everywhere.
 - The CPU test workflow runs as four parallel jobs (`sem-biot`, `sem`,
   `rest`, `skill`), each with its own executed-test floor, instead of one
   job.
