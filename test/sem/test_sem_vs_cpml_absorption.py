@@ -7,8 +7,9 @@ the relative L2 difference over the record, both components, at the worst receiv
 
 The velocity-stress classes used to convolve the stress itself in the momentum equation and to
 take the weak divergence of ``sigma + m``, which differentiates the damping profile too: their
-layer then reflected 0.54 (elastic) and 0.63 (Biot) here, and now 1.2e-3 and 9e-4, against
-1.6e-3 for the displacement form's (on SPECFEM2D-like resolution 5e-2 before, 1.5e-4 now;
+layer then reflected 0.54 (elastic) and 0.63 (Biot) here; with the recursion on the divergence
+split by direction 1.3e-3 and 8.7e-4 (1.3e-3 for the visco-elastic class at Q = 50), against
+1.5e-3 for the displacement form's (on SPECFEM2D-like resolution 5e-2 before, 1.5e-4 now;
 test/sem/specfem_compare/run_compare_absorb.py). The bound below holds them to the
 displacement form's level, which that scheme fails by two orders of magnitude.
 """
