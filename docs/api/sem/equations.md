@@ -136,6 +136,13 @@ First-order in time; the source and receiver fields are `v_x`, `v_z` (and
       inherited_members: true
       show_if_no_docstring: true
 
+::: sweep.sem.ViscoElasticVSSEM2DDeformed
+    options:
+      heading_level: 3
+      members: [build, unrelaxed_velocities]
+      inherited_members: true
+      show_if_no_docstring: true
+
 ::: sweep.sem.ElasticVSSEM3D
     options:
       heading_level: 3
@@ -179,6 +186,20 @@ and the same source and receiver names. See
       show_if_no_docstring: true
 
 ::: sweep.sem.BiotAnisoPermSEM2DDeformed
+    options:
+      heading_level: 3
+      members: [build]
+      inherited_members: true
+      show_if_no_docstring: true
+
+::: sweep.sem.ViscoBiotVSSEM2DDeformed
+    options:
+      heading_level: 3
+      members: [build]
+      inherited_members: true
+      show_if_no_docstring: true
+
+::: sweep.sem.BiotVSSEM3DDeformed
     options:
       heading_level: 3
       members: [build]

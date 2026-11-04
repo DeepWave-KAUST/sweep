@@ -618,6 +618,7 @@ the equation's own source fields, and means the same source:
 | `["vx", "vz"]` | a force at 45°, not an explosion | the force |
 | `["sxx", "szz"]` | an explosion: moment tensor `Mxx = Mzz = 1` | the moment rate |
 | `["sxz"]` | a shear moment, `Mxz = Mzx = 1` | the moment rate |
+| 3-D: `["sxx", "syy", "szz"]`, `["sxy"]`, ... | the explosion, the shear moments (`syy`, `sxy`, `syz` too) | the moment rate |
 
 ```python
 solver = PropSEM(ElasticVSSEM2DDeformed, ..., source_type=["sxx", "szz"],
@@ -635,8 +636,8 @@ scales still differ between the backends.
 
 The default stays a unit vertical force (FD's elastic default is the
 explosion). A force and a stress cannot be mixed in one call (they take the
-wavelet differently); the stress names are 2-D only for now, and a per-call
-`source_vector` only applies to a force. Both backends carry every source
+wavelet differently), and a per-call `source_vector` only applies to a
+force. Both backends carry every source
 type: the kernels only ever see the assembled per-field patterns.
 
 A stress source on an element edge -- every `n_order`-th grid index lands on
@@ -644,7 +645,51 @@ one -- is stamped in every element that meets there, each taking the share of
 a small disk it holds (half a side on an edge, the corner angles at a
 corner): the moment tensor differentiates the basis, whose gradient jumps
 across the edge, and stamped in one element the explosion came out 1-2%
-lopsided. A force needs none of this; its stamp has no derivative.
+lopsided. In 3-D the disk is a ball: a face gives each side half, an edge or a
+corner of an axis-aligned mesh a quarter or an eighth, and a curved mesh the
+solid angles there. A force needs none of this; its stamp has no derivative.
+`test/sem/test_sem_moment3d.py` checks the 3-D stamp against differences of
+the point load, the shares, the mirror symmetry of an explosion on a corner and
+Hex27 against Hex8.
+
+## Visco-elastic attenuation
+
+`ViscoElasticVSSEM2DDeformed` adds attenuation to `ElasticVSSEM2DDeformed` with the
+rheology of the FD `sweep.equations.ViscoElastic`, which is also SPECFEM2D's: `n_sls`
+standard linear solids whose relaxation times are fixed over the band `f_band`, with
+strengths fitted for a constant `Qp` and `Qs` over that band. The default band, a factor 12
+around `f_ref`, is that of SPECFEM2D's original fit; its current fit spans `f_ref / 10` to
+`10 f_ref`. The models are `vp`, `vs`, `rho`, `Qp` and `Qs`, where `vp` and `vs` are the
+phase velocities at `f_ref`:
+
+```python
+from sweep.sem import PropSEM, ViscoElasticVSSEM2DDeformed
+
+solver = PropSEM(ViscoElasticVSSEM2DDeformed, shape=(nz, nx), dh=5.0, dt=5e-4,
+                 free_surface=True, f_dominant=12.0, source_type=["sxx", "szz"],
+                 receiver_type=["vx", "vz"], equation_options={"f_ref": 12.0, "n_sls": 3})
+seis = solver(wavelet, sources, receivers, models=[vp, vs, rho, qp, qs])
+```
+
+The memory variables are element-local, as the stresses are, and they are updated as in the
+FD class at every GLL node. The explicit stress update runs at the unrelaxed velocities,
+which exceed `vp` and `vs` for a finite Q (by about 8% at Q = 10 over the default band), so
+the time step should be taken from those (`unrelaxed_velocities()` of the built equation).
+All five models are differentiable. Q must exceed the lower bound of the fit (about 1.8 for
+three mechanisms over the default band), and element arrays of `Q = inf` give the elastic
+step bit for bit. The C-PML terms run on every element, without the band split. Boundary
+saving is refused because the attenuation is dissipative; use `Full()` or
+`Ckpt(chunks=...)`.
+
+`test/sem/test_sem_visco_elastic.py` checks the elastic limit, the checkpointed and vmapped
+rollouts, and the gradients in `vp`, `Qp` and `Qs` against central differences.
+`test/sem/specfem_compare/run_compare_visco.py` compares the class with SPECFEM2D's
+`ATTENUATION_VISCOELASTIC` on a homogeneous half-space with Q = 30 (velocities at 12 Hz,
+three mechanisms over SPECFEM2D's band). The visco-elastic records agree to 1.2% in
+relative L2, against 1.7% for the elastic records on the same meshes, and the
+visco/elastic spectral ratios of the two codes agree to 0.1% in amplitude and 3 mrad in
+phase (medians over 4-25 Hz, offsets up to 200 m), and to 0.3-1.1% and 7-13 mrad at offsets
+of 200-450 m.
 
 ## Poroelastic waves (Biot)
 
@@ -733,6 +778,32 @@ costs a memory variable per flux component. `equation_options` passes any of
 an equation's own `build` keywords; a name the equation does not take is
 refused.
 
+### Frame attenuation
+
+`ViscoBiotVSSEM2DDeformed` attenuates the frame with the GSLS of
+[`ViscoElasticVSSEM2DDeformed`](#visco-elastic-attenuation): the models end in `Qp` and
+`Qs`, which act on the drained P modulus `H - C^2 / M` and on the shear modulus `mu`;
+`f_ref`, `f_band` and `n_sls` come through `equation_options`, as for the visco-elastic
+class, and `H` and `mu` are taken as the moduli at `f_ref`. The fluid's share of `H`
+does not relax, and `viscous_q` attenuates the drag as before. The memories enter the frame
+part of the total stress only. In a dry solid (`M = 0`) the class gives the records of
+`ViscoElasticVSSEM2DDeformed` to round-off, and element arrays of `Q = inf` give those of
+`BiotVSSEM2DDeformed` bit for bit (`test/sem/test_sem_visco_biot.py`, with the gradients
+in `Qp` and `Qs` against central differences).
+
+`test/sem/specfem_compare/run_compare_visco_biot.py` compares the frame attenuation with
+SPECFEM2D's on its `poroelastic_acoustic` example with `ATTENUATION_VISCOELASTIC`
+(SPECFEM2D attenuates a porous frame only next to a fluid region). SPECFEM2D attenuates the
+shear modulus only, so there `Qp` makes the drained P modulus relax as `mu` does.
+SPECFEM2D 8.1.0 updates its poroelastic memory variables four times per step and drops the
+previous step's term from their recursive convolution, so its frame Q is about 115 where
+50 is requested; its fluid routine also has `mu` for `lambda` in the attenuated stress.
+With those three fixed and SPECFEM2D's own mechanisms, the attenuation changes the records
+by 7.1% in both codes, and its effect agrees to 0.5% in relative L2. Our fit over the same
+band gives an effect 8% larger, because SPECFEM2D's poroelastic routine scales its
+memories by the relaxed shear modulus where its elastic routine uses the unrelaxed one,
+which raises its Q by about 10%.
+
 ### Fluid and dry elastic regions
 
 An element without a solid frame (`rho = 0`) is a fluid, one without a pore
@@ -794,11 +865,67 @@ ours by the same to 3-15% of that); `run_compare_poro_coupling.py` its
 layers (0.01-0.08% in the source band; the example 0.07-0.85% on its own
 mesh, where its inviscid slow wave has about one element per wavelength,
 and 0.003-0.013% with both on elements half as large). SPECFEM2D computes
-no pressure in poroelastic media, so these compare velocities.
+no pressure in poroelastic media, so these compare velocities. Across a
+porosity jump (porous rock over a more porous sand, `pp_layers`), the two
+codes differ by 2-3% in the waves transmitted below the interface, on 5 m and
+on 2.5 m elements alike, whereas each layer alone agrees to 0.01-0.07%. The FD
+`Biot` on a 1.25 m grid, an independent discretisation of the same open-pore
+conditions, agrees with the SEM to 0.3% there. SPECFEM2D shares the interface
+nodes of the two media, so its relative displacement is continuous in both
+components there, whereas the open-pore conditions constrain only its normal
+component.
 
-2-D and `impl='eager'` only. Boundary saving is refused because the viscous
+`impl='eager'` only. Boundary saving is refused because the viscous
 drag is dissipative everywhere, so the field cannot be stepped back; use
 `Full()` or `Ckpt(chunks=...)`.
+
+### In 3-D
+
+`BiotVSSEM3DDeformed` is the 3-D class, on the Hex27 mesh of
+`ElasticVSSEM3DDeformed` (flat, or under a topography). It has the same eight
+coefficients, the same placement (`v` and `p` continuous, `q` and the
+stresses element-local) and the same exact drag at every node, with the
+open-pore surface, the C-PML and `viscous_q`:
+
+```python
+from sweep.sem import BiotVSSEM3DDeformed, PropSEM
+
+solver = PropSEM(BiotVSSEM3DDeformed, shape=(nz, ny, nx), dh=4.0, dt=2e-4,
+                 free_surface=True, f_dominant=30.0, source_type=["p"],
+                 receiver_type=["vx", "vy", "vz", "p"])
+seis = solver(wavelet, sources, receivers, models=[H, mu, C, M, rho, rho_f, m, b])
+```
+
+The flux copies at a node, one per element that shares it (1, 2, 4 or 8), are
+grouped by their number, and the drag's exponentials are stored per group:
+about 2.7 kB per element in float32 at `n_order=4`. A compiled step costs about
+2.5 times one of `ElasticVSSEM3DDeformed` on the same mesh and 1.4 times its
+memory (7.4 against 2.9 ms on 27k elements, float32, RTX 6000 Ada).
+
+The sources are the 2-D class's with `y`: the moment tensor `sxx` ... `syz` on
+the total stress (`["sxx", "syy", "szz"]`, the explosion, is the default), the
+forces `fx`, `fy` and `fz` on both equations, the velocities and fluxes `vx`
+... `qz`, and the pore-pressure injection `p`. Fluid and dry elastic elements
+work as in 2-D, the fluid-solid faces through `FluidSolidInterface3D` (the
+same two integrals on the faces of the Hex27 elements, exact transposes). An
+interface may cross a C-PML band that does not stretch its normal direction
+-- a sea floor crosses the x-y corner columns of the layer -- or one that
+stretches only that direction, but not a region that stretches both, the 3-D
+form of SPECFEM2D's corner rule. What the 2-D classes have and this one does
+not: an anisotropic drag, and an attenuating frame
+(`ViscoBiotVSSEM2DDeformed` is 2-D).
+
+`test/sem/test_biot_sem3d.py` checks that a dry solid is
+`ElasticVSSEM3DDeformed` to round-off and the undrained limit to 3e-3 on 40 m
+elements (the continuous pore pressure averages div v at the nodes, as in 2-D). It also
+checks the drag's operators node by node in a medium that changes from
+element to element, the flux divergence as the transpose of the pressure
+gradient on a curved mesh, the three axes against each other, the gradient in
+`mu`, `M`, `m` and `b` against central differences (with `viscous_q` and the
+open-pore surface), shots and checkpointing. On CUDA it compares a point
+pore-pressure injection in Dai's medium with the analytic solution (the fast
+and the slow P wave): the solid velocity and the pressure agree to 0.3-0.8%,
+inviscid and with a propagating but attenuated slow wave.
 
 ## Wavefield snapshots
 

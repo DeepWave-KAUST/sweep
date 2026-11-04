@@ -19,8 +19,10 @@ import sweep.sem.equations.elastic_vs_deformed as elastic_vs_deformed
 from sweep.equations.biot import biot_from_biot_constants
 from sweep.equations.biot_params import biot_fluid
 from sweep.propagator import Full
-from sweep.sem import (BiotAnisoPermSEM2DDeformed, BiotVSSEM2DDeformed, ElasticVSSEM2DDeformed,
-                       ElasticVSSEM3D, ElasticVSSEM3DDeformed, ElasticVTISEM2DDeformed, PropSEM)
+from sweep.sem import (BiotAnisoPermSEM2DDeformed, BiotVSSEM2DDeformed, BiotVSSEM3DDeformed,
+                       ElasticVSSEM2DDeformed, ElasticVSSEM3D, ElasticVSSEM3DDeformed,
+                       ElasticVTISEM2DDeformed, PropSEM, ViscoBiotVSSEM2DDeformed,
+                       ViscoElasticVSSEM2DDeformed)
 from sweep.sem.mesh.boundaries import free_surface_node_idx
 from test_biot import DAI1
 
@@ -68,11 +70,14 @@ def _built(eq, ndim, coef, free_surface=True):
 
 @pytest.mark.parametrize("eq, ndim, coef", [
     (ElasticVSSEM2DDeformed, 2, ELASTIC),
+    (ViscoElasticVSSEM2DDeformed, 2, ELASTIC + (30.0, 20.0)),
     (ElasticVTISEM2DDeformed, 2, ELASTIC + (0.1, 0.05)),
     (BiotVSSEM2DDeformed, 2, ROCK),
+    (ViscoBiotVSSEM2DDeformed, 2, ROCK + (30.0, 20.0)),
     (BiotAnisoPermSEM2DDeformed, 2, ROCK + (0.0, ROCK[-1])),
     (ElasticVSSEM3D, 3, ELASTIC),
-    (ElasticVSSEM3DDeformed, 3, ELASTIC)])
+    (ElasticVSSEM3DDeformed, 3, ELASTIC),
+    (BiotVSSEM3DDeformed, 3, ROCK)])
 def test_every_velocity_stress_layer_pins_its_outer_edge(eq, ndim, coef):
     e = _built(eq, ndim, coef)
     wall = free_surface_node_idx(e.mesh, tuple(e.cpml.sides), "cpu")
@@ -94,7 +99,8 @@ BOTTOM_ONLY_3D = {"top": True, "left": True, "right": True, "front": True, "back
     (BiotVSSEM2DDeformed, 2, ROCK, BOTTOM_ONLY_2D),
     (ElasticVSSEM3D, 3, ELASTIC, {"top": True, "left": False, "right": False, "front": True,
                                   "back": True, "bottom": False}),
-    (ElasticVSSEM3DDeformed, 3, ELASTIC, BOTTOM_ONLY_3D)])
+    (ElasticVSSEM3DDeformed, 3, ELASTIC, BOTTOM_ONLY_3D),
+    (BiotVSSEM3DDeformed, 3, ROCK, BOTTOM_ONLY_3D)])
 def test_a_layer_between_two_free_faces_is_refused(eq, ndim, coef, free_surface):
     # a plate's backward Lamb modes grow in any PML (see refuse_free_waveguide); PropSEM
     # refuses it, the equation's build() leaves it to its caller (the absorption gates)
@@ -107,6 +113,7 @@ def test_a_layer_between_two_free_faces_is_refused(eq, ndim, coef, free_surface)
 @pytest.mark.parametrize("eq, ndim, coef, free_surface", [
     (ElasticVSSEM2DDeformed, 2, ELASTIC, {"top": True, "left": True, "right": False,
                                          "bottom": False}),
-    (BiotVSSEM2DDeformed, 2, biot_fluid(2.25e9, 1000.0), BOTTOM_ONLY_2D)])
+    (BiotVSSEM2DDeformed, 2, biot_fluid(2.25e9, 1000.0), BOTTOM_ONLY_2D),
+    (BiotVSSEM3DDeformed, 3, biot_fluid(2.25e9, 1000.0), BOTTOM_ONLY_3D)])
 def test_one_free_face_per_axis_or_a_fluid_alone_is_allowed(eq, ndim, coef, free_surface):
     assert _built(eq, ndim, coef, free_surface).cpml is not None

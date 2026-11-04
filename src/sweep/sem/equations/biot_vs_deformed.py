@@ -561,11 +561,26 @@ class BiotVSSEM2DDeformed:
     # ================================================================== #
     # SEMPropagator interface: init_state + step (staggered leapfrog).
     # ================================================================== #
+    def _frame_stress(self, s_xx, s_zz, s_xz, grads, div_v, dt, extra):
+        """The frame's share of the stress update, ``dt (lam_d div v I + mu (grad v +
+        grad v^T))`` on ``(s_xx, s_zz, s_xz)``, from ``grads = (dvx/dx, dvx/dz, dvz/dx,
+        dvz/dz)``. ``extra`` is the state after this class's fields (none here), returned
+        stepped: the seam where :class:`~sweep.sem.equations.visco_biot_vs_deformed.
+        ViscoBiotVSSEM2DDeformed` adds the frame's memories."""
+        d_vx_dx, d_vx_dz, d_vz_dx, d_vz_dz = grads
+        lam_d, mu = self._lam_d, self.mu_e
+        s_xx = s_xx + dt * (lam_d * div_v + 2.0 * mu * d_vx_dx)
+        s_zz = s_zz + dt * (lam_d * div_v + 2.0 * mu * d_vz_dz)
+        s_xz = s_xz + dt * mu * (d_vx_dz + d_vz_dx)
+        return s_xx, s_zz, s_xz, extra
+
     def step(self, fields: tuple, src, dt: float) -> tuple:
         """One staggered-leapfrog step (v, q at n+1/2; sigma, p, r at n+1)."""
+        n = len(BiotVSSEM2DDeformed.field_specs)
         (v_x, v_z, p, q_x, q_z, s_xx, s_zz, s_xz, r_x, r_z,
          m_sxx_x, m_sxz_z, m_sxz_x, m_szz_z, m_qx_x, m_qz_z, m_px, m_pz,
-         m_vxx, m_vzz, m_vxz, m_vzx) = fields
+         m_vxx, m_vzz, m_vxz, m_vzx) = fields[:n]
+        extra = fields[n:]
         mode = self.source_mode
         if mode not in _SOURCE_MODES:
             raise ValueError(f"source_mode must be one of {_SOURCE_MODES}, got {mode!r}")
@@ -656,11 +671,11 @@ class BiotVSSEM2DDeformed:
             rhs = rhs - ifc.apply_ac(v_x, v_z, p)          # +∮ ψ v·n, n out of the solid
         dp_free = self._pin(dt * self._inv_Mp * rhs)
         p = p + dp_free
-        lam_d, mu = self._lam_d, self.mu_e
         dsig_p = alpha * dp_free[ibool]                    # sigma = sigma' - alpha p
-        s_xx = s_xx + dt * (lam_d * div_v + 2.0 * mu * d_vx_dx) - dsig_p
-        s_zz = s_zz + dt * (lam_d * div_v + 2.0 * mu * d_vz_dz) - dsig_p
-        s_xz = s_xz + dt * mu * (d_vx_dz + d_vz_dx)
+        s_xx, s_zz, s_xz, extra = self._frame_stress(
+            s_xx, s_zz, s_xz, (d_vx_dx, d_vx_dz, d_vz_dx, d_vz_dz), div_v, dt, extra)
+        s_xx = s_xx - dsig_p
+        s_zz = s_zz - dsig_p
         if self.viscous_q is not None:
             # dr/dt = -(r - (tau_e / tau_s - 1) B q) / tau_s, exact over the step at q^{n+1/2}
             tau_e, tau_s = self._tau
@@ -672,7 +687,7 @@ class BiotVSSEM2DDeformed:
 
         return (v_x, v_z, p, q_x, q_z, s_xx, s_zz, s_xz, r_x, r_z,
                 m_sxx_x, m_sxz_z, m_sxz_x, m_szz_z, m_qx_x, m_qz_z, m_px, m_pz,
-                m_vxx, m_vzz, m_vxz, m_vzx)
+                m_vxx, m_vzz, m_vxz, m_vzx, *extra)
 
 
 @dataclass
