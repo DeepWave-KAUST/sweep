@@ -79,6 +79,8 @@ the FD classes. `models=` per class: `api-signatures.md`.
 | `ElasticVTISEM2DDeformed` | quad9 | `vp, vs, rho, epsilon, delta` | no | yes | VTI |
 | `ElasticTTISEM2DDeformed` | quad9 | `vp, vs, rho, epsilon, delta, theta` | no | yes | TTI: the VTI medium tilted by `theta` (radians, the FD `ElasticTTI2nd`'s tilt) |
 | `ViscoElasticVSSEM2DDeformed` | quad9 | `vp, vs, rho, Qp, Qs` | no | yes | GSLS attenuation; `f_ref`, `f_band`, `n_sls` via `equation_options`; no boundary saving |
+| `ViscoElasticVSSEM3D` | hex8 | `vp, vs, rho, Qp, Qs` | no | yes | 3-D GSLS attenuation, flat; options as the 2-D class; no boundary saving |
+| `ViscoElasticVSSEM3DDeformed` | hex27 | `vp, vs, rho, Qp, Qs` | no | yes | 3-D GSLS attenuation with topography + absorbing |
 | `ViscoElasticSEM2DDeformed` | quad9 | `vp, vs, rho, Qk, Qmu` | no | yes | SPECFEM2D's visco-elastic displacement scheme (its defaults: `vp`, `vs` unrelaxed) and visco-elastic C-PML; `fit="nonlinear"` (its `USE_SOLVOPT`); no boundary saving |
 | `AcousticElasticSEM2D` | quad9 | `vp, vs, rho` | yes | yes | coupled fluid-solid (ocean over seabed); records `p, vx, vz` (default) or `chi, u_x, u_z` |
 | `BiotVSSEM2DDeformed`, `BiotAnisoPermSEM2DDeformed` | quad9 | Biot set | no | yes | poroelastic; no boundary saving |

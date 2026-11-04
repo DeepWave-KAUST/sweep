@@ -105,4 +105,16 @@ receivers of a marine survey. The
 
     [:material-notebook-outline: Open notebook](../../notebooks/58_sem_plane_wave.ipynb)
 
+-   ![SEM visco-elastic in 3-D](../../figures/gallery/59_sem_visco_elastic3d.png){ loading=lazy }
+
+    **Visco-elastic attenuation in 3-D**
+
+    ---
+
+    `ViscoElasticVSSEM3D` against the whole-space visco-elastic Green's
+    function of a point force, and `ViscoElasticVSSEM3DDeformed` under a hill:
+    attenuation, a topography and absorbing boundaries together.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/59_sem_visco_elastic3d.ipynb)
+
 </div>

@@ -929,6 +929,35 @@ and halving the step divides the difference by four (4.2e-5 at 0.1 ms).
 Stacey sides, gives 1.2% for the visco-elastic records and 1.7% for the elastic ones; there the
 absorbing conditions of the two codes differ as well.
 
+### Visco-elastic in 3-D
+
+`ViscoElasticVSSEM3D` (Hex8) and `ViscoElasticVSSEM3DDeformed` (Hex27, under a topography)
+add the same rheology to `ElasticVSSEM3D` and `ElasticVSSEM3DDeformed`: six memory variables
+per mechanism (`xx`, `yy`, `zz`, `xy`, `xz`, `yz`), the same models, options and refusals.
+With the C-PML of the velocity-stress classes they are the 3-D classes that combine
+attenuation, a topography and absorbing boundaries:
+
+```python
+from sweep.sem import PropSEM, ViscoElasticVSSEM3DDeformed
+
+solver = PropSEM(ViscoElasticVSSEM3DDeformed, shape=(nz, ny, nx), dh=10.0, dt=5e-4,
+                 topography=topo, free_surface=True, f_dominant=10.0,
+                 source_type=["vz"], receiver_type=["vx", "vy", "vz"],
+                 equation_options={"f_ref": 10.0})
+seis = solver(wavelet, sources, receivers, models=[vp, vs, rho, qp, qs])
+```
+
+A vertical point force in a whole space (a C-PML on all six sides, Q = 25 and 15, 5 m GLL
+spacing, a 12 Hz Ricker) matches the visco-elastic Green's function -- the elastic one, near
+field included, with the GSLS complex moduli of the built equation in the frequency domain --
+to 0.7e-3 to 1.2e-3 in relative L2 at 60 to 113 m from the source, where the attenuation
+changes the records by 12% to 47%. On the same grid the elastic class is 1.2e-3 to 1.7e-3
+from its own Green's function. `test/sem/test_sem_visco_elastic3d.py` runs a coarser version
+of that check, the elastic limit on both meshes, the checkpointed and vmapped rollouts and the
+gradients in `vp`, `Qp` and `Qs`. Eager only. Against SPECFEM3D the records agree to 3.6e-3
+on its own mechanisms, which is the time discretization of the memory variables (see
+[Against SPECFEM3D](#against-specfem3d)).
+
 ### SPECFEM2D's displacement scheme
 
 `ViscoElasticSEM2DDeformed` is the displacement class `ElasticSEM2DDeformed` with SPECFEM2D's
@@ -1331,6 +1360,9 @@ stretches only that direction, but not a region that stretches both, the 3-D
 form of SPECFEM2D's corner rule. What the 2-D classes have and this one does
 not: an anisotropic drag, and an attenuating frame
 (`ViscoBiotVSSEM2DDeformed` is 2-D).
+
+With fluid and dry elastic regions it agrees with SPECFEM3D's acoustic-elastic coupling to
+round-off (see [Against SPECFEM3D](#against-specfem3d)).
 
 `test/sem/test_biot_sem3d.py` checks that a dry solid is
 `ElasticVSSEM3DDeformed` to round-off and the undrained limit to 3e-3 on 40 m
@@ -1861,7 +1893,65 @@ The remaining differences are round-off, except for two classes:
   [Visco-acoustic attenuation](#visco-acoustic-attenuation)).
 
 The Biot classes discretize the poroelastic equations differently from SPECFEM2D (see
-[Validation](#validation)), and the 3-D classes have not been compared with SPECFEM3D.
+[Validation](#validation)). The 3-D classes are compared with SPECFEM3D in the next section.
+
+## Against SPECFEM3D
+
+`test/sem/specfem_compare/run_compare_box3d.py` runs the 3-D classes against SPECFEM3D
+(Cartesian) 4.1.1 built in double precision. The cases come from
+`make_specfem3d_box_cases.py`:
+
+- a homogeneous rock (vp 2000, vs 1000 m/s, rho 2000 kg/m³) in a 320 m cube of 10 m Hex8
+  elements from SPECFEM3D's internal mesher, with all six sides free, or the same rock under
+  80 m of water;
+- a vertical point force inside an element, a 25 Hz Ricker that SPECFEM3D reads as an
+  external source time function;
+- ten stations inside elements, on element faces and edges, and on the free surface;
+- 1600 steps of 0.25 ms, the echoes from the six sides included.
+
+As against SPECFEM2D, our step runs in fp64 and no shift or scale is fitted. The records agree
+as follows (relative L2 over all traces, each component scaled by its peak):
+
+| Class | Case | Agreement |
+| --- | --- | --- |
+| `ElasticVSSEM3D`, `ElasticVSSEM3DDeformed` (flat), `ElasticSEM3D` | the elastic rock | 5e-14, 5e-14, 8e-14 |
+| `ViscoElasticVSSEM3D` | Qkappa = Qmu = 30, SPECFEM3D's band (2.5 to 250 Hz, three mechanisms), the velocities read at 25 Hz (`velocities="real_modulus"`) | 3.8e-3 |
+| `ViscoElasticVSSEM3D` on SPECFEM3D's mechanisms | the same; Qkappa = 60, Qmu = 20 | 3.6e-3, 4.4e-3; 1.3e-14 with SPECFEM3D's memory update |
+| `BiotVSSEM3DDeformed`, fluid and dry elastic regions | 80 m of water over the rock, the force in the rock: the pressure and the fluid velocity in the water, the velocity in the rock | 2e-12; 2e-3 to 5e-3 for the fluid velocity across the element faces a station sits on |
+
+On SPECFEM3D's mechanisms our class takes its relaxation times, its strengths (its simplex
+fit of the strain relaxation times, read from its `attenuation.bin`) and its unrelaxed moduli.
+Its bulk and shear defects of a mechanism, `kappa_U c_kappa` and `mu_U c_mu`, are our P and
+shear ones, `kappa_U c_kappa + 4/3 mu_U c_mu` and `mu_U c_mu`, so separate Qkappa and Qmu
+are reproduced exactly.
+
+What separates those records from SPECFEM3D's is the time discretization of the memory
+variables. SPECFEM3D advances them on the strain one step ahead, extrapolated from the last
+two displacements (`2 u^n - u^(n-1)`), which overstates that strain by a factor
+`1 + (omega dt)^2`. At 25 Hz and dt = 0.25 ms its discrete complex modulus differs from the
+GSLS modulus by `-1.2e-4 + 5.5e-5 i` relative to its magnitude; ours differs by 3e-6, since
+the trapezoidal rule only warps the frequency. With SPECFEM3D's update in place of ours (the
+script's `SpecfemScheme`) the records of both cases agree to 1.3e-14, and the difference
+between the two updates falls by a factor of four each time dt is halved. Near 25 Hz,
+SPECFEM3D's error slows the waves by about as much as the leapfrog speeds them up, so against
+a reference run at dt/9 its records are the closer of the two: 7.6e-4 against our 1.7e-3 in
+a small box, where the elastic leapfrog alone is 2.0e-3 from its reference.
+
+Our own constant-Q fit over the same band gives Q = 28.6 at 25 Hz, where SPECFEM3D's gives
+28.5; both stay within 5% of 30 across the band. With that fit and our memory update the
+records differ from SPECFEM3D's by 3.8e-3.
+
+The water is SPECFEM3D's acoustic domain: its potential `chi`, the pressure `-chi''` and the
+fluid velocity `grad(chi') / rho`, coupled to the displacement of the rock, with a
+pressure-free sea surface and rigid sides. The fluid region of `BiotVSSEM3DDeformed` carries the
+pressure on the nodes and the fluid velocity per element. Eliminating the velocity leaves the
+pressure with the potential's stiffness, and SPECFEM3D's `-chi''` obeys the same leapfrog,
+coupled through the same solid velocity at the half step and the same pressure at the step,
+so the two are one scheme. The pressure, the velocity in the rock and the fluid velocity at
+stations inside elements agree to round-off. A station on an element face is the exception:
+the fluid velocity, a gradient of the pressure or potential, jumps across the face.
+SPECFEM3D takes it from the element it located the station in, and ours averages the
+elements, so the component normal to that face differs by 2e-3 to 5e-3.
 
 ## Backend parity
 
