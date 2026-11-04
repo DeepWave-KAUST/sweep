@@ -17,8 +17,8 @@ import numpy as np
 import torch
 
 from sweep.equations.biot import biot_from_biot_constants
-from sweep.sem import (BiotVSSEM2DDeformed, ElasticVSSEM2DDeformed, PropSEM,
-                       ViscoBiotVSSEM2DDeformed, ViscoElasticVSSEM2DDeformed)
+from sweep.sem import (BiotVSSEM2DDeformed, ElasticTTISEM2DDeformed, ElasticVSSEM2DDeformed,
+                       PropSEM, ViscoBiotVSSEM2DDeformed, ViscoElasticVSSEM2DDeformed)
 from test_biot import DAI1
 
 ABCN = 16                        # four elements of layer
@@ -63,6 +63,12 @@ def test_biot_layer_echo():
 def test_visco_elastic_layer_echo():
     """The attenuating class has its own step (Qp = 50, Qs = 30 in both models)."""
     (e,) = _echo(ViscoElasticVSSEM2DDeformed, (2400.0, 1300.0, 2000.0, 50.0, 30.0), 10.0,
+                 6e-4, 700, 15.0, ["vz"])
+    assert e < 1e-3, f"echo {e:.2e}"
+
+
+def test_tti_layer_echo():
+    (e,) = _echo(ElasticTTISEM2DDeformed, (2400.0, 1300.0, 2000.0, 0.1, 0.05, 0.4), 10.0,
                  6e-4, 700, 15.0, ["vz"])
     assert e < 1e-3, f"echo {e:.2e}"
 
