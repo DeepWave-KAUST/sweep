@@ -42,6 +42,7 @@ from typing import ClassVar, Optional
 import torch
 
 from .._assembly import assemble, phys_grads3, stress_divergence3, vector_divergence3
+from ..cpml.elastic_vs import pin_outer_edge
 from ..cpml.elastic_vs3d import SimpleElasticCPML3DProfile, build_simple_elastic_cpml_3d
 from ..coupling import FluidSolidInterface3D, assert_no_normal_pml_corner_on_interface
 from ..fields import FieldSpec, check_element_arrays, init_state_from_specs
@@ -237,7 +238,8 @@ class BiotVSSEM3DDeformed:
             dirichlet=tuple(dirichlet),
             dirichlet_idx=free_surface_node_idx(mesh, dirichlet, device),
             viscous_q=None if viscous_q is None else tuple(float(v) for v in viscous_q),
-            mass_rho=mass_rho, _inv_M=masked_inv_mass(mass_rho, v_alive),
+            mass_rho=mass_rho,
+            _inv_M=pin_outer_edge(masked_inv_mass(mass_rho, v_alive), mesh, cpml),
             _inv_Mm=masked_inv_mass(lump(m_e), p_alive),
             _inv_Mp=masked_inv_mass(lump(inv_M_e), p_alive), _inv_M1=inv_M1,
             _lam_d=H_e - 2.0 * mu_e - alpha * C_e, _alpha=alpha,
@@ -250,6 +252,7 @@ class BiotVSSEM3DDeformed:
     # The C-PML builder ``cpml=`` expects, and the speed PropSEM designs it for.
     cpml_builder: ClassVar[object] = staticmethod(build_simple_elastic_cpml_3d)
     pml_speed: ClassVar[object] = staticmethod(BiotVSSEM2DDeformed.pml_speed)
+    free_plate_unstable = BiotVSSEM2DDeformed.free_plate_unstable
 
     @property
     def source_field_elements(self):
