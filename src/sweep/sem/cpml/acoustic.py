@@ -19,18 +19,22 @@ with ``s ∈ [0, L]`` the depth inside the PML and ``p`` the taper order
 (default 2).
 
 The spatial derivative ``∂b/∂x`` (needed in the double-convolution wave
-step) is precomputed numerically with ``np.gradient`` on the structured
-global mesh, which handles the non-uniform GLL spacing exactly.
+step) is precomputed by finite differences on the structured global mesh,
+``np.gradient``'s arithmetic along every grid line with its own coordinates
+(``_axis.gradient_along``), which takes the non-uniform GLL spacing and the
+graded columns of a topography or interfaces mesh.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 import torch
 
 from ._axis import damping_profile as _damping_profile
+from ._axis import gradient_along as _gradient_along
 
 from ..mesh.quad4 import Quad4Mesh
 
@@ -47,6 +51,12 @@ class CPMLProfile:
     a_z: torch.Tensor              # (n_global,)
     b_z: torch.Tensor              # (n_global,)
     dbz_dz: torch.Tensor           # (n_global,)
+    # the damping and frequency shift a/b are built from, (n_global,) each;
+    # the fluid-solid coupling stretches its interface load with them
+    sigma_x: Optional[torch.Tensor] = None
+    alpha_x: Optional[torch.Tensor] = None
+    sigma_z: Optional[torch.Tensor] = None
+    alpha_z: Optional[torch.Tensor] = None
 
 
 def build_cpml(
@@ -115,17 +125,19 @@ def build_cpml(
     b_z = (sigma_z / safe_z) * (a_z - 1.0)
     b_z = torch.where(sigma_z > 0, b_z, torch.zeros_like(b_z))
 
-    # ∂b/∂x and ∂b/∂z via numerical gradient on the structured global mesh.
-    # The mesh is tensor-product: global node (i_z, i_x) → b is row-major.
-    # np.gradient handles non-uniform GLL spacing exactly when given coords.
+    # ∂b/∂x and ∂b/∂z by finite differences on the structured global mesh
+    # (global node (i_z, i_x), row-major), along every row and column with its
+    # own coordinates: a topography or interfaces mesh grades each column
+    # differently, and column 0's z axis made ∂b/∂z off by the ratio of the
+    # column heights.
     nx_g = mesh.nex * mesh.n_order + 1
     nz_g = mesh.nez * mesh.n_order + 1
-    x_axis = mesh.x_global.reshape(nz_g, nx_g)[0, :].detach().cpu().numpy()
-    z_axis = mesh.z_global.reshape(nz_g, nx_g)[:, 0].detach().cpu().numpy()
+    x_2d = mesh.x_global.reshape(nz_g, nx_g).detach().cpu().numpy()
+    z_2d = mesh.z_global.reshape(nz_g, nx_g).detach().cpu().numpy()
     b_x_2d = b_x.reshape(nz_g, nx_g).detach().cpu().numpy()
     b_z_2d = b_z.reshape(nz_g, nx_g).detach().cpu().numpy()
-    dbx_dx_2d = np.gradient(b_x_2d, x_axis, axis=1)
-    dbz_dz_2d = np.gradient(b_z_2d, z_axis, axis=0)
+    dbx_dx_2d = _gradient_along(b_x_2d, x_2d, axis=1)
+    dbz_dz_2d = _gradient_along(b_z_2d, z_2d, axis=0)
     dbx_dx = torch.as_tensor(dbx_dx_2d.reshape(-1), dtype=dtype, device=device)
     dbz_dz = torch.as_tensor(dbz_dz_2d.reshape(-1), dtype=dtype, device=device)
 
@@ -134,4 +146,6 @@ def build_cpml(
         pml_thickness=max(Lx, Lz),
         a_x=a_x.to(dtype),  b_x=b_x.to(dtype),  dbx_dx=dbx_dx,
         a_z=a_z.to(dtype),  b_z=b_z.to(dtype),  dbz_dz=dbz_dz,
+        sigma_x=sigma_x.to(dtype), alpha_x=alpha_x.to(dtype),
+        sigma_z=sigma_z.to(dtype), alpha_z=alpha_z.to(dtype),
     )

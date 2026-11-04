@@ -1115,6 +1115,9 @@ class SEMCudaPropagator(SEMPropagator):
                 **_elastic_profile(cp_el),
                 "outer_edge_idx": _i64(cp_el.outer_edge_idx),
             })
+            if eq.ifc_cpml is not None:   # the band points' stretching of both loads
+                c.update({"ifc_pml_g": _i64(eq.ifc_cpml.pt_g),
+                          "ifc_pml_cf": _f32(eq.ifc_cpml.table())})
         return c
 
     @_memo_consts

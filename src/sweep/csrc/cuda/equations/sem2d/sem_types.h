@@ -383,6 +383,17 @@ struct SemFluidSolidForwardInput {
     // buys most of the memory at the cheap error. Defaults to
     // band_kind, so an unset field keeps the old all-or-nothing.
     int band_kind_e = 0;
+    // The interface loads' C-PML stretching (additive; coupling.InterfaceCPML):
+    // the interface points inside an absorbing band, each with its node, a
+    // coefficient row (IFC_PML_K floats, layout at sem2d_ifc_pml_ac) and four
+    // memories of its own. EMPTY = no point in a band (the plain terms are the
+    // whole coupling). ifc_pml_tape is (nt, B, n_p, 3): this step's per-point
+    // fluid load and solid (x, z) loads, written whenever it is non-empty and
+    // read back by the adjoint (s_ac for the inv_M gradient, the force for the
+    // boundary-saving march).
+    torch::Tensor ifc_pml_g, ifc_pml_cf;     // (n_p,) int64, (n_p, IFC_PML_K)
+    torch::Tensor ifc_pml_mem;               // (B, n_p, 4), zeroed
+    torch::Tensor ifc_pml_tape;
 };
 
 // Backward input for the coupled fluid-solid adjoint (P4). Interleaves the
@@ -474,6 +485,13 @@ struct SemFluidSolidBackwardInput {
     // buys most of the memory at the cheap error. Defaults to
     // band_kind, so an unset field keeps the old all-or-nothing.
     int band_kind_e = 0;
+    // The interface loads' C-PML stretching (additive), as in the forward
+    // struct: the table, the forward's tape, the four memories' adjoints and
+    // a per-point scratch carrying the chi^k / chi^(k-1) adjoints from the
+    // solid load into lchi_G (before its exchange, so DD needs no new one).
+    torch::Tensor ifc_pml_g, ifc_pml_cf, ifc_pml_tape;
+    torch::Tensor ifc_pml_lmem;              // (B, n_p, 4), zeroed
+    torch::Tensor ifc_pml_scr;               // (B, n_p, 2), zeroed
 };
 
 // Backward input for the 2-D elastic SEM adjoint WITH C-PML (P3e). The mu_*

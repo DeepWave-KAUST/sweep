@@ -282,6 +282,44 @@ and this project adheres to
   used to reach the curved-mesh locator, which said only `could not locate
   (x=..., z=...) in any Quad9 element of column ex=..`. A point on the
   surface row (fractional rows and columns too) is accepted as before.
+- The acoustic C-PML's `db/dz` on a topography or interfaces mesh. The double-convolution
+  step takes the derivative of the recursion coefficient across the layer, which both
+  builders took with column 0's z axis for the whole mesh; such a mesh grades every column
+  differently, so `db/dz` came out off by the ratio of the column heights (1.4 under a 400 m
+  hill on a 1000 m model). Every grid line now takes its own coordinates, in 2-D and 3-D
+  (`sweep.sem.cpml._axis.gradient_along`); flat meshes are unchanged bit for bit
+  (`test/sem/test_sem_acoustic_cpml_profile.py`).
+- **`AcousticElasticSEM2D`: a sea floor through a side C-PML band absorbs like the rock
+  alone.** The coupling took its plain terms inside the bands, where each domain's C-PML
+  carries its stretching into the interface: the solid's form is scaled by `s_x s_z`, so its
+  load is `(s_z*p n_x, s_x*p n_z)`, and the fluid's double-convolution form leaves
+  `(1/s_x)*u_x n_x + (1/s_z)*u_z n_z` -- on a horizontal sea floor, `s_x*p` on the solid and
+  the plain term on the fluid. With 200 m of water over rock, 10 Hz, 20 m elements and a
+  ten-element layer, the records 10 m above and below the floor and 300 m below it differed
+  from a box with no boundary within reach by up to 9e-3, 8e-3 and 4e-2; with the stretched
+  loads 1.3e-3, 2.2e-3 and 3.8e-3, the C-PML's own level on the rock alone (2.4e-3, 2.3e-3,
+  3.8e-3). SPECFEM2D stretches both loads by `s_x` (`compute_coupling_viscoelastic_ac`,
+  `compute_coupling_acoustic_el`), right for its fluid, which it scales as well; on ours the
+  `s_x` on the fluid load brings the error back to 1.3e-2. The interface points in a band
+  carry four memories each (`sweep.sem.coupling.InterfaceCPML`, the profiles' new per-axis
+  `sigma_*`/`d_*` and `alpha_*`), on both backends, the shot batch, boundary saving and
+  domain decomposition (`test/sem/test_sem_fs_cpml_interface.py`).
+- The SEM C-PML profiles no longer take a node on an absorbing layer's inner
+  edge into the layer. Its coordinate equals `lo + L` (`hi - L`) only up to
+  round-off, and `coord < lo + L` counted it in whenever it fell an ulp short:
+  `d ~ 1e-30 d_max`, `alpha = alpha_max`, and every element touching it joined
+  the band -- one physical element column or row, on that side only (287 band
+  elements instead of 272 on a 38 x 19 mesh), in the eager band split, the
+  `impl='c'` interior fast-path mask and the boundary-saving rings. It hit 576
+  of 1248 meshes scanned, float32 and float64, flat, topography and 3-D. The
+  displacement and velocity-stress elastic, acoustic 2-D/3-D and DD axis
+  profiles now count a node in only past 16 ulps of the axis extent;
+  coefficients inside the layer are bit-identical. Where such a node also lay
+  in the other axis's layer it took the corner formulas, whose separation
+  could move its `d` by a few percent; that is gone too. Records and gradients
+  move by round-off (3e-14 in float64) unless that separation acted: then by
+  8e-7 at surface receivers, and 3e-5 with the source and receivers next to
+  that corner.
 
 ## [0.3.6] - 2026-10-29
 

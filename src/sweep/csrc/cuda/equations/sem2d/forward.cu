@@ -625,7 +625,7 @@ void elastic_cpml_forward(const SemElasticCpmlForwardInputCore& in) {
 // COLUMN and the interface node on it is just one of those nodes -- faces on
 // either side of the cut contribute exactly as elements do.
 // B == 1; buffer rotation is the caller's.
-void fluid_solid_dd_asm(const SemFluidSolidForwardInputCore& in) {
+void fluid_solid_dd_asm(const SemFluidSolidForwardInputCore& in, int64_t n) {
     sweep::DeviceGuard guard(in.chi.device_index());
     cudaStream_t stream = sweep::current_stream();
     const int E = in.n_elements, ng = in.n_global, ngll = in.ngll;
@@ -660,6 +660,16 @@ void fluid_solid_dd_asm(const SemFluidSolidForwardInputCore& in) {
             in.ifc_nx.data_ptr<float>(), in.ifc_nz.data_ptr<float>(),
             in.s_ac.data_ptr<float>(), nifc, ng);
     }
+    const int npp = static_cast<int>(in.ifc_pml_g.numel());
+    if (npp > 0)   // the band points' stretching, before s_ac's exchange
+        sem2d_ifc_pml_ac<<<(npp + TPB - 1) / TPB, TPB, 0, stream>>>(
+            in.ux.data_ptr<float>(), in.uz.data_ptr<float>(),
+            in.ux_prev.data_ptr<float>(), in.uz_prev.data_ptr<float>(),
+            in.ifc_pml_g.data_ptr<int64_t>(), in.ifc_pml_cf.data_ptr<float>(),
+            in.ifc_pml_mem.data_ptr<float>(), in.s_ac.data_ptr<float>(),
+            in.ifc_pml_tape.numel() ? in.ifc_pml_tape.data_ptr<float>()
+                                      + static_cast<size_t>(n) * npp * 3 : nullptr,
+            npp, ng);
     SWEEP_CUDA_CHECK(cudaGetLastError());
 }
 
@@ -714,6 +724,17 @@ void fluid_solid_dd_mid(const SemFluidSolidForwardInputCore& in, int64_t n) {
             in.ifc_nz.data_ptr<float>(), in.f_x.data_ptr<float>(),
             in.f_z.data_ptr<float>(), nifc, ng);
     }
+    const int npp = static_cast<int>(in.ifc_pml_g.numel());
+    if (npp > 0)   // the band points' stretching, before the force's exchange
+        sem2d_ifc_pml_el<<<(npp + TPB - 1) / TPB, TPB, 0, stream>>>(
+            in.chi_dd.data_ptr<float>(), in.chi.data_ptr<float>(),
+            in.chi_prev.data_ptr<float>(),
+            in.ifc_pml_g.data_ptr<int64_t>(), in.ifc_pml_cf.data_ptr<float>(),
+            in.ifc_pml_mem.data_ptr<float>(), in.f_x.data_ptr<float>(),
+            in.f_z.data_ptr<float>(),
+            in.ifc_pml_tape.numel() ? in.ifc_pml_tape.data_ptr<float>()
+                                      + static_cast<size_t>(n) * npp * 3 : nullptr,
+            npp, ng);
     cudaMemsetAsync(in.Acc_x.data_ptr<float>(), 0, ngb, stream);
     cudaMemsetAsync(in.Acc_z.data_ptr<float>(), 0, ngb, stream);
     ElCpmlCoefs cf = sem2d_el_coefs(in);
@@ -1126,6 +1147,13 @@ void fluid_solid_forward(const SemFluidSolidForwardInputCore& in) {
     const float* ifc_w = nifc > 0 ? in.ifc_w.data_ptr<float>() : nullptr;
     const float* ifc_nx = nifc > 0 ? in.ifc_nx.data_ptr<float>() : nullptr;
     const float* ifc_nz = nifc > 0 ? in.ifc_nz.data_ptr<float>() : nullptr;
+    // the band points' stretching of both loads (empty: none in a band)
+    const int npp = static_cast<int>(in.ifc_pml_g.numel());
+    const long*  pml_g = npp > 0 ? in.ifc_pml_g.data_ptr<int64_t>() : nullptr;
+    const float* pml_cf = npp > 0 ? in.ifc_pml_cf.data_ptr<float>() : nullptr;
+    float* pml_mem = npp > 0 ? in.ifc_pml_mem.data_ptr<float>() : nullptr;
+    float* pml_tape = (npp > 0 && in.ifc_pml_tape.numel())
+                    ? in.ifc_pml_tape.data_ptr<float>() : nullptr;
     const float* pat_chi = in.pat_chi.data_ptr<float>();
     const float* pat_x = in.pat_x.data_ptr<float>();
     const float* pat_z = in.pat_z.data_ptr<float>();
@@ -1234,8 +1262,10 @@ void fluid_solid_forward(const SemFluidSolidForwardInputCore& in) {
     const size_t ngb = ngB * sizeof(float);
     const long Em = static_cast<long>(E) * m;
     const dim3 gE(E, B), gN(nb, B), gR(rb, B), gD(db, B), gP(pb, B), gI(ib, B);
+    const dim3 gPP(npp > 0 ? (npp + TPB - 1) / TPB : 0, B);
 
     for (int n = 0; n < nt; ++n) {
+        float* pml_tn = pml_tape ? pml_tape + static_cast<size_t>(n) * B * npp * 3 : nullptr;
         // 1. fluid residual: stretched (CPML) or bare stiffness, + S^ac
         if (cp) {
             // fused gather: a*psi is formed in-register, dropping the two
@@ -1258,6 +1288,9 @@ void fluid_solid_forward(const SemFluidSolidForwardInputCore& in) {
         cudaMemsetAsync(s_ac, 0, ngb, stream);
         if (nifc > 0)
             sem2d_ifc_ac<<<gI, TPB, 0, stream>>>(ux, uz, ifc_g, ifc_w, ifc_nx, ifc_nz, s_ac, nifc, ng);
+        if (npp > 0)
+            sem2d_ifc_pml_ac<<<gPP, TPB, 0, stream>>>(ux, uz, ux_prev, uz_prev, pml_g, pml_cf,
+                                                      pml_mem, s_ac, pml_tn, npp, ng);
         // 2-3. chi_dd (post-inversion), free surface wins at the triple point
         if (cp)
             sem2d_fs_chidd<<<gN, TPB, 0, stream>>>(
@@ -1272,6 +1305,9 @@ void fluid_solid_forward(const SemFluidSolidForwardInputCore& in) {
         sem2d_fs_pat_wav<<<gN, TPB, 0, stream>>>(pat_z, wav, n, f_z, ng, wst);
         if (nifc > 0)
             sem2d_ifc_el<<<gI, TPB, 0, stream>>>(chi_dd, ifc_g, ifc_w, ifc_nx, ifc_nz, f_x, f_z, nifc, ng);
+        if (npp > 0)
+            sem2d_ifc_pml_el<<<gPP, TPB, 0, stream>>>(chi_dd, chi, chi_prev, pml_g, pml_cf,
+                                                      pml_mem, f_x, f_z, pml_tn, npp, ng);
         cudaMemsetAsync(Acc_x, 0, ngb, stream);
         cudaMemsetAsync(Acc_z, 0, ngb, stream);
         if (cp)

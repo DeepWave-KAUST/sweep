@@ -295,7 +295,7 @@ void sem_dispatch(int entry, const void* in, int64_t arg)
         case SWEEP_ENTRY_SEM2D_ELASTIC_CPML_DD_BWD_MARCH_FIN: sem2d::elastic_cpml_dd_bwd_march_fin(*static_cast<const SemElasticCpmlBackwardInputCore*>(in), arg); return;
         case SWEEP_ENTRY_SEM2D_ELASTIC_CPML_DD_BWD_PRE: sem2d::elastic_cpml_dd_bwd_pre(*static_cast<const SemElasticCpmlBackwardInputCore*>(in), arg); return;
         case SWEEP_ENTRY_SEM2D_ELASTIC_CPML_DD_BWD_END: sem2d::elastic_cpml_dd_bwd_end(*static_cast<const SemElasticCpmlBackwardInputCore*>(in), arg); return;
-        case SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_ASM: sem2d::fluid_solid_dd_asm(*static_cast<const SemFluidSolidForwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_ASM: sem2d::fluid_solid_dd_asm(*static_cast<const SemFluidSolidForwardInputCore*>(in), arg); return;
         case SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_MID: sem2d::fluid_solid_dd_mid(*static_cast<const SemFluidSolidForwardInputCore*>(in), arg); return;
         case SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_STEP: sem2d::fluid_solid_dd_step(*static_cast<const SemFluidSolidForwardInputCore*>(in), arg); return;
         case SWEEP_ENTRY_SEM2D_FLUID_SOLID_DD_BWD_A: sem2d::fluid_solid_dd_bwd_a(*static_cast<const SemFluidSolidBackwardInputCore*>(in), arg); return;
