@@ -34,7 +34,8 @@ waves. The
 
     The tiling rules for `shape` and `abcn`, `suggest_discretization` for `dh`
     and `dt`, `solver.mesh` with its elements and GLL nodes, a mesh that follows
-    a topography, and what a too-large `dt` does.
+    a topography and internal interfaces (`interfaces=`, `layered_model`), and
+    what a too-large `dt` does.
 
     [:material-notebook-outline: Open notebook](../../notebooks/50_sem_mesh_and_time_step.ipynb)
 
@@ -45,7 +46,8 @@ waves. The
     ---
 
     The equation table, what each equation takes as `models=` and which run on
-    `impl='c'`, and four 2-D equations on one model, record against record.
+    `impl='c'`, four 2-D equations on one model, record against record, and the
+    SH equation.
 
     [:material-notebook-outline: Open notebook](../../notebooks/51_sem_equations_and_models.ipynb)
 
@@ -55,9 +57,9 @@ waves. The
 
     ---
 
-    Grid-index positions, force, explosion and shear sources with their
-    radiation, derived receiver components, and several shots with their own
-    wavelets in one call.
+    Grid-index positions, also between grid points, force, explosion and shear
+    sources with their radiation, derived receiver components, and several shots
+    with their own wavelets in one call.
 
     [:material-notebook-outline: Open notebook](../../notebooks/52_sem_sources_and_receivers.ipynb)
 
@@ -90,8 +92,9 @@ waves. The
 
     ---
 
-    `AcousticElasticSEM2D`: the model on the GLL nodes with the sea floor on
-    element edges, hydrophones and ocean-bottom nodes in one call.
+    `AcousticElasticSEM2D` over a seamount: a mesh that follows the sea floor
+    (`interfaces=`, `layered_model`), and pressure and particle velocity at
+    hydrophones and ocean-bottom nodes in one call.
 
     [:material-notebook-outline: Open notebook](../../notebooks/55_sem_fluid_solid.ipynb)
 
@@ -101,8 +104,9 @@ waves. The
 
     ---
 
-    Acoustic and elastic 3-D runs on `impl='c'`, a 3-D topography and one 3-D
-    gradient: the same call with one more axis.
+    Acoustic and elastic 3-D runs on `impl='c'`, moment-tensor sources, a 3-D
+    topography, one 3-D gradient and a poroelastic rock: the same call with one
+    more axis.
 
     [:material-notebook-outline: Open notebook](../../notebooks/56_sem_3d.ipynb)
 
@@ -112,8 +116,9 @@ waves. The
 
     ---
 
-    VTI with the Thomsen parameters, and Biot's porous rock with its slow P
-    wave, anisotropic permeability and `equation_options`.
+    VTI and tilted TI with the Thomsen parameters, and Biot's porous rock with
+    its slow P wave, anisotropic permeability, `equation_options` and an
+    attenuating frame.
 
     [:material-notebook-outline: Open notebook](../../notebooks/57_sem_vti_and_biot.ipynb)
 
