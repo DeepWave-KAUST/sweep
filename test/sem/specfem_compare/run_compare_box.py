@@ -34,7 +34,9 @@ which our ``vz`` force takes as it is; its moment tensor ``+M : grad(phi)`` is o
 ``-M``. PropSEM's stress source takes the moment rate and loads its running sum times dt, so the
 rate given is the backward difference of SPECFEM2D's samples: the moment loaded at step n is then
 SPECFEM2D's at its step n, as the force is. Its pressure source adds ``h stf / kappa`` to the
-potential's load, our ``chi`` source ``h w``: ``w = stf / kappa``. AcousticSEM2D's field,
+potential's load, our ``chi`` source ``h w``: ``w = stf / kappa`` (PropSEM takes the wavelet
+as the pressure source on the potential forms; these runs take it as the chi source,
+``chi_sourced``). AcousticSEM2D's field,
 ``u'' = c^2 M^-1 (-K u) + M^-1 h w``, is SPECFEM2D's potential with ``w = stf`` (its pressure
 ``-u''`` is taken from the trace as the potential form's is): driving ``u`` with the second
 difference of the source instead would start it with a step, since SPECFEM2D's Ricker is not
@@ -65,6 +67,14 @@ from sweep.sem import (AcousticElasticSEM2D, AcousticPotentialSEM2D, AcousticSEM
                        ElasticVSSEM2DDeformed, ElasticVTISEM2DDeformed, PropSEM,
                        ViscoAcousticPotentialSEM2D, ViscoElasticSEM2DDeformed,
                        ViscoElasticVSSEM2DDeformed, thomsen_to_tti_cij)
+
+def chi_sourced(eq):
+    """``eq`` with the wavelet as the chi source, SPECFEM2D's acoustic source, where PropSEM takes
+    it as the pressure source (``propsem_pressure_wavelet``: the potential forms)."""
+    if not getattr(eq, "propsem_pressure_wavelet", False):
+        return eq
+    return type(eq.__name__, (eq,), {"propsem_pressure_wavelet": False})
+
 
 class SpecfemMemoryLine(ViscoAcousticPotentialSEM2D):
     """ViscoAcousticPotentialSEM2D with SPECFEM2D 8.1.0's ``update_memory_var_acous_weak_form``
@@ -292,7 +302,7 @@ def run_sem(g, eq, device, dtype, n_order=4):
         names = ["BXX", "BXZ"]
     out = 0.0
     for source_type, wav in calls:
-        prop = PropSEM(eq, source_type=source_type, **kw)
+        prop = PropSEM(chi_sourced(eq), source_type=source_type, **kw)
         if layered is not None:
             models = layered(prop)
         with torch.no_grad():
