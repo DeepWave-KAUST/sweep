@@ -25,8 +25,10 @@ the equations and the discretisation. What differs:
   (``["sxx", "syy", "szz"]``, the explosion, is the default), ``vx`` / ``vy`` / ``vz`` and
   ``qx`` / ``qy`` / ``qz`` (``source_mode`` ``"velocity"``), ``fx`` / ``fy`` / ``fz`` (the
   force on both equations, ``"load"``) and the pore-pressure injection ``p``.
-* The C-PML memories -- nine for the stress divergence, three for the flux divergence, three
-  for the pressure gradient and nine for the velocity gradients -- live on every element.
+* The C-PML memories -- nine for the stress divergence and three for the flux divergence
+  (each on one derivative direction of the assembled weak divergence, every element copy of
+  a node holding the node's value, as in the 2-D class), three for the pressure gradient and
+  nine for the velocity gradients -- live on every element.
 
 ``src`` is aligned with ``(v_x, v_y, v_z, p, q_x, q_y, q_z)``. Eager only; no boundary
 saving (the drag is dissipative).
@@ -41,7 +43,8 @@ from typing import ClassVar, Optional
 
 import torch
 
-from .._assembly import assemble, phys_grads3, stress_divergence3, vector_divergence3
+from .._assembly import (assemble, assemble_each, divergence_parts3, first_copies, phys_grads3,
+                         stress_divergence3, vector_divergence3)
 from ..cpml.elastic_vs import pin_outer_edge
 from ..cpml.elastic_vs3d import SimpleElasticCPML3DProfile, build_simple_elastic_cpml_3d
 from ..coupling import FluidSolidInterface3D, assert_no_normal_pml_corner_on_interface
@@ -157,6 +160,7 @@ class BiotVSSEM3DDeformed:
 
     source_mode: str = "load"          # see the 2-D class
     _drag: tuple = None                # (dt, E per group, Psi per group), set by init_state
+    _first: Optional[torch.Tensor] = None   # first_copies of ibool, with a C-PML
 
     @classmethod
     def build(
@@ -247,6 +251,7 @@ class BiotVSSEM3DDeformed:
             _perm=perm, _inv_perm=torch.argsort(perm), _node_inv=torch.argsort(node_order),
             _blocks=blocks,
             cpml=cpml, _D=mesh.deriv, _w_J=w, _inv_J=mesh.inv_J,
+            _first=None if cpml is None else first_copies(ibool, mesh.n_global).to(w.dtype),
         )
 
     # The C-PML builder ``cpml=`` expects, and the speed PropSEM designs it for.
@@ -327,6 +332,15 @@ class BiotVSSEM3DDeformed:
         s_yz = s_yz + dt * mu * (vy_z + vz_y)
         return (s_xx, s_yy, s_zz, s_xy, s_xz, s_yz), extra
 
+    def _div_parts(self, sig):
+        """:func:`divergence_parts3` of the element-local entries ``sig``, assembled --
+        complete at every node -- and read back on every element copy:
+        ``(E, ngll, ngll, ngll, len(sig))``."""
+        ibool = self.mesh.ibool
+        P = torch.stack(divergence_parts3(self._D, self._inv_J, self._w_J, sig), -1)
+        return P.new_zeros(self.mesh.n_global, P.shape[-1]).index_add(
+            0, ibool.reshape(-1), P.reshape(-1, P.shape[-1]))[ibool]
+
     def step(self, fields: tuple, src, dt: float) -> tuple:
         """One staggered-leapfrog step (v, q at n+1/2; sigma, p, r at n+1)."""
         n = len(BiotVSSEM3DDeformed.field_specs)
@@ -351,27 +365,31 @@ class BiotVSSEM3DDeformed:
 
         # ----- forces at t^n: total-stress divergence and pressure gradient -----
         d_p_dx, d_p_dy, d_p_dz = phys_grads3(D, ibool, inv_J, p)
+        sig = (s_xx, s_xy, s_xz, s_xy, s_yy, s_yz, s_xz, s_yz, s_zz)
+        f = [-r for r in stress_divergence3(D, ibool, inv_J, w, sig, like)]
         if cp is not None:
+            # the C-PML on the assembled divergence split by derivative direction, its
+            # stretch added once per node (see ElasticVSSEM2DDeformed.step)
             ax, bx, ay, by, az, bz = cp.a_x, cp.b_x, cp.a_y, cp.b_y, cp.a_z, cp.b_z
-            m_sxx_x = ax * m_sxx_x + bx * s_xx
-            m_sxy_y = ay * m_sxy_y + by * s_xy
-            m_sxz_z = az * m_sxz_z + bz * s_xz
-            m_sxy_x = ax * m_sxy_x + bx * s_xy
-            m_syy_y = ay * m_syy_y + by * s_yy
-            m_syz_z = az * m_syz_z + bz * s_yz
-            m_sxz_x = ax * m_sxz_x + bx * s_xz
-            m_syz_y = ay * m_syz_y + by * s_yz
-            m_szz_z = az * m_szz_z + bz * s_zz
+            P = self._div_parts(sig)
+            m_sxx_x = ax * m_sxx_x + bx * P[..., 0]
+            m_sxy_y = ay * m_sxy_y + by * P[..., 1]
+            m_sxz_z = az * m_sxz_z + bz * P[..., 2]
+            m_sxy_x = ax * m_sxy_x + bx * P[..., 3]
+            m_syy_y = ay * m_syy_y + by * P[..., 4]
+            m_syz_z = az * m_syz_z + bz * P[..., 5]
+            m_sxz_x = ax * m_sxz_x + bx * P[..., 6]
+            m_syz_y = ay * m_syz_y + by * P[..., 7]
+            m_szz_z = az * m_szz_z + bz * P[..., 8]
+            first = self._first
+            Q = assemble_each([first * (m_sxx_x + m_sxy_y + m_sxz_z),
+                               first * (m_sxy_x + m_syy_y + m_syz_z),
+                               first * (m_sxz_x + m_syz_y + m_szz_z)], ibool, like)
+            f = [fc - Qc for fc, Qc in zip(f, Q)]
             m_px = ax * m_px + bx * d_p_dx
             m_py = ay * m_py + by * d_p_dy
             m_pz = az * m_pz + bz * d_p_dz
             d_p_dx, d_p_dy, d_p_dz = d_p_dx + m_px, d_p_dy + m_py, d_p_dz + m_pz
-            sig = (s_xx + m_sxx_x, s_xy + m_sxy_y, s_xz + m_sxz_z,
-                   s_xy + m_sxy_x, s_yy + m_syy_y, s_yz + m_syz_z,
-                   s_xz + m_sxz_x, s_yz + m_syz_y, s_zz + m_szz_z)
-        else:
-            sig = (s_xx, s_xy, s_xz, s_xy, s_yy, s_yz, s_xz, s_yz, s_zz)
-        f = [-r for r in stress_divergence3(D, ibool, inv_J, w, sig, like)]
         ifc = self.ifc
         if ifc.n_face:
             # a fluid's pressure on the solid: -∮ p n φ, n out of the solid
@@ -428,13 +446,13 @@ class BiotVSSEM3DDeformed:
             vx_x, vx_y, vx_z = vx_x + m_vx_x, vx_y + m_vx_y, vx_z + m_vx_z
             vy_x, vy_y, vy_z = vy_x + m_vy_x, vy_y + m_vy_y, vy_z + m_vy_z
             vz_x, vz_y, vz_z = vz_x + m_vz_x, vz_y + m_vz_y, vz_z + m_vz_z
-            m_qx_x = ax * m_qx_x + bx * q_x
-            m_qy_y = ay * m_qy_y + by * q_y
-            m_qz_z = az * m_qz_z + bz * q_z
-            div_q = vector_divergence3(D, ibool, inv_J, w,
-                                       (q_x + m_qx_x, q_y + m_qy_y, q_z + m_qz_z), like)
-        else:
-            div_q = vector_divergence3(D, ibool, inv_J, w, (q_x, q_y, q_z), like)
+        div_q = vector_divergence3(D, ibool, inv_J, w, (q_x, q_y, q_z), like)
+        if cp is not None:
+            P = self._div_parts((q_x, q_y, q_z))
+            m_qx_x = ax * m_qx_x + bx * P[..., 0]
+            m_qy_y = ay * m_qy_y + by * P[..., 1]
+            m_qz_z = az * m_qz_z + bz * P[..., 2]
+            div_q = div_q + assemble(self._first * (m_qx_x + m_qy_y + m_qz_z), ibool, like)
         div_v = vx_x + vy_y + vz_z
         alpha = self._alpha
         rhs = div_q - assemble(w * alpha * div_v, ibool, like)

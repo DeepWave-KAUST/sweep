@@ -189,19 +189,29 @@ class ViscoElasticVSSEM2DDeformed(ElasticVSSEM2DDeformed):
         inv_M = self._inv_M
         b_x, b_z = src[0], src[1]
 
-        # ----- velocity update from the current σ (with σ-field CPML, every element) -----
+        # ----- velocity update from the current σ (σ-derivative CPML, every element) -----
+        # the parent's, unsplit: the recursion on the assembled divergence split by
+        # derivative direction, its stretch added once per node
+        R_x, R_z = self.assemble_stress_divergence(
+            sigma_xx, sigma_xz, sigma_xz, sigma_zz)
         if use_cpml:
             cb = self._band
-            m_sxx_x = cb["a_x"] * m_sxx_x + cb["b_x"] * sigma_xx
-            m_sxz_z = cb["a_z"] * m_sxz_z + cb["b_z"] * sigma_xz
-            m_sxz_x = cb["a_x"] * m_sxz_x + cb["b_x"] * sigma_xz
-            m_szz_z = cb["a_z"] * m_szz_z + cb["b_z"] * sigma_zz
-            R_x, R_z = self.assemble_stress_divergence(
-                sigma_xx + m_sxx_x, sigma_xz + m_sxz_z, sigma_xz + m_sxz_x,
-                sigma_zz + m_szz_z)
-        else:
-            R_x, R_z = self.assemble_stress_divergence(
-                sigma_xx, sigma_xz, sigma_xz, sigma_zz)
+            z = torch.zeros_like(sigma_xx)
+            ib = cb["ibool"]
+            # (x part of R_x, x part of R_z, z part of R_x, z part of R_z)
+            P = torch.cat([self._divergence_e(sigma_xx, z, sigma_xz, z, cb),
+                           self._divergence_e(z, sigma_xz, z, sigma_zz, cb)], -1)
+            P = sigma_xx.new_zeros(self.mesh.n_global, 4).index_add(
+                0, ib.reshape(-1), P.reshape(-1, 4))[ib]
+            m_sxx_x = cb["a_x"] * m_sxx_x + cb["b_x"] * P[..., 0]
+            m_sxz_x = cb["a_x"] * m_sxz_x + cb["b_x"] * P[..., 1]
+            m_sxz_z = cb["a_z"] * m_sxz_z + cb["b_z"] * P[..., 2]
+            m_szz_z = cb["a_z"] * m_szz_z + cb["b_z"] * P[..., 3]
+            psi = torch.stack([m_sxx_x + m_sxz_z, m_sxz_x + m_szz_z], -1) * cb["first"]
+            acc = sigma_xx.new_zeros(self.mesh.n_global, 2).index_add(
+                0, ib.reshape(-1), psi.reshape(-1, 2))
+            R_x = R_x + acc[:, 0]
+            R_z = R_z + acc[:, 1]
         v_x = v_x + dt * inv_M * (-R_x + b_x)
         v_z = v_z + dt * inv_M * (-R_z + b_z)
 
