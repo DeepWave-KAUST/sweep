@@ -1196,7 +1196,9 @@ solver.receiver_illumination           # after the backward
 
 - **`source_illumination`** is `sum_t |a|^2` at every GLL node, summed over the
   shots. `a` is the second time derivative of the field the gradient is built
-  from: `chi_tt = -p` on the potential forms, `u_tt` on the displacement forms
+  from: `chi_tt` on the potential forms, whose chi in PropSEM's run is the
+  pressure the wavelet drives (the wavelet is the pressure source, see above),
+  so `a = p_tt` as on the pressure form; `u_tt` on the displacement forms
   and `v_t` on the velocity-stress forms. It is the pseudo-Hessian of Shin et al.
   (2001) and SPECFEM2D's first approximate Hessian (`APPROXIMATE_HESS_KL`,
   `b_accel . b_accel`).

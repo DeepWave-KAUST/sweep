@@ -10,8 +10,10 @@ node and over its time steps (summed over its shots),
     receiver illumination   R = sum_t |lambda(t)|^2,  lambda = M^-1 dL/df the
                                                   adjoint wavefield
 
-where the wavefields ``f`` are an equation's kinematic fields: the potential
-``chi`` of the potential forms (``a = chi_tt = -p``), the displacement of the
+where the wavefields ``f`` are an equation's kinematic fields -- those of the run
+PropSEM makes: on the potential forms the wavelet itself drives chi, which is then
+the pressure (the wavelet is the pressure source), so ``a = chi_tt`` is ``p_tt``
+as on the pressure form -- the displacement of the
 second-order forms (``a = u_tt``) and the velocity of the velocity-stress ones
 (``a = v_t``) -- the quantity each form's gradient is built from, so ``S`` is
 the pseudo-Hessian of Shin et al. (2001) and SPECFEM2D's first approximate

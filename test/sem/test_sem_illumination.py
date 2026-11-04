@@ -122,11 +122,11 @@ def test_at_a_source_node_the_two_terms_equal_independent_ones():
     # dL/dw[n] = dt^2 (M^-1 dL/dchi^{n+1}) at the source node
     lam2 = float(((gw / DT ** 2) ** 2).sum())
     assert abs(float(sink.rec[g0]) - lam2) <= 1e-10 * lam2
-    # a receiver on the node records chi there
+    # a receiver on the node records the run's chi there: p (the wavelet drives chi)
     eq, st = EQ["potential"]
     q = PropSEM(eq, shape=SHAPE, dh=DH, dt=DT, n_order=4, abcn=8, f_dominant=F0, impl="eager",
                 dtype=torch.float64, free_surface=True, source_type=st, memory=Full(),
-                receiver_type=["chi"], eager_options={"use_compile": False})
+                receiver_type=["p"], eager_options={"use_compile": False})
     q.compute_illumination = True
     with torch.no_grad():
         o = q(_wav(torch.float64), SRC, np.array([[list(SRC[0])]]),
