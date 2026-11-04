@@ -840,7 +840,7 @@ all receivers and components:
   large domain, which made those cases too slow to run (under 500 of 460000 points in ten
   minutes). The past-critical and Rayleigh cases are compared in the small domain only.
 
-Notebook 50 runs an SV wave in the flat half-space, past the critical angle, a Rayleigh wave,
+Notebook 58 runs an SV wave in the flat half-space, past the critical angle, a Rayleigh wave,
 a hill and a canyon, and a soft basin.
 
 ## Anisotropic media

@@ -93,7 +93,7 @@ receivers of a marine survey. The
 
     [:material-notebook-outline: Open notebook](../../notebooks/49_sem_attenuation.ipynb)
 
--   ![SEM plane waves](../../figures/gallery/50_sem_plane_wave.png){ loading=lazy }
+-   ![SEM plane waves](../../figures/gallery/58_sem_plane_wave.png){ loading=lazy }
 
     **Plane waves · P, SV, SH, Rayleigh through an injection band**
 
@@ -103,6 +103,6 @@ receivers of a marine survey. The
     critical angle, or a Rayleigh wave, entering through a band around a box,
     then a hill, a canyon and a soft basin inside it.
 
-    [:material-notebook-outline: Open notebook](../../notebooks/50_sem_plane_wave.ipynb)
+    [:material-notebook-outline: Open notebook](../../notebooks/58_sem_plane_wave.ipynb)
 
 </div>

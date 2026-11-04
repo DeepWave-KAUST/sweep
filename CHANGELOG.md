@@ -48,7 +48,7 @@ and this project adheres to
   SPECFEM2D's edges put 2e-3 to 5e-3 of their own into its records, where ours meet the plane
   wave to 1.6e-4 to 4.2e-4, past the critical angle and for the Rayleigh wave as well. In SH
   SPECFEM2D's Stacey edges take no Bielak terms, and its records near them miss the plane wave
-  by up to 20% (`test/sem/test_sem_plane_wave.py`). Notebook 50.
+  by up to 20% (`test/sem/test_sem_plane_wave.py`). Notebook 58.
 - **The nonlinear constant-Q fit, SPECFEM2D's `USE_SOLVOPT`: `fit="nonlinear"`** on
   `ViscoElasticSEM2DDeformed` and `ViscoAcousticPotentialSEM2D` (`equation_options`). The
   relaxation frequencies are fitted with the strengths, for each Q, both kept positive, by
