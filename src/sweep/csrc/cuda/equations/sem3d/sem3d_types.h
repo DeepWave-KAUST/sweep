@@ -316,6 +316,24 @@ struct Sem3dVsForwardInput {
     double dt = 0.0; double ihx = 0.0, ihy = 0.0, ihz = 0.0;
     int nt = 0, ngll = 0, n_elements = 0, n_global = 0, n_rec = 0;
     int ndim = 3, batch = 1;
+    // deformed=1: Hex27 (ElasticVSSEM3DDeformed). w_J + the full per-node 3x3
+    // inv_J drive the deformed divergence / gradient kernels; wH* / ih* are ignored.
+    int deformed = 0;
+    torch::Tensor wJ;                                // (E, ngll^3) = w3 |J|
+    torch::Tensor ixx, ixy, ixz, iex, iey, iez, igx, igy, igz;  // d(xi,eta,gamma)/d(x,y,z)
+    // aniso = 9 (VTI) or 21 (TTI): the Voigt stiffnesses drive the stress update
+    // and lam / mu / lam2mu are ignored. cij (aniso, E*ngll^3): c11 c12 c13 c22 c23
+    // c33 c44 c55 c66 for 9, c11 c12 .. c16 c22 .. c26 c33 .. c36 c44 c45 c46 c55
+    // c56 c66 for 21 (ElasticVTISEM3D / ElasticTTISEM3D's bs_model_attrs order).
+    int aniso = 0;
+    torch::Tensor cij;
+    // nsls > 0: ViscoElasticVSSEM3D(+Deformed). The GSLS memories rmem (6 nsls,
+    // E*ngll^3; mechanism-major, xx yy zz xy xz yz) ride the stress update:
+    // r+ = a_l r - c_l F_l(gv) with ptau / mtau (nsls, E*ngll^3) the relaxed P /
+    // shear moduli times the strengths and gsls_w (2 nsls) = (a_0.., c_0..), and
+    // sig takes dt/2 sum_l (r+ + r). lam / mu / lam2mu are the unrelaxed moduli.
+    int nsls = 0;
+    torch::Tensor ptau, mtau, gsls_w, rmem;
 };
 
 // Returns (grad_lam, grad_mu, grad_lam2mu, grad_inv_M, grad_wavelet).
@@ -335,6 +353,19 @@ struct Sem3dVsBackwardInput {
     double dt = 0.0; double ihx = 0.0, ihy = 0.0, ihz = 0.0;
     int nt = 0, ngll = 0, n_elements = 0, n_global = 0, n_rec = 0;
     int ndim = 3, batch = 1;
+    // deformed=1: Hex27 (ElasticVSSEM3DDeformed). w_J + the full per-node 3x3
+    // inv_J drive the deformed divergence / gradient kernels; wH* / ih* are ignored.
+    int deformed = 0;
+    torch::Tensor wJ;                                // (E, ngll^3) = w3 |J|
+    torch::Tensor ixx, ixy, ixz, iex, iey, iez, igx, igy, igz;  // d(xi,eta,gamma)/d(x,y,z)
+    // aniso = 9 / 21: as on the forward input; grad_cij (aniso, E*ngll^3) takes the
+    // stiffness gradients and grad_lam / grad_mu / grad_lam2mu stay zero.
+    int aniso = 0;
+    torch::Tensor cij, grad_cij;
+    // nsls > 0: as on the forward input; lrmem (6 nsls, E*ngll^3) is the memories'
+    // adjoint, carried across steps, and grad_ptau / grad_mtau take their gradients.
+    int nsls = 0;
+    torch::Tensor ptau, mtau, gsls_w, lrmem, grad_ptau, grad_mtau;
 };
 
 } // namespace sem3d

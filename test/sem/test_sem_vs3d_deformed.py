@@ -234,11 +234,31 @@ def test_propsem_drives_it_with_topography_and_cpml():
     assert float(s.abs().max()) > 0
 
 
-def test_impl_c_is_refused_clearly():
-    """The CUDA kernel assumes flat hex8 metrics; silently running it on a
-    curved mesh would use the wrong geometry. The gate must refuse."""
+@cuda
+def test_impl_c_hands_the_kernels_the_curved_metric():
+    """The Hex8 kernels assume flat metrics; running them on a curved mesh would
+    use the wrong geometry without an error. impl='c' must select the deformed
+    kernels and give them the per-node inverse Jacobian (the records and
+    gradients against eager: test_sem_c_elastic_vs3d_deformed.py)."""
+    from sweep.sem.prop_c import SEMCudaPropagator, sem_c_available
+    if not sem_c_available():
+        pytest.skip("needs the compiled sweep._C SEM binding")
     nz = ny = nx = 4 * NO + 1
-    with pytest.raises((NotImplementedError, RuntimeError)):
-        PropSEM(ElasticVSSEM3DDeformed, shape=(nz, ny, nx), dh=DH, dt=DT,
+    p = PropSEM(ElasticVSSEM3DDeformed, shape=(nz, ny, nx), dh=DH, dt=DT,
                 nt=8, n_order=NO, free_surface=("top",), abcn=2 * NO,
                 f_dominant=F0, dev="cuda", impl="c")
+    assert p.impl == "c"
+    D = torch.float32
+    topo = lambda x, y: 30.0 * torch.sin(2 * np.pi * x / 300.0) ** 2
+    m = build_topography_hex27(nex=3, ney=3, nez=3, x_max=300.0, y_max=300.0,
+                               z_bottom=300.0, z_top_fn=topo, n_order=NO, dtype=D)
+    eq = ElasticVSSEM3DDeformed.build(m, _full(m, VP, D), _full(m, VS, D),
+                                      _full(m, RHO, D))
+    c = SEMCudaPropagator.build(
+        eq, dt=DT, nt=8, source_xz=[(150.0, 150.0, 150.0)],
+        receiver_xz=[(150.0, 150.0, 100.0)], source_kinds=["force"],
+        source_payloads=[(0.0, 0.0, 1.0)])._elastic_vs3d_consts()
+    assert c["deformed"] == 1
+    E = m.n_elements
+    assert torch.equal(c["igx"].cpu(), m.inv_J[..., 2, 0].reshape(E, -1))
+    assert float(c["igx"].abs().max()) > 0      # the curved term is really there

@@ -77,8 +77,18 @@ def _is_acoustic(cls):
     return "Acoustic" in n and "Elastic" not in n
 
 
+# one constant per model name: the elastic set, a moderate VTI / TTI medium and Q
+_MODEL_VALUES = {"vp": VP, "vs": VS, "rho": RHO, "epsilon": 0.2, "delta": 0.1,
+                 "gamma": 0.15, "theta": 0.4, "phi": 0.6, "Qp": 40.0, "Qs": 30.0}
+
+
+def _model_names(cls):
+    from sweep.sem.prop_base import propsem_models
+    return propsem_models(cls)
+
+
 def _models(cls, shape, grad):
-    vals = (VP,) if _is_acoustic(cls) else (VP, VS, RHO)
+    vals = [_MODEL_VALUES[n] for n in _model_names(cls)]
     out = [torch.full(shape, v, device="cuda") for v in vals]
     return [m.clone().requires_grad_(True) for m in out] if grad else out
 
@@ -209,7 +219,8 @@ def test_gradients_agree_with_eager(cls):
     _, g1 = _run(cls, ndim, "c", grad=True)
     _, g2 = _run(cls, ndim, "c", grad=True)       # run-to-run floor
     _, ge = _run(cls, ndim, "eager", grad=True)
-    names = ("vp",) if _is_acoustic(cls) else ("vp", "vs", "rho")
+    names = _model_names(cls)
+    assert len(names) == len(g1) == len(ge), cls.__name__
     for nm, a, b, e in zip(names, g1, g2, ge):
         floor, got = _rel(a, b), _rel(a, e)
         assert got <= max(FLOOR_FACTOR * floor, ABS_CEILING), (

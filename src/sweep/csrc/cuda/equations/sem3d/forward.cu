@@ -470,6 +470,30 @@ void elastic_vs3d_forward(const Sem3dVsForwardInputCore& in) {
     const float* wHy = in.wHy.data_ptr<float>();
     const float* wHz = in.wHz.data_ptr<float>();
     const float* inv_M = in.inv_M.data_ptr<float>();
+    // Hex27 (ElasticVSSEM3DDeformed): w_J and the nine inv_J streams replace wH*/ih*
+    const bool def = in.deformed != 0;
+    // VTI (9) / TTI (21) Voigt stiffnesses in place of lam / mu / lam2mu
+    const int nc = in.aniso;
+    SWEEP_CHECK(nc == 0 || nc == 9 || nc == 21,
+                "sem3d VS aniso must be 0, 9 or 21 stiffnesses");
+    const float* cij = nc ? in.cij.data_ptr<float>() : nullptr;
+    // ViscoElasticVSSEM3D: nsls GSLS mechanisms on the stress update
+    const int nsls = in.nsls;
+    SWEEP_CHECK(nsls == 0 || nc == 0, "sem3d VS: GSLS memories need the isotropic moduli");
+    const float* ptau = nsls ? in.ptau.data_ptr<float>() : nullptr;
+    const float* mtau = nsls ? in.mtau.data_ptr<float>() : nullptr;
+    const float* gsls_w = nsls ? in.gsls_w.data_ptr<float>() : nullptr;
+    float* rmem = nsls ? in.rmem.data_ptr<float>() : nullptr;
+    const float* wJ  = def ? in.wJ.data_ptr<float>()  : nullptr;
+    const float* Ixx = def ? in.ixx.data_ptr<float>() : nullptr;
+    const float* Ixy = def ? in.ixy.data_ptr<float>() : nullptr;
+    const float* Ixz = def ? in.ixz.data_ptr<float>() : nullptr;
+    const float* Iex = def ? in.iex.data_ptr<float>() : nullptr;
+    const float* Iey = def ? in.iey.data_ptr<float>() : nullptr;
+    const float* Iez = def ? in.iez.data_ptr<float>() : nullptr;
+    const float* Igx = def ? in.igx.data_ptr<float>() : nullptr;
+    const float* Igy = def ? in.igy.data_ptr<float>() : nullptr;
+    const float* Igz = def ? in.igz.data_ptr<float>() : nullptr;
     const float* ax = cp ? in.a_x.data_ptr<float>() : nullptr;
     const float* bx = cp ? in.b_x.data_ptr<float>() : nullptr;
     const float* ay = cp ? in.a_y.data_ptr<float>() : nullptr;
@@ -517,9 +541,15 @@ void elastic_vs3d_forward(const Sem3dVsForwardInputCore& in) {
         cudaMemsetAsync(Ry, 0, ngb, stream);
         cudaMemsetAsync(Rz, 0, ngb, stream);
         if (cp) cudaMemsetAsync(P, 0, 9 * ngb, stream);
-        sem3d_vs_sigma_div<<<grid, m, sh_v, stream>>>(
-            sig, ax, bx, ay, by, az, bz, wHx, wHy, wHz,
-            ibool, D, Rx, Ry, Rz, P, ngll, E, ng);
+        if (def)
+            sem3d_vs_sigma_div_deformed<<<grid, m, sh_v, stream>>>(
+                sig, ax, bx, ay, by, az, bz, wJ,
+                Ixx, Ixy, Ixz, Iex, Iey, Iez, Igx, Igy, Igz,
+                ibool, D, Rx, Ry, Rz, P, ngll, E, ng);
+        else
+            sem3d_vs_sigma_div<<<grid, m, sh_v, stream>>>(
+                sig, ax, bx, ay, by, az, bz, wHx, wHy, wHz,
+                ibool, D, Rx, Ry, Rz, P, ngll, E, ng);
         if (cp)
             sem3d_vs_cpml_nodal<<<nb, TPB, 0, stream>>>(a_n, P, msig, Rx, Ry, Rz, ng);
         const size_t o = static_cast<size_t>(n) * ng;
@@ -527,10 +557,18 @@ void elastic_vs3d_forward(const Sem3dVsForwardInputCore& in) {
             vx, vy, vz, Rx, Ry, Rz, inv_M, px_, py_, pz_, wav, n, dt,
             save ? s_vx + o : nullptr, save ? s_vy + o : nullptr,
             save ? s_vz + o : nullptr, ng);
-        sem3d_vs_stress_update<<<grid, m, sh_g, stream>>>(
-            vx, vy, vz, sig, mvel, ax, bx, ay, by, az, bz, lam, mu, l2m,
-            ibool, D, ihx, ihy, ihz, dt,
-            save ? s_gv + static_cast<size_t>(n) * 9 * Em : nullptr, ngll, E, ng);
+        float* gv_n = save ? s_gv + static_cast<size_t>(n) * 9 * Em : nullptr;
+        if (def)
+            SEM3D_VS_LAUNCH_NC(nc, sem3d_vs_stress_update_deformed, grid, m, sh_g, stream,
+                vx, vy, vz, sig, mvel, ax, bx, ay, by, az, bz, lam, mu, l2m, cij,
+                nsls, ptau, mtau, gsls_w, rmem,
+                Ixx, Ixy, Ixz, Iex, Iey, Iez, Igx, Igy, Igz,
+                ibool, D, dt, gv_n, ngll, E, ng);
+        else
+            SEM3D_VS_LAUNCH_NC(nc, sem3d_vs_stress_update, grid, m, sh_g, stream,
+                vx, vy, vz, sig, mvel, ax, bx, ay, by, az, bz, lam, mu, l2m, cij,
+                nsls, ptau, mtau, gsls_w, rmem,
+                ibool, D, ihx, ihy, ihz, dt, gv_n, ngll, E, ng);
         if (nrec > 0) {
             sem2d::sem2d_record<<<rb, TPB, 0, stream>>>(vx, rec_G, rec_W, sx, n, nt, nrec, m, ng);
             sem2d::sem2d_record<<<rb, TPB, 0, stream>>>(vy, rec_G, rec_W, sy, n, nt, nrec, m, ng);

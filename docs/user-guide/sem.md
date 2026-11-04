@@ -198,14 +198,19 @@ forward + backward call in GB:
 | eager, `use_compile=False`, `Ckpt(chunks=8)` | 0.41 / 1.47 (1.3) | 1.48 / 5.65 (3.9) | 0.80 / 3.36 (7.9) |
 | eager, `Ckpt(chunks=8)` (the defaults) | 0.072 / 0.33 (1.2) | 0.48 / 2.17 (3.5) | 0.42 / 1.53 (7.7) |
 
+On a Hex27 mesh, `ElasticVSSEM3DDeformed` runs the same CUDA time loop as
+`ElasticVSSEM3D`; its four element kernels apply the full 3 × 3 inverse Jacobian at
+every GLL node instead of the Hex8 kernels' one scale factor per axis. On an A100
+(order 4, C-PML on five sides, 10³ and 16³ elements, 400 steps) that took 1.15–1.3×
+the Hex8 time on the same number of elements, at the same peak memory.
+
 Where the equation has CUDA kernels (the `impl="c"` column of the
 [equation table](equations.md#sem-family-spectral-elements)), `impl='c'` is the
 faster backend: in the table the fastest eager configuration takes 1.4–2.9× as
 long per forward step, and 1.5–2.8× as long per forward + backward step as
 `impl='c'` with `BoundarySaving()` (1.8–5.5× against `Full()`). `impl='eager'`
 runs everything else: the equations without CUDA kernels
-(`AcousticSEM2DDeformed`, `ElasticVSSEM2DDeformed`, `ElasticVTISEM2DDeformed`,
-`ElasticTTISEM2DDeformed`, `ElasticVSSEM3DDeformed` and the Biot forms), the CPU, fp64,
+(`AcousticSEM2DDeformed`, `ElasticSHSEM2DDeformed` and the Biot forms), the CPU, fp64,
 [wavefield snapshots](#wavefield-snapshots) and second derivatives
 (`create_graph=True` with `Full()`). On a GPU, its defaults — the compiled
 step and `Ckpt(chunks=8)` — are its fastest configuration for single shots, at
@@ -432,7 +437,8 @@ the equation path.
 
 Each equation family's autograd Functions sit in one module of
 `sweep/sem/drivers/` (`acoustic2d`, `acoustic3d`, `elastic2d`,
-`fluid_solid`, and `bare` for the paths without a C-PML) — the fused
+`fluid_solid`, `vs2d` for the 2-D velocity-stress family, and `bare` for the
+paths without a C-PML and the 3-D velocity-stress classes) — the fused
 single-domain Function (the C entry runs the time loop) next to the strip
 Function `SEMModelParallel` steps (Python runs the stepped entries with one
 exchange per assembly). A module names
@@ -945,6 +951,15 @@ long runs in such media need checking. Against SPECFEM3D's anisotropic medium, g
 [Against SPECFEM3D](#against-specfem3d)). Notebook 60 shows the wavefronts and shear-wave
 splitting.
 
+All four classes run on `impl='c'`: the CUDA kernels of `ElasticVSSEM3D` (and of
+`ElasticVSSEM3DDeformed` on Hex27) with the nine or 21 stiffnesses in the stress update, and
+the stiffness gradients go on to the Thomsen parameters, the tilt and the azimuth through the
+same `thomsen_to_cij3d` as on eager. The records and the gradients in every model agree with
+eager to 2e-7 to 2e-6 in relative L2, with the C-PML, on Hex8 and on a curved Hex27
+(`test/sem/test_sem_c_tti3d.py`). On an A100 (16³ elements, order 4, 400 steps, forward and
+backward) the VTI classes took 1.1× and the TTI classes 1.4× the time of the isotropic
+kernels on the same mesh.
+
 ## Visco-elastic attenuation
 
 `ViscoElasticVSSEM2DDeformed` adds attenuation to `ElasticVSSEM2DDeformed` with the
@@ -1026,9 +1041,18 @@ to 0.7e-3 to 1.2e-3 in relative L2 at 60 to 113 m from the source, where the att
 changes the records by 12% to 47%. On the same grid the elastic class is 1.2e-3 to 1.7e-3
 from its own Green's function. `test/sem/test_sem_visco_elastic3d.py` runs a coarser version
 of that check, the elastic limit on both meshes, the checkpointed and vmapped rollouts and the
-gradients in `vp`, `Qp` and `Qs`. Eager only. Against SPECFEM3D the records agree to 3.6e-3
+gradients in `vp`, `Qp` and `Qs`. Against SPECFEM3D the records agree to 3.6e-3
 on its own mechanisms, which is the time discretization of the memory variables (see
 [Against SPECFEM3D](#against-specfem3d)).
+
+Both classes run on `impl='c'`: the CUDA kernels of the elastic classes with the unrelaxed
+moduli, the memories advancing in the stress kernel and their adjoint in its transpose (the
+adjoint needs no history of the memories, only the saved strain rates). The records and the
+gradients in all five models agree with eager to 2e-7 to 4e-6 in relative L2, with the C-PML,
+on Hex8 and on a curved Hex27, and `Q = inf` gives the elastic kernels' records
+(`test/sem/test_sem_c_visco3d.py`). With three mechanisms a forward and backward call took
+1.55–1.6× the elastic time on an A100 (16³ elements, 400 steps). Boundary saving stays
+refused on both backends.
 
 ### SPECFEM2D's displacement scheme
 

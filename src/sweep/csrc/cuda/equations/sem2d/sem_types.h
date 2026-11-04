@@ -615,3 +615,59 @@ struct SemElasticBackwardInput {
     double dt = 0.0;
     int nt = 0, ngll = 0, n_elements = 0, n_global = 0, n_rec = 0, ndim = 2;
 };
+
+// SEM 2D velocity-stress elastic (ElasticVSSEM2DDeformed and its VTI / TTI /
+// visco-elastic subclasses) on Quad9, natural free surface, save-all: v x2
+// (global), sigma x3 + 4 velocity-gradient C-PML memories (element-local; slots
+// vx_x vz_z vx_z vz_x), the divergence by physical direction P and its 4 memories
+// (NODAL; slot 2i + j = (R_x,x) (R_x,z) (R_z,x) (R_z,z)). Coefficients a/b per
+// axis element-local and per node (a_n). Optional save-all: the v history and the
+// 4 STRETCHED velocity gradients per step. See sem2d/vs2d_kernels.cuh.
+struct Sem2dVsForwardInput {
+    torch::Tensor ibool, D, lam, mu, lam2mu;         // (E, ngll^2); lam.. empty when aniso
+    torch::Tensor wJ, ixx, ixz, iex, iez, inv_M;     // w2 |J|, d(xi,eta)/d(x,z); 1/mass_rho
+    torch::Tensor a_x, b_x, a_z, b_z;                // (E, ngll^2); empty = bare
+    torch::Tensor a_n;                               // (4, n_global) a_x b_x a_z b_z per node
+    torch::Tensor pat_x, pat_z, wavelet, rec_G, rec_W;
+    torch::Tensor vx, vz, Rx, Rz;                    // (n_global,)
+    torch::Tensor P, msig;                           // (4, n_global); empty = bare
+    torch::Tensor sig;                               // (3, E*ngll^2): xx zz xz
+    torch::Tensor mvel;                              // (4, E*ngll^2)
+    torch::Tensor seis_x, seis_z;
+    torch::Tensor save_vx, save_vz;                  // (nt, n_global) OPTIONAL
+    torch::Tensor save_gv;                           // (nt, 4, E*ngll^2) OPTIONAL
+    double dt = 0.0;
+    int nt = 0, ngll = 0, n_elements = 0, n_global = 0, n_rec = 0;
+    int ndim = 2, batch = 1;
+    // aniso = 4 (VTI: c11 c13 c33 c55) or 6 (TTI: c11 c13 c15 c33 c35 c55): the
+    // stiffnesses cij (aniso, E*ngll^2) replace lam / mu / lam2mu.
+    int aniso = 0;
+    torch::Tensor cij;
+    // nsls > 0: ViscoElasticVSSEM2DDeformed's GSLS memories rmem (3 nsls, E*ngll^2;
+    // xx zz xz per mechanism), as on Sem3dVsForwardInput.
+    int nsls = 0;
+    torch::Tensor ptau, mtau, gsls_w, rmem;
+};
+
+// Backward of Sem2dVsForwardInput. Returns (grad_lam, grad_mu, grad_lam2mu,
+// grad_inv_M, grad_wavelet); grad_cij / grad_ptau / grad_mtau when aniso / nsls.
+struct Sem2dVsBackwardInput {
+    torch::Tensor ibool, D, lam, mu, lam2mu;
+    torch::Tensor wJ, ixx, ixz, iex, iez, inv_M;
+    torch::Tensor a_x, b_x, a_z, b_z, a_n;
+    torch::Tensor pat_x, pat_z, wavelet, rec_G, rec_W;
+    torch::Tensor save_vx, save_vz, save_gv;
+    torch::Tensor grad_sx, grad_sz;                  // (n_rec, nt) upstream
+    // adjoint state: lv x2 (global), lsig (3, E*m), lmsig (4, n_global), lmvel
+    // (4, E*m); lP the divergence-by-direction adjoint (4, n_global, scratch)
+    torch::Tensor lvx, lvz, lRx, lRz, lP, lmsig;
+    torch::Tensor lsig, lmvel;
+    torch::Tensor grad_lam, grad_mu, grad_lam2mu, grad_inv_M, grad_wavelet;
+    double dt = 0.0;
+    int nt = 0, ngll = 0, n_elements = 0, n_global = 0, n_rec = 0;
+    int ndim = 2, batch = 1;
+    int aniso = 0;
+    torch::Tensor cij, grad_cij;
+    int nsls = 0;
+    torch::Tensor ptau, mtau, gsls_w, lrmem, grad_ptau, grad_mtau;
+};

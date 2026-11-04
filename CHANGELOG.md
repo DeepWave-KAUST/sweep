@@ -34,7 +34,7 @@ and this project adheres to
   attenuation, a topography and absorbing boundaries. A point force in a whole space matches
   the visco-elastic Green's function (the elastic one with the GSLS complex moduli) to
   0.7e-3 to 1.2e-3 in relative L2, where the attenuation changes the records by 12% to 47%
-  (`test/sem/test_sem_visco_elastic3d.py`). Eager; no boundary saving (dissipative).
+  (`test/sem/test_sem_visco_elastic3d.py`). No boundary saving (dissipative).
 - **Curved internal interfaces in 3-D: `PropSEM(interfaces=...)` on the Hex27 classes and
   `sweep.sem.build_layered_hex27`.** Each interface is `(ny, nx)` rows; the element layers
   follow the interfaces, graded linearly in every column of control nodes, and
@@ -44,6 +44,43 @@ and this project adheres to
   SPECFEM3D to 3e-14 across a curved interface. A curved sea floor for
   `BiotVSSEM3DDeformed` (water and rock, each element wholly one medium) is the case that needs
   it (`test/sem/test_sem_interfaces3d.py`); notebook 61: a seamount.
+- **`impl='c'` for the 2-D velocity-stress family**: `ElasticVSSEM2DDeformed`,
+  `ElasticVTISEM2DDeformed`, `ElasticTTISEM2DDeformed` and `ViscoElasticVSSEM2DDeformed`, through
+  two new core entries (`sem2d_elastic_vs_forward` / `_backward`, `sem2d/vs2d.cu`). The 3-D
+  velocity-stress kernels with two components: the per-node 2 x 2 inverse Jacobian, the C-PML
+  on the divergence split by direction and on the velocity gradients, the four or six
+  stiffnesses or the GSLS memories in the stress update, and their transposes. Records and the
+  gradients in every model match eager to 2.5e-7 to 4.8e-6 in relative L2, with the C-PML and
+  bare, on a mesh with a topography and an interior shear (`test/sem/test_sem_c_vs2d.py`).
+  The natural free surface only: `free_top=True`, which `PropSEM` never sets, stays on eager.
+- **`impl='c'` for `ViscoElasticVSSEM3D` and `ViscoElasticVSSEM3DDeformed`.** The elastic
+  velocity-stress kernels with the unrelaxed moduli and the GSLS memories (six per mechanism,
+  element-local) advancing in the stress kernel; the transpose carries the memories' adjoint
+  and images the relaxed moduli times the strengths, which autograd takes on to `vp`, `vs`,
+  `rho`, `Qp` and `Qs` through the class's fit. Records and the gradients in all five models
+  match eager to 2e-7 to 4e-6 in relative L2 with the C-PML, on Hex8 and on a curved Hex27,
+  and `Q = inf` gives the elastic kernels' records (`test/sem/test_sem_c_visco3d.py`). Three
+  mechanisms take 1.55 to 1.6 times the elastic time (A100, 16^3 elements).
+- **`impl='c'` for the 3-D VTI and TTI classes** (`ElasticVTISEM3D`, `ElasticTTISEM3D` and
+  their Hex27 versions). The velocity-stress kernels take the nine or 21 Voigt stiffnesses in
+  the stress update and its transpose (one template per stiffness count, the isotropic code
+  unchanged) and return the stiffness gradients, which go on to the Thomsen parameters, the
+  tilt and the azimuth through `thomsen_to_cij3d`, as on eager. Records and the gradients in
+  all eight models match eager to 2e-7 to 2.4e-6 in relative L2 with the C-PML, on Hex8 and on
+  a curved Hex27 (`test/sem/test_sem_c_tti3d.py`); a medium without anisotropy runs the
+  isotropic kernels' numbers. VTI takes 1.1 times and TTI 1.4 times the isotropic time
+  (A100, 16^3 elements).
+- **`impl='c'` for `ElasticVSSEM3DDeformed`: 3-D elastic with topography and the C-PML on
+  CUDA.** The `ElasticVSSEM3D` time loop with four element kernels that apply the full
+  3 x 3 inverse Jacobian at every GLL node (the stress divergence, split by direction in
+  the C-PML band, the velocity gradients and their transposes); the nodal kernels are
+  shared. On a mesh with a topography and an interior shear, so that all nine metric terms
+  are non-zero, the records and the gradients in `vp`, `vs`, `rho` match eager to 3e-7 to
+  1.2e-6 in relative L2, the size of the CUDA path's own run-to-run differences, and a flat
+  Hex27 reproduces the Hex8 kernels (`test/sem/test_sem_c_elastic_vs3d_deformed.py`). It
+  takes 1.15 to 1.3 times the Hex8 time on the same elements (A100). Save-all only, as on
+  Hex8, and `impl=None` now takes it on a GPU: where the per-step histories do not fit,
+  `impl='eager'` keeps its checkpointed default.
 - **`ElasticVTISEM3D`, `ElasticTTISEM3D` (and their `...Deformed` versions on Hex27):
   transversely isotropic media on the 3-D SEM.** The velocity-stress step of `ElasticVSSEM3D`
   with the stiffnesses of a VTI medium (`vp, vs, rho, epsilon, delta, gamma`) or of one whose
@@ -55,7 +92,7 @@ and this project adheres to
   toward x or y reproduces the turned VTI problem to round-off, and against SPECFEM3D's
   anisotropic medium (its `model_aniso.f90` given the same stiffnesses) the records agree to
   5e-14 for a vertical and a tilted axis (`test/sem/test_sem_tti3d.py`,
-  `run_compare_box3d.py`). Notebook 60: wavefronts and shear-wave splitting. Eager.
+  `run_compare_box3d.py`). Notebook 60: wavefronts and shear-wave splitting.
 - **The 3-D SEM against SPECFEM3D.** `test/sem/specfem_compare/run_compare_box3d.py` runs the
   3-D classes against SPECFEM3D 4.1.1 in double precision on a box with six free sides
   (`make_specfem3d_box_cases.py`: a point force, stations inside elements, on faces and edges

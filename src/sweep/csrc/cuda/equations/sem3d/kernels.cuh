@@ -1460,8 +1460,234 @@ static __global__ void sem3d_vs_vel_update(
     if (s_vx) { s_vx[i] = nvx; s_vy[i] = nvy; s_vz[i] = nvz; }
 }
 
+// ---- the constitutive seam of the four VS3D stress kernels ------------------
+// NC = 0: isotropic (lam, mu, lam2mu). NC = 9 (VTI) / 21 (TTI): the Voigt
+// stiffnesses cij (NC, E*m), in ElasticVTISEM3D / ElasticTTISEM3D's order
+//   9: c11 c12 c13 c22 c23 c33 c44 c55 c66
+//  21: c11..c16 c22..c26 c33..c36 c44 c45 c46 c55 c56 c66
+// with the Voigt strain rates of the stretched gradients gv (fixed 9-slot order)
+//   e = (vx_x, vy_y, vz_z, vz_y + vy_z, vz_x + vx_z, vy_x + vx_y)
+// and the stress rows I = xx, yy, zz, yz, xz, xy (sig keeps xx, yy, zz, xy, xz, yz).
+
+// Index of c_IJ (I, J in 0..5, symmetric) in the 21-entry order.
+__host__ __device__ __forceinline__ constexpr int vs3d_kij(int I, int J) {
+    return (I < J ? I : J) * 6 - (I < J ? I : J) * ((I < J ? I : J) - 1) / 2
+           + ((I < J ? J : I) - (I < J ? I : J));
+}
+
+template <int NC>
+__device__ __forceinline__ void vs3d_stress_increment(
+    float* __restrict__ sig, long Em, int off, const float gv[9], float dt,
+    const float* __restrict__ lam, const float* __restrict__ mu,
+    const float* __restrict__ lam2mu, const float* __restrict__ cij)
+{
+    if constexpr (NC == 0) {
+        const float l = lam[off], u_ = mu[off], l2 = lam2mu[off];
+        sig[0 * Em + off] += dt * (l2 * gv[0] + l * (gv[1] + gv[2]));
+        sig[1 * Em + off] += dt * (l2 * gv[1] + l * (gv[0] + gv[2]));
+        sig[2 * Em + off] += dt * (l2 * gv[2] + l * (gv[0] + gv[1]));
+        sig[3 * Em + off] += dt * u_ * (gv[3] + gv[4]);
+        sig[4 * Em + off] += dt * u_ * (gv[5] + gv[6]);
+        sig[5 * Em + off] += dt * u_ * (gv[7] + gv[8]);
+    } else {
+        const float e[6] = {gv[0], gv[1], gv[2], gv[7] + gv[8], gv[5] + gv[6], gv[3] + gv[4]};
+        if constexpr (NC == 9) {
+            const float c11 = cij[0 * Em + off], c12 = cij[1 * Em + off], c13 = cij[2 * Em + off];
+            const float c22 = cij[3 * Em + off], c23 = cij[4 * Em + off], c33 = cij[5 * Em + off];
+            const float c44 = cij[6 * Em + off], c55 = cij[7 * Em + off], c66 = cij[8 * Em + off];
+            sig[0 * Em + off] += dt * (c11 * e[0] + c12 * e[1] + c13 * e[2]);
+            sig[1 * Em + off] += dt * (c12 * e[0] + c22 * e[1] + c23 * e[2]);
+            sig[2 * Em + off] += dt * (c13 * e[0] + c23 * e[1] + c33 * e[2]);
+            sig[3 * Em + off] += dt * (c66 * e[5]);
+            sig[4 * Em + off] += dt * (c55 * e[4]);
+            sig[5 * Em + off] += dt * (c44 * e[3]);
+        } else {
+            static_assert(NC == 21, "NC is 0, 9 or 21");
+            float c[21];
+            #pragma unroll
+            for (int k = 0; k < 21; ++k) c[k] = cij[k * Em + off];
+            float inc[6];
+            #pragma unroll
+            for (int I = 0; I < 6; ++I) {
+                float a = c[vs3d_kij(I, 0)] * e[0];
+                #pragma unroll
+                for (int J = 1; J < 6; ++J) a += c[vs3d_kij(I, J)] * e[J];
+                inc[I] = dt * a;
+            }
+            sig[0 * Em + off] += inc[0];
+            sig[1 * Em + off] += inc[1];
+            sig[2 * Em + off] += inc[2];
+            sig[3 * Em + off] += inc[5];
+            sig[4 * Em + off] += inc[4];
+            sig[5 * Em + off] += inc[3];
+        }
+    }
+}
+
+// The adjoint of vs3d_stress_increment: lg = dt C^T lsig (the stretched gradients'
+// adjoint, fixed 9-slot order) and the moduli's gradients against the saved
+// stretched gradients gv of this step (save_gv slice): grad_lam / grad_mu /
+// grad_lam2mu for NC = 0, gC (NC, E*m) for the stiffnesses otherwise.
+template <int NC>
+__device__ __forceinline__ void vs3d_stress_adjoint(
+    const float* __restrict__ lsig, const float* __restrict__ gv, long Em, int off,
+    float dt, const float* __restrict__ lam, const float* __restrict__ mu,
+    const float* __restrict__ lam2mu, const float* __restrict__ cij,
+    float* __restrict__ gLam, float* __restrict__ gMu, float* __restrict__ gL2m,
+    float* __restrict__ gC, float lg[9])
+{
+    const float lxx = lsig[0 * Em + off], lyy = lsig[1 * Em + off], lzz = lsig[2 * Em + off];
+    const float lxy = lsig[3 * Em + off], lxz = lsig[4 * Em + off], lyz = lsig[5 * Em + off];
+    const float g0 = gv[0*Em+off], g1 = gv[1*Em+off], g2 = gv[2*Em+off];
+    const float g3 = gv[3*Em+off], g4 = gv[4*Em+off], g5 = gv[5*Em+off];
+    const float g6 = gv[6*Em+off], g7 = gv[7*Em+off], g8 = gv[8*Em+off];
+    if constexpr (NC == 0) {
+        const float l = lam[off], u_ = mu[off], l2 = lam2mu[off];
+        lg[0] = dt * (l2 * lxx + l * (lyy + lzz));
+        lg[1] = dt * (l2 * lyy + l * (lxx + lzz));
+        lg[2] = dt * (l2 * lzz + l * (lxx + lyy));
+        lg[3] = dt * u_ * lxy;  lg[4] = dt * u_ * lxy;
+        lg[5] = dt * u_ * lxz;  lg[6] = dt * u_ * lxz;
+        lg[7] = dt * u_ * lyz;  lg[8] = dt * u_ * lyz;
+        gL2m[off] += dt * (g0 * lxx + g1 * lyy + g2 * lzz);
+        gLam[off] += dt * ((g1 + g2) * lxx + (g0 + g2) * lyy + (g0 + g1) * lzz);
+        gMu[off]  += dt * ((g3 + g4) * lxy + (g5 + g6) * lxz + (g7 + g8) * lyz);
+    } else {
+        const float L[6] = {lxx, lyy, lzz, lyz, lxz, lxy};          // Voigt rows
+        const float e[6] = {g0, g1, g2, g7 + g8, g5 + g6, g3 + g4};
+        float le[6];
+        if constexpr (NC == 9) {
+            const float c11 = cij[0 * Em + off], c12 = cij[1 * Em + off], c13 = cij[2 * Em + off];
+            const float c22 = cij[3 * Em + off], c23 = cij[4 * Em + off], c33 = cij[5 * Em + off];
+            const float c44 = cij[6 * Em + off], c55 = cij[7 * Em + off], c66 = cij[8 * Em + off];
+            le[0] = dt * (c11 * L[0] + c12 * L[1] + c13 * L[2]);
+            le[1] = dt * (c12 * L[0] + c22 * L[1] + c23 * L[2]);
+            le[2] = dt * (c13 * L[0] + c23 * L[1] + c33 * L[2]);
+            le[3] = dt * (c44 * L[3]);
+            le[4] = dt * (c55 * L[4]);
+            le[5] = dt * (c66 * L[5]);
+            gC[0 * Em + off] += dt * (L[0] * e[0]);
+            gC[1 * Em + off] += dt * (L[0] * e[1] + L[1] * e[0]);
+            gC[2 * Em + off] += dt * (L[0] * e[2] + L[2] * e[0]);
+            gC[3 * Em + off] += dt * (L[1] * e[1]);
+            gC[4 * Em + off] += dt * (L[1] * e[2] + L[2] * e[1]);
+            gC[5 * Em + off] += dt * (L[2] * e[2]);
+            gC[6 * Em + off] += dt * (L[3] * e[3]);
+            gC[7 * Em + off] += dt * (L[4] * e[4]);
+            gC[8 * Em + off] += dt * (L[5] * e[5]);
+        } else {
+            static_assert(NC == 21, "NC is 0, 9 or 21");
+            float c[21];
+            #pragma unroll
+            for (int k = 0; k < 21; ++k) c[k] = cij[k * Em + off];
+            #pragma unroll
+            for (int J = 0; J < 6; ++J) {                 // C symmetric: le = dt C L
+                float a = c[vs3d_kij(0, J)] * L[0];
+                #pragma unroll
+                for (int I = 1; I < 6; ++I) a += c[vs3d_kij(I, J)] * L[I];
+                le[J] = dt * a;
+            }
+            #pragma unroll
+            for (int I = 0; I < 6; ++I)
+                #pragma unroll
+                for (int J = I; J < 6; ++J)
+                    gC[vs3d_kij(I, J) * Em + off] += dt * (I == J ? L[I] * e[I]
+                                                                  : L[I] * e[J] + L[J] * e[I]);
+        }
+        lg[0] = le[0]; lg[1] = le[1]; lg[2] = le[2];
+        lg[3] = le[5]; lg[4] = le[5];          // vy_x, vx_y
+        lg[5] = le[4]; lg[6] = le[4];          // vz_x, vx_z
+        lg[7] = le[3]; lg[8] = le[3];          // vz_y, vy_z
+    }
+}
+
+// ---- the GSLS memories of ViscoElasticVSSEM3D on the stress update ----------
+// Per mechanism l: r+ = a_l r - c_l F_l(gv), F_l = (tp - 2 ts (gy + gz),
+// tp - 2 ts (gx + gz), tp - 2 ts (gx + gy), ts e_xy, ts e_xz, ts e_yz) with
+// tp = ptau_l theta, ts = mtau_l, theta = gx + gy + gz (gx = vx_x ...), and the
+// stress takes dt/2 sum_l (r+ + r). rmem (6 nsls, E*m) is mechanism-major in
+// sig's component order; w = (a_0 .. a_{L-1}, c_0 .. c_{L-1}).
+__device__ __forceinline__ void vs3d_gsls_step(
+    float* __restrict__ sig, float* __restrict__ rmem, long Em, int off,
+    const float gv[9], float dt, int nsls, const float* __restrict__ ptau,
+    const float* __restrict__ mtau, const float* __restrict__ w)
+{
+    const float theta = gv[0] + gv[1] + gv[2];
+    const float exy = gv[4] + gv[3], exz = gv[6] + gv[5], eyz = gv[8] + gv[7];
+    float sums[6] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+    for (int l = 0; l < nsls; ++l) {
+        const float a = w[l], c = w[nsls + l];
+        const float tp = ptau[l * Em + off] * theta, ts = mtau[l * Em + off];
+        const float F[6] = {tp - 2.f * ts * (gv[1] + gv[2]), tp - 2.f * ts * (gv[0] + gv[2]),
+                            tp - 2.f * ts * (gv[0] + gv[1]), ts * exy, ts * exz, ts * eyz};
+        #pragma unroll
+        for (int k = 0; k < 6; ++k) {
+            float* r = rmem + static_cast<long>(6 * l + k) * Em + off;
+            const float r0 = *r, rn = a * r0 - c * F[k];
+            sums[k] += rn + r0;
+            *r = rn;
+        }
+    }
+    const float h = 0.5f * dt;
+    #pragma unroll
+    for (int k = 0; k < 6; ++k) sig[k * Em + off] += h * sums[k];
+}
+
+// The adjoint of vs3d_gsls_step. With lam_l = lr_l + dt/2 lsig (the adjoint of r+),
+// the memories' adjoint goes on as a_l lam_l + dt/2 lsig, the forcing's adjoint
+// mu_l = -c_l lam_l adds to lg (the stretched gradients' adjoint) and images ptau /
+// mtau against this step's saved stretched gradients gvs (the save_gv slice).
+__device__ __forceinline__ void vs3d_gsls_adjoint(
+    const float* __restrict__ lsig, float* __restrict__ lrmem, long Em, int off,
+    const float* __restrict__ gvs, float dt, int nsls, const float* __restrict__ ptau,
+    const float* __restrict__ mtau, const float* __restrict__ w,
+    float* __restrict__ gPt, float* __restrict__ gMt, float lg[9])
+{
+    const float h = 0.5f * dt;
+    float ls[6], g[9];
+    #pragma unroll
+    for (int k = 0; k < 6; ++k) ls[k] = lsig[k * Em + off];
+    #pragma unroll
+    for (int j = 0; j < 9; ++j) g[j] = gvs[j * Em + off];
+    const float theta = g[0] + g[1] + g[2];
+    const float exy = g[4] + g[3], exz = g[6] + g[5], eyz = g[8] + g[7];
+    for (int l = 0; l < nsls; ++l) {
+        const float a = w[l], c = w[nsls + l];
+        const float pt = ptau[l * Em + off], mt = mtau[l * Em + off];
+        float mu[6];
+        #pragma unroll
+        for (int k = 0; k < 6; ++k) {
+            float* lr = lrmem + static_cast<long>(6 * l + k) * Em + off;
+            const float lam = *lr + h * ls[k];
+            *lr = a * lam + h * ls[k];
+            mu[k] = -c * lam;
+        }
+        const float sn = mu[0] + mu[1] + mu[2];
+        lg[0] += pt * sn - 2.f * mt * (mu[1] + mu[2]);
+        lg[1] += pt * sn - 2.f * mt * (mu[0] + mu[2]);
+        lg[2] += pt * sn - 2.f * mt * (mu[0] + mu[1]);
+        lg[3] += mt * mu[3];  lg[4] += mt * mu[3];      // vy_x, vx_y
+        lg[5] += mt * mu[4];  lg[6] += mt * mu[4];      // vz_x, vx_z
+        lg[7] += mt * mu[5];  lg[8] += mt * mu[5];      // vz_y, vy_z
+        gPt[l * Em + off] += sn * theta;
+        gMt[l * Em + off] += -2.f * (mu[0] * (g[1] + g[2]) + mu[1] * (g[0] + g[2])
+                                     + mu[2] * (g[0] + g[1]))
+                             + mu[3] * exy + mu[4] * exz + mu[5] * eyz;
+    }
+}
+
+// Launch KERNEL<NC> for the input's stiffness count (0 isotropic, 9 VTI, 21 TTI).
+#define SEM3D_VS_LAUNCH_NC(nc, KERNEL, grid, block, shmem, stream, ...)              \
+    do {                                                                            \
+        if ((nc) == 21) KERNEL<21><<<grid, block, shmem, stream>>>(__VA_ARGS__);    \
+        else if ((nc) == 9) KERNEL<9><<<grid, block, shmem, stream>>>(__VA_ARGS__); \
+        else KERNEL<0><<<grid, block, shmem, stream>>>(__VA_ARGS__);                \
+    } while (0)
+
+
 // G: velocity gradients of the NEW v + v-memory update + stretch + isotropic
 // stress increment (in place). Optionally records the 9 STRETCHED gradients.
+template <int NC>
 static __global__ void sem3d_vs_stress_update(
     const float* __restrict__ vx, const float* __restrict__ vy,
     const float* __restrict__ vz,
@@ -1471,6 +1697,9 @@ static __global__ void sem3d_vs_stress_update(
     const float* __restrict__ a_z, const float* __restrict__ b_z,   // null = bare
     const float* __restrict__ lam, const float* __restrict__ mu,
     const float* __restrict__ lam2mu,
+    const float* __restrict__ cij,    // (NC, E*m) when NC > 0
+    int nsls, const float* __restrict__ ptau, const float* __restrict__ mtau,
+    const float* __restrict__ gsls_w, float* __restrict__ rmem,   // nsls = 0: elastic
     const int* __restrict__ ibool, const float* __restrict__ D,
     float ihx, float ihy, float ihz, float dt,
     float* __restrict__ save_gv,             // (9, E*m) slice for this step; may be null
@@ -1522,13 +1751,8 @@ static __global__ void sem3d_vs_stress_update(
         #pragma unroll
         for (int j = 0; j < 9; ++j) save_gv[j * Em + off] = gv[j];
     }
-    const float l = lam[off], u_ = mu[off], l2 = lam2mu[off];
-    sig[0 * Em + off] += dt * (l2 * gv[0] + l * (gv[1] + gv[2]));
-    sig[1 * Em + off] += dt * (l2 * gv[1] + l * (gv[0] + gv[2]));
-    sig[2 * Em + off] += dt * (l2 * gv[2] + l * (gv[0] + gv[1]));
-    sig[3 * Em + off] += dt * u_ * (gv[3] + gv[4]);
-    sig[4 * Em + off] += dt * u_ * (gv[5] + gv[6]);
-    sig[5 * Em + off] += dt * u_ * (gv[7] + gv[8]);
+    vs3d_stress_increment<NC>(sig, Em, off, gv, dt, lam, mu, lam2mu, cij);
+    if (nsls) vs3d_gsls_step(sig, rmem, Em, off, gv, dt, nsls, ptau, mtau, gsls_w);
 }
 
 // ---- P8 backward kernels (transposes of the three forward kernels) ---------
@@ -1537,6 +1761,7 @@ static __global__ void sem3d_vs_stress_update(
 // gv adjoints, run the mvel adjoint recursion in place, image lam/mu/lam2mu,
 // and D^T-scatter the raw-gv adjoints into lv (the transpose of the gather+
 // ref-grad). Shared 9m.
+template <int NC>
 static __global__ void sem3d_vs_stress_update_T(
     const float* __restrict__ lsig, const float* __restrict__ save_gv,
     float* __restrict__ lmvel,
@@ -1545,10 +1770,15 @@ static __global__ void sem3d_vs_stress_update_T(
     const float* __restrict__ a_z, const float* __restrict__ b_z,   // null = bare
     const float* __restrict__ lam, const float* __restrict__ mu,
     const float* __restrict__ lam2mu,
+    const float* __restrict__ cij,    // (NC, E*m) when NC > 0
+    int nsls, const float* __restrict__ ptau, const float* __restrict__ mtau,
+    const float* __restrict__ gsls_w, float* __restrict__ lrmem,  // nsls = 0: elastic
+    float* __restrict__ gPt, float* __restrict__ gMt,
     const int* __restrict__ ibool, const float* __restrict__ D,
     float ihx, float ihy, float ihz, float dt,
     float* __restrict__ lvx, float* __restrict__ lvy, float* __restrict__ lvz,
     float* __restrict__ gLam, float* __restrict__ gMu, float* __restrict__ gL2m,
+    float* __restrict__ gC,           // (NC, E*m) when NC > 0
     int ngll, int E, long n_global)
 {
     const int e = blockIdx.x;
@@ -1560,25 +1790,11 @@ static __global__ void sem3d_vs_stress_update_T(
     const long Em = static_cast<long>(E) * m;
     const size_t bo = static_cast<size_t>(blockIdx.y) * n_global;
 
-    const float lxx = lsig[0 * Em + off], lyy = lsig[1 * Em + off], lzz = lsig[2 * Em + off];
-    const float lxy = lsig[3 * Em + off], lxz = lsig[4 * Em + off], lyz = lsig[5 * Em + off];
-    const float l = lam[off], u_ = mu[off], l2 = lam2mu[off];
-    // lambda(gv_str) = dt C^T lsig, in the fixed 9-slot order
     float lg[9];
-    lg[0] = dt * (l2 * lxx + l * (lyy + lzz));
-    lg[1] = dt * (l2 * lyy + l * (lxx + lzz));
-    lg[2] = dt * (l2 * lzz + l * (lxx + lyy));
-    lg[3] = dt * u_ * lxy;  lg[4] = dt * u_ * lxy;
-    lg[5] = dt * u_ * lxz;  lg[6] = dt * u_ * lxz;
-    lg[7] = dt * u_ * lyz;  lg[8] = dt * u_ * lyz;
-    // imaging with the saved stretched gradients
-    const float* gv = save_gv;
-    const float g0 = gv[0*Em+off], g1 = gv[1*Em+off], g2 = gv[2*Em+off];
-    const float g3 = gv[3*Em+off], g4 = gv[4*Em+off], g5 = gv[5*Em+off];
-    const float g6 = gv[6*Em+off], g7 = gv[7*Em+off], g8 = gv[8*Em+off];
-    gL2m[off] += dt * (g0 * lxx + g1 * lyy + g2 * lzz);
-    gLam[off] += dt * ((g1 + g2) * lxx + (g0 + g2) * lyy + (g0 + g1) * lzz);
-    gMu[off]  += dt * ((g3 + g4) * lxy + (g5 + g6) * lxz + (g7 + g8) * lyz);
+    vs3d_stress_adjoint<NC>(lsig, save_gv, Em, off, dt, lam, mu, lam2mu, cij,
+                            gLam, gMu, gL2m, gC, lg);
+    if (nsls) vs3d_gsls_adjoint(lsig, lrmem, Em, off, save_gv, dt, nsls, ptau, mtau,
+                                gsls_w, gPt, gMt, lg);
     // mvel adjoint recursion + raw-gv adjoint
     float lraw[9];
     if (a_x) {
@@ -1744,6 +1960,343 @@ static __global__ void sem3d_vs_sigma_div_T(
         ls[6] = wx * rz_x;  ls[7] = wy * rz_y;  ls[8] = wz * rz_z;
     }
     // map slot -> sigma component: 0->xx,1->xy,2->xz,3->xy,4->yy,5->yz,6->xz,7->yz,8->zz
+    const int comp[9] = {0, 3, 4, 3, 1, 5, 4, 5, 2};
+    float add6[6] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+    #pragma unroll
+    for (int j = 0; j < 9; ++j) add6[comp[j]] += ls[j];
+    #pragma unroll
+    for (int c = 0; c < 6; ++c) lsig[c * Em + off] += add6[c];
+}
+
+
+// ---- P8 on Hex27 (ElasticVSSEM3DDeformed): the four element kernels with the
+// per-node metric. I_aj = d xi_a / d x_j (rows xi, eta, gamma); w_J = w3 |J|. The
+// nodal kernels (vel update, C-PML recursion and their transposes) are shared.
+
+// The deformed sem3d_vs_sigma_div: R_i = sum_a D_a^T [w_J sum_j sig_ij I_aj]. An
+// element the C-PML reaches assembles the divergence split by PHYSICAL direction,
+// P_ij = sum_a D_a^T [w_J sig_ij I_aj] (slot 3i + j, as the flat kernel), one stress
+// row at a time so that the shared memory stays 9m at any order.
+static __global__ void sem3d_vs_sigma_div_deformed(
+    const float* __restrict__ sig,
+    const float* __restrict__ a_x, const float* __restrict__ b_x,
+    const float* __restrict__ a_y, const float* __restrict__ b_y,
+    const float* __restrict__ a_z, const float* __restrict__ b_z,   // null = bare
+    const float* __restrict__ wJ,
+    const float* __restrict__ Ixx, const float* __restrict__ Ixy,
+    const float* __restrict__ Ixz, const float* __restrict__ Iex,
+    const float* __restrict__ Iey, const float* __restrict__ Iez,
+    const float* __restrict__ Igx, const float* __restrict__ Igy,
+    const float* __restrict__ Igz,
+    const int* __restrict__ ibool, const float* __restrict__ D,
+    float* __restrict__ Rx, float* __restrict__ Ry, float* __restrict__ Rz,
+    float* __restrict__ P,
+    int ngll, int E, long n_global)
+{
+    const int e = blockIdx.x;
+    if (e >= E) return;
+    const int m = ngll * ngll * ngll, tid = threadIdx.x;
+    if (tid >= m) return;
+    const int kx_i = tid % ngll, ky_i = (tid / ngll) % ngll, kz_i = tid / (ngll * ngll);
+    const int off = e * m + tid;
+    const long Em = static_cast<long>(E) * m;
+    const size_t bo = static_cast<size_t>(blockIdx.y) * n_global;
+    // block-uniform: the barriers below stay legal
+    const bool layer = a_x && __syncthreads_or(
+        a_x[off] != 0.f || a_y[off] != 0.f || a_z[off] != 0.f ||
+        b_x[off] != 0.f || b_y[off] != 0.f || b_z[off] != 0.f);
+
+    extern __shared__ float sh[];        // 9 flux arrays
+    const float sxx = sig[0 * Em + off], syy = sig[1 * Em + off], szz = sig[2 * Em + off];
+    const float sxy = sig[3 * Em + off], sxz = sig[4 * Em + off], syz = sig[5 * Em + off];
+    const float s9[9] = {sxx, sxy, sxz, sxy, syy, syz, sxz, syz, szz};   // (row i, column j)
+    const float w = wJ[off];
+    const float I9[9] = {Ixx[off], Ixy[off], Ixz[off], Iex[off], Iey[off], Iez[off],
+                         Igx[off], Igy[off], Igz[off]};               // (row a, column j)
+    const int zy = (kz_i * ngll + ky_i) * ngll;
+    const int g = ibool[off];
+    if (layer) {
+        for (int i = 0; i < 3; ++i) {
+            #pragma unroll
+            for (int j = 0; j < 3; ++j) {                 // slots (j, a): w sig_ij I_aj
+                const float ws = w * s9[3 * i + j];
+                #pragma unroll
+                for (int a = 0; a < 3; ++a) sh[(3 * j + a) * m + tid] = ws * I9[3 * a + j];
+            }
+            __syncthreads();
+            float r3[3] = {0.f, 0.f, 0.f};
+            for (int q = 0; q < ngll; ++q) {
+                const float Tx = D[q * ngll + kx_i], Ty = D[q * ngll + ky_i], Tz = D[q * ngll + kz_i];
+                const int iy = (kz_i * ngll + q) * ngll + kx_i, iz = (q * ngll + ky_i) * ngll + kx_i;
+                #pragma unroll
+                for (int j = 0; j < 3; ++j)
+                    r3[j] += Tx * sh[(3 * j + 0) * m + zy + q] + Ty * sh[(3 * j + 1) * m + iy]
+                           + Tz * sh[(3 * j + 2) * m + iz];
+            }
+            #pragma unroll
+            for (int j = 0; j < 3; ++j) atomicAdd(&P[(3 * i + j) * n_global + bo + g], r3[j]);
+            __syncthreads();                              // the next row overwrites the fluxes
+        }
+        return;
+    }
+    #pragma unroll
+    for (int i = 0; i < 3; ++i)                           // slots (i, a): w sum_j sig_ij I_aj
+        #pragma unroll
+        for (int a = 0; a < 3; ++a)
+            sh[(3 * i + a) * m + tid] = w * (s9[3 * i + 0] * I9[3 * a + 0]
+                                             + s9[3 * i + 1] * I9[3 * a + 1]
+                                             + s9[3 * i + 2] * I9[3 * a + 2]);
+    __syncthreads();
+    float rx = 0.f, ry = 0.f, rz = 0.f;
+    for (int q = 0; q < ngll; ++q) {
+        const float Tx = D[q * ngll + kx_i], Ty = D[q * ngll + ky_i], Tz = D[q * ngll + kz_i];
+        const int iy = (kz_i * ngll + q) * ngll + kx_i, iz = (q * ngll + ky_i) * ngll + kx_i;
+        rx += Tx * sh[0 * m + zy + q] + Ty * sh[1 * m + iy] + Tz * sh[2 * m + iz];
+        ry += Tx * sh[3 * m + zy + q] + Ty * sh[4 * m + iy] + Tz * sh[5 * m + iz];
+        rz += Tx * sh[6 * m + zy + q] + Ty * sh[7 * m + iy] + Tz * sh[8 * m + iz];
+    }
+    atomicAdd(&Rx[bo + g], rx);
+    atomicAdd(&Ry[bo + g], ry);
+    atomicAdd(&Rz[bo + g], rz);
+}
+
+// The deformed sem3d_vs_stress_update: the reference derivatives of the new v,
+// the physical gradients dv_c/dx_j = sum_a r_ca I_aj, then the flat kernel's
+// memory update, stretch, optional record and isotropic stress increment.
+template <int NC>
+static __global__ void sem3d_vs_stress_update_deformed(
+    const float* __restrict__ vx, const float* __restrict__ vy,
+    const float* __restrict__ vz,
+    float* __restrict__ sig, float* __restrict__ mvel,
+    const float* __restrict__ a_x, const float* __restrict__ b_x,
+    const float* __restrict__ a_y, const float* __restrict__ b_y,
+    const float* __restrict__ a_z, const float* __restrict__ b_z,   // null = bare
+    const float* __restrict__ lam, const float* __restrict__ mu,
+    const float* __restrict__ lam2mu,
+    const float* __restrict__ cij,    // (NC, E*m) when NC > 0
+    int nsls, const float* __restrict__ ptau, const float* __restrict__ mtau,
+    const float* __restrict__ gsls_w, float* __restrict__ rmem,   // nsls = 0: elastic
+    const float* __restrict__ Ixx, const float* __restrict__ Ixy,
+    const float* __restrict__ Ixz, const float* __restrict__ Iex,
+    const float* __restrict__ Iey, const float* __restrict__ Iez,
+    const float* __restrict__ Igx, const float* __restrict__ Igy,
+    const float* __restrict__ Igz,
+    const int* __restrict__ ibool, const float* __restrict__ D, float dt,
+    float* __restrict__ save_gv,             // (9, E*m) slice for this step; may be null
+    int ngll, int E, long n_global)
+{
+    const int e = blockIdx.x;
+    if (e >= E) return;
+    const int m = ngll * ngll * ngll, tid = threadIdx.x;
+    if (tid >= m) return;
+    const int kx_i = tid % ngll, ky_i = (tid / ngll) % ngll, kz_i = tid / (ngll * ngll);
+    const int off = e * m + tid;
+    const long Em = static_cast<long>(E) * m;
+    const size_t bo = static_cast<size_t>(blockIdx.y) * n_global;
+
+    extern __shared__ float sh[];
+    float* s_vx = sh; float* s_vy = sh + m; float* s_vz = sh + 2 * m;
+    const int g0 = ibool[off];
+    s_vx[tid] = vx[bo + g0]; s_vy[tid] = vy[bo + g0]; s_vz[tid] = vz[bo + g0];
+    __syncthreads();
+
+    const int zy = (kz_i * ngll + ky_i) * ngll;
+    float r[9] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};   // (component c, axis a)
+    for (int q = 0; q < ngll; ++q) {
+        const float Dx = D[kx_i * ngll + q], Dy = D[ky_i * ngll + q], Dz = D[kz_i * ngll + q];
+        const int iy = (kz_i * ngll + q) * ngll + kx_i, iz = (q * ngll + ky_i) * ngll + kx_i;
+        r[0] += Dx * s_vx[zy + q]; r[1] += Dy * s_vx[iy]; r[2] += Dz * s_vx[iz];
+        r[3] += Dx * s_vy[zy + q]; r[4] += Dy * s_vy[iy]; r[5] += Dz * s_vy[iz];
+        r[6] += Dx * s_vz[zy + q]; r[7] += Dy * s_vz[iy]; r[8] += Dz * s_vz[iz];
+    }
+    const float I9[9] = {Ixx[off], Ixy[off], Ixz[off], Iex[off], Iey[off], Iez[off],
+                         Igx[off], Igy[off], Igz[off]};
+#define SEM3D_VS_PG(c, j) (r[3 * (c) + 0] * I9[(j)] + r[3 * (c) + 1] * I9[3 + (j)] \
+                           + r[3 * (c) + 2] * I9[6 + (j)])
+    // fixed 9-slot order: gvx_x, gvy_y, gvz_z, gvy_x, gvx_y, gvz_x, gvx_z, gvz_y, gvy_z
+    float gv[9] = {SEM3D_VS_PG(0, 0), SEM3D_VS_PG(1, 1), SEM3D_VS_PG(2, 2),
+                   SEM3D_VS_PG(1, 0), SEM3D_VS_PG(0, 1), SEM3D_VS_PG(2, 0),
+                   SEM3D_VS_PG(0, 2), SEM3D_VS_PG(2, 1), SEM3D_VS_PG(1, 2)};
+#undef SEM3D_VS_PG
+    if (a_x) {
+        const float ax = a_x[off], bx = b_x[off], ay = a_y[off], by = b_y[off];
+        const float az = a_z[off], bz = b_z[off];
+        const float ca[9] = {ax, ay, az, ax, ay, ax, az, ay, az};
+        const float cb[9] = {bx, by, bz, bx, by, bx, bz, by, bz};
+        #pragma unroll
+        for (int j = 0; j < 9; ++j) {
+            const float mm = ca[j] * mvel[j * Em + off] + cb[j] * gv[j];
+            mvel[j * Em + off] = mm;
+            gv[j] = gv[j] + mm;
+        }
+    }
+    if (save_gv) {
+        #pragma unroll
+        for (int j = 0; j < 9; ++j) save_gv[j * Em + off] = gv[j];
+    }
+    vs3d_stress_increment<NC>(sig, Em, off, gv, dt, lam, mu, lam2mu, cij);
+    if (nsls) vs3d_gsls_step(sig, rmem, Em, off, gv, dt, nsls, ptau, mtau, gsls_w);
+}
+
+// The deformed sem3d_vs_stress_update_T: the flat kernel's adjoint of the
+// stretched gradients, imaging and memory recursion, then the transpose of the
+// metric contraction (adjoint of r_ca = sum_j I_aj lraw_cj) and the D^T scatter.
+template <int NC>
+static __global__ void sem3d_vs_stress_update_T_deformed(
+    const float* __restrict__ lsig, const float* __restrict__ save_gv,
+    float* __restrict__ lmvel,
+    const float* __restrict__ a_x, const float* __restrict__ b_x,
+    const float* __restrict__ a_y, const float* __restrict__ b_y,
+    const float* __restrict__ a_z, const float* __restrict__ b_z,   // null = bare
+    const float* __restrict__ lam, const float* __restrict__ mu,
+    const float* __restrict__ lam2mu,
+    const float* __restrict__ cij,    // (NC, E*m) when NC > 0
+    int nsls, const float* __restrict__ ptau, const float* __restrict__ mtau,
+    const float* __restrict__ gsls_w, float* __restrict__ lrmem,  // nsls = 0: elastic
+    float* __restrict__ gPt, float* __restrict__ gMt,
+    const float* __restrict__ Ixx, const float* __restrict__ Ixy,
+    const float* __restrict__ Ixz, const float* __restrict__ Iex,
+    const float* __restrict__ Iey, const float* __restrict__ Iez,
+    const float* __restrict__ Igx, const float* __restrict__ Igy,
+    const float* __restrict__ Igz,
+    const int* __restrict__ ibool, const float* __restrict__ D, float dt,
+    float* __restrict__ lvx, float* __restrict__ lvy, float* __restrict__ lvz,
+    float* __restrict__ gLam, float* __restrict__ gMu, float* __restrict__ gL2m,
+    float* __restrict__ gC,           // (NC, E*m) when NC > 0
+    int ngll, int E, long n_global)
+{
+    const int e = blockIdx.x;
+    if (e >= E) return;
+    const int m = ngll * ngll * ngll, tid = threadIdx.x;
+    if (tid >= m) return;
+    const int kx_i = tid % ngll, ky_i = (tid / ngll) % ngll, kz_i = tid / (ngll * ngll);
+    const int off = e * m + tid;
+    const long Em = static_cast<long>(E) * m;
+    const size_t bo = static_cast<size_t>(blockIdx.y) * n_global;
+
+    float lg[9];
+    vs3d_stress_adjoint<NC>(lsig, save_gv, Em, off, dt, lam, mu, lam2mu, cij,
+                            gLam, gMu, gL2m, gC, lg);
+    if (nsls) vs3d_gsls_adjoint(lsig, lrmem, Em, off, save_gv, dt, nsls, ptau, mtau,
+                                gsls_w, gPt, gMt, lg);
+    float lraw[9];
+    if (a_x) {
+        const float ax = a_x[off], bx = b_x[off], ay = a_y[off], by = b_y[off];
+        const float az = a_z[off], bz = b_z[off];
+        const float ca[9] = {ax, ay, az, ax, ay, ax, az, ay, az};
+        const float cb[9] = {bx, by, bz, bx, by, bx, bz, by, bz};
+        #pragma unroll
+        for (int j = 0; j < 9; ++j) {
+            const float tot = lg[j] + lmvel[j * Em + off];
+            lraw[j] = lg[j] + cb[j] * tot;
+            lmvel[j * Em + off] = ca[j] * tot;
+        }
+    } else {
+        #pragma unroll
+        for (int j = 0; j < 9; ++j) lraw[j] = lg[j];
+    }
+    // the raw-gradient adjoints per (component c, direction j); slot of (c, j):
+    // (x,x)0 (y,y)1 (z,z)2 (y,x)3 (x,y)4 (z,x)5 (x,z)6 (z,y)7 (y,z)8
+    const float lc[9] = {lraw[0], lraw[4], lraw[6],
+                         lraw[3], lraw[1], lraw[8],
+                         lraw[5], lraw[7], lraw[2]};
+    const float I9[9] = {Ixx[off], Ixy[off], Ixz[off], Iex[off], Iey[off], Iez[off],
+                         Igx[off], Igy[off], Igz[off]};
+    extern __shared__ float sh[];
+    #pragma unroll
+    for (int c = 0; c < 3; ++c)                            // slots (c, a)
+        #pragma unroll
+        for (int a = 0; a < 3; ++a)
+            sh[(3 * c + a) * m + tid] = I9[3 * a + 0] * lc[3 * c + 0]
+                                      + I9[3 * a + 1] * lc[3 * c + 1]
+                                      + I9[3 * a + 2] * lc[3 * c + 2];
+    __syncthreads();
+    const int zy = (kz_i * ngll + ky_i) * ngll;
+    float ax_ = 0.f, ay_ = 0.f, az_ = 0.f;
+    for (int q = 0; q < ngll; ++q) {
+        const float Tx = D[q * ngll + kx_i], Ty = D[q * ngll + ky_i], Tz = D[q * ngll + kz_i];
+        const int iy = (kz_i * ngll + q) * ngll + kx_i, iz = (q * ngll + ky_i) * ngll + kx_i;
+        ax_ += Tx * sh[0 * m + zy + q] + Ty * sh[1 * m + iy] + Tz * sh[2 * m + iz];
+        ay_ += Tx * sh[3 * m + zy + q] + Ty * sh[4 * m + iy] + Tz * sh[5 * m + iz];
+        az_ += Tx * sh[6 * m + zy + q] + Ty * sh[7 * m + iy] + Tz * sh[8 * m + iz];
+    }
+    const int g = ibool[off];
+    atomicAdd(&lvx[bo + g], ax_);
+    atomicAdd(&lvy[bo + g], ay_);
+    atomicAdd(&lvz[bo + g], az_);
+}
+
+// The deformed sem3d_vs_sigma_div_T: lsig_ij += w_J sum_a I_aj (D_a lR_i), or with
+// each slot's own adjoint lP_ij in an element the C-PML reaches. Shared 9m.
+static __global__ void sem3d_vs_sigma_div_T_deformed(
+    const float* __restrict__ lRx, const float* __restrict__ lRy,
+    const float* __restrict__ lRz, const float* __restrict__ lP,
+    float* __restrict__ lsig,
+    const float* __restrict__ a_x, const float* __restrict__ b_x,
+    const float* __restrict__ a_y, const float* __restrict__ b_y,
+    const float* __restrict__ a_z, const float* __restrict__ b_z,   // null = bare
+    const float* __restrict__ wJ,
+    const float* __restrict__ Ixx, const float* __restrict__ Ixy,
+    const float* __restrict__ Ixz, const float* __restrict__ Iex,
+    const float* __restrict__ Iey, const float* __restrict__ Iez,
+    const float* __restrict__ Igx, const float* __restrict__ Igy,
+    const float* __restrict__ Igz,
+    const int* __restrict__ ibool, const float* __restrict__ D,
+    int ngll, int E, long n_global)
+{
+    const int e = blockIdx.x;
+    if (e >= E) return;
+    const int m = ngll * ngll * ngll, tid = threadIdx.x;
+    if (tid >= m) return;
+    const int kx_i = tid % ngll, ky_i = (tid / ngll) % ngll, kz_i = tid / (ngll * ngll);
+    const int off = e * m + tid;
+    const long Em = static_cast<long>(E) * m;
+    const size_t bo = static_cast<size_t>(blockIdx.y) * n_global;
+    const bool layer = a_x && __syncthreads_or(
+        a_x[off] != 0.f || a_y[off] != 0.f || a_z[off] != 0.f ||
+        b_x[off] != 0.f || b_y[off] != 0.f || b_z[off] != 0.f);
+
+    extern __shared__ float sh[];
+    const int g = ibool[off];
+    const int zy = (kz_i * ngll + ky_i) * ngll;
+    const float w = wJ[off];
+    const float I9[9] = {Ixx[off], Ixy[off], Ixz[off], Iex[off], Iey[off], Iez[off],
+                         Igx[off], Igy[off], Igz[off]};
+    float ls[9];                                          // slots (i, j), as the flat kernel
+    if (layer) {
+        #pragma unroll
+        for (int j = 0; j < 9; ++j) sh[j * m + tid] = lP[j * n_global + bo + g];
+        __syncthreads();
+        #pragma unroll
+        for (int s = 0; s < 9; ++s) {
+            float d0 = 0.f, d1 = 0.f, d2 = 0.f;
+            for (int q = 0; q < ngll; ++q) {
+                const float Dx = D[kx_i * ngll + q], Dy = D[ky_i * ngll + q], Dz = D[kz_i * ngll + q];
+                const int iy = (kz_i * ngll + q) * ngll + kx_i, iz = (q * ngll + ky_i) * ngll + kx_i;
+                d0 += Dx * sh[s * m + zy + q]; d1 += Dy * sh[s * m + iy]; d2 += Dz * sh[s * m + iz];
+            }
+            const int j = s % 3;
+            ls[s] = w * (I9[j] * d0 + I9[3 + j] * d1 + I9[6 + j] * d2);
+        }
+    } else {
+        float* s_x = sh; float* s_y = sh + m; float* s_z = sh + 2 * m;
+        s_x[tid] = lRx[bo + g]; s_y[tid] = lRy[bo + g]; s_z[tid] = lRz[bo + g];
+        __syncthreads();
+        float r[9] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};   // (component i, axis a)
+        for (int q = 0; q < ngll; ++q) {
+            const float Dx = D[kx_i * ngll + q], Dy = D[ky_i * ngll + q], Dz = D[kz_i * ngll + q];
+            const int iy = (kz_i * ngll + q) * ngll + kx_i, iz = (q * ngll + ky_i) * ngll + kx_i;
+            r[0] += Dx * s_x[zy + q]; r[1] += Dy * s_x[iy]; r[2] += Dz * s_x[iz];
+            r[3] += Dx * s_y[zy + q]; r[4] += Dy * s_y[iy]; r[5] += Dz * s_y[iz];
+            r[6] += Dx * s_z[zy + q]; r[7] += Dy * s_z[iy]; r[8] += Dz * s_z[iz];
+        }
+        #pragma unroll
+        for (int i = 0; i < 3; ++i)
+            #pragma unroll
+            for (int j = 0; j < 3; ++j)
+                ls[3 * i + j] = w * (I9[j] * r[3 * i + 0] + I9[3 + j] * r[3 * i + 1]
+                                     + I9[6 + j] * r[3 * i + 2]);
+    }
     const int comp[9] = {0, 3, 4, 3, 1, 5, 4, 5, 2};
     float add6[6] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
     #pragma unroll

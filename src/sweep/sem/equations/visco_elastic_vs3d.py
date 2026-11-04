@@ -23,8 +23,10 @@ would need the memories' share of the stretched strain rate on the band rows.
 Models ``vp, vs, rho, Qp, Qs``, the 2-D class's ``f_ref``, ``f_band``, ``n_sls``, ``n_fit`` and
 ``velocities``, and all five models differentiable; element arrays of ``Q = inf`` give the
 elastic step bit for bit. The explicit stress update runs at the unrelaxed velocities: take
-``dt`` from those (:meth:`ViscoElasticVSSEM3D.unrelaxed_velocities`). Eager only; no boundary
-saving, since the attenuation is dissipative.
+``dt`` from those (:meth:`ViscoElasticVSSEM3D.unrelaxed_velocities`). ``impl='c'`` runs the
+velocity-stress CUDA kernels with the memories in the stress kernel (``nsls``,
+:mod:`sweep.sem.prop_c`); no boundary saving on either backend, since the attenuation is
+dissipative.
 """
 
 from __future__ import annotations

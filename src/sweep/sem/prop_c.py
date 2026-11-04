@@ -28,6 +28,17 @@ from .equations.acoustic3d_deformed import AcousticSEM3DDeformed
 from .equations.elastic3d import ElasticSEM3D
 from .equations.elastic3d_deformed import ElasticSEM3DDeformed
 from .equations.elastic_vs3d import ElasticVSSEM3D
+from .equations.elastic_vs3d_deformed import ElasticVSSEM3DDeformed
+from .equations.elastic_tti_vs3d import (_CIJ, _VTI, ElasticTTISEM3D,
+                                         ElasticTTISEM3DDeformed, ElasticVTISEM3D,
+                                         ElasticVTISEM3DDeformed)
+from .equations.visco_elastic_vs3d import ViscoElasticVSSEM3D, ViscoElasticVSSEM3DDeformed
+from .equations.visco_elastic_vs_deformed import (ViscoElasticVSSEM2DDeformed,
+                                                 gsls_weights)
+from .equations.elastic_vs_deformed import ElasticVSSEM2DDeformed
+from .equations.elastic_vti_vs_deformed import (ElasticTTISEM2DDeformed,
+                                                ElasticVTISEM2DDeformed)
+from .drivers.vs2d import _SEMElasticVS2DC
 from .equations.elastic2d_deformed import ElasticSEM2DDeformed
 from .cdrive import (AC_CPML_FIELDS, EL_CPML_FIELDS, EL_CPML_TRIPLES,
                      METRIC_NAMES)
@@ -35,7 +46,8 @@ from .drivers.acoustic2d import _SEMAcousticCpmlC
 from .drivers.elastic2d import _SEMElasticCpmlC
 from .drivers.fluid_solid import _SEMFluidSolidC
 from .drivers.bare import (_SEMAcousticC, _SEMElasticC, _SEMAcoustic3DC,
-                           _SEMElastic3DC, _SEMElasticVS3DC, _VS3D_CPML)
+                           _SEMElastic3DC, _SEMElasticVS3DC, _SEMElasticVS3DAnisoC,
+                           _SEMViscoElasticVS3DC, _VS3D_CPML)
 # The autograd Functions live in sweep.sem.drivers (one module per equation
 # family, filled through sweep.sem.cdrive); they are re-exported here for
 # the callers and tests that import them from prop_c. The bar for moving one
@@ -365,6 +377,17 @@ _C_ROUTES = (
     (AcousticPotentialSEM2D, "_forward_acoustic_cpml",   "_forward_acoustic"),
     (ElasticSEM2DDeformed,   "_forward_elastic_cpml",    "_forward_elastic"),
     (AcousticElasticSEM2D,   "_forward_fluid_solid",     "_forward_fluid_solid"),
+    (ElasticTTISEM2DDeformed, "_forward_elastic_vs2d",   "_forward_elastic_vs2d"),
+    (ElasticVTISEM2DDeformed, "_forward_elastic_vs2d",   "_forward_elastic_vs2d"),
+    (ViscoElasticVSSEM2DDeformed, "_forward_elastic_vs2d", "_forward_elastic_vs2d"),
+    (ElasticVSSEM2DDeformed, "_forward_elastic_vs2d",    "_forward_elastic_vs2d"),
+    (ElasticVTISEM3DDeformed, "_forward_elastic_vs3d",   "_forward_elastic_vs3d"),
+    (ElasticTTISEM3DDeformed, "_forward_elastic_vs3d",   "_forward_elastic_vs3d"),
+    (ElasticVTISEM3D,        "_forward_elastic_vs3d",    "_forward_elastic_vs3d"),
+    (ElasticTTISEM3D,        "_forward_elastic_vs3d",    "_forward_elastic_vs3d"),
+    (ViscoElasticVSSEM3DDeformed, "_forward_elastic_vs3d", "_forward_elastic_vs3d"),
+    (ViscoElasticVSSEM3D,    "_forward_elastic_vs3d",    "_forward_elastic_vs3d"),
+    (ElasticVSSEM3DDeformed, "_forward_elastic_vs3d",    "_forward_elastic_vs3d"),
     (ElasticVSSEM3D,         "_forward_elastic_vs3d",    "_forward_elastic_vs3d"),
     (ElasticSEM3DDeformed,   "_forward_elastic3d_deformed",
                              "_forward_elastic3d_deformed"),
@@ -1067,13 +1090,25 @@ class SEMCudaPropagator(SEMPropagator):
         return (sx, sy, sz)
 
     def _elastic_vs3d_consts(self):
-        """Velocity-stress Hex8 elastic, with the per-axis C-PML coefficients
+        """Velocity-stress elastic, with the per-axis C-PML coefficients
         (broadcast to (E, m) like the quadrature) when the equation has one;
-        ``has_cpml`` tells the driver whether to fill or hand empties."""
+        ``has_cpml`` tells the driver whether to fill or hand empties. On a
+        Hex27 mesh (ElasticVSSEM3DDeformed) the full per-node metric drives the
+        *_deformed kernels and wH* / ih* are placeholders they never read."""
         b, eq = self._base(), self.eq
+        if isinstance(eq, ElasticVSSEM3DDeformed):
+            E, m = b.E, b.m
+            wJ = _f32(eq._w_jac.reshape(E, m))
+            J = eq._inv_J                       # (..., a, j) = d xi_a / d x_j
+            geom = {"wHx": wJ, "wHy": wJ, "wHz": wJ,
+                    "ihx": 1.0, "ihy": 1.0, "ihz": 1.0, "deformed": 1, "wJ": wJ,
+                    **{nm: _f32(J[..., k // 3, k % 3].reshape(E, m))
+                       for k, nm in enumerate(METRIC_NAMES)}}
+        else:
+            geom = b.vs3d_geom()
         c = {
             "ibool": b.ibool_flat(), "D": b.D(eq),
-            **b.vs3d_geom(),
+            **geom,
             "pat_x": b.pattern(0), "pat_y": b.pattern(1), "pat_z": b.pattern(2),
             **b.rec(),
             "has_cpml": eq.cpml is not None,
@@ -1086,14 +1121,84 @@ class SEMCudaPropagator(SEMPropagator):
         return c
 
     def _forward_elastic_vs3d(self, wav):
+        """The isotropic Lame set, for the VTI / TTI classes their nine / 21
+        Voigt stiffnesses (``aniso`` in the kernels), for the visco-elastic
+        classes the unrelaxed Lame set plus the GSLS memories (``nsls``) --
+        flat or Hex27 alike."""
         eq = self.eq
         c = self._elastic_vs3d_consts()
         E, m = c["n_elements"], c["ngll"] ** 3
         t = lambda x: x.to("cuda", torch.float32).reshape(E, m)
+        inv_M = eq._inv_M.to("cuda", torch.float32)
+        if isinstance(eq, ElasticTTISEM3D):
+            names = _VTI if isinstance(eq, ElasticVTISEM3D) else _CIJ
+            cij = torch.stack([t(getattr(eq, a)) for a in names])
+            return tuple(_SEMElasticVS3DAnisoC.apply(cij, inv_M, wav, c))
+        if isinstance(eq, ViscoElasticVSSEM3D):
+            a_l, c_l = gsls_weights(eq._tau_sigma, self.dt)
+            c["gsls_w"] = torch.tensor(list(a_l) + list(c_l), dtype=torch.float32,
+                                       device="cuda")
+            ptau = torch.stack([t(x) for x in eq._p_tau])
+            mtau = torch.stack([t(x) for x in eq._m_tau])
+            return tuple(_SEMViscoElasticVS3DC.apply(
+                t(eq._lam), t(eq._mu), t(eq._lam2mu), ptau, mtau, inv_M, wav, c))
         sx, sy, sz = _SEMElasticVS3DC.apply(
-            t(eq._lam), t(eq._mu), t(eq._lam2mu),
-            eq._inv_M.to("cuda", torch.float32), wav, c)
+            t(eq._lam), t(eq._mu), t(eq._lam2mu), inv_M, wav, c)
         return (sx, sy, sz)
+
+    # -- 2-D velocity-stress -------------------------------------------- #
+    def _elastic_vs2d_consts(self):
+        """The 2-D velocity-stress family on Quad9: the per-node metric, and with
+        a C-PML its per-axis coefficients element-local and per node (the
+        divergence memories are nodal). The strong free surface
+        (``free_top=True``, which PropSEM never sets) has no kernel."""
+        b, eq = self._base(), self.eq
+        if getattr(eq, "free_top", False):
+            raise NotImplementedError(
+                f"{type(eq).__name__}(free_top=True): the strong free-surface "
+                "projection has no impl='c' kernel; use impl='eager', or the natural "
+                "free surface (free_top=False, PropSEM's).")
+        E, m = b.E, b.m
+        f = lambda t: _f32(t.reshape(E, m))
+        c = {
+            "ibool": b.ibool_flat(), "D": b.D(eq), "wJ": f(eq._w_J),
+            "ixx": f(eq._ixx), "ixz": f(eq._ixz), "iex": f(eq._iex), "iez": f(eq._iez),
+            "pat_x": b.pattern(0), "pat_z": b.pattern(1),
+            **b.rec(),
+            "has_cpml": eq.cpml is not None,
+            **b.tail,
+        }
+        if eq.cpml is not None:
+            names = ("a_x", "b_x", "a_z", "b_z")
+            c.update({nm: f(getattr(eq.cpml, nm)) for nm in names})
+            c["a_n"] = b.nodal(*(c[nm] for nm in names))
+        return c
+
+    def _forward_elastic_vs2d(self, wav):
+        """ElasticVSSEM2DDeformed: the Lame set; the VTI / TTI classes: their four
+        / six stiffnesses; the visco-elastic class: the unrelaxed Lame set and the
+        GSLS memories."""
+        eq = self.eq
+        c = self._elastic_vs2d_consts()
+        E, m = c["n_elements"], c["ngll"] ** 2
+        t = lambda x: x.to("cuda", torch.float32).reshape(E, m)
+        inv_M = eq._inv_M.to("cuda", torch.float32)
+        if isinstance(eq, ElasticVTISEM2DDeformed):       # VTI, TTI
+            c["mode"] = "aniso"
+            mats = (torch.stack([t(getattr(eq, a)) for a in type(eq).bs_model_attrs]),)
+        elif isinstance(eq, ViscoElasticVSSEM2DDeformed):
+            a_l, c_l = gsls_weights(eq._tau_sigma, self.dt)
+            c["mode"] = "visco"
+            c["gsls_w"] = torch.tensor(list(a_l) + list(c_l), dtype=torch.float32,
+                                       device="cuda")
+            mats = (t(eq._lam), t(eq._mu), t(eq._lam2mu),
+                    torch.stack([t(x) for x in eq._p_tau]),
+                    torch.stack([t(x) for x in eq._m_tau]))
+        else:
+            c["mode"] = "iso"
+            mats = (t(eq._lam), t(eq._mu), t(eq._lam2mu))
+        sx, sz = _SEMElasticVS2DC.apply(inv_M, wav, c, *mats)
+        return (sx, sz)
 
     # -- 2-D coupled fluid-solid ----------------------------------------- #
     def _fluid_solid_consts(self):

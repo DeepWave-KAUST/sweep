@@ -71,19 +71,19 @@ the FD classes. `models=` per class: `api-signatures.md`.
 | `ViscoAcousticPotentialSEM2D` | quad9 | `vp, Qk` (+ `density=`) | no | yes | SPECFEM2D's visco-acoustic potential form; `fit="nonlinear"` (its `USE_SOLVOPT`); no boundary saving |
 | `AcousticSEM3D` / `AcousticSEM3DDeformed` | hex8 / hex27 | `vp` | yes | yes | 3-D acoustic (with topography for Deformed) |
 | `ElasticSEM2DDeformed` | quad9 | `vp, vs, rho` | yes | yes | 2-D elastic with topography |
-| `ElasticVSSEM2DDeformed` | quad9 | `vp, vs, rho` | no | yes | velocity-stress |
+| `ElasticVSSEM2DDeformed` | quad9 | `vp, vs, rho` | yes | yes | velocity-stress |
 | `ElasticSHSEM2DDeformed` | quad9 | `vs, rho` | no | yes | SH waves (`u_y`, receivers `u_y`, `vy`) |
 | `ElasticSEM2D` | quad4 | `vp, vs, rho` | no | **no** (reflecting box, `abcn=0`) | |
 | `ElasticSEM3D` / `ElasticSEM3DDeformed` | hex8 / hex27 | `vp, vs, rho` | yes | **no** | |
 | `ElasticVSSEM3D` | hex8 | `vp, vs, rho` | yes | yes | 3-D elastic with absorbing boundary, flat |
-| `ElasticVSSEM3DDeformed` | hex27 | `vp, vs, rho` | no | yes | 3-D elastic, topography + absorbing |
-| `ElasticVTISEM2DDeformed` | quad9 | `vp, vs, rho, epsilon, delta` | no | yes | VTI |
-| `ElasticTTISEM2DDeformed` | quad9 | `vp, vs, rho, epsilon, delta, theta` | no | yes | TTI: the VTI medium tilted by `theta` (radians, the FD `ElasticTTI2nd`'s tilt) |
-| `ElasticVTISEM3D` / `ElasticVTISEM3DDeformed` | hex8 / hex27 | `vp, vs, rho, epsilon, delta, gamma` | no | yes | 3-D VTI (Thomsen) |
-| `ElasticTTISEM3D` / `ElasticTTISEM3DDeformed` | hex8 / hex27 | `vp, vs, rho, epsilon, delta, gamma, theta, phi` | no | yes | 3-D TTI: tilt `theta`, azimuth `phi` (radians), the FD `ElasticTTISG3D`'s parameters; 21 stiffnesses |
-| `ViscoElasticVSSEM2DDeformed` | quad9 | `vp, vs, rho, Qp, Qs` | no | yes | GSLS attenuation; `f_ref`, `f_band`, `n_sls` via `equation_options`; no boundary saving |
-| `ViscoElasticVSSEM3D` | hex8 | `vp, vs, rho, Qp, Qs` | no | yes | 3-D GSLS attenuation, flat; options as the 2-D class; no boundary saving |
-| `ViscoElasticVSSEM3DDeformed` | hex27 | `vp, vs, rho, Qp, Qs` | no | yes | 3-D GSLS attenuation with topography + absorbing |
+| `ElasticVSSEM3DDeformed` | hex27 | `vp, vs, rho` | yes | yes | 3-D elastic, topography + absorbing |
+| `ElasticVTISEM2DDeformed` | quad9 | `vp, vs, rho, epsilon, delta` | yes | yes | VTI |
+| `ElasticTTISEM2DDeformed` | quad9 | `vp, vs, rho, epsilon, delta, theta` | yes | yes | TTI: the VTI medium tilted by `theta` (radians, the FD `ElasticTTI2nd`'s tilt) |
+| `ElasticVTISEM3D` / `ElasticVTISEM3DDeformed` | hex8 / hex27 | `vp, vs, rho, epsilon, delta, gamma` | yes | yes | 3-D VTI (Thomsen) |
+| `ElasticTTISEM3D` / `ElasticTTISEM3DDeformed` | hex8 / hex27 | `vp, vs, rho, epsilon, delta, gamma, theta, phi` | yes | yes | 3-D TTI: tilt `theta`, azimuth `phi` (radians), the FD `ElasticTTISG3D`'s parameters; 21 stiffnesses |
+| `ViscoElasticVSSEM2DDeformed` | quad9 | `vp, vs, rho, Qp, Qs` | yes | yes | GSLS attenuation; `f_ref`, `f_band`, `n_sls` via `equation_options`; no boundary saving |
+| `ViscoElasticVSSEM3D` | hex8 | `vp, vs, rho, Qp, Qs` | yes | yes | 3-D GSLS attenuation, flat; options as the 2-D class; no boundary saving |
+| `ViscoElasticVSSEM3DDeformed` | hex27 | `vp, vs, rho, Qp, Qs` | yes | yes | 3-D GSLS attenuation with topography + absorbing |
 | `ViscoElasticSEM2DDeformed` | quad9 | `vp, vs, rho, Qk, Qmu` | no | yes | SPECFEM2D's visco-elastic displacement scheme (its defaults: `vp`, `vs` unrelaxed) and visco-elastic C-PML; `fit="nonlinear"` (its `USE_SOLVOPT`); no boundary saving |
 | `AcousticElasticSEM2D` | quad9 | `vp, vs, rho` | yes | yes | coupled fluid-solid (ocean over seabed); records `p, vx, vz` (default) or `chi, u_x, u_z` |
 | `BiotVSSEM2DDeformed`, `BiotAnisoPermSEM2DDeformed` | quad9 | Biot set | no | yes | poroelastic; no boundary saving |

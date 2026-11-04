@@ -20,7 +20,8 @@ sources and receivers, the gradients and boundary saving are the parent's.
   ``ElasticTTISEM2DDeformed``'s tilt.
 
 The explicit step's stability limit is set by the fastest velocity, ``vp sqrt(1 + 2 epsilon)``
-for a positive ``epsilon``: take ``dt`` from that. Eager only.
+for a positive ``epsilon``: take ``dt`` from that. ``impl='c'`` runs the velocity-stress CUDA
+kernels with these stiffnesses (``aniso`` = 9 or 21, :mod:`sweep.sem.prop_c`).
 """
 
 from __future__ import annotations

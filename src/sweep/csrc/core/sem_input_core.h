@@ -1005,6 +1005,118 @@ struct SemElasticBackwardInputCore {
     int ndim = 2;
 };
 
+struct Sem2dVsForwardInputCore {
+    Buf ibool;   // (E, ngll^2); lam.. empty when aniso
+    Buf D;
+    Buf lam;
+    Buf mu;
+    Buf lam2mu;
+    Buf wJ;   // w2 |J|, d(xi,eta)/d(x,z); 1/mass_rho
+    Buf ixx;
+    Buf ixz;
+    Buf iex;
+    Buf iez;
+    Buf inv_M;
+    Buf a_x;   // (E, ngll^2); empty = bare
+    Buf b_x;
+    Buf a_z;
+    Buf b_z;
+    Buf a_n;   // (4, n_global) a_x b_x a_z b_z per node
+    Buf pat_x;
+    Buf pat_z;
+    Buf wavelet;
+    Buf rec_G;
+    Buf rec_W;
+    Buf vx;   // (n_global,)
+    Buf vz;
+    Buf Rx;
+    Buf Rz;
+    Buf P;   // (4, n_global); empty = bare
+    Buf msig;
+    Buf sig;   // (3, E*ngll^2): xx zz xz
+    Buf mvel;   // (4, E*ngll^2)
+    Buf seis_x;
+    Buf seis_z;
+    Buf save_vx;   // (nt, n_global) OPTIONAL
+    Buf save_vz;
+    Buf save_gv;   // (nt, 4, E*ngll^2) OPTIONAL
+    double dt = 0.0;
+    int nt = 0;
+    int ngll = 0;
+    int n_elements = 0;
+    int n_global = 0;
+    int n_rec = 0;
+    int ndim = 2;
+    int batch = 1;
+    int aniso = 0;
+    Buf cij;
+    int nsls = 0;
+    Buf ptau;
+    Buf mtau;
+    Buf gsls_w;
+    Buf rmem;
+};
+
+struct Sem2dVsBackwardInputCore {
+    Buf ibool;
+    Buf D;
+    Buf lam;
+    Buf mu;
+    Buf lam2mu;
+    Buf wJ;
+    Buf ixx;
+    Buf ixz;
+    Buf iex;
+    Buf iez;
+    Buf inv_M;
+    Buf a_x;
+    Buf b_x;
+    Buf a_z;
+    Buf b_z;
+    Buf a_n;
+    Buf pat_x;
+    Buf pat_z;
+    Buf wavelet;
+    Buf rec_G;
+    Buf rec_W;
+    Buf save_vx;
+    Buf save_vz;
+    Buf save_gv;
+    Buf grad_sx;   // (n_rec, nt) upstream
+    Buf grad_sz;
+    Buf lvx;
+    Buf lvz;
+    Buf lRx;
+    Buf lRz;
+    Buf lP;
+    Buf lmsig;
+    Buf lsig;
+    Buf lmvel;
+    Buf grad_lam;
+    Buf grad_mu;
+    Buf grad_lam2mu;
+    Buf grad_inv_M;
+    Buf grad_wavelet;
+    double dt = 0.0;
+    int nt = 0;
+    int ngll = 0;
+    int n_elements = 0;
+    int n_global = 0;
+    int n_rec = 0;
+    int ndim = 2;
+    int batch = 1;
+    int aniso = 0;
+    Buf cij;
+    Buf grad_cij;
+    int nsls = 0;
+    Buf ptau;
+    Buf mtau;
+    Buf gsls_w;
+    Buf lrmem;
+    Buf grad_ptau;
+    Buf grad_mtau;
+};
+
 struct Sem3dForwardInputCore {
     Buf ibool;   // (E, ngll^3) int64, flattened (kz,ky,kx)
     Buf D;   // (ngll, ngll) f32
@@ -1573,6 +1685,24 @@ struct Sem3dVsForwardInputCore {
     int n_rec = 0;
     int ndim = 3;
     int batch = 1;
+    int deformed = 0;
+    Buf wJ;   // (E, ngll^3) = w3 |J|
+    Buf ixx;   // d(xi,eta,gamma)/d(x,y,z)
+    Buf ixy;
+    Buf ixz;
+    Buf iex;
+    Buf iey;
+    Buf iez;
+    Buf igx;
+    Buf igy;
+    Buf igz;
+    int aniso = 0;
+    Buf cij;
+    int nsls = 0;
+    Buf ptau;
+    Buf mtau;
+    Buf gsls_w;
+    Buf rmem;
 };
 
 struct Sem3dVsBackwardInputCore {
@@ -1635,6 +1765,27 @@ struct Sem3dVsBackwardInputCore {
     int n_rec = 0;
     int ndim = 3;
     int batch = 1;
+    int deformed = 0;
+    Buf wJ;   // (E, ngll^3) = w3 |J|
+    Buf ixx;   // d(xi,eta,gamma)/d(x,y,z)
+    Buf ixy;
+    Buf ixz;
+    Buf iex;
+    Buf iey;
+    Buf iez;
+    Buf igx;
+    Buf igy;
+    Buf igz;
+    int aniso = 0;
+    Buf cij;
+    Buf grad_cij;
+    int nsls = 0;
+    Buf ptau;
+    Buf mtau;
+    Buf gsls_w;
+    Buf lrmem;
+    Buf grad_ptau;
+    Buf grad_mtau;
 };
 
 #include <type_traits>
@@ -1649,6 +1800,8 @@ static_assert(std::is_standard_layout<SemFluidSolidForwardInputCore>::value, "Se
 static_assert(std::is_standard_layout<SemFluidSolidBackwardInputCore>::value, "SemFluidSolidBackwardInputCore crosses the C boundary");
 static_assert(std::is_standard_layout<SemElasticCpmlBackwardInputCore>::value, "SemElasticCpmlBackwardInputCore crosses the C boundary");
 static_assert(std::is_standard_layout<SemElasticBackwardInputCore>::value, "SemElasticBackwardInputCore crosses the C boundary");
+static_assert(std::is_standard_layout<Sem2dVsForwardInputCore>::value, "Sem2dVsForwardInputCore crosses the C boundary");
+static_assert(std::is_standard_layout<Sem2dVsBackwardInputCore>::value, "Sem2dVsBackwardInputCore crosses the C boundary");
 static_assert(std::is_standard_layout<Sem3dForwardInputCore>::value, "Sem3dForwardInputCore crosses the C boundary");
 static_assert(std::is_standard_layout<Sem3dBackwardInputCore>::value, "Sem3dBackwardInputCore crosses the C boundary");
 static_assert(std::is_standard_layout<Sem3dCpmlForwardInputCore>::value, "Sem3dCpmlForwardInputCore crosses the C boundary");
