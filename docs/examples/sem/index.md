@@ -128,4 +128,16 @@ receivers of a marine survey. The
 
     [:material-notebook-outline: Open notebook](../../notebooks/60_sem_tti3d.ipynb)
 
+-   ![SEM curved sea floor in 3-D](../../figures/gallery/61_sem_seafloor3d.png){ loading=lazy }
+
+    **A curved sea floor in 3-D**
+
+    ---
+
+    `PropSEM(interfaces=...)` on the Hex27 mesh: element layers that follow a
+    seamount, water and rock in `BiotVSSEM3DDeformed`, an air gun recorded by
+    hydrophones and sea-floor geophones.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/61_sem_seafloor3d.ipynb)
+
 </div>

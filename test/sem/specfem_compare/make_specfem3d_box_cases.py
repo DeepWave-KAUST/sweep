@@ -21,7 +21,13 @@ and on the surface. ``DATA/sweep_box3d.json`` keeps the geometry for the compari
   ``model_aniso.f90`` by the material's anisotropy flag (1, 2), which a user edits: this script
   writes ``sweep_aniso_cij.inc``, the 21 stiffnesses of each case (in SPECFEM3D's axes, z up),
   for that routine to include (``include 'sweep_aniso_cij.inc'`` at its end; then rebuild
-  ``xgenerate_databases``).
+  ``xgenerate_databases``);
+* ``layers3d_force``: the rock over a stiffer one (vp 3000, vs 1700, rho 2300) across a curved
+  interface 160 m deep on average, ``depth = 160 + 20 cos(2 pi x / 320) cos(2 pi y / 320)``,
+  sixteen element layers above and below it, the force and stations in both. SPECFEM3D's
+  internal mesher takes the interface on a 5 m grid, grades the layers linearly in each
+  column and builds straight-sided elements from their corners (its 27-node elements get
+  their mid-nodes as averages of the corners).
 
 The attenuating cases take SPECFEM3D's three mechanisms (its ``N_SLS``) over a band given
 (``COMPUTE_FREQ_BAND_AUTOMATIC = .false.``), periods 4 ms .. 0.4 s (2.5 .. 250 Hz, whose
@@ -64,7 +70,21 @@ CASES = {"iso3d_force": dict(attenuation=False),
          "sea3d_force": dict(attenuation=False, water=WATER, recs=RECS_SEA),
          "vti3d_force": dict(attenuation=False, aniso=dict(ANISO, flag=1, theta=0.0, phi=0.0)),
          "tti3d_force": dict(attenuation=False, aniso=dict(ANISO, flag=2, theta=math.radians(30.0),
-                                                           phi=math.radians(40.0)))}
+                                                           phi=math.radians(40.0))),
+         "layers3d_force": dict(attenuation=False, recs=None,
+                                layer=dict(rock=dict(rho=2300.0, vp=3000.0, vs=1700.0),
+                                           depth0=160.0, amp=20.0, period=320.0, upper=16))}
+RECS_LAYERS = {"upper": [(200.7, 163.1, 101.7), (101.1, 96.4, 51.3), (243.5, 88.2, 120.4),
+                         (210.0, 163.1, 100.0)],
+               "lower": [(157.3, 231.9, 198.3), (243.5, 88.2, 252.4), (120.0, 200.0, 230.0)],
+               "surface": [(100.3, 200.7, 0.0), (250.0, 120.0, 0.0)]}
+CASES["layers3d_force"]["recs"] = RECS_LAYERS
+
+
+def interface_depth(lay, x, y):
+    """The curved interface's depth (m, z down) at (x, y)."""
+    k = 2 * math.pi / lay["period"]
+    return lay["depth0"] + lay["amp"] * np.cos(k * x) * np.cos(k * y)
 # the Voigt entries (rows, columns xx, yy, zz, yz, xz, xy) of the FD ElasticTTISG3D's order
 KEYS = ("11", "12", "13", "14", "15", "16", "22", "23", "24", "25", "26", "33", "34", "35", "36",
         "44", "45", "46", "55", "56", "66")
@@ -152,7 +172,15 @@ for name, case in CASES.items():
     an = case.get("aniso")
     mat = f"1 {ROCK['rho']} {ROCK['vp']} {ROCK['vs']} {q[0]} {q[1]} {an['flag'] if an else 0} 2"
     wat = case.get("water")
-    if wat is None:
+    lay = case.get("layer")
+    if lay is not None:                   # SPECFEM3D counts the layers from the bottom
+        nl = NE - lay["upper"]
+        r = lay["rock"]
+        mesh = (mesh0 + f"NMATERIALS                      = 2\n{mat}\n"
+                f"2 {r['rho']} {r['vp']} {r['vs']} {q[0]} {q[1]} 0 2\n"
+                f"NREGIONS                        = 2\n1 {NE} 1 {NE} 1 {nl} 2\n"
+                f"1 {NE} 1 {NE} {nl + 1} {NE} 1\n")
+    elif wat is None:
         mesh = (mesh0 + f"NMATERIALS                      = 1\n{mat}\n"
                 f"NREGIONS                        = 1\n1 {NE} 1 {NE} 1 {NE} 1\n")
     else:                                 # SPECFEM3D counts the layers from the bottom
@@ -168,8 +196,18 @@ for name, case in CASES.items():
     (out / name / "OUTPUT_FILES" / "DATABASES_MPI").mkdir(parents=True, exist_ok=True)
     (d / "Par_file").write_text(par)
     (d / "meshfem3D_files" / "Mesh_Par_file").write_text(mesh)
-    (d / "meshfem3D_files" / "interfaces.dat").write_text(
-        f"1\n .true. 2 2 0.0 0.0 {NE * H:.1f} {NE * H:.1f}\n interface.dat\n {NE}\n")
+    if lay is None:
+        (d / "meshfem3D_files" / "interfaces.dat").write_text(
+            f"1\n .true. 2 2 0.0 0.0 {NE * H:.1f} {NE * H:.1f}\n interface.dat\n {NE}\n")
+    else:                                 # the curved interface (elevation, z up), then the top
+        n5 = 2 * NE + 1
+        g = np.arange(n5) * (H / 2)
+        (d / "meshfem3D_files" / "interfaces.dat").write_text(
+            f"2\n .true. {n5} {n5} 0.0 0.0 {H / 2} {H / 2}\n interface1.dat\n"
+            f" .true. 2 2 0.0 0.0 {NE * H:.1f} {NE * H:.1f}\n interface.dat\n"
+            f" {NE - lay['upper']}\n {lay['upper']}\n")
+        (d / "meshfem3D_files" / "interface1.dat").write_text("".join(
+            f"{-interface_depth(lay, x, y):.15e}\n" for y in g for x in g))
     (d / "meshfem3D_files" / "interface.dat").write_text("0.0\n0.0\n0.0\n0.0\n")
     (d / "FORCESOLUTION").write_text(
         "FORCE  001\ntime shift:     0.0\nf0:             25.0\n"
@@ -186,6 +224,7 @@ for name, case in CASES.items():
         ROCK, h=H, ne=NE, ngll=NGLL, dt=DT, nstep=NSTEP, f0=F0, source=SRC, receivers=recs,
         groups=[[g, len(v)] for g, v in groups.items()], attenuation=case["attenuation"], q=q,
         **(ATT if case["attenuation"] else {}), **({"water": wat} if wat else {}),
+        **({"layer": lay} if lay else {}),
         **({"aniso": dict(an, cij=tti_cij(ROCK["rho"], ROCK["vp"], ROCK["vs"], an["epsilon"],
                                           an["delta"], an["gamma"], an["theta"], an["phi"]))}
            if an else {})),

@@ -36,7 +36,7 @@ is the curved one (biquadratic elements) that follows a topography and, with
 ## 3-D meshes
 
 `Hex8Mesh` and `Hex27Mesh` are the 3-D counterparts of `Quad4Mesh` and
-`Quad9Mesh`.
+`Quad9Mesh`; `build_layered_hex27` is `build_layered_quad9` in 3-D.
 
 ::: sweep.sem.Hex8Mesh
 
@@ -47,6 +47,8 @@ is the curved one (biquadratic elements) that follows a topography and, with
 ::: sweep.sem.build_axis_aligned_hex27
 
 ::: sweep.sem.build_topography_hex27
+
+::: sweep.sem.build_layered_hex27
 
 ::: sweep.sem.hex27_from_control_nodes
 

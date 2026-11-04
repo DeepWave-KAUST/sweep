@@ -87,8 +87,8 @@ element boundaries is smeared over the elements it crosses. With `interfaces`, t
 internal interfaces instead, as SPECFEM2D's internal mesher follows those of its
 `interfaces.dat`.
 
-- **The interfaces.** Each is given like `topography`: its row in every column, `(nx,)`,
-  fractional rows allowed, top-down.
+- **The interfaces.** Each is given like `topography`: its row in every column, `(nx,)` in
+  2-D and `(ny, nx)` in 3-D, fractional rows allowed, top-down.
 - **The layers.** The surface (or the topography), the interfaces and the model's last row
   bound the layers, and each layer gets whole element rows. `interface_elements` sets them,
   top-down and summing to `(nz - 1) / n_order`; by default the layers share them by their mean
@@ -97,7 +97,8 @@ internal interfaces instead, as SPECFEM2D's internal mesher follows those of its
 - **The absorbing pads** join the layers next to them, and the interfaces stay flat across the
   lateral pads.
 
-This is 2-D only, on the Quad9 classes. `element_layer` gives each element's layer, and
+Interfaces need the curved meshes: the Quad9 classes in 2-D and the Hex27 ones (the
+`...Deformed` classes) in 3-D. `element_layer` gives each element's layer, and
 `layered_model(values)` gives a GLL-native model of one value per layer, which steps exactly at
 the interfaces:
 
@@ -115,6 +116,33 @@ seis = solver(wavelet, sources, receivers, models=models)
 
 The values may be tensors that require gradients. Against SPECFEM2D's mesh of the same
 interfaces, see [Against SPECFEM2D](#against-specfem2d).
+
+In 3-D the mesh is `build_layered_hex27`'s, and a sea floor is the case that needs it:
+`BiotVSSEM3DDeformed` models the water and a dry rock in one mesh (its fluid and dry elastic
+regions, coupled as SPECFEM3D couples its acoustic and elastic domains), but each element has
+to be wholly one medium, so a curved sea floor has to run along element faces:
+
+```python
+from sweep.equations.biot_params import biot_elastic, biot_fluid
+from sweep.sem import BiotVSSEM3DDeformed, PropSEM
+
+solver = PropSEM(BiotVSSEM3DDeformed, shape=(nz, ny, nx), dh=dh, dt=dt, free_surface=True,
+                 interfaces=[seafloor], interface_elements=[3, 7],      # seafloor: (ny, nx) rows
+                 source_type=["p"], receiver_type=["vx", "vy", "vz", "p"])
+water, rock = biot_fluid(1020.0 * 1500.0 ** 2, 1020.0), biot_elastic(2400.0, 1300.0, 2000.0)
+models = [solver.layered_model(c) for c in zip(water, rock)]
+seis = solver(wavelet, sources, receivers, models=models)
+```
+
+The control nodes of the Hex27 elements, mid-nodes included, lie on the interfaces at their
+columns, so the faces between the layers follow the interfaces' curvature. SPECFEM3D's
+internal mesher takes only the corners from its interfaces and puts the mid-nodes of its
+27-node elements at their averages, which makes its elements straight-sided. On that straight-sided mesh of a curved interface
+(20 m of relief over 320 m) `ElasticVSSEM3DDeformed` agrees with SPECFEM3D to 3e-14; on its own
+mesh, whose faces follow the interface, the records differ from SPECFEM3D's by 9e-3, which is
+the difference between the two meshes (a 10 m element's straight face departs from the curve
+by up to 0.1 m there). See [Against SPECFEM3D](#against-specfem3d). Notebook 61 shows a
+seamount in 3-D.
 
 ## Speed and memory on `impl='eager'`
 
@@ -1947,7 +1975,8 @@ The Biot classes discretize the poroelastic equations differently from SPECFEM2D
 
 - a homogeneous rock (vp 2000, vs 1000 m/s, rho 2000 kg/m³) in a 320 m cube of 10 m Hex8
   elements from SPECFEM3D's internal mesher, with all six sides free; the same rock under
-  80 m of water; or the rock transversely isotropic;
+  80 m of water; the rock transversely isotropic; or the rock over a stiffer one across a
+  curved interface;
 - a vertical point force inside an element, a 25 Hz Ricker that SPECFEM3D reads as an
   external source time function;
 - ten stations inside elements, on element faces and edges, and on the free surface;
@@ -1963,6 +1992,7 @@ as follows (relative L2 over all traces, each component scaled by its peak):
 | `ViscoElasticVSSEM3D` on SPECFEM3D's mechanisms | the same; Qkappa = 60, Qmu = 20 | 3.6e-3, 4.4e-3; 1.3e-14 with SPECFEM3D's memory update |
 | `ElasticVTISEM3D`, `ElasticVTISEM3DDeformed` (flat) | the rock transversely isotropic (`epsilon = 0.25`, `delta = 0.1`, `gamma = 0.15`), a vertical axis | 5e-14 |
 | `ElasticTTISEM3D`, `ElasticTTISEM3DDeformed` (flat) | the same medium, its axis tilted by 30° toward the azimuth 40° | 5e-14 |
+| `ElasticVSSEM3DDeformed`, with `interfaces` | the rock over a stiffer one (vp 3000, vs 1700 m/s) across an interface 160 m deep with 20 m of relief | 3e-14 on SPECFEM3D's straight-sided elements; 9e-3 on ours, whose faces follow the interface |
 | `BiotVSSEM3DDeformed`, fluid and dry elastic regions | 80 m of water over the rock, the force in the rock: the pressure and the fluid velocity in the water, the velocity in the rock | 2e-12; 2e-3 to 5e-3 for the fluid velocity across the element faces a station sits on |
 
 On SPECFEM3D's mechanisms our class takes its relaxation times, its strengths (its simplex

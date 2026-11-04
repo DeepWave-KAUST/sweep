@@ -26,7 +26,12 @@ element faces and edges and on the surface.
   Hex27 mesh) for the vertical axis, ElasticTTISEM3D and ElasticTTISEM3DDeformed for the tilted
   one, after checking that the stiffnesses they build are those (the generator's are an
   independent numpy Bond rotation; SPECFEM3D's z up flips the eight entries with one index in
-  ``yz`` or ``xz``).
+  ``yz`` or ``xz``);
+* the rock over a stiffer one across a curved interface (``PropSEM(interfaces=...)`` in 3-D):
+  ElasticVSSEM3DDeformed on its layered Hex27 mesh, whose mid-nodes lie on the interface, and
+  ``FacetedMesh``, the same class on SPECFEM3D's straight-sided elements (the mid-nodes the
+  averages of the corners, as its internal mesher makes them); the materials per element
+  layer (``layered_model``).
 
 SPECFEM3D's attenuation: ``sigma = C_U eps - sum_l R_l``, ``dR_l/dt = -R_l / tau_sigma_l + 2
 mu_U c_l eps_dev / tau_sigma_l`` (and ``kappa_U c_kappa_l tr(eps)`` for the bulk part), ``c_l
@@ -77,8 +82,42 @@ from sweep.sem.equations.visco_elastic_vs3d import gsls_memory_specs3
 from sweep.sem.fields import FieldSpec
 
 CASES = ("iso3d_force", "visco3d_force", "visco3d_km_force", "sea3d_force", "vti3d_force",
-         "tti3d_force")
+         "tti3d_force", "layers3d_force")
 TI = (ElasticVTISEM3D, ElasticVTISEM3DDeformed, ElasticTTISEM3D, ElasticTTISEM3DDeformed)
+
+
+class FacetedMesh(ElasticVSSEM3DDeformed):
+    """ElasticVSSEM3DDeformed, run on SPECFEM3D's straight-sided version of the layered mesh
+    (``faceted``)."""
+
+
+def faceted(g, dh, n, dtype, device):
+    """The layered Hex27 mesh of the curved-interface case with the mid-nodes of every
+    element the averages of its corners: SPECFEM3D's internal mesher (``add_missing_nodes``)."""
+    from sweep.sem.mesh.hex27 import _pack_control, hex27_from_control_nodes
+    lay, L = g["layer"], (n - 1) * dh
+    ne = g["ne"]
+    c = torch.linspace(0.0, L, 2 * ne + 1, dtype=torch.float64)
+    YY, XX = torch.meshgrid(c, c, indexing="ij")
+    k = 2 * math.pi / lay["period"]
+    mid = lay["depth0"] + lay["amp"] * torch.cos(k * XX) * torch.cos(k * YY)
+    tops = [torch.zeros_like(XX), mid, torch.full_like(XX, L)]
+    zs = []
+    for i, m in enumerate((lay["upper"], ne - lay["upper"])):
+        frac = torch.linspace(0.0, 1.0, 2 * m + 1, dtype=torch.float64)
+        z = tops[i][None] + frac[:, None, None] * (tops[i + 1] - tops[i])[None]
+        zs.append(z if i == 0 else z[1:])
+    Z = torch.cat(zs, 0)
+    for ax in range(3):                       # odd control nodes: the means of their neighbours
+        lo = [slice(None)] * 3
+        hi = [slice(None)] * 3
+        md = [slice(None)] * 3
+        lo[ax], md[ax], hi[ax] = slice(0, -2, 2), slice(1, None, 2), slice(2, None, 2)
+        Z[tuple(md)] = 0.5 * (Z[tuple(lo)] + Z[tuple(hi)])
+    X = c.view(1, 1, -1).expand_as(Z)
+    Y = c.view(1, -1, 1).expand_as(Z)
+    control = _pack_control(X, Y, Z, ne, ne, ne)
+    return hex27_from_control_nodes(control, ne, ne, ne, n_order=4, dtype=dtype, device=device)
 COMPS = ("X", "Y", "Z")
 N_SLS = 3                             # SPECFEM3D's constants.h
 
@@ -249,6 +288,8 @@ def equations(g):
     if "aniso" in g:
         return ([ElasticVTISEM3D, ElasticVTISEM3DDeformed] if g["aniso"]["theta"] == 0.0
                 else [ElasticTTISEM3D, ElasticTTISEM3DDeformed])
+    if "layer" in g:
+        return [ElasticVSSEM3DDeformed, FacetedMesh]
     if not g["attenuation"]:
         return [ElasticVSSEM3D, ElasticVSSEM3DDeformed, ElasticSEM3D]
     qk, qmu = g["q"]
@@ -319,6 +360,20 @@ def run_sem(g, eq, device, dtype, n_order=4):
                    f_dominant=g["f0"], dev=device, dtype=dtype, impl="eager",
                    memory=Full(), eager_options=EagerOptions(use_compile=False),
                    source_type=["vz"], receiver_type=["vx", "vy", "vz"], **kw)
+    if "layer" in g:                            # the curved interface, the layers' materials
+        lay = g["layer"]
+        k = 2 * math.pi / lay["period"]
+        yy, xx = np.meshgrid(np.arange(n) * dh, np.arange(n) * dh, indexing="ij")
+        rows = (lay["depth0"] + lay["amp"] * np.cos(k * xx) * np.cos(k * yy)) / dh
+        prop = PropSEM(eq, shape=(n, n, n), dh=dh, dt=g["dt"], n_order=n_order, abcn=0,
+                       interfaces=[rows], interface_elements=[lay["upper"],
+                                                              g["ne"] - lay["upper"]],
+                       f_dominant=g["f0"], dev=device, dtype=dtype, impl="eager",
+                       memory=Full(), eager_options=EagerOptions(use_compile=False),
+                       source_type=["vz"], receiver_type=["vx", "vy", "vz"])
+        if eq is FacetedMesh:
+            prop.mesh = faceted(g, dh, n, dtype, device)
+        models = [prop.layered_model([g[key], lay["rock"][key]]) for key in ("vp", "vs", "rho")]
     if eq in TI:                                # the stiffnesses the case gave SPECFEM3D
         built = prop._build_eq(models)
         ref = g["aniso"]["cij"]
@@ -368,6 +423,7 @@ def direct_window(g):
     r = np.array(g["receivers"])
     dist = np.min([np.linalg.norm(r - m, axis=1) for m in images], 0)
     v = g["vp"] * math.sqrt(1.0 + 2.0 * max(0.0, g.get("aniso", {}).get("epsilon", 0.0)))
+    v = max(v, g.get("layer", {}).get("rock", {}).get("vp", 0.0))
     return dist / v - 1.0 / g["f0"]
 
 

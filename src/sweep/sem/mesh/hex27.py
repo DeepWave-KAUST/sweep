@@ -195,3 +195,46 @@ def build_topography_hex27(
     control = _pack_control(X, Y, Z, nez, ney, nex)
     return hex27_from_control_nodes(control, nex, ney, nez, n_order=n_order,
                                     dtype=dtype, device=device)
+
+
+def build_layered_hex27(
+    nex, ney, x_max, y_max, z_bottom,
+    surfaces: list[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]], rows: list[int],
+    *, n_order=4, dtype=torch.float32, device="cpu",
+) -> Hex27Mesh:
+    """Conforming Hex27 mesh of layers whose element layers follow curved interfaces --
+    SPECFEM3D's internal mesher (``interfaces.dat``) in 3-D, and
+    :func:`~sweep.sem.mesh.quad9.build_layered_quad9` with a y axis.
+
+    ``surfaces[0]`` is the top (``z_top_fn`` of :func:`build_topography_hex27`) and
+    ``surfaces[1:]`` the internal interfaces, top-down, each mapping two equal-shaped tensors
+    of (x, y) to the depth there (z down); the bottom is flat at ``z_bottom``. Layer ``k`` lies
+    between ``surfaces[k]`` and the next surface (or the bottom) in ``rows[k]`` element layers,
+    its control layers graded linearly in each control column. The control columns are
+    uniform in x and y. A single layer is :func:`build_topography_hex27`'s mesh.
+    """
+    if len(rows) != len(surfaces) or any(int(r) < 1 for r in rows):
+        raise ValueError(f"one positive layer count per layer: {len(surfaces)} surfaces, "
+                         f"rows {list(rows)}")
+    nc = lambda ne: 2 * ne + 1
+    x_axis = torch.linspace(0.0, x_max, nc(nex), dtype=dtype, device=device)
+    y_axis = torch.linspace(0.0, y_max, nc(ney), dtype=dtype, device=device)
+    YY, XX = torch.meshgrid(y_axis, x_axis, indexing="ij")     # (nc_y, nc_x)
+    tops = [torch.as_tensor(f(XX, YY), dtype=dtype, device=device) for f in surfaces]
+    tops.append(torch.full_like(XX, float(z_bottom)))
+    for k in range(len(rows)):
+        if not bool((tops[k + 1] > tops[k]).all()):
+            raise ValueError(f"layer {k} is not below the surface above it everywhere: the "
+                             "interfaces must not touch or cross")
+    z_layers = []
+    for k, n in enumerate(rows):
+        frac = torch.linspace(0.0, 1.0, nc(int(n)), dtype=dtype, device=device)
+        z = tops[k][None] + frac[:, None, None] * (tops[k + 1] - tops[k])[None]
+        z_layers.append(z if k == 0 else z[1:])         # the shared interface layer once
+    Z = torch.cat(z_layers, 0)                          # (2 nez + 1, nc_y, nc_x)
+    nez = sum(int(n) for n in rows)
+    X = x_axis.view(1, 1, -1).expand_as(Z)
+    Y = y_axis.view(1, -1, 1).expand_as(Z)
+    control = _pack_control(X, Y, Z, nez, ney, nex)
+    return hex27_from_control_nodes(control, nex, ney, nez, n_order=n_order,
+                                    dtype=dtype, device=device)

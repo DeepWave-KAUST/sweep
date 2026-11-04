@@ -205,16 +205,16 @@ def _resolve_topography(topography, shape):
 
 def _resolve_interfaces(interfaces, shape, topography):
     """``interfaces`` -> the internal interfaces' rows, float64 on the host, top-down: one
-    ``(nx,)`` array of fractional rows per interface, each below the surface (row 0, or
-    the topography) and the one above, and above the model's last row. 2-D only."""
+    ``(nx,)`` (2-D) or ``(ny, nx)`` (3-D) array of fractional rows per interface, each below
+    the surface (row 0, or the topography) and the one above, and above the model's last
+    row."""
     if interfaces is None:
         return None
-    if len(shape) != 2:
-        raise NotImplementedError("interfaces are 2-D only")
     rows = [_resolve_topography(r, shape) for r in interfaces]
     if not rows:
         return None
-    top = topography if topography is not None else torch.zeros(shape[1], dtype=torch.float64)
+    top = (topography if topography is not None
+           else torch.zeros(tuple(shape[1:]), dtype=torch.float64))
     for k, r in enumerate(rows):
         above = top if k == 0 else rows[k - 1]
         if not bool((r > above).all()):
@@ -280,10 +280,10 @@ class _SurfaceRows:
 
 
 class _FlatTop:
-    """A flat top at z = 0 for :func:`build_layered_quad9` (a class, so a propagator stays
-    picklable)."""
+    """A flat top at z = 0 for :func:`build_layered_quad9` and :func:`build_layered_hex27`
+    (a class, so a propagator stays picklable)."""
 
-    def __call__(self, x):
+    def __call__(self, x, y=None):
         return torch.zeros_like(x)
 
 
@@ -722,9 +722,10 @@ class PropSEM:
     ``n_order``; default ten elements) the absorbing layer added outside it;
     ``free_surface`` takes PropTorch's edge spec (default ``False``) and
     ``topography`` its per-column surface rows; ``interfaces`` are internal
-    interfaces given the same way, top-down, which the 2-D Quad9 mesh follows
-    in ``interface_elements`` element rows per layer (default: by the layers'
-    mean thicknesses), see :meth:`layered_model`; ``memory`` is ``Full()``,
+    interfaces given the same way, top-down, which the curved mesh (Quad9 in
+    2-D, Hex27 in 3-D) follows in ``interface_elements`` element rows (layers)
+    per layer (default: by the layers' mean thicknesses), see
+    :meth:`layered_model`; ``memory`` is ``Full()``,
     ``BoundarySaving(storage_dtype=...)`` or ``Ckpt(chunks=...)``; ``impl``
     ``None`` is ``'auto'``; ``eager_options`` is an ``EagerOptions`` (or its dict)
     for ``impl='eager'``, the step compiled unless ``use_compile=False``; ``nt``
@@ -1208,13 +1209,15 @@ class PropSEM:
             common.update(ney=elems_pad[1], y_max=maxes[1])
         self._layer_rows = [elems_pad[0]]
         if self.interfaces is not None:
-            if kind != "quad9":
+            if kind not in ("quad9", "hex27"):
                 raise ValueError(
-                    f"interfaces need a curved-element 2-D mesh; {equation.__name__} builds "
-                    f"on a {kind} mesh. Use the 'Deformed' variant of this equation.")
+                    f"interfaces need a curved-element mesh (Quad9, Hex27); "
+                    f"{equation.__name__} builds on a {kind} mesh. Use the 'Deformed' "
+                    f"variant of this equation.")
+            from .mesh.hex27 import build_layered_hex27
             from .mesh.quad9 import build_layered_quad9
             top = (self.topography if topography is not None
-                   else torch.zeros(shape[1], dtype=torch.float64))
+                   else torch.zeros(tuple(shape[1:]), dtype=torch.float64))
             bounds = [top, *self.interfaces, torch.full_like(top, float(shape[0] - 1))]
             rows = _layer_elements(bounds, elems_int[0], self._interface_elements)
             rows[0] += low_pad[0]                 # the layers take the pads at their sides
@@ -1227,10 +1230,16 @@ class PropSEM:
                         else _FlatTop()]
             surfaces += [_SurfaceRows(r + z_pad, self.dh, self._pad0[1:])
                          for r in self.interfaces]
-            build = (build_layered_quad9,
-                     dict(nex=elems_pad[-1], x_max=maxes[-1], z_bottom=maxes[0],
-                          surfaces=surfaces, rows=rows, n_order=n_order, dtype=dtype,
-                          device=dev))
+            if kind == "quad9":
+                build = (build_layered_quad9,
+                         dict(nex=elems_pad[-1], x_max=maxes[-1], z_bottom=maxes[0],
+                              surfaces=surfaces, rows=rows, n_order=n_order, dtype=dtype,
+                              device=dev))
+            else:
+                build = (build_layered_hex27,
+                         dict(nex=elems_pad[-1], ney=elems_pad[1], x_max=maxes[-1],
+                              y_max=maxes[1], z_bottom=maxes[0], surfaces=surfaces, rows=rows,
+                              n_order=n_order, dtype=dtype, device=dev))
         elif topography is None:
             build = (flat_builder, dict(z_max=maxes[0], **common))
         else:
@@ -1264,12 +1273,16 @@ class PropSEM:
     def element_layer(self):
         """``(E,)`` long: each element's layer, 0 at the top -- the layers ``interfaces``
         cut, the absorbing pads in the layer they border; all zeros without interfaces."""
-        ez = torch.arange(self._gll_shape[0]) // self._elems_pad[-1]
+        per_layer = 1
+        for n in self._elems_pad[1:]:                 # the elements of one layer: (ny,) nx
+            per_layer *= n
+        ez = torch.arange(self._gll_shape[0]) // per_layer
         edges = torch.cumsum(torch.tensor(self._layer_rows), 0)
         return torch.bucketize(ez, edges, right=True)
 
     def layered_model(self, values):
-        """A GLL-native model, ``(E, ngll, ngll)``, of one value per layer (top-down;
+        """A GLL-native model, ``(E, ngll, ngll)`` (3-D ``(E, ngll, ngll, ngll)``), of one
+        value per layer (top-down;
         floats or 0-d tensors, which keep their gradients): the material steps at the
         interfaces, as the mesh does, where a grid model would be interpolated across them."""
         n_layers = len(self._layer_rows)

@@ -23,6 +23,7 @@ GLL points, diagonal mass matrix. On a flat-topped box `PropTorch` is the simple
 | `abcn` | grid cells of C-PML, a multiple of `n_order`; `None` (default) = ten elements |
 | `n_order` | GLL polynomial degree per element (default 4) |
 | `topography` | surface row per column `(nx,)` / `(ny, nx)`, **fractional rows allowed**; free surface on top implied |
+| `interfaces` | internal interfaces given like `topography`, top-down (curved meshes: Quad9 / Hex27 classes); `interface_elements` element layers per layer; `prop.layered_model([v_top, ...])` gives a GLL-native model that steps at them (e.g. water / rock for `BiotVSSEM3DDeformed`) |
 | `memory` | default `Full()`; `BoundarySaving(...)`, `Ckpt(chunks=...)` also accepted |
 | `impl` | `None`: CUDA kernels when the class has them and the device is CUDA, else eager |
 | Elastic default source | a **unit vertical force** (FD `Elastic` defaults to an explosion) |

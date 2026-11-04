@@ -34,6 +34,7 @@ from .hex8 import (
 from .hex27 import (
     Hex27Mesh,
     build_axis_aligned_hex27,
+    build_layered_hex27,
     build_topography_hex27,
     hex27_from_control_nodes,
 )
@@ -56,6 +57,7 @@ __all__ = [
     "boundary_element_faces",
     "Hex27Mesh",
     "build_axis_aligned_hex27",
+    "build_layered_hex27",
     "build_topography_hex27",
     "hex27_from_control_nodes",
 ]

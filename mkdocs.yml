@@ -155,6 +155,7 @@ nav:
               - Plane waves · P, SV, SH, Rayleigh through an injection band: notebooks/58_sem_plane_wave.ipynb
               - Visco-elastic attenuation in 3-D: notebooks/59_sem_visco_elastic3d.ipynb
               - Anisotropy in 3-D: notebooks/60_sem_tti3d.ipynb
+              - A curved sea floor in 3-D: notebooks/61_sem_seafloor3d.ipynb
           - Imaging:
               - examples/imaging/index.md
               - RTM · Marmousi: notebooks/08_rtm_acoustic_marmousi.ipynb

@@ -35,6 +35,15 @@ and this project adheres to
   the visco-elastic Green's function (the elastic one with the GSLS complex moduli) to
   0.7e-3 to 1.2e-3 in relative L2, where the attenuation changes the records by 12% to 47%
   (`test/sem/test_sem_visco_elastic3d.py`). Eager; no boundary saving (dissipative).
+- **Curved internal interfaces in 3-D: `PropSEM(interfaces=...)` on the Hex27 classes and
+  `sweep.sem.build_layered_hex27`.** Each interface is `(ny, nx)` rows; the element layers
+  follow the interfaces, graded linearly in every column of control nodes, and
+  `layered_model` gives each layer its material. The mid-nodes lie on the interfaces, so the
+  faces between the layers follow their curvature, where SPECFEM3D's internal mesher builds
+  straight-sided elements; on that straight-sided mesh `ElasticVSSEM3DDeformed` agrees with
+  SPECFEM3D to 3e-14 across a curved interface. A curved sea floor for
+  `BiotVSSEM3DDeformed` (water and rock, each element wholly one medium) is the case that needs
+  it (`test/sem/test_sem_interfaces3d.py`); notebook 61: a seamount.
 - **`ElasticVTISEM3D`, `ElasticTTISEM3D` (and their `...Deformed` versions on Hex27):
   transversely isotropic media on the 3-D SEM.** The velocity-stress step of `ElasticVSSEM3D`
   with the stiffnesses of a VTI medium (`vp, vs, rho, epsilon, delta, gamma`) or of one whose
