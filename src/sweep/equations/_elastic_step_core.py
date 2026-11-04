@@ -15,6 +15,7 @@ zero-copy tensor reference assignments, no extra memory.
 from __future__ import annotations
 
 from ._cpml import cpml_update
+from ._invariants import once
 from ._free_surface import (
     FS_MOD_SXX,
     FS_NEARSURF_O2,
@@ -69,6 +70,7 @@ def elastic_velocity_substep(
     free_surface=False,
     fs_faces=None,
     lame_lambda_2mu=None,
+    invariants=None,
 ):
     """Velocity sub-step: update ``(vx, vz)`` from the stress gradients (a pure
     shear — stresses are read, not written).  This is the first half of
@@ -110,11 +112,11 @@ def elastic_velocity_substep(
     hz, hx = pd._spacing["z"], pd._spacing["x"]
     tzz_z, m_tzzz = cpml_update(tzz_z, m_tzzz, azh, bzh, (szz, pd.kzf, hz))
     txz_x, m_txzx = cpml_update(txz_x, m_txzx, ax, bx, (sxz, pd.kxb, hx))
-    vz = vz + dt / rho_z * (tzz_z + txz_x)
+    vz = vz + once(invariants, "dt/rho_z", lambda: dt / rho_z) * (tzz_z + txz_x)
 
     txz_z, m_txzz = cpml_update(txz_z, m_txzz, az, bz, (sxz, pd.kzb, hz))
     txx_x, m_txxx = cpml_update(txx_x, m_txxx, axh, bxh, (sxx, pd.kxf, hx))
-    vx = vx + dt / rho_x * (txx_x + txz_z)
+    vx = vx + once(invariants, "dt/rho_x", lambda: dt / rho_x) * (txx_x + txz_z)
 
     return (
         vx, vz, sxx, szz, sxz,
@@ -208,6 +210,7 @@ def elastic_stress_substep(
     fs_faces=None,
     lame_lambda_2mu=None,
     return_gradients=False,
+    invariants=None,
 ):
     """Stress sub-step: update ``(sxx, szz, sxz)`` from the velocity gradients (a
     pure shear — velocities are read, not written).  Second half of
@@ -237,20 +240,22 @@ def elastic_stress_substep(
         # uses the modified coefficient 4 mu (lam+mu)/(lam+2mu) * d vx/dx  (from
         # sigma_zz=0).  Top or bottom surface row (the image-method mirror alone
         # leaves the surface sigma_xx ~mu/lambda too big).
-        _coef = 4.0 * lame_mu * (lame_lambda + lame_mu) / lame_lambda_2mu
-        _sxx_surf = sxx_pre_fs + dt * _coef * vx_x
+        _dt_coef = once(invariants, "dt*fs_coef",
+                        lambda: dt * (4.0 * lame_mu * (lame_lambda + lame_mu) / lame_lambda_2mu))
+        _sxx_surf = sxx_pre_fs + _dt_coef * vx_x
         for side in z_sides:
             sxx = overwrite_surface_row(sxx, _sxx_surf, top_halo, axis=-2, side=side)
     if _mod_sxx and x_sides:
         # x-normal analogue (x<->z swap): at sigma_xx=0 the surface sigma_zz uses
         # the modified coefficient times d vz/dz.
-        _coef_x = 4.0 * lame_mu * (lame_lambda + lame_mu) / lame_lambda_2mu
-        _szz_surf = szz_pre_fs + dt * _coef_x * vz_z
+        _dt_coef_x = once(invariants, "dt*fs_coef",
+                          lambda: dt * (4.0 * lame_mu * (lame_lambda + lame_mu) / lame_lambda_2mu))
+        _szz_surf = szz_pre_fs + _dt_coef_x * vz_z
         for side in x_sides:
             szz = overwrite_surface_row(szz, _szz_surf, top_halo, axis=-1, side=side)
 
     vx_z, vz_x, m_vxz, m_vzx = elastic_shear_cpml(vx_z, vz_x, m_vxz, m_vzx, pml, (vx, vz, pd))
-    sxz = sxz + dt * mu_xz * (vx_z + vz_x)
+    sxz = sxz + once(invariants, "dt*mu_xz", lambda: dt * mu_xz) * (vx_z + vz_x)
 
     out = (
         vx, vz, sxx, szz, sxz,
@@ -280,6 +285,7 @@ def elastic_step_core(
     free_surface=False,
     fs_faces=None,
     lame_lambda_2mu=None,
+    invariants=None,
 ):
     """One leapfrog step on the 2-D first-order velocity-stress elastic
     equations: ``stress ∘ velocity``.  Pure stencil + CPML + state update; NO
@@ -293,13 +299,14 @@ def elastic_step_core(
     Parameters are unchanged from the historic monolithic version: ``pml`` is the
     8-tuple ``(az, bz, azh, bzh, ax, bx, axh, bxh)``; ``free_surface``/
     ``fs_faces`` select the image-method derivatives; ``lame_lambda_2mu`` is
-    an optional precomputed ``λ + 2 μ``.
+    an optional precomputed ``λ + 2 μ``; ``invariants`` the rollout's dict of
+    time-invariant coefficients (``sweep.equations._invariants``).
     """
     kw = dict(
         lame_lambda=lame_lambda, lame_mu=lame_mu, mu_xz=mu_xz,
         rho_x=rho_x, rho_z=rho_z, dt=dt, h=h, b=b, pd=pd, pml=pml,
         free_surface=free_surface, fs_faces=fs_faces,
-        lame_lambda_2mu=lame_lambda_2mu,
+        lame_lambda_2mu=lame_lambda_2mu, invariants=invariants,
     )
     state = elastic_velocity_substep(
         vx, vz, sxx, szz, sxz,

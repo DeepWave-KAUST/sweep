@@ -421,6 +421,7 @@ when the corresponding capability is implemented (or, for
 | `image_topography_hint` | `None` | Appended to that refusal: where to go instead (the elastic equations point to `ElasticCurvilinear` / `PropSEM`). |
 | `BOUNDARY_BUFFER_REACH` | `0` | How far, in units of M, the boundary-saving imaging stencil reaches beyond the reverse step; a non-zero value makes the propagator insert a sigma=0 buffer of `REACH*M + 1` cells before the PML (`AcousticVRZ` / `AcousticVRZ3D` declare 1). |
 | `C_HAS_RECURSIVE_CKPT` | `True` | Set `False` when the core ships no `{C_NAME}_backward_recursive_ckpt`; `Ckpt(mode="recursive")` is then refused. |
+| `takes_invariants` | `False` | The eager `func` takes `invariants=None`: the dict an uncompiled rollout hands every step (one per rollout and per checkpointed chunk). Wrap each coefficient that depends on the models and `dt` alone in `sweep.equations._invariants.once(invariants, "key", lambda: dt / rho)`: it is then made once instead of every step, and the backward keeps one field fewer per step for it. Declare it on the class that defines `func`; a subclass that overrides `func` without declaring it is not handed the dict. |
 | `default_pml_type` | `"cpmlr"` | PML formulation used when the propagator is not given one explicitly. |
 
 ## Out of scope here

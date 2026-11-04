@@ -1,4 +1,5 @@
 from ._cpml import cpml_axis_update
+from ._invariants import once
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec, history_fields, record_single
 
@@ -31,7 +32,8 @@ def _gradient_kernel3d(spatial_order, axis, sign=-1):
 def step_cpml(u_now, u_pre, psix, psiz, zetax, zetaz, 
               vp, z, dt, h, b, 
               lap_x, lap_z,
-              pml, grad_op, grad_kernels=None
+              pml, grad_op, grad_kernels=None,
+              invariants=None,
               ):
 
     az, bz, dbzdz, ax, bx, dbxdx = pml
@@ -40,20 +42,25 @@ def step_cpml(u_now, u_pre, psix, psiz, zetax, zetaz,
 
     dpdx = grad_op(u_now, h, axis=-1, kernels=grad_kernels)
     dpdz = grad_op(u_now, h, axis=-2, kernels=grad_kernels)
-    inv_z = 1.0 / z
-    model_b = vp * inv_z
-    kappa = z * vp
-    # ∇b via the product rule on (vp, 1/z) — matches the C kernel exactly:
-    #   dbdx = (∂x vp)·(1/z) + vp·∂x(1/z)   [NOT ∂x(vp/z), the field-gradient form]
-    # The two discretisations differ at O(h²); using the product rule keeps the
-    # eager forward operator identical to the compiled CUDA kernel so impl='c'
-    # and impl='eager' produce the same wavefields and the same gradients.
-    dvpdx = grad_op(vp, h, axis=-1, kernels=grad_kernels)
-    dvpdz = grad_op(vp, h, axis=-2, kernels=grad_kernels)
-    dinvzdx = grad_op(inv_z, h, axis=-1, kernels=grad_kernels)
-    dinvzdz = grad_op(inv_z, h, axis=-2, kernels=grad_kernels)
-    dbdx = dvpdx * inv_z + vp * dinvzdx
-    dbdz = dvpdz * inv_z + vp * dinvzdz
+
+    def coefficients():
+        inv_z = 1.0 / z
+        model_b = vp * inv_z
+        kappa = z * vp
+        # ∇b via the product rule on (vp, 1/z) — matches the C kernel exactly:
+        #   dbdx = (∂x vp)·(1/z) + vp·∂x(1/z)   [NOT ∂x(vp/z), the field-gradient form]
+        # The two discretisations differ at O(h²); using the product rule keeps the
+        # eager forward operator identical to the compiled CUDA kernel so impl='c'
+        # and impl='eager' produce the same wavefields and the same gradients.
+        dvpdx = grad_op(vp, h, axis=-1, kernels=grad_kernels)
+        dvpdz = grad_op(vp, h, axis=-2, kernels=grad_kernels)
+        dinvzdx = grad_op(inv_z, h, axis=-1, kernels=grad_kernels)
+        dinvzdz = grad_op(inv_z, h, axis=-2, kernels=grad_kernels)
+        dbdx = dvpdx * inv_z + vp * dinvzdx
+        dbdz = dvpdz * inv_z + vp * dinvzdz
+        return model_b, kappa, dbdx, dbdz
+
+    model_b, kappa, dbdx, dbdz = once(invariants, "vrz_coefficients", coefficients)
 
     # ``psiyn`` is the Z memory variable -- historical name, correct slot.
     contrib_z, psiyn, zetaz = cpml_axis_update(
@@ -67,7 +74,7 @@ def step_cpml(u_now, u_pre, psix, psiz, zetax, zetaz,
     dpdx_cpml = dpdx + psixn
     dpdz_cpml = dpdz + psiyn
 
-    u_next = 2 * u_now - u_pre + dt**2 * kappa * (
+    u_next = 2 * u_now - u_pre + once(invariants, "dt2*kappa", lambda: dt**2 * kappa) * (
         model_b * w_sum + dbdx * dpdx_cpml + dbdz * dpdz_cpml
     )
 
@@ -78,7 +85,8 @@ def step_cpml_3d(
         u_now, u_pre, psix, psiy, psiz, zetax, zetay, zetaz,
         vp, z, dt, h, b,
         lap_x, lap_y, lap_z,
-        pml, grad_op, grad_kernels=None
+        pml, grad_op, grad_kernels=None,
+        invariants=None,
         ):
 
     az, bz, dbzdz, ay, by, dbydy, ax, bx, dbxdx = pml
@@ -88,20 +96,25 @@ def step_cpml_3d(
     dpdx = grad_op(u_now, h, axis=-1, kernels=grad_kernels)
     dpdy = grad_op(u_now, h, axis=-2, kernels=grad_kernels)
     dpdz = grad_op(u_now, h, axis=-3, kernels=grad_kernels)
-    inv_z = 1.0 / z
-    model_b = vp * inv_z
-    kappa = z * vp
-    # ∇b via the product rule on (vp, 1/z) — matches the C kernel exactly
-    # (see the 2-D step_cpml for why the field-gradient form is avoided).
-    dvpdx = grad_op(vp, h, axis=-1, kernels=grad_kernels)
-    dvpdy = grad_op(vp, h, axis=-2, kernels=grad_kernels)
-    dvpdz = grad_op(vp, h, axis=-3, kernels=grad_kernels)
-    dinvzdx = grad_op(inv_z, h, axis=-1, kernels=grad_kernels)
-    dinvzdy = grad_op(inv_z, h, axis=-2, kernels=grad_kernels)
-    dinvzdz = grad_op(inv_z, h, axis=-3, kernels=grad_kernels)
-    dbdx = dvpdx * inv_z + vp * dinvzdx
-    dbdy = dvpdy * inv_z + vp * dinvzdy
-    dbdz = dvpdz * inv_z + vp * dinvzdz
+
+    def coefficients():
+        inv_z = 1.0 / z
+        model_b = vp * inv_z
+        kappa = z * vp
+        # ∇b via the product rule on (vp, 1/z) — matches the C kernel exactly
+        # (see the 2-D step_cpml for why the field-gradient form is avoided).
+        dvpdx = grad_op(vp, h, axis=-1, kernels=grad_kernels)
+        dvpdy = grad_op(vp, h, axis=-2, kernels=grad_kernels)
+        dvpdz = grad_op(vp, h, axis=-3, kernels=grad_kernels)
+        dinvzdx = grad_op(inv_z, h, axis=-1, kernels=grad_kernels)
+        dinvzdy = grad_op(inv_z, h, axis=-2, kernels=grad_kernels)
+        dinvzdz = grad_op(inv_z, h, axis=-3, kernels=grad_kernels)
+        dbdx = dvpdx * inv_z + vp * dinvzdx
+        dbdy = dvpdy * inv_z + vp * dinvzdy
+        dbdz = dvpdz * inv_z + vp * dinvzdz
+        return model_b, kappa, dbdx, dbdy, dbdz
+
+    model_b, kappa, dbdx, dbdy, dbdz = once(invariants, "vrz_coefficients", coefficients)
 
     contrib_z, psizn, zetaz = cpml_axis_update(
         lap_z, dpdz, psiz, zetaz, az, bz, dbzdz, h, -3, grad_op, grad_kernels)
@@ -119,7 +132,7 @@ def step_cpml_3d(
     dpdy_cpml = dpdy + psiyn
     dpdz_cpml = dpdz + psizn
 
-    u_next = 2 * u_now - u_pre + dt**2 * kappa * (
+    u_next = 2 * u_now - u_pre + once(invariants, "dt2*kappa", lambda: dt**2 * kappa) * (
         model_b * w_sum + dbdx * dpdx_cpml + dbdy * dpdy_cpml + dbdz * dpdz_cpml
     )
 
@@ -184,6 +197,7 @@ class AcousticVRZ(SecondOrderEquation):
     )
 
     default_pml_type = "cpmlr"
+    takes_invariants = True
 
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch', dim=2):
         """Build the 2-D VRZ acoustic equation operator.
@@ -224,11 +238,12 @@ class AcousticVRZ(SecondOrderEquation):
     def default_receiver_fields(self):
         return ["h1"]
 
-    def func(self, wavefields, models, dt, h, b, **kwargs):
+    def func(self, wavefields, models, dt, h, b, invariants=None, **kwargs):
         u_now = wavefields[0]
         hz, hx = self._spacings_2d(h)
         lap_u_now_z, lap_u_now_x = self.separable_d2_2d(u_now, self.laplace_kernels, hz, hx)
-        out = step_cpml(*wavefields, *models, dt, h, b, lap_u_now_x, lap_u_now_z, self.b, self.gradient, self.grad_kernels)
+        out = step_cpml(*wavefields, *models, dt, h, b, lap_u_now_x, lap_u_now_z, self.b, self.gradient, self.grad_kernels,
+                        invariants=invariants)
         if getattr(self, "free_surface", False):
             out = zero_top_halo_fields(out, self.so // 2, axis=-2)
         return out
@@ -316,6 +331,7 @@ class AcousticVRZ3D(SecondOrderEquation):
     )
 
     default_pml_type = "cpmlr"
+    takes_invariants = True
 
     def __init__(self, spatial_order=4, device='cpu', backend='torch', dim=3):
         """Build the 3-D VRZ acoustic equation operator.
@@ -363,11 +379,12 @@ class AcousticVRZ3D(SecondOrderEquation):
     def default_receiver_fields(self):
         return ["h1"]
 
-    def func(self, wavefields, models, dt, h, b, **kwargs):
+    def func(self, wavefields, models, dt, h, b, invariants=None, **kwargs):
         u_now = wavefields[0]
         hz, hy, hx = self._spacings_3d(h)
         lap_z, lap_y, lap_x = self.separable_d2_3d(u_now, self.laplace_kernels, hz, hy, hx)
-        out = step_cpml_3d(*wavefields, *models, dt, h, b, lap_x, lap_y, lap_z, self.b, self.gradient, self.grad_kernels)
+        out = step_cpml_3d(*wavefields, *models, dt, h, b, lap_x, lap_y, lap_z, self.b, self.gradient, self.grad_kernels,
+                           invariants=invariants)
         if getattr(self, "free_surface", False):
             out = zero_top_halo_fields(out, self.so // 2, axis=-3)
         return out

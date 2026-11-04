@@ -43,6 +43,7 @@ and the envelope decays for as long as float64 can resolve it.
 from __future__ import annotations
 
 from .base import FirstOrderEquation
+from ._invariants import once
 from .cuda_layout import CUDALayoutSpec, history_fields, record_multi
 
 from .fields import FieldSpec, ModelSpec
@@ -145,6 +146,7 @@ def step(
     rho, C11, C33, C13, C55, C15, C35,
     dt, h, b, pd,
     pml=None,
+    invariants=None,
 ):
     """One displacement leapfrog step of Oh et al. (2020) eqs 11-12.
 
@@ -193,7 +195,7 @@ def step(
     m_szzz = az * m_szzz + bz * dszz_dz
     dszz_dz = dszz_dz + m_szzz
 
-    scale = dt * dt / rho
+    scale = once(invariants, "dt*dt/rho", lambda: dt * dt / rho)
     ux_next = 2.0 * ux - ux_pre + scale * (dsxx_dx + dsxz_dz)
     uz_next = 2.0 * uz - uz_pre + scale * (dsxz_dx + dszz_dz)
 
@@ -243,6 +245,7 @@ class ElasticTTI2nd(FirstOrderEquation):
 
     prepare_models_for_c = True
     default_pml_type = "cpmls"
+    takes_invariants = True
 
     C_NAME = "elastic_tti_2nd2d"
     # No ``elastic_tti_2nd2d_backward_recursive_ckpt`` binding is compiled for this

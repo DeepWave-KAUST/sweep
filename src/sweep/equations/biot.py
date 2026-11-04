@@ -51,6 +51,7 @@ import math
 import torch
 
 from ._cpml import cpml_update
+from ._invariants import once
 from ._elastic_step_core import _fsd
 from ._free_surface import (
     FS_MOD_SXX,
@@ -183,6 +184,7 @@ class Biot(FirstOrderEquation):
     )
 
     default_pml_type = "cpmls"
+    takes_invariants = True
     supports_batched_models = True
     # The viscous drag is dissipative and acts at every node: stepping back in time multiplies
     # round-off by exp(gamma dt) per step, so the reverse reconstruction boundary saving relies
@@ -238,7 +240,7 @@ class Biot(FirstOrderEquation):
         n_o2 = near_surface_o2_count(halo, FS_NEARSURF_O2)
         return halo, n_o2, (get_o2_pd(self.pd) if n_o2 else None)
 
-    def func(self, wavefields, models, dt, h, b, **kwargs):
+    def func(self, wavefields, models, dt, h, b, invariants=None, **kwargs):
         fs = self._top_free_surface()
         (vx, vz, qx, qz, sxx, szz, sxz, p,
          m_sxx_x, m_sxz_z, m_sxz_x, m_szz_z, m_p_x, m_p_z,
@@ -258,10 +260,12 @@ class Biot(FirstOrderEquation):
         p_x, m_p_x = cpml_update(pd.x_forward(p), m_p_x, axh, bxh, (p, pd.kxf, hx))
         p_z, m_p_z = cpml_update(_dz(pd, fs, "z_forward", p, True), m_p_z, azh, bzh, (p, pd.kzf, hz))
 
-        decay = torch.exp(-gamma * dt)
+        inv = invariants
+        decay = once(inv, "decay", lambda: torch.exp(-gamma * dt))
         # (1 - exp(-gamma dt)) / gamma, -> dt as gamma -> 0
-        safe = torch.where(gamma * dt > 1e-12, gamma, torch.ones_like(gamma))
-        weight = torch.where(gamma * dt > 1e-12, -torch.expm1(-gamma * dt) / safe, dt * torch.ones_like(gamma))
+        safe = once(inv, "safe", lambda: torch.where(gamma * dt > 1e-12, gamma, torch.ones_like(gamma)))
+        weight = once(inv, "weight", lambda: torch.where(gamma * dt > 1e-12, -torch.expm1(-gamma * dt) / safe,
+                                                         dt * torch.ones_like(gamma)))
 
         div_sx = sxx_x + sxz_z
         div_sz = sxz_x + szz_z
@@ -286,7 +290,7 @@ class Biot(FirstOrderEquation):
         p = p - dt * (c * div_v + biot_m * div_q)
         vx_z, m_vx_z = cpml_update(_dz(pd, fs, "z_forward", vx, False), m_vx_z, azh, bzh, (vx, pd.kzf, hz))
         vz_x, m_vz_x = cpml_update(pd.x_forward(vz), m_vz_x, axh, bxh, (vz, pd.kxf, hx))
-        sxz = sxz + dt * mu * (vx_z + vz_x)
+        sxz = sxz + once(inv, "dt*mu", lambda: dt * mu) * (vx_z + vz_x)
 
         if fs is not None:
             halo = fs[0]
@@ -294,7 +298,8 @@ class Biot(FirstOrderEquation):
                 # surface sxx with d vz/dz from sigma_zz = 0, (H - lam_u^2 / H) d vx/dx
                 # + C (1 - lam_u / H) div q, and d qz/dz extrapolated linearly from below
                 qz_z_surf = 2.0 * qz_z.roll(-1, -2) - qz_z.roll(-2, -2)
-                surf = sxx_old + dt * (4.0 * mu * (lam_u + mu) * vx_x + 2.0 * mu * c * (qx_x + qz_z_surf)) / hmod
+                surf = sxx_old + dt * (once(inv, "fs_4mu(lam+mu)", lambda: 4.0 * mu * (lam_u + mu)) * vx_x
+                                       + once(inv, "fs_2muc", lambda: 2.0 * mu * c) * (qx_x + qz_z_surf)) / hmod
                 sxx = overwrite_top_row(sxx, surf, halo, axis=-2)
             szz = zero_top_row(szz, halo, axis=-2)
             p = zero_top_row(p, halo, axis=-2)

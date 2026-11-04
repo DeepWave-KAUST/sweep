@@ -447,6 +447,22 @@ and this project adheres to
   rotated-staggered-grid derivative keeps the plain conv.
   `sweep.operators.torch.STENCIL_BACKWARD_KEEPS_KERNEL_ONLY = False` restores
   the plain conv everywhere.
+- **An uncompiled eager rollout makes the step's time-invariant coefficients
+  once.** `dt / rho`, `vp**2 * dt**2`, `dt * mu`, the VRZ/VRR first-derivative
+  coefficients, the free-surface Robertsson factors and the like depend on the
+  models and `dt` alone; recomputed every step, each was a new field that the
+  product reading it kept for the backward. The full-tape and checkpointed
+  rollouts now hand the step a dict in which they are made once (per rollout,
+  per checkpointed chunk); every eager equation that had such coefficients
+  takes it (all but the qP family, which has none). Records are bitwise the
+  same; gradients move by rounding (at most 2e-6 of their maximum across 60
+  cases, second derivatives included). Fields kept per time step, on top of
+  the stencil change above: 2-D Acoustic 2 -> 1, Elastic 8 -> 5 (12 -> 5 with a
+  free surface), ElasticVRR 26 -> 6, AcousticVRZ 14 -> 4, DASZhao 10 -> 4,
+  ViscoElastic 15 -> 6; 3-D Elastic 19 -> 10. Compiled steps and boundary
+  saving compute the coefficients in place, as before. An equation opts in
+  with `takes_invariants = True` and `sweep.equations._invariants.once`;
+  `sweep.propagator._torch_eager.HOIST_INVARIANTS = False` turns it off.
 - The CPU test workflow runs as four parallel jobs (`sem-biot`, `sem`,
   `rest`, `skill`), each with its own executed-test floor, instead of one
   job.

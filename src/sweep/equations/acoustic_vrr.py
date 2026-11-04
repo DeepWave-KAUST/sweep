@@ -1,3 +1,4 @@
+from ._invariants import once
 from .base import SecondOrderEquation
 from .fields import FieldSpec, ModelSpec
 from .utils import zero_top_halo_fields
@@ -7,7 +8,7 @@ from ._registry import register_equation
 def step_cpml(u_now, u_pre, psix, psiz, zetax, zetaz,
               vp, rx, rz, dt, h, b,
               lap_x, lap_z,
-              pml, grad_op, grad_kernels=None):
+              pml, grad_op, grad_kernels=None, invariants=None):
     """Single split-step CPML update of the 2-D VRR acoustic equation.
 
     The VRR propagator is the scalar second-order PDE
@@ -27,8 +28,8 @@ def step_cpml(u_now, u_pre, psix, psiz, zetax, zetaz,
 
     dpdx = grad_op(u_now, h, axis=-1, kernels=grad_kernels)
     dpdz = grad_op(u_now, h, axis=-2, kernels=grad_kernels)
-    dvpdx = grad_op(vp, h, axis=-1, kernels=grad_kernels)
-    dvpdz = grad_op(vp, h, axis=-2, kernels=grad_kernels)
+    dvpdx = once(invariants, "dvpdx", lambda: grad_op(vp, h, axis=-1, kernels=grad_kernels))
+    dvpdz = once(invariants, "dvpdz", lambda: grad_op(vp, h, axis=-2, kernels=grad_kernels))
 
     # Z direction
     tmpz = ((1 + bz) * lap_z + dbzdz * dpdz) + grad_op(az * psiz, h, axis=-2, kernels=grad_kernels)
@@ -47,11 +48,11 @@ def step_cpml(u_now, u_pre, psix, psiz, zetax, zetaz,
     dpdx_cpml = dpdx + psixn
     dpdz_cpml = dpdz + psizn
 
-    cx = vp * dvpdx - 2 * vp**2 * rx
-    cz = vp * dvpdz - 2 * vp**2 * rz
+    cx = once(invariants, "cx", lambda: vp * dvpdx - 2 * vp**2 * rx)
+    cz = once(invariants, "cz", lambda: vp * dvpdz - 2 * vp**2 * rz)
 
     u_next = 2 * u_now - u_pre + dt**2 * (
-        vp**2 * w_sum + cx * dpdx_cpml + cz * dpdz_cpml
+        once(invariants, "vp2", lambda: vp**2) * w_sum + cx * dpdx_cpml + cz * dpdz_cpml
     )
 
     return u_next, u_now, psixn, psizn, zetax, zetaz
@@ -109,6 +110,7 @@ class AcousticVRR(SecondOrderEquation):
     )
 
     default_pml_type = "cpmlr"
+    takes_invariants = True
 
     def __init__(self, spatial_order=4, device='cpu', backend='torch', dim=2):
         """Build the 2-D VRR acoustic equation operator.
@@ -137,11 +139,12 @@ class AcousticVRR(SecondOrderEquation):
         return ["h1"]
 
 
-    def func(self, wavefields, models, dt, h, b, **kwargs):
+    def func(self, wavefields, models, dt, h, b, invariants=None, **kwargs):
         u_now = wavefields[0]
         hz, hx = self._spacings_2d(h)
         lap_u_now_z, lap_u_now_x = self.separable_d2_2d(u_now, self.laplace_kernels, hz, hx)
-        out = step_cpml(*wavefields, *models, dt, h, b, lap_u_now_x, lap_u_now_z, self.b, self.gradient, self.grad_kernels)
+        out = step_cpml(*wavefields, *models, dt, h, b, lap_u_now_x, lap_u_now_z, self.b, self.gradient, self.grad_kernels,
+                        invariants=invariants)
         if getattr(self, "free_surface", False):
             out = zero_top_halo_fields(out, self.so // 2, axis=-2)
         return out

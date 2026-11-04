@@ -140,7 +140,13 @@ def _first_grad(prop, cfg, init_models, observed, wavelet, src, rec, device="cud
     m = [torch.tensor(a, device=device, requires_grad=(i == 0))
          for i, a in enumerate(init_models)]
     rec_out = prop(wavelet, src.copy(), rec.copy(), models=m)
-    (rec_out - observed).pow(2).mean().backward()
+    # The misfit over the data's own scale: DAS records are strains, and their
+    # plain misfit puts the gradient in float32's subnormal range (dasmu2d with
+    # a free surface: 44% of it below 1.2e-38), where a change of summation
+    # order alone moves it by percents.  Every comparison here is of
+    # directions or ratios, so a constant factor changes nothing else.
+    scale = observed.detach().abs().max().clamp_min(1e-30) ** 2
+    ((rec_out - observed).pow(2).mean() / scale).backward()
     return m[0].grad.detach().clone()
 
 

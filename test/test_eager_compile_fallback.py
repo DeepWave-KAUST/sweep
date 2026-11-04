@@ -48,10 +48,17 @@ def _run(use_compile, memory=None):
 
 
 @lru_cache(maxsize=None)
-def _reference(boundary_saving):
+def _reference(boundary_saving, hoist=True):
     """``(record, gradient)`` of the plain uncompiled run every fallback must
-    reproduce, per memory mode: deterministic, so one run serves every test."""
-    _, out, grad = _run(False, BoundarySaving() if boundary_saving else None)
+    reproduce, per memory mode: deterministic, so one run serves every test.
+    ``hoist=False``: the step's time-invariant coefficients computed in place,
+    as a rollout that started compiled computes them (``_hoists_invariants``)."""
+    import sweep.propagator._torch_eager as TE
+    before, TE.HOIST_INVARIANTS = TE.HOIST_INVARIANTS, hoist
+    try:
+        _, out, grad = _run(False, BoundarySaving() if boundary_saving else None)
+    finally:
+        TE.HOIST_INVARIANTS = before
     return out, grad
 
 
@@ -66,7 +73,8 @@ def compiles_on_cpu(monkeypatch):
 @pytest.mark.usefixtures("compiles_on_cpu")
 @pytest.mark.parametrize("memory", [None, BoundarySaving()], ids=["full", "boundary_saving"])
 def test_falls_back_to_the_uncompiled_step(monkeypatch, memory):
-    ref_out, ref_grad = _reference(memory is not None)
+    # The rollout started compiled: its coefficients stay computed in place.
+    ref_out, ref_grad = _reference(memory is not None, hoist=False)
 
     calls = []
     monkeypatch.setattr(torch, "compile", _compile_that_cannot_build(calls))

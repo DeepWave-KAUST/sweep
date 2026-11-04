@@ -1,6 +1,7 @@
 import functools
 
 from ._cpml import cpml_axis_update
+from ._invariants import once
 from .base import SecondOrderEquation
 from .acoustic_born import refuse_c_grads
 from .cuda_layout import CUDALayoutSpec, history_fields, history_plain, record_single
@@ -43,6 +44,7 @@ def step_cpml(
     grad_op,
     src=None,
     ssrc=None,
+    invariants=None,
 ):
     az, bz, dbzdz, ay, by, dbydy, ax, bx, dbxdx = pml
 
@@ -67,7 +69,7 @@ def step_cpml(
         lap_x, dudx, psix, zetax, ax, bx, dbxdx, h, -1, grad_op, src=src)
     w_sum += contrib_x
 
-    u_next = 2 * u_now - u_pre + vp**2 * dt**2 * w_sum
+    u_next = 2 * u_now - u_pre + once(invariants, "vp2dt2", lambda: vp**2 * dt**2) * w_sum
 
     sw_sum = 0.0
 
@@ -83,7 +85,8 @@ def step_cpml(
         lap_sx, dsudx, spsix, szetax, ax, bx, dbxdx, h, -1, grad_op, src=ssrc)
     sw_sum += contrib_sx
 
-    su_next = 2 * su_now - su_pre + vp**2 * dt**2 * sw_sum + ref * vp**2 * dt**2 * w_sum
+    su_next = (2 * su_now - su_pre + once(invariants, "vp2dt2", lambda: vp**2 * dt**2) * sw_sum
+               + once(invariants, "ref*vp2dt2", lambda: ref * vp**2 * dt**2) * w_sum)
 
     return (
         u_next,
@@ -173,6 +176,7 @@ class AcousticBorn3D(SecondOrderEquation):
     )
 
     default_pml_type = "cpmlr"
+    takes_invariants = True
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch"):
         """Build the 3-D acoustic LSRTM equation operator.
@@ -209,7 +213,7 @@ class AcousticBorn3D(SecondOrderEquation):
     def default_receiver_fields(self):
         return ["sh1"]
 
-    def func(self, wavefields, models, dt, h, b, **kwargs):
+    def func(self, wavefields, models, dt, h, b, invariants=None, **kwargs):
         hz, hy, hx = self._spacings_3d(h)
         lap_z, lap_y, lap_x = self.separable_d2_3d(wavefields[0], self.laplace_kernels, hz, hy, hx)
         lap_sz, lap_sy, lap_sx = self.separable_d2_3d(wavefields[8], self.laplace_kernels, hz, hy, hx)
@@ -229,6 +233,7 @@ class AcousticBorn3D(SecondOrderEquation):
             self.gradient,
             src=(wavefields[0], self.laplace_kernels, (hz, hy, hx)),
             ssrc=(wavefields[8], self.laplace_kernels, (hz, hy, hx)),
+            invariants=invariants,
         )
         if getattr(self, "free_surface", False):
             out = zero_top_halo_fields(out, self.so // 2, axis=-3)

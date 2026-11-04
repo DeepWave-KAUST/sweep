@@ -2,8 +2,9 @@ from .base import FirstOrderEquation
 from .fields import FieldSpec, ModelSpec, ensure_field_specs
 from ._registry import register_equation
 from ._cpml import cpml_update
+from ._invariants import once
 
-def step_cpml(p, vx, vz, phix, phiz, psix, psiz, vp, rho, dt, h, b, pd, pml=None):
+def step_cpml(p, vx, vz, phix, phiz, psix, psiz, vp, rho, dt, h, b, pd, pml=None, invariants=None):
 
     az, bz, azh, bzh, ax, bx, axh, bxh = pml
     # az, bz, dbzdz, ax, bx, dbxdx = b
@@ -13,10 +14,10 @@ def step_cpml(p, vx, vz, phix, phiz, psix, psiz, vp, rho, dt, h, b, pd, pml=None
     p_z = pd.z_backward(p)
  
     p_z, psi_z = cpml_update(p_z, psiz, azh, bzh, (p, pd.kzb, pd._spacing["z"]))
-    vz = vz - dt / rho * p_z
+    vz = vz - once(invariants, "dt/rho", lambda: dt / rho) * p_z
 
     p_x, psi_x = cpml_update(p_x, psix, axh, bxh, (p, pd.kxb, pd._spacing["x"]))
-    vx = vx - dt / rho * p_x
+    vx = vx - once(invariants, "dt/rho", lambda: dt / rho) * p_x
     # Update p
     vx_x = pd.x_forward(vx)
     vz_z = pd.z_forward(vz)
@@ -28,11 +29,11 @@ def step_cpml(p, vx, vz, phix, phiz, psix, psiz, vp, rho, dt, h, b, pd, pml=None
     vx_x, phix = cpml_update(vx_x, phix, ax, bx, (vx, pd.kxf, pd._spacing["x"]))
     div_v = div_v + vx_x
 
-    p = p - vp**2 * rho * dt * (vz_z + vx_x)
+    p = p - once(invariants, "vp2*rho*dt", lambda: vp**2 * rho * dt) * (vz_z + vx_x)
 
     return p, vx, vz, phix, phiz, psi_x, psi_z
 
-def step_spml(px, pz, vx, vz, vp, rho, dt, h, b, pd, pml=None):
+def step_spml(px, pz, vx, vz, vp, rho, dt, h, b, pd, pml=None, invariants=None):
 
     bx, bz = pml
     p = px + pz
@@ -40,14 +41,14 @@ def step_spml(px, pz, vx, vz, vp, rho, dt, h, b, pd, pml=None):
     p_x = pd.x_backward(p)
     p_z = pd.z_backward(p)
 
-    vx = ((1.-0.5*dt*bx)*vx+dt/rho*p_x)/(1.+0.5*dt*bx)
-    vz = ((1.-0.5*dt*bz)*vz+dt/rho*p_z)/(1.+0.5*dt*bz)
+    vx = ((1.-0.5*dt*bx)*vx+once(invariants, "dt/rho", lambda: dt/rho)*p_x)/(1.+0.5*dt*bx)
+    vz = ((1.-0.5*dt*bz)*vz+once(invariants, "dt/rho", lambda: dt/rho)*p_z)/(1.+0.5*dt*bz)
 
     vx_x = pd.x_forward(vx)
     vz_z = pd.z_forward(vz)
 
-    px = ((1.-0.5*dt*bx)*px+vp**2 * rho * dt * vx_x)/(1.+0.5*dt*bx)
-    pz = ((1.-0.5*dt*bz)*pz+vp**2 * rho * dt * vz_z)/(1.+0.5*dt*bz)
+    px = ((1.-0.5*dt*bx)*px+once(invariants, "vp2*rho*dt", lambda: vp**2 * rho * dt) * vx_x)/(1.+0.5*dt*bx)
+    pz = ((1.-0.5*dt*bz)*pz+once(invariants, "vp2*rho*dt", lambda: vp**2 * rho * dt) * vz_z)/(1.+0.5*dt*bz)
 
     return px, pz, vx, vz
 
@@ -100,6 +101,7 @@ class Acoustic1st(FirstOrderEquation):
     )
 
     default_pml_type = "cpmls"  # acoustic1st does not support 'cpmlr'; supported: ['cpmls', 'spml'].
+    takes_invariants = True
 
     def __init__(self, spatial_order=4, device='cpu', backend='jax', **kwargs):
         """Build the first-order acoustic equation operator.

@@ -10,6 +10,7 @@ from .cuda_layout import CUDALayoutSpec, history_fields, record_multi
 from .elastic_tti import STIFFNESS_KEYS, ElasticTTI
 from ._registry import register_equation
 from ._cpml import cpml_update
+from ._invariants import once
 from .utils import is_torch_tensor
 
 
@@ -82,6 +83,7 @@ def step(
     pd,
     pml=None,
     free_surface=False,
+    invariants=None,
 ):
     """One axis-aligned staggered-grid elastic-TTI step.
 
@@ -119,9 +121,9 @@ def step(
     dsxz_dx, m_txzx = cpml_update(dsxz_dx, m_txzx, ax, bx, (sxz, pd.kxb, pd._spacing["x"]))
     dszz_dz, m_tzzz = cpml_update(dszz_dz, m_tzzz, azh, bzh, (szz, pd.kzf, pd._spacing["z"]))
 
-    vx = vx + (dt / rho) * (dsxx_dx + dsxz_dz)
-    vy = vy + (dt / rho) * (dsxy_dx + dsyz_dz)
-    vz = vz + (dt / rho) * (dsxz_dx + dszz_dz)
+    vx = vx + once(invariants, "dt/rho", lambda: dt / rho) * (dsxx_dx + dsxz_dz)
+    vy = vy + once(invariants, "dt/rho", lambda: dt / rho) * (dsxy_dx + dsyz_dz)
+    vz = vz + once(invariants, "dt/rho", lambda: dt / rho) * (dsxz_dx + dszz_dz)
 
     dvx_dx = pd.x_backward(vx)
     dvy_dx = pd.x_forward(vy)
@@ -190,6 +192,7 @@ class ElasticTTISG(ElasticTTI):
 
     prepare_models_for_c = True
     default_pml_type = "cpmls"  # SG variant uses 8 staggered CPML profiles, not 6.
+    takes_invariants = True
     # The parent's fields, the CPML memories marked with their axis: this step
     # updates them through cpml_update, so they may live in strips (the rotated-
     # grid parent's step does not, and keeps them full-grid).

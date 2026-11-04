@@ -39,6 +39,7 @@ from .fields import FieldSpec, ModelSpec
 # ---------------------------------------------------------------------------
 from ._registry import register_equation
 from ._cpml import cpml_update
+from ._invariants import once
 
 def step_vti_2d(
     vx, vz, sH, sV,
@@ -47,6 +48,7 @@ def step_vti_2d(
     dt, h, b, pd,
     pml=None,
     free_surface=False,
+    invariants=None,
 ):
     """One leapfrog time step of the 2-D acoustic VTI system.
 
@@ -87,8 +89,8 @@ def step_vti_2d(
 
     dsV_dz, m_sVz = cpml_update(dsV_dz, m_sVz, azh, bzh, (sV, pd.kzf, pd._spacing["z"]))
 
-    vx = vx + dt * inv_rho * dsH_dx
-    vz = vz + dt * inv_rho * dsV_dz
+    vx = vx + once(invariants, "dt*inv_rho", lambda: dt * inv_rho) * dsH_dx
+    vz = vz + once(invariants, "dt*inv_rho", lambda: dt * inv_rho) * dsV_dz
 
     # --- stress update ---
     # dvx/dx at cell centre (i, j)
@@ -117,6 +119,7 @@ def step_vti_3d(
     dt, h, b, pd,
     pml=None,
     free_surface=False,
+    invariants=None,
 ):
     """One leapfrog time step of the 3-D acoustic VTI system.
 
@@ -153,9 +156,9 @@ def step_vti_3d(
 
     dsV_dz, m_sVz = cpml_update(dsV_dz, m_sVz, azh, bzh, (sV, pd.kzf, pd._spacing["z"]))
 
-    vx = vx + dt * inv_rho * dsH_dx
-    vy = vy + dt * inv_rho * dsH_dy
-    vz = vz + dt * inv_rho * dsV_dz
+    vx = vx + once(invariants, "dt*inv_rho", lambda: dt * inv_rho) * dsH_dx
+    vy = vy + once(invariants, "dt*inv_rho", lambda: dt * inv_rho) * dsH_dy
+    vz = vz + once(invariants, "dt*inv_rho", lambda: dt * inv_rho) * dsV_dz
 
     # --- stress update ---
     dvx_dx = pd.x_backward(vx)
@@ -270,6 +273,7 @@ class AcousticVTI1st(FirstOrderEquation):
     )
 
     default_pml_type = "cpmls"
+    takes_invariants = True
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch", free_surface=False):
         """Build the 2-D first-order acoustic VTI equation operator.
@@ -478,6 +482,7 @@ class AcousticVTI1st3D(FirstOrderEquation):
     )
 
     default_pml_type = "cpmls"
+    takes_invariants = True
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch", free_surface=False):
         """Build the 3-D first-order acoustic VTI equation operator.

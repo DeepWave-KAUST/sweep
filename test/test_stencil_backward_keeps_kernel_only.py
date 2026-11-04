@@ -16,6 +16,7 @@ import torch
 import torch.autograd.forward_ad as fwAD
 
 import sweep.operators.torch as OPS
+import sweep.propagator._torch_eager as TE
 from sweep.equations import (Acoustic, Acoustic3D, AcousticVRZ3D, AcousticVTI, Elastic, ElasticCurvilinear,
                              ViscoElastic)
 from sweep.equations.elastic3d import Elastic as Elastic3D
@@ -265,6 +266,9 @@ def _saved_fields_per_step(cls, shape, values, device):
     pytest.param(Elastic, [2500.0, 1400.0, 2000.0], 8, {"cpu": 13, "cuda": 13}, id="elastic2d"),
 ])
 def test_a_rollout_keeps_fewer_fields_per_step(cls, values, kept, plain, device, monkeypatch):
+    # The stencils' share alone: the time-invariant coefficients made once per
+    # rollout save more (test_eager_time_invariants.py).
+    monkeypatch.setattr(TE, "HOIST_INVARIANTS", False)
     shape = (20, 24)
     assert _saved_fields_per_step(cls, shape, values, device) == kept
     monkeypatch.setattr(OPS, "STENCIL_BACKWARD_KEEPS_KERNEL_ONLY", False)

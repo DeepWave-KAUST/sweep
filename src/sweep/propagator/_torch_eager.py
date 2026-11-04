@@ -25,6 +25,11 @@ _NO_COMPILE_WARNED = False
 # (see _rollout_ckpt).
 CKPT_PLAIN_WARMUP = torch.__version__ < (2, 5)
 
+# An uncompiled rollout makes the step's time-invariant coefficients once
+# (``sweep.equations._invariants``).  A/B switch: False recomputes them every
+# step, as compiled steps do.
+HOIST_INVARIANTS = True
+
 # torch 2.2 keeps the table of compiled backends per thread.  When the autograd
 # thread runs a compiled step (a checkpoint recompute, the boundary-saving
 # backward), it checks every cache entry on the step's code object -- entries
@@ -43,6 +48,16 @@ OWN_CODE_PER_COMPILE = (2, 2) <= torch.__version__ < (2, 3)
 # while compiling the backward, where no fallback can catch it.  Nothing turns
 # that off, so on CPU the step runs uncompiled.
 INDUCTOR_23 = (2, 3) <= torch.__version__ < (2, 4)
+
+
+def _takes_invariants(equation):
+    """Whether the class that defines the equation's ``func`` declares
+    ``takes_invariants`` itself: a subclass that overrides ``func`` is not
+    handed the dict unless it says it takes it."""
+    for cls in type(equation).__mro__:
+        if "func" in vars(cls):
+            return bool(vars(cls).get("takes_invariants", False))
+    return False
 
 
 def _with_own_code(fn):
@@ -225,7 +240,7 @@ class _PropTorchEager(
         num_wavefields = len(self.wavefield_names) if strips is None else len(strips)
         source_indices = tuple(self.source_indices)
 
-        def step_func(*flat_args, source=None):
+        def step_func(*flat_args, source=None, invariants=None):
             wavefields = flat_args[:num_wavefields]
             models = flat_args[num_wavefields:-3]
             dt, h, b = flat_args[-3:]
@@ -233,7 +248,10 @@ class _PropTorchEager(
             # before torch 2.4 cannot call a bound method held in a closure.
             if strips is not None:
                 wavefields = strips.group(wavefields)
-            out = equation.func(wavefields, models, dt, h, b)
+            if invariants is None:
+                out = equation.func(wavefields, models, dt, h, b)
+            else:
+                out = equation.func(wavefields, models, dt, h, b, invariants=invariants)
             if strips is not None:
                 out = strips.flatten(out)
             if source is None:
@@ -261,10 +279,13 @@ class _PropTorchEager(
         it computes, which on a 2-D grid outlasts the step on the GPU."""
         at = tuple(self.receiver_indices)
 
-        def steps_func(fields, models, dt, h, b, samples, source, receivers):
+        def steps_func(fields, models, dt, h, b, samples, source, receivers, invariants=None):
             columns = []
             for sample in samples:
-                fields = step(*fields, *models, dt, h, b, source=(sample, *source))
+                if invariants is None:
+                    fields = step(*fields, *models, dt, h, b, source=(sample, *source))
+                else:
+                    fields = step(*fields, *models, dt, h, b, source=(sample, *source), invariants=invariants)
                 columns.append(_record_column(fields, at, *receivers))
             return tuple(fields), torch.stack(columns, dim=1)
 
@@ -402,7 +423,7 @@ class _PropTorchEager(
             self._steps_funcs[k] = fn
         return fn
 
-    def _stepper(self, models, wavelet_steps, src, rec, nt, adj, settled, k):
+    def _stepper(self, models, wavelet_steps, src, rec, nt, adj, settled, k, invariants=None):
         """``advance(fields, t, end) -> (fields, block, n)``: steps ``t`` to
         ``t + n - 1`` of the rollout, ``block`` their record columns
         ``(B, n, nrec, len(receiver_type))``.
@@ -416,13 +437,19 @@ class _PropTorchEager(
         calls sit on multiples of ``k`` whatever ``end`` is, so a rollout cut
         at multiples of ``k`` (checkpoint chunks, the plain warm-up) takes the
         same steps compiled as one that is not, and a checkpoint's recompute
-        the same as its forward."""
+        the same as its forward.  ``invariants`` is the rollout's (or the
+        checkpoint chunk's) dict of time-invariant coefficients
+        (``_hoists_invariants``), None when compiled."""
         h = self._equation_spacing
         models = tuple(models)
         source = src.step_args(wavelet_steps[0])[1:] if nt else ()
         receivers = (*rec.step_args(), rec.batch, rec.nreceivers)
         compiled = self._steps_fn(k)
         plain = self._plain_steps_func
+
+        # Uncompiled only (``_hoists_invariants``), where ``compiled`` is the
+        # plain function as well: a compiled call is handed no dict.
+        extra = {} if invariants is None else {"invariants": invariants}
 
         def sample(t):
             return wavelet_steps[nt - t - 1 if adj else t]
@@ -431,12 +458,22 @@ class _PropTorchEager(
             if settled.compiled(t, fields) and t % k == 0 and t + k <= end:
                 self._mark_compile_step_begin()
                 fields, block = compiled(tuple(fields), models, self.dt, h, None,
-                                         tuple(sample(t + j) for j in range(k)), source, receivers)
+                                         tuple(sample(t + j) for j in range(k)), source, receivers, **extra)
                 return list(fields), block, k
-            fields, block = plain(tuple(fields), models, self.dt, h, None, (sample(t),), source, receivers)
+            fields, block = plain(tuple(fields), models, self.dt, h, None, (sample(t),), source, receivers,
+                                  **extra)
             return list(fields), block, 1
 
         return advance
+
+    def _hoists_invariants(self):
+        """Whether this rollout's uncompiled steps make their time-invariant
+        coefficients once, in a dict (``sweep.equations._invariants``) new for
+        the rollout and for each checkpointed chunk (whose recompute makes them
+        again).  Decided once, at the start of the rollout: a chunk's recompute
+        must save what its forward saved, even after a failed compile turned
+        compiling off in between.  Compiled steps compute them in place."""
+        return not self.use_compile and HOIST_INVARIANTS and _takes_invariants(self.equation)
 
     def _sample_receivers(self, rec, wavefield, receivers):
         """One record column, ``(B, nrec, len(receiver_type))``."""
@@ -574,6 +611,8 @@ class _PropTorchEager(
         num_models = len(models)
 
         settled = _SettledSteps()
+        self._steps_fn(k)              # first, as _rollout_full does
+        hoist = self._hoists_invariants()
         chunk_records = []
         start = 0
         if self.use_compile and CKPT_PLAIN_WARMUP:
@@ -597,7 +636,7 @@ class _PropTorchEager(
                 state = list(chunk_inputs[:num_wavefields])
                 chunk_models = list(chunk_inputs[num_wavefields : num_wavefields + num_models])
                 advance = self._stepper(self._prepare_runtime_models(chunk_models), wavelet_steps, src,
-                                        rec, nt, adj, settled, k)
+                                        rec, nt, adj, settled, k, invariants={} if hoist else None)
                 end = min(start_t + chunk_size, nt)
                 blocks, t = [], start_t
                 while t < end:
@@ -621,7 +660,13 @@ class _PropTorchEager(
         which are detached host copies, are still written in place.
         """
         k = 1 if return_wavefield else self._resolved_steps_per_call(self._records(runtime_models, wavelet_steps))
-        advance = self._stepper(runtime_models, wavelet_steps, src, rec, nt, adj, _SettledSteps(), k)
+        # Set up compiling the calls before deciding on the dict: a torch
+        # without torch.compile (or torch 2.3 on a CPU) turns compiling off
+        # right there, and the rollout then runs as an uncompiled one does.
+        self._steps_fn(k)
+        invariants = {} if self._hoists_invariants() else None
+        advance = self._stepper(runtime_models, wavelet_steps, src, rec, nt, adj, _SettledSteps(), k,
+                                invariants=invariants)
         blocks, t = [], 0
         while t < nt:
             wavefield, block, n = advance(wavefield, t, nt)

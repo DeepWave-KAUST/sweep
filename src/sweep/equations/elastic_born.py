@@ -30,6 +30,7 @@ from ._elastic_step_core import (
     elastic_stress_substep,
 )
 from ._free_surface import FS_MOD_SXX, overwrite_surface_row
+from ._invariants import once
 from ._registry import register_equation
 from .elastic import Elastic
 
@@ -90,6 +91,7 @@ class ElasticBorn(FirstOrderEquation):
     C_NAME = "elastic_born2d"
 
     default_pml_type = "cpmls"
+    takes_invariants = True
     supports_per_edge_free_surface = True
     supports_per_edge_free_surface_c = True
     free_plate_unstable = True
@@ -159,7 +161,7 @@ class ElasticBorn(FirstOrderEquation):
         bg1 = elastic_velocity_substep(*bg, **kw)
         sc1 = list(elastic_velocity_substep(*sc, **kw))
         rho, drho = models[2], models[6]
-        r = drho / rho
+        r = once(kw.get("invariants"), "drho/rho", lambda: drho / rho)
         sc1[0] = sc1[0] - r * (bg1[0] - bg[0])
         sc1[1] = sc1[1] - r * (bg1[1] - bg[1])
         return [*bg1, *sc1]
@@ -173,24 +175,27 @@ class ElasticBorn(FirstOrderEquation):
         *bg2, (vx_x, vz_z, vx_z, vz_x) = elastic_stress_substep(*bg, **kw, return_gradients=True)
         sc2 = list(elastic_stress_substep(*sc, **kw))
         dt = kw["dt"]
+        inv = kw.get("invariants")
         _, _, _, lam, mu, lam2mu, _, dlam, dmu, dlam2mu = models
         sxx_s, szz_s = sc2[2], sc2[3]
         sc2[2] = sxx_s + dt * (dlam2mu * vx_x + dlam * vz_z)
         sc2[3] = szz_s + dt * (dlam2mu * vz_z + dlam * vx_x)
-        sc2[4] = sc2[4] + dt * dmu * (vx_z + vz_x)
+        sc2[4] = sc2[4] + once(inv, "dt*dmu", lambda: dt * dmu) * (vx_z + vz_x)
 
         z_sides, x_sides = _fs_sides(kw["fs_faces"], kw["free_surface"])
         if FS_MOD_SXX and (z_sides or x_sides):
             # d/dλ, d/dμ of c = 4 μ (λ+μ)/(λ+2μ)
-            den = lam2mu * lam2mu
-            dc = (4 * mu * mu * dlam + 4 * (lam * lam + 2 * lam * mu + 2 * mu * mu) * dmu) / den
+            def _dc():
+                den = lam2mu * lam2mu
+                return (4 * mu * mu * dlam + 4 * (lam * lam + 2 * lam * mu + 2 * mu * mu) * dmu) / den
+            dc = once(inv, "fs_dc", _dc)
             halo = self.pd.coes.shape[0]
             if z_sides:
-                surf = sxx_s + dt * dc * vx_x
+                surf = sxx_s + once(inv, "fs_dt*dc", lambda: dt * dc) * vx_x
                 for side in z_sides:
                     sc2[2] = overwrite_surface_row(sc2[2], surf, halo, axis=-2, side=side)
             if x_sides:
-                surf = szz_s + dt * dc * vz_z
+                surf = szz_s + once(inv, "fs_dt*dc", lambda: dt * dc) * vz_z
                 for side in x_sides:
                     sc2[3] = overwrite_surface_row(sc2[3], surf, halo, axis=-1, side=side)
 
@@ -203,9 +208,11 @@ class ElasticBorn(FirstOrderEquation):
 
     _fs_zero_traction = Elastic._fs_zero_traction
 
-    def func(self, wavefields, models, dt, h, b, **kwargs):
+    def func(self, wavefields, models, dt, h, b, invariants=None, **kwargs):
         models = self._born_models(models)
         kw = self._kw(models, dt, h, b, self.b)
+        if invariants is not None:
+            kw["invariants"] = invariants
         wf = self._velocity_substep(list(wavefields), models, kw)
         return tuple(self._stress_substep(wf, models, kw))
 

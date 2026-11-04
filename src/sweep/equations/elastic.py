@@ -63,6 +63,7 @@ class Elastic(FirstOrderEquation):
     # staggered image method on any subset of the 4 faces, with the z<->x
     # Robertsson analogue and traction zeroing per face.  See ``_fs_zero_traction``.
     supports_per_edge_free_surface = True
+    takes_invariants = True
     # The 2-D Elastic CUDA kernels honour a per-edge free surface on ALL four
     # faces (top/bottom/left/right, incl. z∩x corners) via the generalized image
     # mirror + hand-written adjoint (z and x) in ``elastic_free_surface.cuh``.
@@ -156,7 +157,7 @@ class Elastic(FirstOrderEquation):
     def prepare_models(self, models):
         return list(self._lame(models))
 
-    def func(self, wavefields, models, dt, h, b, **kwargs):
+    def func(self, wavefields, models, dt, h, b, invariants=None, **kwargs):
         vp, vs, rho, lame_lambda, lame_mu, lame_lambda_2mu = self._lame(models)
 
         # The wave equation (Virieux 1986 first-order velocity-stress) is
@@ -174,6 +175,7 @@ class Elastic(FirstOrderEquation):
             free_surface=free_surface,
             fs_faces=getattr(self, "fs_faces", None),
             lame_lambda_2mu=lame_lambda_2mu,
+            invariants=invariants,
         )
         (vx, vz, sxx, szz, sxz,
          m_vxx, m_vxz, m_vzx, m_vzz,

@@ -75,6 +75,7 @@ from sweep.scalars import fd_coefficients
 
 from ._registry import register_equation
 from ._cpml import cpml_update
+from ._invariants import once
 
 # Python floats, built here: inside the compiled step Dynamo traces numpy as
 # tensors, so a numpy table read there turned every ``float(coef)`` into a
@@ -228,6 +229,7 @@ def vr_stress_substep(
     vp_x, vp_z, vs_x, vs_z,
     dt, pd, pml,
     free_surface=False,
+    invariants=None,
 ):
     """Second half of :func:`elastic_vr_step_core`: the momentum derivatives
     (and their CPML memories), then the stresses and the free-surface rows."""
@@ -238,8 +240,8 @@ def vr_stress_substep(
     _n_o2 = _near_surface_o2_count(top_halo, FS_NEARSURF_O2) if free_surface else 0
     _pd2 = _get_o2_pd(pd) if _n_o2 else None
 
-    vp2 = vp * vp
-    vs2 = vs * vs
+    vp2 = once(invariants, "vp2", lambda: vp * vp)
+    vs2 = once(invariants, "vs2", lambda: vs * vs)
 
     # ---- 4. Momentum spatial derivatives (from the UPDATED momentum) ----
     # Same stagger pattern as standard Elastic. Each output lives at the
@@ -268,12 +270,19 @@ def vr_stress_substep(
     #                + V_alpha^2 (d_i p_j)
     # Index pairing (i = derivative axis, j = momentum component):
     #   xx -> dpx_dx        zz -> dpz_dz        xz -> dpz_dx        zx -> dpx_dz
-    gamma_P_xx = vp * vp_x * px - 2.0 * vp2 * Rp_x * px + vp2 * dpx_dx
-    gamma_P_zz = vp * vp_z * pz - 2.0 * vp2 * Rp_z * pz + vp2 * dpz_dz
-    gamma_S_xx = vs * vs_x * px - 2.0 * vs2 * Rs_x * px + vs2 * dpx_dx
-    gamma_S_zz = vs * vs_z * pz - 2.0 * vs2 * Rs_z * pz + vs2 * dpz_dz
-    gamma_S_xz = vs * vs_x * pz - 2.0 * vs2 * Rs_x * pz + vs2 * dpz_dx
-    gamma_S_zx = vs * vs_z * px - 2.0 * vs2 * Rs_z * px + vs2 * dpx_dz
+    inv = invariants
+    gamma_P_xx = (once(inv, "vp*vp_x", lambda: vp * vp_x) * px
+                  - once(inv, "2vp2*Rp_x", lambda: 2.0 * vp2 * Rp_x) * px + vp2 * dpx_dx)
+    gamma_P_zz = (once(inv, "vp*vp_z", lambda: vp * vp_z) * pz
+                  - once(inv, "2vp2*Rp_z", lambda: 2.0 * vp2 * Rp_z) * pz + vp2 * dpz_dz)
+    gamma_S_xx = (once(inv, "vs*vs_x", lambda: vs * vs_x) * px
+                  - once(inv, "2vs2*Rs_x", lambda: 2.0 * vs2 * Rs_x) * px + vs2 * dpx_dx)
+    gamma_S_zz = (once(inv, "vs*vs_z", lambda: vs * vs_z) * pz
+                  - once(inv, "2vs2*Rs_z", lambda: 2.0 * vs2 * Rs_z) * pz + vs2 * dpz_dz)
+    gamma_S_xz = (once(inv, "vs*vs_x", lambda: vs * vs_x) * pz
+                  - once(inv, "2vs2*Rs_x", lambda: 2.0 * vs2 * Rs_x) * pz + vs2 * dpz_dx)
+    gamma_S_zx = (once(inv, "vs*vs_z", lambda: vs * vs_z) * px
+                  - once(inv, "2vs2*Rs_z", lambda: 2.0 * vs2 * Rs_z) * px + vs2 * dpx_dz)
 
     # ---- 7. Stress update (S&S Eq. 24, 2D expansion) ----
     # Trap: sigma_xx gets -2 gamma_S_zz, NOT -2 gamma_S_xx. Comes from
@@ -291,7 +300,8 @@ def vr_stress_substep(
         # VR-native form: physical 4 mu (lam+mu)/(lam+2mu) * d vx/dx becomes
         # 4 vs^2 (vp^2-vs^2)/vp^2 * d px/dx (px = rho*vx cancels the rho).
         sxx = _fs_sxx_correction(
-            sxx, sxx_pre, dt, 4.0 * vs2 * (vp2 - vs2) / vp2, dpx_dx, top_halo, axis=-2
+            sxx, sxx_pre, dt, once(invariants, "fs_coef", lambda: 4.0 * vs2 * (vp2 - vs2) / vp2),
+            dpx_dx, top_halo, axis=-2
         )
         sxz = zero_top_row(sxz, top_halo, axis=-2)
         szz = zero_top_row(szz, top_halo, axis=-2)
@@ -313,6 +323,7 @@ def elastic_vr_step_core(
     vp_x, vp_z, vs_x, vs_z,
     dt, h, b, pd, pml,
     free_surface=False,
+    invariants=None,
 ):
     """One leapfrog step of the Soares & Sacchi 2025 elastic vector
     reflectivity equation on a Virieux SSG.
@@ -353,7 +364,7 @@ def elastic_vr_step_core(
         vp=vp, vs=vs,
         Rp_x=Rp_x, Rp_z=Rp_z, Rs_x=Rs_x, Rs_z=Rs_z,
         vp_x=vp_x, vp_z=vp_z, vs_x=vs_x, vs_z=vs_z,
-        dt=dt, pd=pd, pml=pml, free_surface=free_surface,
+        dt=dt, pd=pd, pml=pml, free_surface=free_surface, invariants=invariants,
     )
 
 
@@ -438,6 +449,7 @@ class ElasticVRR(FirstOrderEquation):
     )
 
     default_pml_type = "cpmls"
+    takes_invariants = True
     supports_bs_free_surface = True  # interior_substeps keep the free-surface rows
 
     def __init__(self, spatial_order=4, device='cpu', backend='torch'):
@@ -512,7 +524,7 @@ class ElasticVRR(FirstOrderEquation):
         self._vgrad_cache = (key, out)
         return out
 
-    def func(self, wavefields, models, dt, h, b, **kwargs):
+    def func(self, wavefields, models, dt, h, b, invariants=None, **kwargs):
         vp, vs, Rp_x, Rp_z, Rs_x, Rs_z = models
         vp_x, vp_z, vs_x, vs_z = self._precompute_velocity_gradients(vp, vs, h)
         free_surface = getattr(self, "free_surface", False)
@@ -522,7 +534,7 @@ class ElasticVRR(FirstOrderEquation):
             Rp_x=Rp_x, Rp_z=Rp_z, Rs_x=Rs_x, Rs_z=Rs_z,
             vp_x=vp_x, vp_z=vp_z, vs_x=vs_x, vs_z=vs_z,
             dt=dt, h=h, b=b, pd=self.pd, pml=self.b,
-            free_surface=free_surface,
+            free_surface=free_surface, invariants=invariants,
         )
         return out
 

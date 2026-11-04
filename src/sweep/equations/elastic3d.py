@@ -1,5 +1,6 @@
 from .base import FirstOrderEquation
 from ._cpml import cpml_update
+from ._invariants import once
 from .cuda_layout import CUDALayoutSpec, history_fields, record_multi
 
 from . import slot_table
@@ -36,7 +37,7 @@ def velocity_substep(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
                      m_sxzx, m_sxzz,
                      m_syyy,
                      m_syzy, m_syzz,
-                     *, rho, dt, pd, pml, free_surface=False):
+                     *, rho, dt, pd, pml, free_surface=False, invariants=None):
     """First half of :func:`step`: the stress derivatives (and their CPML
     memories), then the velocities. Returns all 27 fields, in order."""
     az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh = pml
@@ -78,9 +79,9 @@ def velocity_substep(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
 
     dsyz_dy, m_syzy = cpml_update(dsyz_dy, m_syzy, ay, by, (syz, pd.kyb, pd._spacing["y"]))
 
-    vx = vx + dt / rho * (dsxx_dx + dsxy_dy + dsxz_dz)
-    vy = vy + dt / rho * (dsxy_dx + dsyy_dy + dsyz_dz)
-    vz = vz + dt / rho * (dsxz_dx + dsyz_dy + dszz_dz)
+    vx = vx + once(invariants, "dt/rho", lambda: dt / rho) * (dsxx_dx + dsxy_dy + dsxz_dz)
+    vy = vy + once(invariants, "dt/rho", lambda: dt / rho) * (dsxy_dx + dsyy_dy + dsyz_dz)
+    vz = vz + once(invariants, "dt/rho", lambda: dt / rho) * (dsxz_dx + dsyz_dy + dszz_dz)
 
     return (vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
             m_vxx, m_vxy, m_vxz,
@@ -103,7 +104,7 @@ def stress_substep(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
                    m_syyy,
                    m_syzy, m_syzz,
                    *, lame_lambda, lame_mu, dt, pd, pml, free_surface=False,
-                   return_gradients=False):
+                   return_gradients=False, invariants=None):
     """Second half of :func:`step`: the velocity derivatives (and their CPML
     memories), then the stresses and the free-surface rows."""
     az, bz, azh, bzh, ay, by, ayh, byh, ax, bx, axh, bxh = pml
@@ -145,12 +146,12 @@ def stress_substep(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
 
     sxx_pre_fs = sxx
     syy_pre_fs = syy
-    sxx = sxx + dt * (lame_lambda * div_v + 2 * lame_mu * dvx_dx)
-    syy = syy + dt * (lame_lambda * div_v + 2 * lame_mu * dvy_dy)
-    szz = szz + dt * (lame_lambda * div_v + 2 * lame_mu * dvz_dz)
-    sxy = sxy + dt * lame_mu * (dvx_dy + dvy_dx)
-    sxz = sxz + dt * lame_mu * (dvx_dz + dvz_dx)
-    syz = syz + dt * lame_mu * (dvy_dz + dvz_dy)
+    sxx = sxx + dt * (lame_lambda * div_v + once(invariants, "2*mu", lambda: 2 * lame_mu) * dvx_dx)
+    syy = syy + dt * (lame_lambda * div_v + once(invariants, "2*mu", lambda: 2 * lame_mu) * dvy_dy)
+    szz = szz + dt * (lame_lambda * div_v + once(invariants, "2*mu", lambda: 2 * lame_mu) * dvz_dz)
+    sxy = sxy + once(invariants, "dt*mu", lambda: dt * lame_mu) * (dvx_dy + dvy_dx)
+    sxz = sxz + once(invariants, "dt*mu", lambda: dt * lame_mu) * (dvx_dz + dvz_dx)
+    syz = syz + once(invariants, "dt*mu", lambda: dt * lame_mu) * (dvy_dz + dvz_dy)
 
     if free_surface:
         if FS_MOD_SXX:
@@ -162,9 +163,9 @@ def stress_substep(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
             # it the image-method mirror alone leaves surface sigma_xx/yy too
             # large -> Rayleigh ~15% slow (2-D analogue: _elastic_step_core /
             # das.py DASMu-2D).
-            _l2m = lame_lambda + 2.0 * lame_mu
-            _coef = 4.0 * lame_mu * (lame_lambda + lame_mu) / _l2m
-            _coef2 = 2.0 * lame_lambda * lame_mu / _l2m
+            _l2m = once(invariants, "fs_l2m", lambda: lame_lambda + 2.0 * lame_mu)
+            _coef = once(invariants, "fs_coef", lambda: 4.0 * lame_mu * (lame_lambda + lame_mu) / _l2m)
+            _coef2 = once(invariants, "fs_coef2", lambda: 2.0 * lame_lambda * lame_mu / _l2m)
             _sxx_surf = sxx_pre_fs + dt * (_coef * dvx_dx + _coef2 * dvy_dy)
             _syy_surf = syy_pre_fs + dt * (_coef2 * dvx_dx + _coef * dvy_dy)
             sxx = overwrite_top_row(sxx, _sxx_surf, top_halo, axis=-3)
@@ -210,6 +211,7 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
          pml=None,
          free_surface=False,
          return_gradients=False,
+         invariants=None,
          ):
     """One leapfrog step: :func:`velocity_substep`, then :func:`stress_substep`
     (``Elastic.interior_substeps`` reuses the two halves)."""
@@ -223,10 +225,10 @@ def step(vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
                               m_syyy,
                               m_syzy, m_syzz,
                               rho=rho, dt=dt, pd=pd, pml=pml,
-                              free_surface=free_surface)
+                              free_surface=free_surface, invariants=invariants)
     return stress_substep(*fields, lame_lambda=lame_lambda, lame_mu=lame_mu, dt=dt, pd=pd, pml=pml,
                           free_surface=free_surface,
-                          return_gradients=return_gradients)
+                          return_gradients=return_gradients, invariants=invariants)
 
 
 @register_equation('Elastic3D')
@@ -284,6 +286,7 @@ class Elastic(FirstOrderEquation):
     )
 
     default_pml_type = "cpmls"  # staggered-grid CPML: step() unpacks 12 profiles
+    takes_invariants = True
     # The eager boundary-saving sub-steps carry the free-surface BC (the image
     # derivatives and the surface rows of stress_substep).
     supports_bs_free_surface = True

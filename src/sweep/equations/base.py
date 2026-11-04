@@ -109,6 +109,12 @@ class WaveEquation:
     # to True.
     supports_batched_models = False
 
+    # Whether ``func`` takes ``invariants``: the dict an uncompiled eager rollout
+    # passes every step so the step's time-invariant coefficients are made once
+    # per rollout (``sweep.equations._invariants.once``).  Defaults to False:
+    # the propagator then calls ``func`` without it.
+    takes_invariants = False
+
     # Whether this equation's eager ``func`` honours a *per-edge* free surface
     # (``self.fs_faces``: a free surface on any subset of the 2*ndim faces, each
     # with its own PML thickness) rather than only the historical top-only
