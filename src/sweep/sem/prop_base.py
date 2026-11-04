@@ -2069,6 +2069,7 @@ class PropSEM:
                              f"B={len(pershot)}")
         inj = band_injection(eq, self._plane_wave_band(eq, wave), wavelet, self.dt, self.nt)
 
+        self._refuse_above_surface(receivers, "receiver")     # as _Acq does
         xz = self._rec_row(receivers, 0)
         _check_pml_placement(eq, [], xz, pml_guard)
         locate_points(eq.mesh, xz)
