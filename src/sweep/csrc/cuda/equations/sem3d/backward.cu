@@ -799,13 +799,15 @@ void elastic_vs3d_backward(const Sem3dVsBackwardInputCore& in) {
     const int nb = (ng + TPB - 1) / TPB;
     const int rj = nrec > 0 ? (nrec * m + TPB - 1) / TPB : 0;
 
-    for (int k = nt - 1; k >= 0; --k) {
+    const int t0 = in.t0, t1 = in.t1 > 0 ? in.t1 : nt;
+    SWEEP_CHECK(0 <= t0 && t0 < t1 && t1 <= nt, "sem3d VS: bad step range");
+    for (int k = t1 - 1; k >= t0; --k) {
         if (nrec > 0) {
             sem2d::sem2d_adjoint_source<<<rj, TPB, 0, stream>>>(gsx, rec_G, rec_W, lvx, k, nt, nrec, m);
             sem2d::sem2d_adjoint_source<<<rj, TPB, 0, stream>>>(gsy, rec_G, rec_W, lvy, k, nt, nrec, m);
             sem2d::sem2d_adjoint_source<<<rj, TPB, 0, stream>>>(gsz, rec_G, rec_W, lvz, k, nt, nrec, m);
         }
-        const float* gv_k = sgv + static_cast<size_t>(k) * 9 * Em;
+        const float* gv_k = sgv + static_cast<size_t>(k - t0) * 9 * Em;
         if (def)
             SEM3D_VS_LAUNCH_NC(nc, sem3d_vs_stress_update_T_deformed, grid, m, sh9, stream,
                 lsig, gv_k, lmvel, ax, bx, ay, by, az, bz, lam, mu, l2m, cij,
@@ -818,12 +820,11 @@ void elastic_vs3d_backward(const Sem3dVsBackwardInputCore& in) {
                 ax, bx, ay, by, az, bz, lam, mu, l2m, cij,
                 nsls, ptau, mtau, gsls_w, lrmem, gPt, gMt, ibool, D,
                 ihx, ihy, ihz, dt, lvx, lvy, lvz, gLam, gMu, gL2m, gC, ngll, E, ng);
-        const size_t ok = static_cast<size_t>(k) * ng;
-        const float* vk1x = k >= 1 ? svx + (ok - ng) : nullptr;
-        const float* vk1y = k >= 1 ? svy + (ok - ng) : nullptr;
-        const float* vk1z = k >= 1 ? svz + (ok - ng) : nullptr;
+        // v^k at history row k - t0 + 1, v^(k-1) one row up (row 0: the call's start)
+        const size_t ok = static_cast<size_t>(k - t0 + 1) * ng;
         sem3d_vs_vel_update_T<<<nb, TPB, 0, stream>>>(
-            lvx, lvy, lvz, svx + ok, svy + ok, svz + ok, vk1x, vk1y, vk1z,
+            lvx, lvy, lvz, svx + ok, svy + ok, svz + ok,
+            svx + (ok - ng), svy + (ok - ng), svz + (ok - ng),
             inv_M, dt, lRx, lRy, lRz, gM, ng);
         sem2d::sem2d_accum_gradW<<<nb, TPB, 0, stream>>>(px_, inv_M, lvx, dt, k, gW, ng);
         sem2d::sem2d_accum_gradW<<<nb, TPB, 0, stream>>>(py_, inv_M, lvy, dt, k, gW, ng);

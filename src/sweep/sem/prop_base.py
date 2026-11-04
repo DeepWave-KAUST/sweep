@@ -893,10 +893,13 @@ class PropSEM:
                     f"takes chunks only; Ckpt({', '.join(b + '=...' for b in bad)}) "
                     f"is not supported.")
             if self._use_c:
-                raise NotImplementedError(
-                    "Ckpt chunks the eager autograd tape; impl='c' keeps the "
-                    "whole history or saves the boundary (BoundarySaving()), "
-                    "and has no tape to chunk.")
+                from .prop_c import c_checkpoint_supported
+                if not c_checkpoint_supported(self.equation):
+                    raise NotImplementedError(
+                        "Ckpt chunks the eager autograd tape; impl='c' keeps the "
+                        f"whole history for {self.equation.__name__} or saves the "
+                        "boundary (BoundarySaving()), and has no tape to chunk. "
+                        "The velocity-stress classes checkpoint on impl='c' too.")
             self._ckpt_chunk = int(m.chunks)
         if self.bs_band_mode != "full" and self._memory != "boundary":
             raise ValueError(
@@ -912,7 +915,9 @@ class PropSEM:
 
     def _default_memory(self):
         """PropTorch's default strategy: boundary saving on ``impl='c'`` where its
-        kernels run it (else the full tape), checkpointing on eager -- in chunks of
+        kernels run it, else checkpoints in chunks of ``C_CHECKPOINT_CHUNK`` steps
+        where they take them (the velocity-stress classes), else the full tape;
+        checkpointing on eager -- in chunks of
         ``_DEFAULT_CKPT_CHUNK`` steps, which the CUDA-graph rollout runs faster
         than ``Ckpt()``'s 100 (it rebuilds its graphs per call, at a cost that
         grows with the chunk). A CUDA-graph compile mode on CUDA takes the full
@@ -921,9 +926,15 @@ class PropSEM:
         if _DEFAULT_MEMORY is not None:
             return dataclasses.replace(_DEFAULT_MEMORY)
         if self._use_c:
-            from .prop_c import c_boundary_saving_supported
-            return (BoundarySaving() if c_boundary_saving_supported(
-                self.equation, self.abcn_elements > 0) else Full())
+            from .prop_c import (C_CHECKPOINT_CHUNK, c_boundary_saving_supported,
+                                 c_checkpoint_supported)
+            if c_boundary_saving_supported(self.equation, self.abcn_elements > 0):
+                return BoundarySaving()
+            # the velocity-stress kernels keep their histories per chunk: the
+            # save-all of a long record outgrows the device (sweep.sem.drivers.vs_chunks)
+            if c_checkpoint_supported(self.equation):
+                return Ckpt(chunks=C_CHECKPOINT_CHUNK)
+            return Full()
         if (self.eager_options.use_compile
                 and self.eager_options.compile_mode in ("reduce-overhead", "max-autotune")
                 and torch.device(self.dev).type == "cuda"):
@@ -2694,7 +2705,8 @@ class PropSEM:
                                 b, sv)
             seis.append(prop.forward(wav_per_shot[b], memory=memory,
                                      bs_store_dtype=store_dtype,
-                                     bs_store_dtype_elem=store_dtype_elem))
+                                     bs_store_dtype_elem=store_dtype_elem,
+                                     ckpt_chunk=self._ckpt_chunk))
         return torch.stack(seis, 0)                          # (nshots, nt, nrec, ncomp)
 
     def _c_cache_stamps(self, shot_src, receivers):

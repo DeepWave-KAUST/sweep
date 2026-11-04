@@ -13,6 +13,7 @@ import torch
 from ..cdrive import (METRIC_NAMES, Alloc, check_filled, dims, fill, give,
                       grads_or_none,
                       memory_mode, put, take)
+from .vs_chunks import backward_chunks, chunk_of, forward_chunks
 
 
 def _record(A, c, *names):
@@ -292,9 +293,11 @@ def _vs3d_geometry(s, c, A):
         put(s, _AC3D_METRIC, A.empty)
 
 
-def _vs3d_forward_input(c, A, need_bwd):
-    """The forward struct of both 3-D velocity-stress Functions, all but the
-    moduli and the ``inv_M`` / ``wavelet`` leaves, which the caller sets."""
+def _vs3d_forward_input(c, A, hist):
+    """The forward struct of the 3-D velocity-stress Functions, all but the
+    moduli and the ``inv_M`` / ``wavelet`` leaves, which the caller sets; with
+    the histories of ``hist`` steps (``None``: none), which a save-all run and a
+    chunk's recompute keep (see :mod:`.vs_chunks`)."""
     import sweep._C as _C
     E, m, ng = c["n_elements"], c["ngll"] ** 3, c["n_global"]
     s = _C.Sem3dVsForwardInput()
@@ -308,9 +311,12 @@ def _vs3d_forward_input(c, A, need_bwd):
     put(s, ("vx", "vy", "vz", "Rx", "Ry", "Rz"), A.zeros)
     s.sig, s.mvel = A.block(6, E * m), A.block(9, E * m)
     give(s, _record(A, c, "seis_x", "seis_y", "seis_z"))
-    put(s, ("save_vx", "save_vy", "save_vz"), A.hist if need_bwd else A.empty)
-    s.save_gv = (torch.zeros(c["nt"], 9, E * m, dtype=torch.float32, device=A.dev)
-                 if need_bwd else A.empty)
+    if hist is None:
+        put(s, ("save_vx", "save_vy", "save_vz", "save_gv"), A.empty)
+    else:               # v: the start of the run, then every step; gv: every step
+        put(s, ("save_vx", "save_vy", "save_vz"), lambda: torch.zeros(
+            hist + 1, ng, dtype=torch.float32, device=A.dev))
+        s.save_gv = torch.zeros(hist, 9, E * m, dtype=torch.float32, device=A.dev)
     # the isotropic elastic default; the anisotropic / visco Functions override
     s.aniso, s.cij = 0, A.empty
     s.nsls = 0
@@ -319,9 +325,9 @@ def _vs3d_forward_input(c, A, need_bwd):
     return s
 
 
-def _vs3d_backward_input(c, A, carry, gs):
-    """The backward struct of both Functions, all but the moduli, their
-    gradient buffers and the ``inv_M`` / ``wavelet`` leaves."""
+def _vs3d_backward_input(c, A, gs):
+    """The backward struct of the Functions, all but the histories, the moduli,
+    their gradient buffers and the ``inv_M`` / ``wavelet`` leaves."""
     import sweep._C as _C
     E, m, ng = c["n_elements"], c["ngll"] ** 3, c["n_global"]
     b = _C.Sem3dVsBackwardInput()
@@ -332,7 +338,6 @@ def _vs3d_backward_input(c, A, carry, gs):
         b.lP, b.lmsig = A.block(9, ng), A.block(9, ng)
     else:
         put(b, _VS3D_CPML + ("a_n", "lP", "lmsig"), A.empty)
-    give(b, carry)
     b.grad_sx, b.grad_sy, b.grad_sz = (g.contiguous().float() for g in gs)
     put(b, ("lvx", "lvy", "lvz", "lRx", "lRy", "lRz", "adj_x", "adj_y", "adj_z",
             "grad_inv_M"), A.zeros)
@@ -349,34 +354,72 @@ def _vs3d_backward_input(c, A, carry, gs):
 _VS3D_CARRY = ("save_vx", "save_vy", "save_vz", "save_gv")
 
 
+def _vs3d_run(ctx, c, A, need_bwd, set_moduli, saved):
+    """One forward of a 3-D velocity-stress Function: the save-all, a run with no
+    adjoint, or the chunked checkpoints (``c["ckpt"]``). ``set_moduli(s)`` puts
+    the Function's constitutive leaves on a forward struct; ``saved`` are the
+    tensors the backward takes back."""
+    import sweep._C as _C
+    K = chunk_of(c, need_bwd)
+    s = _vs3d_forward_input(c, A, c["nt"] if need_bwd and K is None else None)
+    set_moduli(s)
+    if K is None:
+        seis = _C.sem3d_elastic_vs_forward(check_filled(s))
+        carry = take(s, _VS3D_CARRY)
+    else:
+        names, ckpts = forward_chunks(_C.sem3d_elastic_vs_forward, check_filled(s),
+                                      c["nt"], K)
+        seis = (s.seis_x, s.seis_y, s.seis_z)
+        carry = {"K": K, "names": names, "ckpts": ckpts}
+    if need_bwd:
+        ctx.save_for_backward(*saved)
+        ctx.c, ctx.carry, ctx.set_moduli = c, carry, set_moduli
+    return seis
+
+
+def _vs3d_adjoint(ctx, A, b):
+    """The adjoint of :func:`_vs3d_run` on the backward struct ``b`` (moduli,
+    gradient buffers and leaves set): the save-all histories, or the chunks
+    recomputed from their checkpoints."""
+    import sweep._C as _C
+    c, carry = ctx.c, ctx.carry
+    if "ckpts" not in carry:
+        give(b, carry)
+        _C.sem3d_elastic_vs_backward(check_filled(b))
+        return
+    K = carry["K"]
+    f = _vs3d_forward_input(c, A, K)
+    ctx.set_moduli(f)
+    give(b, take(f, _VS3D_CARRY))
+    backward_chunks(_C.sem3d_elastic_vs_forward, _C.sem3d_elastic_vs_backward,
+                    check_filled(f), check_filled(b), c["nt"], K,
+                    carry["names"], carry["ckpts"])
+
+
 class _SEMElasticVS3DC(torch.autograd.Function):
     """ElasticVSSEM3D / ElasticVSSEM3DDeformed: the isotropic Lame set."""
     @staticmethod
     def forward(ctx, lam, mu, lam2mu, inv_M, wavelet, c):
-        import sweep._C as _C
         mats = (lam, mu, lam2mu, inv_M)
         need_bwd = any(t.requires_grad for t in mats + (wavelet,))
         A = Alloc(wavelet.device, c["n_global"], c["nt"])
-        s = _vs3d_forward_input(c, A, need_bwd)
-        s.lam, s.mu, s.lam2mu, s.inv_M, s.wavelet = lam, mu, lam2mu, inv_M, wavelet
-        seis = _C.sem3d_elastic_vs_forward(check_filled(s))
-        if need_bwd:
-            ctx.save_for_backward(*mats, wavelet)
-            ctx.c, ctx.carry = c, take(s, _VS3D_CARRY)
-        return seis
+
+        def set_moduli(s):
+            s.lam, s.mu, s.lam2mu, s.inv_M, s.wavelet = lam, mu, lam2mu, inv_M, wavelet
+        return _vs3d_run(ctx, c, A, need_bwd, set_moduli, mats + (wavelet,))
 
     @staticmethod
     def backward(ctx, gsx, gsy, gsz):
-        import sweep._C as _C
         *mats, wavelet = ctx.saved_tensors
         c = ctx.c
         A = Alloc(wavelet.device, c["n_global"], c["nt"])
-        b = _vs3d_backward_input(c, A, ctx.carry, (gsx, gsy, gsz))
+        b = _vs3d_backward_input(c, A, (gsx, gsy, gsz))
         b.lam, b.mu, b.lam2mu, b.inv_M = mats
         b.wavelet = wavelet
         for nm, t in zip(("grad_lam", "grad_mu", "grad_lam2mu"), mats):
             setattr(b, nm, torch.zeros_like(t))
-        grads = _C.sem3d_elastic_vs_backward(check_filled(b))
+        _vs3d_adjoint(ctx, A, b)
+        grads = (b.grad_lam, b.grad_mu, b.grad_lam2mu, b.grad_inv_M, b.grad_wavelet)
         return grads_or_none(mats + [wavelet], grads) + (None,)
 
 
@@ -388,33 +431,28 @@ class _SEMElasticVS3DAnisoC(torch.autograd.Function):
     Thomsen parameters through the class's ``thomsen_to_cij3d``."""
     @staticmethod
     def forward(ctx, cij, inv_M, wavelet, c):
-        import sweep._C as _C
         need_bwd = any(t.requires_grad for t in (cij, inv_M, wavelet))
         A = Alloc(wavelet.device, c["n_global"], c["nt"])
-        s = _vs3d_forward_input(c, A, need_bwd)
-        s.aniso, s.cij = int(cij.shape[0]), cij
-        s.lam = s.mu = s.lam2mu = A.empty
-        s.inv_M, s.wavelet = inv_M, wavelet
-        seis = _C.sem3d_elastic_vs_forward(check_filled(s))
-        if need_bwd:
-            ctx.save_for_backward(cij, inv_M, wavelet)
-            ctx.c, ctx.carry = c, take(s, _VS3D_CARRY)
-        return seis
+
+        def set_moduli(s):
+            s.aniso, s.cij = int(cij.shape[0]), cij
+            s.lam = s.mu = s.lam2mu = A.empty
+            s.inv_M, s.wavelet = inv_M, wavelet
+        return _vs3d_run(ctx, c, A, need_bwd, set_moduli, (cij, inv_M, wavelet))
 
     @staticmethod
     def backward(ctx, gsx, gsy, gsz):
-        import sweep._C as _C
         cij, inv_M, wavelet = ctx.saved_tensors
         c = ctx.c
         A = Alloc(wavelet.device, c["n_global"], c["nt"])
-        b = _vs3d_backward_input(c, A, ctx.carry, (gsx, gsy, gsz))
+        b = _vs3d_backward_input(c, A, (gsx, gsy, gsz))
         b.aniso, b.cij, b.grad_cij = int(cij.shape[0]), cij, torch.zeros_like(cij)
         b.lam = b.mu = b.lam2mu = A.empty
         b.grad_lam = b.grad_mu = b.grad_lam2mu = A.empty
         b.inv_M, b.wavelet = inv_M, wavelet
-        grads = _C.sem3d_elastic_vs_backward(check_filled(b))
+        _vs3d_adjoint(ctx, A, b)
         return grads_or_none((cij, inv_M, wavelet),
-                             (b.grad_cij, grads[3], grads[4])) + (None,)
+                             (b.grad_cij, b.grad_inv_M, b.grad_wavelet)) + (None,)
 
 
 class _SEMViscoElasticVS3DC(torch.autograd.Function):
@@ -426,30 +464,25 @@ class _SEMViscoElasticVS3DC(torch.autograd.Function):
     with constant weights), only their adjoint state."""
     @staticmethod
     def forward(ctx, lam, mu, lam2mu, ptau, mtau, inv_M, wavelet, c):
-        import sweep._C as _C
         mats = (lam, mu, lam2mu, ptau, mtau, inv_M)
         need_bwd = any(t.requires_grad for t in mats + (wavelet,))
         E, m = c["n_elements"], c["ngll"] ** 3
         A = Alloc(wavelet.device, c["n_global"], c["nt"])
-        s = _vs3d_forward_input(c, A, need_bwd)
-        s.lam, s.mu, s.lam2mu, s.inv_M, s.wavelet = lam, mu, lam2mu, inv_M, wavelet
         L = int(ptau.shape[0])
-        s.nsls, s.ptau, s.mtau, s.gsls_w = L, ptau, mtau, c["gsls_w"]
-        s.rmem = A.block(6 * L, E * m)
-        seis = _C.sem3d_elastic_vs_forward(check_filled(s))
-        if need_bwd:
-            ctx.save_for_backward(*mats, wavelet)
-            ctx.c, ctx.carry = c, take(s, _VS3D_CARRY)
-        return seis
+
+        def set_moduli(s):
+            s.lam, s.mu, s.lam2mu, s.inv_M, s.wavelet = lam, mu, lam2mu, inv_M, wavelet
+            s.nsls, s.ptau, s.mtau, s.gsls_w = L, ptau, mtau, c["gsls_w"]
+            s.rmem = A.block(6 * L, E * m)
+        return _vs3d_run(ctx, c, A, need_bwd, set_moduli, mats + (wavelet,))
 
     @staticmethod
     def backward(ctx, gsx, gsy, gsz):
-        import sweep._C as _C
         lam, mu, lam2mu, ptau, mtau, inv_M, wavelet = ctx.saved_tensors
         c = ctx.c
         E, m = c["n_elements"], c["ngll"] ** 3
         A = Alloc(wavelet.device, c["n_global"], c["nt"])
-        b = _vs3d_backward_input(c, A, ctx.carry, (gsx, gsy, gsz))
+        b = _vs3d_backward_input(c, A, (gsx, gsy, gsz))
         b.lam, b.mu, b.lam2mu, b.inv_M, b.wavelet = lam, mu, lam2mu, inv_M, wavelet
         for nm, t in zip(("grad_lam", "grad_mu", "grad_lam2mu"), (lam, mu, lam2mu)):
             setattr(b, nm, torch.zeros_like(t))
@@ -457,6 +490,7 @@ class _SEMViscoElasticVS3DC(torch.autograd.Function):
         b.nsls, b.ptau, b.mtau, b.gsls_w = L, ptau, mtau, c["gsls_w"]
         b.lrmem = A.block(6 * L, E * m)
         b.grad_ptau, b.grad_mtau = torch.zeros_like(ptau), torch.zeros_like(mtau)
-        g = _C.sem3d_elastic_vs_backward(check_filled(b))
+        _vs3d_adjoint(ctx, A, b)
         return grads_or_none((lam, mu, lam2mu, ptau, mtau, inv_M, wavelet),
-                             (g[0], g[1], g[2], b.grad_ptau, b.grad_mtau, g[3], g[4])) + (None,)
+                             (b.grad_lam, b.grad_mu, b.grad_lam2mu, b.grad_ptau,
+                              b.grad_mtau, b.grad_inv_M, b.grad_wavelet)) + (None,)

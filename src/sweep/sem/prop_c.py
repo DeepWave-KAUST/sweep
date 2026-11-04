@@ -711,6 +711,19 @@ _BS_ANY_CPML = (AcousticSEM3D, AcousticSEM3DDeformed)
 _BS_NEEDS_CPML = (AcousticPotentialSEM2D, ElasticSEM2DDeformed, AcousticElasticSEM2D)
 
 
+# The forward methods whose drivers checkpoint in chunks (sweep.sem.drivers.vs_chunks),
+# and PropSEM's default chunk for them on impl='c': near the memory optimum
+# sqrt(2 nt) steps for nt from 500 to 8000 (within 1.25x of it), as the save-all
+# histories per step are about half the state.
+_CKPT_ROUTES = ("_forward_elastic_vs3d", "_forward_elastic_vs2d")
+C_CHECKPOINT_CHUNK = 64
+
+
+def c_checkpoint_supported(equation) -> bool:
+    """Do the CUDA kernels run ``memory=Ckpt(chunks=...)`` for ``equation`` (a class)?"""
+    return any(c_route(equation, cp) in _CKPT_ROUTES for cp in (False, True))
+
+
 def c_boundary_saving_supported(equation, has_cpml) -> bool:
     """Do the CUDA kernels run boundary saving for ``equation`` (a class)?"""
     return (issubclass(equation, _BS_ANY_CPML)
@@ -757,7 +770,8 @@ class SEMCudaPropagator(SEMPropagator):
         }
 
     def forward(self, source_wavelet: torch.Tensor, memory=None,
-                bs_store_dtype=None, bs_store_dtype_elem=None, **kwargs):
+                bs_store_dtype=None, bs_store_dtype_elem=None, ckpt_chunk=None,
+                **kwargs):
         """Seismogram ``(nt, nrec, ncomp)`` -- the same contract as the eager
         :meth:`SEMPropagator.forward`. The private ``_forward_*`` dispatch
         targets below return one tensor per receiver-capable field, in
@@ -771,7 +785,7 @@ class SEMCudaPropagator(SEMPropagator):
                     f"SEMPropagator for snapshots.")
         return self._assemble(self._forward_components(
             source_wavelet, memory=memory, bs_store_dtype=bs_store_dtype,
-            bs_store_dtype_elem=bs_store_dtype_elem))
+            bs_store_dtype_elem=bs_store_dtype_elem, ckpt_chunk=ckpt_chunk))
 
     def _assemble(self, comps):
         recv = [sp.name for sp in self.eq.field_specs if sp.supports_receiver]
@@ -842,7 +856,7 @@ class SEMCudaPropagator(SEMPropagator):
 
     def _forward_components(self, source_wavelet: torch.Tensor, memory=None,
                             bs_store_dtype=None, bs_store_dtype_elem=None,
-                            **kwargs):
+                            ckpt_chunk=None, **kwargs):
         """One shot through the family's forward method -- the (C-PML, bare)
         pair of the FIRST row of ``_C_ROUTES`` the equation is an instance of.
         The rows are ordered most-derived first, so a deformed equation never
@@ -858,6 +872,12 @@ class SEMCudaPropagator(SEMPropagator):
                         f"{type(self.eq).__name__} "
                         f"{'with' if cpml is not None else 'without'} a C-PML "
                         f"has no impl='c' kernel; use impl='eager'.")
+                if ckpt_chunk is not None and name not in _CKPT_ROUTES:
+                    raise NotImplementedError(
+                        f"ckpt_chunk: {type(self.eq).__name__} keeps the whole history "
+                        "on impl='c' (only the velocity-stress classes checkpoint).")
+                # the chunk the velocity-stress drivers checkpoint in (None: save-all)
+                self._c_ckpt = None if ckpt_chunk is None else int(ckpt_chunk)
                 if self.illumination is not None and name not in _ILLUM_ROUTES:
                     raise NotImplementedError(
                         f"compute_illumination is not wired on impl='c' for "
@@ -1127,6 +1147,7 @@ class SEMCudaPropagator(SEMPropagator):
         flat or Hex27 alike."""
         eq = self.eq
         c = self._elastic_vs3d_consts()
+        c["ckpt"] = getattr(self, "_c_ckpt", None)
         E, m = c["n_elements"], c["ngll"] ** 3
         t = lambda x: x.to("cuda", torch.float32).reshape(E, m)
         inv_M = eq._inv_M.to("cuda", torch.float32)
@@ -1180,6 +1201,7 @@ class SEMCudaPropagator(SEMPropagator):
         GSLS memories."""
         eq = self.eq
         c = self._elastic_vs2d_consts()
+        c["ckpt"] = getattr(self, "_c_ckpt", None)
         E, m = c["n_elements"], c["ngll"] ** 2
         t = lambda x: x.to("cuda", torch.float32).reshape(E, m)
         inv_M = eq._inv_M.to("cuda", torch.float32)

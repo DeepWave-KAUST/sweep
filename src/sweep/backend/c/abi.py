@@ -1301,6 +1301,8 @@ class Sem2dVsForwardInputCore(Structure):
         ("mtau", Buf),
         ("gsls_w", Buf),
         ("rmem", Buf),
+        ("t0", c_int32),
+        ("t1", c_int32),
     ]
 
 
@@ -1363,6 +1365,8 @@ class Sem2dVsBackwardInputCore(Structure):
         ("lrmem", Buf),
         ("grad_ptau", Buf),
         ("grad_mtau", Buf),
+        ("t0", c_int32),
+        ("t1", c_int32),
     ]
 
 
@@ -1965,6 +1969,8 @@ class Sem3dVsForwardInputCore(Structure):
         ("mtau", Buf),
         ("gsls_w", Buf),
         ("rmem", Buf),
+        ("t0", c_int32),
+        ("t1", c_int32),
     ]
 
 
@@ -2050,6 +2056,8 @@ class Sem3dVsBackwardInputCore(Structure):
         ("lrmem", Buf),
         ("grad_ptau", Buf),
         ("grad_mtau", Buf),
+        ("t0", c_int32),
+        ("t1", c_int32),
     ]
 
 
@@ -3217,6 +3225,8 @@ FIELDS = {
         ("mtau", "Buf", None),
         ("gsls_w", "Buf", None),
         ("rmem", "Buf", None),
+        ("t0", "int", 0),
+        ("t1", "int", 0),
     ],
     "Sem2dVsBackwardInputCore": [
         ("ibool", "Buf", None),
@@ -3276,6 +3286,8 @@ FIELDS = {
         ("lrmem", "Buf", None),
         ("grad_ptau", "Buf", None),
         ("grad_mtau", "Buf", None),
+        ("t0", "int", 0),
+        ("t1", "int", 0),
     ],
     "Sem3dForwardInputCore": [
         ("ibool", "Buf", None),
@@ -3857,6 +3869,8 @@ FIELDS = {
         ("mtau", "Buf", None),
         ("gsls_w", "Buf", None),
         ("rmem", "Buf", None),
+        ("t0", "int", 0),
+        ("t1", "int", 0),
     ],
     "Sem3dVsBackwardInputCore": [
         ("ibool", "Buf", None),
@@ -3939,6 +3953,8 @@ FIELDS = {
         ("lrmem", "Buf", None),
         ("grad_ptau", "Buf", None),
         ("grad_mtau", "Buf", None),
+        ("t0", "int", 0),
+        ("t1", "int", 0),
     ],
 }
 
@@ -5134,6 +5150,8 @@ LAYOUT_PROBE = [
     ("Sem2dVsForwardInputCore", "mtau"),
     ("Sem2dVsForwardInputCore", "gsls_w"),
     ("Sem2dVsForwardInputCore", "rmem"),
+    ("Sem2dVsForwardInputCore", "t0"),
+    ("Sem2dVsForwardInputCore", "t1"),
     ("Sem2dVsBackwardInputCore", None),
     ("Sem2dVsBackwardInputCore", "ibool"),
     ("Sem2dVsBackwardInputCore", "D"),
@@ -5192,6 +5210,8 @@ LAYOUT_PROBE = [
     ("Sem2dVsBackwardInputCore", "lrmem"),
     ("Sem2dVsBackwardInputCore", "grad_ptau"),
     ("Sem2dVsBackwardInputCore", "grad_mtau"),
+    ("Sem2dVsBackwardInputCore", "t0"),
+    ("Sem2dVsBackwardInputCore", "t1"),
     ("Sem3dForwardInputCore", None),
     ("Sem3dForwardInputCore", "ibool"),
     ("Sem3dForwardInputCore", "D"),
@@ -5766,6 +5786,8 @@ LAYOUT_PROBE = [
     ("Sem3dVsForwardInputCore", "mtau"),
     ("Sem3dVsForwardInputCore", "gsls_w"),
     ("Sem3dVsForwardInputCore", "rmem"),
+    ("Sem3dVsForwardInputCore", "t0"),
+    ("Sem3dVsForwardInputCore", "t1"),
     ("Sem3dVsBackwardInputCore", None),
     ("Sem3dVsBackwardInputCore", "ibool"),
     ("Sem3dVsBackwardInputCore", "D"),
@@ -5847,6 +5869,8 @@ LAYOUT_PROBE = [
     ("Sem3dVsBackwardInputCore", "lrmem"),
     ("Sem3dVsBackwardInputCore", "grad_ptau"),
     ("Sem3dVsBackwardInputCore", "grad_mtau"),
+    ("Sem3dVsBackwardInputCore", "t0"),
+    ("Sem3dVsBackwardInputCore", "t1"),
     ("BoundaryDtype", "FP32"),
     ("BoundaryDtype", "FP16"),
     ("BoundaryDtype", "BF16"),

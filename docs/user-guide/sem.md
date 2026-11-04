@@ -52,9 +52,10 @@ The options PropTorch has mean what they mean there:
 - `memory` — `Full()`, `BoundarySaving(storage_dtype=...)` or
   `Ckpt(chunks=...)` from `sweep.propagator` (see
   [Boundary saving](#boundary-saving)). Without it PropSEM takes PropTorch's
-  default strategy: boundary saving on `impl='c'` where its kernels have it
-  (else the full tape) and checkpointing on eager, in chunks of 8 steps;
-  `memory_strategy` reports `'full'`, `'boundary'` or `'ckpt'`;
+  default strategy: on `impl='c'` boundary saving where its kernels have it,
+  checkpoints in chunks of 64 steps for the velocity-stress classes, else the full
+  tape; on eager checkpointing in chunks of 8 steps; `memory_strategy` reports
+  `'full'`, `'boundary'` or `'ckpt'`;
 - `impl` — `None` runs the CUDA kernels where the equation has them and the
   device is CUDA, eager otherwise; `'eager'` / `'c'` choose;
 - `eager_options` — `EagerOptions(...)` from `sweep.propagator` (or its dict),
@@ -203,6 +204,20 @@ On a Hex27 mesh, `ElasticVSSEM3DDeformed` runs the same CUDA time loop as
 every GLL node instead of the Hex8 kernels' one scale factor per axis. On an A100
 (order 4, C-PML on five sides, 10³ and 16³ elements, 400 steps) that took 1.15–1.3×
 the Hex8 time on the same number of elements, at the same peak memory.
+
+The velocity-stress classes on `impl='c'` (2-D and 3-D, isotropic, VTI / TTI and
+visco-elastic) have no boundary saving; their adjoint needs, per step, the velocities
+and the stretched velocity gradients, several times the state. `memory=Full()` keeps
+them for the whole record. `memory=Ckpt(chunks=K)`, PropSEM's default there with
+`K = 64`, keeps the state at the start of every `K`-step chunk instead and reruns each
+chunk in the backward pass (one more forward pass in all), with the same records and
+gradients up to the kernels' run-to-run rounding (`test/sem/test_sem_c_vs_ckpt.py`).
+On an A100, one forward and backward call with the default options:
+
+| | `impl='eager'` (compiled, `Ckpt(8)`) | `impl='c'`, `Full()` | `impl='c'`, `Ckpt(64)` |
+| --- | --- | --- | --- |
+| `ElasticVSSEM2DDeformed`, 401 × 801, 2000 steps | 2.28 s, 7.3 GB | 0.81 s, 23.3 GB | 1.16 s, 1.8 GB |
+| `ElasticVSSEM3DDeformed`, 65³, 1000 steps | 9.84 s, 12.5 GB | 0.91 s, 36.4 GB | 1.32 s, 4.4 GB |
 
 Where the equation has CUDA kernels (the `impl="c"` column of the
 [equation table](equations.md#sem-family-spectral-elements)), `impl='c'` is the
@@ -438,7 +453,8 @@ the equation path.
 Each equation family's autograd Functions sit in one module of
 `sweep/sem/drivers/` (`acoustic2d`, `acoustic3d`, `elastic2d`,
 `fluid_solid`, `vs2d` for the 2-D velocity-stress family, and `bare` for the
-paths without a C-PML and the 3-D velocity-stress classes) — the fused
+paths without a C-PML and the 3-D velocity-stress classes, whose chunked
+checkpoints both velocity-stress modules take from `vs_chunks`) — the fused
 single-domain Function (the C entry runs the time loop) next to the strip
 Function `SEMModelParallel` steps (Python runs the stepped entries with one
 exchange per assembly). A module names

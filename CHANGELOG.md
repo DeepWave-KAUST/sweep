@@ -44,6 +44,17 @@ and this project adheres to
   SPECFEM3D to 3e-14 across a curved interface. A curved sea floor for
   `BiotVSSEM3DDeformed` (water and rock, each element wholly one medium) is the case that needs
   it (`test/sem/test_sem_interfaces3d.py`); notebook 61: a seamount.
+- **`memory=Ckpt(chunks=K)` on `impl='c'` for the velocity-stress classes**, 2-D and 3-D,
+  and PropSEM's default there (`K = 64`; it was the save-all). The forward keeps the state
+  at the start of every `K`-step chunk; the backward reruns each chunk from its checkpoint
+  with the histories on and runs the adjoint through it (`sweep.sem.drivers.vs_chunks`; the
+  core entries take a step range `t0`, `t1`). Records and gradients equal the save-all's up
+  to the kernels' run-to-run rounding, for chunks that divide the record or not, of one
+  step or of all but one (`test/sem/test_sem_c_vs_ckpt.py`). On an A100 a forward and
+  backward call of `ElasticVSSEM2DDeformed` on 401 x 801 for 2000 steps took 1.16 s and
+  1.8 GB, against 0.81 s and 23.3 GB with `Full()` and 2.28 s and 7.3 GB on eager's
+  defaults; `ElasticVSSEM3DDeformed` on 65^3 for 1000 steps 1.32 s and 4.4 GB, against
+  0.91 s and 36.4 GB, and 9.84 s and 12.5 GB.
 - **`impl='c'` for the 2-D velocity-stress family**: `ElasticVSSEM2DDeformed`,
   `ElasticVTISEM2DDeformed`, `ElasticTTISEM2DDeformed` and `ViscoElasticVSSEM2DDeformed`, through
   two new core entries (`sem2d_elastic_vs_forward` / `_backward`, `sem2d/vs2d.cu`). The 3-D
@@ -78,9 +89,7 @@ and this project adheres to
   are non-zero, the records and the gradients in `vp`, `vs`, `rho` match eager to 3e-7 to
   1.2e-6 in relative L2, the size of the CUDA path's own run-to-run differences, and a flat
   Hex27 reproduces the Hex8 kernels (`test/sem/test_sem_c_elastic_vs3d_deformed.py`). It
-  takes 1.15 to 1.3 times the Hex8 time on the same elements (A100). Save-all only, as on
-  Hex8, and `impl=None` now takes it on a GPU: where the per-step histories do not fit,
-  `impl='eager'` keeps its checkpointed default.
+  takes 1.15 to 1.3 times the Hex8 time on the same elements (A100).
 - **`ElasticVTISEM3D`, `ElasticTTISEM3D` (and their `...Deformed` versions on Hex27):
   transversely isotropic media on the 3-D SEM.** The velocity-stress step of `ElasticVSSEM3D`
   with the stiffnesses of a VTI medium (`vp, vs, rho, epsilon, delta, gamma`) or of one whose

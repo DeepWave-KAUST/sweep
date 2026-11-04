@@ -536,7 +536,14 @@ void elastic_vs3d_forward(const Sem3dVsForwardInputCore& in) {
     const int rb = nrec > 0 ? (nrec + TPB - 1) / TPB : 0;
     const size_t ngb = static_cast<size_t>(ng) * sizeof(float);
 
-    for (int n = 0; n < nt; ++n) {
+    const int t0 = in.t0, t1 = in.t1 > 0 ? in.t1 : nt;
+    SWEEP_CHECK(0 <= t0 && t0 < t1 && t1 <= nt, "sem3d VS: bad step range");
+    if (save) {                     // history row 0: the v this call starts from
+        cudaMemcpyAsync(s_vx, vx, ngb, cudaMemcpyDeviceToDevice, stream);
+        cudaMemcpyAsync(s_vy, vy, ngb, cudaMemcpyDeviceToDevice, stream);
+        cudaMemcpyAsync(s_vz, vz, ngb, cudaMemcpyDeviceToDevice, stream);
+    }
+    for (int n = t0; n < t1; ++n) {
         cudaMemsetAsync(Rx, 0, ngb, stream);
         cudaMemsetAsync(Ry, 0, ngb, stream);
         cudaMemsetAsync(Rz, 0, ngb, stream);
@@ -552,12 +559,12 @@ void elastic_vs3d_forward(const Sem3dVsForwardInputCore& in) {
                 ibool, D, Rx, Ry, Rz, P, ngll, E, ng);
         if (cp)
             sem3d_vs_cpml_nodal<<<nb, TPB, 0, stream>>>(a_n, P, msig, Rx, Ry, Rz, ng);
-        const size_t o = static_cast<size_t>(n) * ng;
+        const size_t o = static_cast<size_t>(n - t0 + 1) * ng;
         sem3d_vs_vel_update<<<nb, TPB, 0, stream>>>(
             vx, vy, vz, Rx, Ry, Rz, inv_M, px_, py_, pz_, wav, n, dt,
             save ? s_vx + o : nullptr, save ? s_vy + o : nullptr,
             save ? s_vz + o : nullptr, ng);
-        float* gv_n = save ? s_gv + static_cast<size_t>(n) * 9 * Em : nullptr;
+        float* gv_n = save ? s_gv + static_cast<size_t>(n - t0) * 9 * Em : nullptr;
         if (def)
             SEM3D_VS_LAUNCH_NC(nc, sem3d_vs_stress_update_deformed, grid, m, sh_g, stream,
                 vx, vy, vz, sig, mvel, ax, bx, ay, by, az, bz, lam, mu, l2m, cij,

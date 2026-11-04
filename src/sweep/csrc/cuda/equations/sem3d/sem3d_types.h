@@ -334,6 +334,11 @@ struct Sem3dVsForwardInput {
     // sig takes dt/2 sum_l (r+ + r). lam / mu / lam2mu are the unrelaxed moduli.
     int nsls = 0;
     torch::Tensor ptau, mtau, gsls_w, rmem;
+    // The steps [t0, t1) this call runs (t1 = 0: all nt), for the checkpointed
+    // adjoint; records and the wavelet stay indexed by the global step. The v
+    // history holds t1 - t0 + 1 rows, the first the v the call starts from (the
+    // driver copies it in; zero at t0 = 0); the gradient history t1 - t0.
+    int t0 = 0, t1 = 0;
 };
 
 // Returns (grad_lam, grad_mu, grad_lam2mu, grad_inv_M, grad_wavelet).
@@ -366,6 +371,9 @@ struct Sem3dVsBackwardInput {
     // adjoint, carried across steps, and grad_ptau / grad_mtau take their gradients.
     int nsls = 0;
     torch::Tensor ptau, mtau, gsls_w, lrmem, grad_ptau, grad_mtau;
+    // The steps [t0, t1) of the forward call whose histories this one reads
+    // (t1 = 0: all nt), in reverse; the adjoint state carries across calls.
+    int t0 = 0, t1 = 0;
 };
 
 } // namespace sem3d

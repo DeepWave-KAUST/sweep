@@ -107,7 +107,13 @@ void elastic_vs2d_forward(const Sem2dVsForwardInputCore& in) {
     const int rb = nrec > 0 ? (nrec + TPB - 1) / TPB : 0;
     const size_t ngb = static_cast<size_t>(ng) * sizeof(float);
 
-    for (int n = 0; n < nt; ++n) {
+    const int t0 = in.t0, t1 = in.t1 > 0 ? in.t1 : nt;
+    SWEEP_CHECK(0 <= t0 && t0 < t1 && t1 <= nt, "sem2d VS: bad step range");
+    if (save) {                     // history row 0: the v this call starts from
+        cudaMemcpyAsync(s_vx, vx, ngb, cudaMemcpyDeviceToDevice, stream);
+        cudaMemcpyAsync(s_vz, vz, ngb, cudaMemcpyDeviceToDevice, stream);
+    }
+    for (int n = t0; n < t1; ++n) {
         cudaMemsetAsync(Rx, 0, ngb, stream);
         cudaMemsetAsync(Rz, 0, ngb, stream);
         if (c.cp) cudaMemsetAsync(P, 0, 4 * ngb, stream);
@@ -116,11 +122,11 @@ void elastic_vs2d_forward(const Sem2dVsForwardInputCore& in) {
             c.ibool, c.D, Rx, Rz, P, ngll, E, ng);
         if (c.cp)
             sem2d_vs_cpml_nodal<<<nb, TPB, 0, stream>>>(c.a_n, P, msig, Rx, Rz, ng);
-        const size_t o = static_cast<size_t>(n) * ng;
+        const size_t o = static_cast<size_t>(n - t0 + 1) * ng;
         sem2d_vs_vel_update<<<nb, TPB, 0, stream>>>(
             vx, vz, Rx, Rz, c.inv_M, c.px, c.pz, wav, n, dt,
             save ? s_vx + o : nullptr, save ? s_vz + o : nullptr, ng);
-        float* gv_n = save ? s_gv + static_cast<size_t>(n) * 4 * Em : nullptr;
+        float* gv_n = save ? s_gv + static_cast<size_t>(n - t0) * 4 * Em : nullptr;
         SEM2D_VS_LAUNCH_NC(c.nc, sem2d_vs_stress_update, E, m, sh2, stream,
             vx, vz, sig, mvel, c.ax, c.bx, c.az, c.bz, c.lam, c.mu, c.l2m, c.cij,
             c.nsls, c.ptau, c.mtau, c.gsls_w, rmem, c.Ixx, c.Ixz, c.Iex, c.Iez,
@@ -172,22 +178,24 @@ void elastic_vs2d_backward(const Sem2dVsBackwardInputCore& in) {
     const int nb = (ng + TPB - 1) / TPB;
     const int rj = nrec > 0 ? (nrec * m + TPB - 1) / TPB : 0;
 
-    for (int k = nt - 1; k >= 0; --k) {
+    const int t0 = in.t0, t1 = in.t1 > 0 ? in.t1 : nt;
+    SWEEP_CHECK(0 <= t0 && t0 < t1 && t1 <= nt, "sem2d VS: bad step range");
+    for (int k = t1 - 1; k >= t0; --k) {
         if (nrec > 0) {
             sem2d_adjoint_source<<<rj, TPB, 0, stream>>>(gsx, c.rec_G, c.rec_W, lvx, k, nt, nrec, m);
             sem2d_adjoint_source<<<rj, TPB, 0, stream>>>(gsz, c.rec_G, c.rec_W, lvz, k, nt, nrec, m);
         }
-        const float* gv_k = sgv + static_cast<size_t>(k) * 4 * Em;
+        const float* gv_k = sgv + static_cast<size_t>(k - t0) * 4 * Em;
         SEM2D_VS_LAUNCH_NC(c.nc, sem2d_vs_stress_update_T, E, m, sh4, stream,
             lsig, gv_k, lmvel, c.ax, c.bx, c.az, c.bz, c.lam, c.mu, c.l2m, c.cij,
             c.nsls, c.ptau, c.mtau, c.gsls_w, lrmem, gPt, gMt,
             c.Ixx, c.Ixz, c.Iex, c.Iez, c.ibool, c.D, dt, lvx, lvz,
             gLam, gMu, gL2m, gC, ngll, E);
-        const size_t ok = static_cast<size_t>(k) * ng;
-        const float* vk1x = k >= 1 ? svx + (ok - ng) : nullptr;
-        const float* vk1z = k >= 1 ? svz + (ok - ng) : nullptr;
+        // v^k at history row k - t0 + 1, v^(k-1) one row up (row 0: the call's start)
+        const size_t ok = static_cast<size_t>(k - t0 + 1) * ng;
         sem2d_vs_vel_update_T<<<nb, TPB, 0, stream>>>(
-            lvx, lvz, svx + ok, svz + ok, vk1x, vk1z, c.inv_M, dt, lRx, lRz, gM, ng);
+            lvx, lvz, svx + ok, svz + ok, svx + (ok - ng), svz + (ok - ng),
+            c.inv_M, dt, lRx, lRz, gM, ng);
         sem2d_accum_gradW<<<nb, TPB, 0, stream>>>(c.px, c.inv_M, lvx, dt, k, gW, ng);
         sem2d_accum_gradW<<<nb, TPB, 0, stream>>>(c.pz, c.inv_M, lvz, dt, k, gW, ng);
         if (c.cp)

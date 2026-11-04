@@ -1055,6 +1055,8 @@ struct Sem2dVsForwardInputCore {
     Buf mtau;
     Buf gsls_w;
     Buf rmem;
+    int t0 = 0;
+    int t1 = 0;
 };
 
 struct Sem2dVsBackwardInputCore {
@@ -1115,6 +1117,8 @@ struct Sem2dVsBackwardInputCore {
     Buf lrmem;
     Buf grad_ptau;
     Buf grad_mtau;
+    int t0 = 0;
+    int t1 = 0;
 };
 
 struct Sem3dForwardInputCore {
@@ -1703,6 +1707,8 @@ struct Sem3dVsForwardInputCore {
     Buf mtau;
     Buf gsls_w;
     Buf rmem;
+    int t0 = 0;
+    int t1 = 0;
 };
 
 struct Sem3dVsBackwardInputCore {
@@ -1786,6 +1792,8 @@ struct Sem3dVsBackwardInputCore {
     Buf lrmem;
     Buf grad_ptau;
     Buf grad_mtau;
+    int t0 = 0;
+    int t1 = 0;
 };
 
 #include <type_traits>
