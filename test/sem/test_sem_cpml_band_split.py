@@ -20,7 +20,7 @@ import torch
 
 from sweep.propagator import BoundarySaving, Ckpt, EagerOptions, Full
 from sweep.sem import (PropSEM, AcousticSEM2DDeformed, AcousticSEM3D,
-                       ElasticSEM2DDeformed, ElasticVSSEM2DDeformed,
+                       ElasticSEM2DDeformed, ElasticVSSEM2DDeformed, ElasticTTISEM2DDeformed,
                        ElasticVTISEM2DDeformed, ElasticVSSEM3D, ElasticVSSEM3DDeformed)
 from sweep.sem._assembly import assemble, first_copies
 from sweep.sem.fields import FieldSpec
@@ -290,6 +290,10 @@ class _FullMeshVTI(_FullMeshVSStep, ElasticVTISEM2DDeformed):
     pass
 
 
+class _FullMeshTTI(_FullMeshVSStep, ElasticTTISEM2DDeformed):
+    pass
+
+
 def _run_vs(eq, vals, memory=Full(), topo=False, split=None):
     x = np.arange(SHAPE[1])
     kw = dict(shape=SHAPE, dh=10.0, dt=6e-4, n_order=4, abcn=8, f_dominant=15.0, dev="cpu",
@@ -313,9 +317,10 @@ def _run_vs(eq, vals, memory=Full(), topo=False, split=None):
 
 def _vs_cases():
     """Every (split, topography, memory) for the isotropic VS; two of them for the
-    VTI, which shares the step and differs only in ``_stress_increment``."""
+    VTI and the TTI, which share the step and differ only in ``_stress_increment``."""
     vs = (ElasticVSSEM2DDeformed, _FullMeshVS, (2400.0, 1300.0, 2000.0))
     vti = (ElasticVTISEM2DDeformed, _FullMeshVTI, (2400.0, 1300.0, 2000.0, 0.1, 0.05))
+    tti = (ElasticTTISEM2DDeformed, _FullMeshTTI, (2400.0, 1300.0, 2000.0, 0.1, 0.05, 0.4))
     mem = {"full": Full(), "boundary_saving": BoundarySaving()}
     out = []
     for split in (True, False):
@@ -325,6 +330,7 @@ def _vs_cases():
                 out.append(pytest.param(*vs, mem[m], topo, split, id=tag + "-vs"))
                 if (split, topo, m) in ((True, True, "boundary_saving"), (False, False, "full")):
                     out.append(pytest.param(*vti, mem[m], topo, split, id=tag + "-vti"))
+                    out.append(pytest.param(*tti, mem[m], topo, split, id=tag + "-tti"))
     return out
 
 

@@ -131,7 +131,7 @@ def propsem_models(equation) -> list:
     exists so that callers pass ``models=[vp]`` and rho is a constant the
     adapter fills in. ``sweep show`` reads the same list.
     """
-    supplied = {"rho"} if equation is AcousticPotentialSEM2D else set()
+    supplied = {"rho"} if getattr(equation, "takes_density", False) else set()
     return [n for n in model_names(equation) if n not in supplied]
 
 
@@ -202,6 +202,52 @@ def _resolve_topography(topography, shape):
     return t
 
 
+def _resolve_interfaces(interfaces, shape, topography):
+    """``interfaces`` -> the internal interfaces' rows, float64 on the host, top-down: one
+    ``(nx,)`` array of fractional rows per interface, each below the surface (row 0, or
+    the topography) and the one above, and above the model's last row. 2-D only."""
+    if interfaces is None:
+        return None
+    if len(shape) != 2:
+        raise NotImplementedError("interfaces are 2-D only")
+    rows = [_resolve_topography(r, shape) for r in interfaces]
+    if not rows:
+        return None
+    top = topography if topography is not None else torch.zeros(shape[1], dtype=torch.float64)
+    for k, r in enumerate(rows):
+        above = top if k == 0 else rows[k - 1]
+        if not bool((r > above).all()):
+            raise ValueError(f"interface {k} must lie below the "
+                             f"{'surface' if k == 0 else f'interface {k - 1}'} in every column")
+    return rows
+
+
+def _layer_elements(bounds, total, given):
+    """Element rows per layer, top-down: ``given`` checked, or ``total`` shared by the
+    layers' mean thicknesses (``bounds``: the surface, the interfaces and the last row, in
+    rows), at least one each, by largest remainders."""
+    n_layers = len(bounds) - 1
+    if given is not None:
+        given = [int(n) for n in given]
+        if len(given) != n_layers or min(given) < 1 or sum(given) != total:
+            raise ValueError(f"interface_elements must give {n_layers} positive element-row "
+                             f"counts summing to the model's {total}; got {given}")
+        return given
+    thick = [float((bounds[k + 1] - bounds[k]).mean()) for k in range(n_layers)]
+    if total < n_layers:
+        raise ValueError(f"{n_layers} layers need at least {n_layers} element rows; the model "
+                         f"has {total}")
+    share = [max(1.0, total * t / sum(thick)) for t in thick]
+    out = [max(1, int(x)) for x in share]
+    for k in sorted(range(n_layers), key=lambda k: share[k] - out[k], reverse=True):
+        if sum(out) >= total:
+            break
+        out[k] += 1
+    while sum(out) > total:                       # the floor of 1 overshot: take from the largest
+        out[out.index(max(out))] -= 1
+    return out
+
+
 class _SurfaceRows:
     """The ``z_top`` a curved mesh is built from: the topography rows in
     metres, linear between columns -- so exact on them, which is where an
@@ -230,6 +276,14 @@ class _SurfaceRows:
             hi = z[y1, x0] + fx * (z[y1, x1] - z[y1, x0])
             out = lo + fy * (hi - lo)
         return out.to(x.dtype)
+
+
+class _FlatTop:
+    """A flat top at z = 0 for :func:`build_layered_quad9` (a class, so a propagator stays
+    picklable)."""
+
+    def __call__(self, x):
+        return torch.zeros_like(x)
 
 
 def _resolve_device(device, dev):
@@ -645,7 +699,10 @@ class PropSEM:
     model and ``abcn`` (grid cells, whole elements: a multiple of
     ``n_order``; default ten elements) the absorbing layer added outside it;
     ``free_surface`` takes PropTorch's edge spec (default ``False``) and
-    ``topography`` its per-column surface rows; ``memory`` is ``Full()``,
+    ``topography`` its per-column surface rows; ``interfaces`` are internal
+    interfaces given the same way, top-down, which the 2-D Quad9 mesh follows
+    in ``interface_elements`` element rows per layer (default: by the layers'
+    mean thicknesses), see :meth:`layered_model`; ``memory`` is ``Full()``,
     ``BoundarySaving(storage_dtype=...)`` or ``Ckpt(chunks=...)``; ``impl``
     ``None`` is ``'auto'``; ``eager_options`` is an ``EagerOptions`` (or its dict)
     for ``impl='eager'``, the step compiled unless ``use_compile=False``; ``nt``
@@ -671,6 +728,8 @@ class PropSEM:
         abcn=None,
         free_surface=False,
         topography=None,
+        interfaces=None,
+        interface_elements=None,
         memory=None,
         f_dominant: float = 10.0,
         impl=None,
@@ -721,6 +780,8 @@ class PropSEM:
         self._nt_given = None if nt is None else int(nt)
         self.nt = self._nt_given
         self.topography = _resolve_topography(topography, shape)
+        self.interfaces = _resolve_interfaces(interfaces, shape, self.topography)
+        self._interface_elements = interface_elements
         # resolved to a tuple of side names; an empty tuple is falsey, so the
         # places that ask "is there a free surface at all" keep working
         self.free_surface = _resolve_free_surface(
@@ -1092,7 +1153,32 @@ class PropSEM:
                       n_order=n_order, dtype=dtype, device=dev)
         if self.ndim == 3:
             common.update(ney=elems_pad[1], y_max=maxes[1])
-        if topography is None:
+        self._layer_rows = [elems_pad[0]]
+        if self.interfaces is not None:
+            if kind != "quad9":
+                raise ValueError(
+                    f"interfaces need a curved-element 2-D mesh; {equation.__name__} builds "
+                    f"on a {kind} mesh. Use the 'Deformed' variant of this equation.")
+            from .mesh.quad9 import build_layered_quad9
+            top = (self.topography if topography is not None
+                   else torch.zeros(shape[1], dtype=torch.float64))
+            bounds = [top, *self.interfaces, torch.full_like(top, float(shape[0] - 1))]
+            rows = _layer_elements(bounds, elems_int[0], self._interface_elements)
+            rows[0] += low_pad[0]                 # the layers take the pads at their sides
+            rows[-1] += high_pad[0]
+            self._layer_rows = rows
+            # the mesh's top: the topography (never padded), or flat with any top pad
+            # inside the first layer; the interfaces shift down by that pad
+            z_pad = float(self._pad0[0])
+            surfaces = [_SurfaceRows(top, self.dh, self._pad0[1:]) if topography is not None
+                        else _FlatTop()]
+            surfaces += [_SurfaceRows(r + z_pad, self.dh, self._pad0[1:])
+                         for r in self.interfaces]
+            build = (build_layered_quad9,
+                     dict(nex=elems_pad[-1], x_max=maxes[-1], z_bottom=maxes[0],
+                          surfaces=surfaces, rows=rows, n_order=n_order, dtype=dtype,
+                          device=dev))
+        elif topography is None:
             build = (flat_builder, dict(z_max=maxes[0], **common))
         else:
             # the model's first column (and row of columns, in 3-D) sits at
@@ -1118,8 +1204,27 @@ class PropSEM:
         for e in elems_pad:
             n_el *= e
         self._gll_shape = (n_el,) + (n_order + 1,) * self.ndim
-        if topography is not None:
+        if topography is not None or self.interfaces is not None:
             self.mesh
+
+    @property
+    def element_layer(self):
+        """``(E,)`` long: each element's layer, 0 at the top -- the layers ``interfaces``
+        cut, the absorbing pads in the layer they border; all zeros without interfaces."""
+        ez = torch.arange(self._gll_shape[0]) // self._elems_pad[-1]
+        edges = torch.cumsum(torch.tensor(self._layer_rows), 0)
+        return torch.bucketize(ez, edges, right=True)
+
+    def layered_model(self, values):
+        """A GLL-native model, ``(E, ngll, ngll)``, of one value per layer (top-down;
+        floats or 0-d tensors, which keep their gradients): the material steps at the
+        interfaces, as the mesh does, where a grid model would be interpolated across them."""
+        n_layers = len(self._layer_rows)
+        if len(values) != n_layers:
+            raise ValueError(f"one value per layer: {n_layers} layers, {len(values)} values")
+        v = torch.stack([torch.as_tensor(x, dtype=self.dtype) for x in values]).to(self.dev)
+        idx = self.element_layer.to(self.dev)
+        return v[idx].view(-1, *([1] * self.ndim)).expand(self._gll_shape).contiguous()
 
     @property
     def mesh(self):
@@ -1347,12 +1452,12 @@ class PropSEM:
                                  pml_thickness_elements=self.abcn_elements,
                                  c_max=c_max, f_dominant=self.f_dominant),
                     sides, self.abcn_elements, c_max, self.f_dominant)
-            if self.equation is AcousticPotentialSEM2D:   # vp + constant density
+            if getattr(self.equation, "takes_density", False):  # vp + constant density
                 rho = torch.full_like(grids[0], self._c_density)
-                return AcousticPotentialSEM2D.build(
-                    self.mesh, grids[0], rho, dirichlet=dirichlet, cpml=cpml,
+                return self.equation.build(
+                    self.mesh, grids[0], rho, *grids[1:], dirichlet=dirichlet, cpml=cpml,
                     **self._eq_options)
-            return self.equation.build(self.mesh, grids[0],
+            return self.equation.build(self.mesh, *grids,
                                        dirichlet=dirichlet, cpml=cpml,
                                        **self._eq_options)
         # elastic: vp/vs/rho and a NATURAL free surface -- traction-free is what

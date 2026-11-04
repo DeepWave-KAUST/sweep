@@ -26,6 +26,62 @@ and this project adheres to
   skill.  The docs page *AI assistants (Agent Skills)* covers the install,
   and `test/test_skill_snippets.py` runs every code block of the skill so
   its examples cannot fall behind the API.
+- **`ViscoElasticSEM2DDeformed`: SPECFEM2D's visco-elastic displacement scheme on the SEM.**
+  `ElasticSEM2DDeformed` with SPECFEM2D's `ATTENUATION_VISCOELASTIC` as its Newmark path runs
+  it: mechanisms on the bulk and the shear modulus (models `vp, vs, rho, Qk, Qmu`), element
+  memories `e = A^2 e + B (s + A s_old)` of the dilatation, the deviatoric and the shear strain,
+  and SPECFEM2D's defaults: the band `f_ref / 10 .. 10 f_ref`, the fit at `2 n_sls - 1`
+  frequencies, and `vp`, `vs` read as unrelaxed (`"real_modulus"` is its
+  `READ_VELOCITIES_AT_f0`). The C-PML layer runs without attenuation. `Q = inf` is the elastic
+  step bit for bit, and all five models are differentiable. Against SPECFEM2D 8.1.0 the records
+  agree to 7e-14, with `Qkappa = Qmu = 30` read at 15 Hz and with `Qkappa = 60`, `Qmu = 20`
+  read as unrelaxed, where the velocity-stress class keeps 2e-4. Eager, 2-D; no boundary saving
+  (dissipative).
+- **`ElasticSHSEM2DDeformed`: SH waves on the SEM.** The out-of-plane displacement `u_y`
+  (SPECFEM2D's `P_SV = .false.`), as the potential form's scalar equation with `vp = vs` and
+  the density `1 / (rho vs^2)`: its operators, C-PML and exact boundary saving, a traction-free
+  surface, models `vs, rho`, a force along y and the receivers `u_y`, `vy`. Against SPECFEM2D:
+  1e-13 flat, 2e-12 under a hill. `PropSEM` reads whether an equation takes `density=` from its
+  `takes_density` flag.
+- **`ViscoAcousticPotentialSEM2D`: visco-acoustic attenuation on the SEM.** The potential
+  form with SPECFEM2D's `ATTENUATION_VISCOACOUSTIC`: its weak form, node memories and Newmark
+  update, models `vp, Qk` and `density=`, and the visco-elastic class's `f_ref`, `f_band`,
+  `n_sls`, `n_fit` and `velocities` (with `"unrelaxed"`, SPECFEM2D's reading without
+  `READ_VELOCITIES_AT_f0`, now on both classes). `Qk = inf` is the potential step bit for bit,
+  and all models are differentiable. Against SPECFEM2D 8.1.0 the records differ by 2.8% at Q =
+  30; its `update_memory_var_acous_weak_form` sets `dot_e1_old = dot_e1` inside the loop over
+  the mechanisms, and with that line reproduced they agree to 8e-13. Eager, 2-D; no boundary
+  saving (dissipative).
+- **Curved internal interfaces on the 2-D SEM mesh.** `PropSEM(interfaces=[...])` takes
+  internal interfaces like `topography`, one row per column and top-down, and its Quad9 mesh
+  follows them: each layer gets whole element rows (`interface_elements`, by default shared
+  by the layers' mean thicknesses), graded linearly between its two interfaces in every
+  column, as SPECFEM2D's internal mesher grades the layers of its `interfaces.dat`.
+  `element_layer` gives each element's layer and `layered_model(values)` a GLL-native model of
+  one value per layer, which steps at the interfaces instead of being interpolated across
+  them. The mesh is `sweep.sem.build_layered_quad9` (one layer is `build_topography_quad9`'s).
+  Against SPECFEM2D's mesh of the same interfaces (a curved sea floor under water, a
+  sinusoidal interface between two rocks) the records agree to 4e-12.
+- **The 2-D SEM against SPECFEM2D to round-off.** `test/sem/specfem_compare/run_compare_box.py`
+  runs the 2-D classes against SPECFEM2D built in double precision on the cases of
+  `make_specfem_box_cases.py`: homogeneous media in a box with all four sides free, a Ricker,
+  6000 steps, no shift or scale fitted. The elastic classes (`ElasticVSSEM2DDeformed`,
+  `ElasticSEM2DDeformed`, `ElasticSEM2D`, the VTI and TTI ones) agree to 1e-13, and to 3e-12
+  under a Gaussian hill. The acoustic ones (`AcousticPotentialSEM2D`, `AcousticSEM2D`) agree
+  to 1e-12 in pressure, and `AcousticElasticSEM2D` (water over rock) to 2e-12. The
+  visco-elastic class agrees to 2e-4 with SPECFEM2D's conventions; its memory variables'
+  time scheme differs. The conventions the comparison matches are in the SEM guide's
+  "Against SPECFEM2D".
+- **`ElasticTTISEM2DDeformed`: tilted transverse isotropy on the SEM.** The VTI
+  velocity-stress SEM with its symmetry axis tilted by a sixth model, `theta` (radians), by
+  the closed-form Bond rotation of the FD `ElasticTTI2nd`, in its axes and with its sign of
+  `theta` (`sweep.sem.thomsen_to_tti_cij`); the tilt adds the `c15`, `c35` couplings to the
+  stress update. `theta = 0` is `ElasticVTISEM2DDeformed`, and all six models are
+  differentiable, under boundary saving too. Both classes agree with SPECFEM2D's anisotropic
+  elastic medium (material type 2) to 1e-13 in relative L2 with SPECFEM2D built in double
+  precision: a VTI shale with a vertical and a 30° axis, a force and an explosion, all sides
+  free (`test/sem/specfem_compare/run_compare_box.py`, cases from
+  `make_specfem_box_cases.py`). Eager, 2-D.
 - **`BiotVSSEM3DDeformed`: the Biot SEM in 3-D.** The velocity-stress Biot SEM of
   `BiotVSSEM2DDeformed` on the Hex27 mesh of `ElasticVSSEM3DDeformed` (flat or under a
   topography): the same coefficients, placement and exact per-node drag, the open-pore
@@ -50,8 +106,13 @@ and this project adheres to
   Against SPECFEM2D's `ATTENUATION_VISCOELASTIC` (Q = 30, half-space, its band
   `f0 / 10 .. 10 f0`) the records agree to 1.2% in relative L2 (1.7% for the elastic pair)
   and the visco/elastic spectral ratios to 0.1-1.1% in amplitude
-  (`test/sem/specfem_compare/run_compare_visco.py`). Eager, 2-D; no boundary saving
-  (dissipative). The band and the moduli factors of the fit are shared with the FD class
+  (`test/sem/specfem_compare/run_compare_visco.py`). SPECFEM2D's reading of the velocities
+  at `f_ref` (`velocities="real_modulus"`: `rho v^2` is the real part of the modulus there,
+  which puts the phase velocity about `3 / (8 Q^2)` above `v`) and its fit's frequencies
+  (`n_fit = 2 n_sls - 1`) are options; with both, the records agree with SPECFEM2D's to 2e-4
+  in a box with free sides, SPECFEM2D in double precision (0.9% with the defaults), the rest
+  being the memory variables' time scheme (second order: 4.2e-5 at half the step). Eager,
+  2-D; no boundary saving (dissipative). The band and the moduli factors of the fit are shared with the FD class
   (`sweep.equations.visco_elastic.gsls_band`, `gsls_moduli_factors`); the default band, a
   factor 12, is that of SPECFEM2D's original fit, not of its current one.
 - **`ViscoBiotVSSEM2DDeformed`: Biot with an attenuating frame.** The models of

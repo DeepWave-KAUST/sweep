@@ -31,6 +31,7 @@ from .mesh import (
     Quad9Mesh,
     build_axis_aligned_quad9,
     build_topography_quad9,
+    build_layered_quad9,
     quad9_from_control_nodes,
     Hex8Mesh,
     build_hex8_mesh,
@@ -58,7 +59,7 @@ from .cpml import (
 from . import equations as _equations
 from .equations import *                                    # noqa: F401,F403
 globals().update(_equations.equation_classes())
-from .constitutive import thomsen_to_vti_cij
+from .constitutive import thomsen_to_tti_cij, thomsen_to_vti_cij
 from .propagator import (SEMPropagator, PointStamp, PointStamp3D, EdgeStamp,
                          build_point_stamp, build_point_stamps, build_moment_stamp,
                          locate_points)
@@ -76,6 +77,7 @@ __all__ = [
     "Quad9Mesh",
     "build_axis_aligned_quad9",
     "build_topography_quad9",
+    "build_layered_quad9",
     "quad9_from_control_nodes",
     "Hex8Mesh",
     "build_hex8_mesh",

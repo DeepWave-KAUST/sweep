@@ -26,6 +26,14 @@ complex modulus there, and all five are differentiable. Element arrays of ``Q = 
 ``tau_l = 0`` and :class:`ElasticVSSEM2DDeformed`'s step bit for bit. ``Q`` must exceed the
 fit's ``q_min`` (about 1.8 for 3 mechanisms over the default band).
 
+SPECFEM2D's conventions are options: ``velocities="real_modulus"`` takes ``rho vp^2`` and
+``rho vs^2`` as the real parts of the moduli at ``f_ref``, as its ``READ_VELOCITIES_AT_f0``
+does, which leaves the phase velocity higher than ``vp`` by about ``3 / (8 Q^2)``; and
+``n_fit = 2 n_sls - 1`` samples the constant-Q least squares at its frequencies (log-spaced
+over ``f_band`` with the ends; the default 200 fits the band throughout). ``velocities=
+"unrelaxed"`` takes ``vp``, ``vs`` as the infinite-frequency velocities, which is how SPECFEM2D
+reads them without ``READ_VELOCITIES_AT_f0``.
+
 The explicit stress update runs at the unrelaxed velocities, above ``vp`` / ``vs`` for a
 finite Q (~8% at Q = 10 for the default band of a factor 12): take ``dt`` from those
 (:meth:`ViscoElasticVSSEM2DDeformed.unrelaxed_velocities`). The C-PML terms run on every
@@ -39,6 +47,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import ClassVar, Optional
 
+import numpy as np
 import torch
 
 from sweep.equations.visco_elastic import (GSLSFit, MAX_SLS, gsls_band, gsls_moduli_factors,
@@ -56,31 +65,58 @@ def gsls_memory_specs(n_sls):
             for l in range(n_sls) for c in ("xx", "zz", "xz")]
 
 
-def gsls_setup(Qp_e, Qs_e, f_ref, f_band, n_sls, who):
+def gsls_real_modulus_factors(taus, tau_sigma, f_ref):
+    """``(s_U, s_R)`` mapping ``rho v^2`` to the unrelaxed and relaxed moduli when ``rho v^2``
+    is the real part of the modulus at ``f_ref``, as SPECFEM2D's ``READ_VELOCITIES_AT_f0``
+    takes it (``shift_velocities_from_f0``), instead of the phase velocity's square
+    (:func:`~sweep.equations.visco_elastic.gsls_moduli_factors`)."""
+    wt = 2.0 * np.pi * f_ref * np.asarray(tau_sigma, dtype=np.float64)
+    ca = wt ** 2 / (1.0 + wt ** 2)
+    s_R = 1.0 / (1.0 + sum(float(ca[l]) * t for l, t in enumerate(taus)))
+    return s_R * (1.0 + sum(taus)), s_R
+
+
+def gsls_unrelaxed_factors(taus, tau_sigma, f_ref):
+    """``(s_U, s_R)`` when ``v`` is the unrelaxed (infinite-frequency) velocity, as SPECFEM2D
+    reads its input without ``READ_VELOCITIES_AT_f0``: ``s_U = 1``, ``s_R = 1 / (1 + sum t)``."""
+    total = 1.0 + sum(taus)
+    return total / total, 1.0 / total
+
+
+VELOCITY_CONVENTIONS = {"phase": gsls_moduli_factors, "real_modulus": gsls_real_modulus_factors,
+                        "unrelaxed": gsls_unrelaxed_factors}
+
+
+def gsls_setup(Qp_e, Qs_e, f_ref, f_band, n_sls, who, *, n_fit=200, velocities="phase"):
     """The GSLS of ``n_sls`` mechanisms over ``f_band`` (default: a factor 12 around
     ``f_ref``, see :func:`~sweep.equations.visco_elastic.gsls_band`) for the quality
-    factors ``Qp_e``, ``Qs_e``: a namespace of the band, the relaxation times, the fit's
-    ``q_min`` (``Q`` below it is refused, naming ``who``), the strengths ``tp``, ``ts`` and
-    the factors ``(s_U, s_R)`` of
-    :func:`~sweep.equations.visco_elastic.gsls_moduli_factors` for each."""
+    factors ``Qp_e``, ``Qs_e``, the constant-Q least squares sampled at ``n_fit``
+    frequencies: a namespace of the band, the relaxation times, the fit's ``q_min`` (``Q``
+    below it is refused, naming ``who``), the strengths ``tp``, ``ts`` and the factors
+    ``(s_U, s_R)`` of ``VELOCITY_CONVENTIONS[velocities]`` for each."""
     if not 1 <= int(n_sls) <= MAX_SLS:
         raise ValueError(f"n_sls must be in [1, {MAX_SLS}], got {n_sls}")
+    if velocities not in VELOCITY_CONVENTIONS:
+        raise ValueError(f"velocities must be one of {sorted(VELOCITY_CONVENTIONS)}, "
+                         f"got {velocities!r}")
     f_ref, n_sls = float(f_ref), int(n_sls)
+    if int(n_fit) < n_sls:
+        raise ValueError(f"n_fit = {n_fit} frequencies cannot fit {n_sls} mechanisms")
     f_band = gsls_band(f_ref, f_band)
     tau_sigma = gsls_relaxation_times(n_sls, *f_band)
-    fit = GSLSFit(tau_sigma, *f_band)
+    fit = GSLSFit(tau_sigma, *f_band, n_freq=int(n_fit))
     q_min = fit.min_valid_q()
     q_lo = float(torch.minimum(Qp_e.detach().min(), Qs_e.detach().min()))
     if not q_lo > q_min:
         raise ValueError(
-            f"{who}: min(Qp, Qs) = {q_lo:.3g} is below {q_min:.3g}, where the constant-Q fit "
+            f"{who}: min(Q) = {q_lo:.3g} is below {q_min:.3g}, where the constant-Q fit "
             f"yields a negative relaxation strength (n_sls={n_sls}, f_band={f_band}). Bound Q "
             "from below.")
     tp, ts = fit.tau(Qp_e), fit.tau(Qs_e)
+    factors = VELOCITY_CONVENTIONS[velocities]
     return SimpleNamespace(f_ref=f_ref, f_band=f_band, n_sls=n_sls, q_min=q_min,
                            tau_sigma=tuple(float(t) for t in tau_sigma), tp=tp, ts=ts,
-                           p=gsls_moduli_factors(tp, tau_sigma, f_ref),
-                           s=gsls_moduli_factors(ts, tau_sigma, f_ref))
+                           p=factors(tp, tau_sigma, f_ref), s=factors(ts, tau_sigma, f_ref))
 
 
 def gsls_weights(tau_sigma, dt):
@@ -141,14 +177,20 @@ class ViscoElasticVSSEM2DDeformed(ElasticVSSEM2DDeformed):
         f_ref: float = 10.0,
         f_band: Optional[tuple] = None,
         n_sls: int = 3,
+        n_fit: int = 200,
+        velocities: str = "phase",
     ) -> "ViscoElasticVSSEM2DDeformed":
         """Build the equation. ``vp_e`` / ``vs_e`` are the phase velocities at ``f_ref``
-        (Hz), ``Qp_e`` / ``Qs_e`` the quality factors of the P and shear moduli, fitted
-        constant over ``f_band = (f_min, f_max)`` (default: a factor 12 around ``f_ref``, see
+        (Hz) -- or, with ``velocities="real_modulus"``, the square roots of the moduli's
+        real parts there over ``rho_e``, SPECFEM2D's reading --, ``Qp_e`` / ``Qs_e`` the
+        quality factors of the P and shear moduli, fitted constant over
+        ``f_band = (f_min, f_max)`` (default: a factor 12 around ``f_ref``, see
         :func:`~sweep.equations.visco_elastic.gsls_band`) with ``n_sls`` mechanisms
-        (SPECFEM's default 3; 1 to 4)."""
+        (SPECFEM's default 3; 1 to 4), by least squares at ``n_fit`` log-spaced
+        frequencies (SPECFEM2D's: ``2 n_sls - 1``)."""
         check_element_arrays(mesh, Qp_e=Qp_e, Qs_e=Qs_e)
-        g = gsls_setup(Qp_e, Qs_e, f_ref, f_band, n_sls, cls.__name__)
+        g = gsls_setup(Qp_e, Qs_e, f_ref, f_band, n_sls, cls.__name__, n_fit=n_fit,
+                       velocities=velocities)
         (sU_p, sR_p), (sU_s, sR_s) = g.p, g.s
         # The elastic build on the unrelaxed velocities: mass, geometry, the free surface,
         # the C-PML and the unrelaxed Lame set (bit for bit the elastic one at Q = inf).
@@ -160,6 +202,7 @@ class ViscoElasticVSSEM2DDeformed(ElasticVSSEM2DDeformed):
         mu_R = rho_e * vs_e * vs_e * sR_s
         eq.Qp_e, eq.Qs_e = Qp_e, Qs_e
         eq.f_ref, eq.f_band, eq.n_sls, eq.q_min = g.f_ref, g.f_band, g.n_sls, g.q_min
+        eq.n_fit, eq.velocities = int(n_fit), velocities
         eq._tau_sigma = g.tau_sigma
         eq._p_tau = tuple(pi_R * t for t in g.tp)
         eq._m_tau = tuple(mu_R * t for t in g.ts)

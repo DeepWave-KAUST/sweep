@@ -1,6 +1,6 @@
 # Meshes, basis and C-PML
 
-`PropSEM` builds all of this from `shape`, `n_order`, `topography` and `abcn`.
+`PropSEM` builds all of this from `shape`, `n_order`, `topography`, `interfaces` and `abcn`.
 The builders are public for driving [`SEMPropagator`](low_level.md) directly:
 a mesh of your own, a C-PML profile tuned by hand, or an equation `PropSEM`
 does not drive.
@@ -14,7 +14,8 @@ does not drive.
 ## 2-D meshes
 
 `Quad4Mesh` is the flat, axis-aligned mesh with a constant Jacobian; `Quad9Mesh`
-is the curved one (biquadratic elements) that follows a topography.
+is the curved one (biquadratic elements) that follows a topography and, with
+`build_layered_quad9`, curved internal interfaces.
 
 ::: sweep.sem.Quad4Mesh
 
@@ -25,6 +26,8 @@ is the curved one (biquadratic elements) that follows a topography.
 ::: sweep.sem.build_axis_aligned_quad9
 
 ::: sweep.sem.build_topography_quad9
+
+::: sweep.sem.build_layered_quad9
 
 ::: sweep.sem.quad9_from_control_nodes
 

@@ -117,3 +117,31 @@ def test_what_it_cannot_do_is_refused():
     vp, vs, rho, qp, qs = _models()
     with pytest.raises(ValueError, match="Bound Q from below"):
         _call(_prop(), [vp, vs, rho, torch.full(SHAPE, 1.1, dtype=F64), qs])
+
+
+def test_specfem2d_conventions():
+    # n_fit = 2 n_sls - 1: SPECFEM2D's classical least squares (lfit_zener at 2N - 1
+    # log-spaced frequencies with the ends); velocities = "real_modulus": its
+    # READ_VELOCITIES_AT_f0, Re M(f_ref) = rho v^2 (shift_velocities_from_f0)
+    from sweep.equations.visco_elastic import gsls_relaxation_times
+    f_ref, n_sls, q = 15.0, 3, 30.0
+    band = (f_ref / 10.0, 10.0 * f_ref)
+    full = lambda v: torch.full(SHAPE, v, dtype=F64)
+    p = _prop(equation_options={"f_ref": f_ref, "f_band": band, "n_sls": n_sls,
+                                "n_fit": 2 * n_sls - 1, "velocities": "real_modulus"})
+    eq = p._build_eq([full(3000.0), full(1500.0), full(2400.0), full(q), full(q)])
+    point = 1.0 / gsls_relaxation_times(n_sls, *band)
+    x = 2.0 * np.pi * band[0] * (band[1] / band[0]) ** np.linspace(0.0, 1.0, 2 * n_sls - 1)
+    afunc = x[:, None] * (point - x[:, None] / q) / (point ** 2 + x[:, None] ** 2)
+    w = np.linalg.lstsq(afunc, np.full(len(x), 1.0 / q), rcond=None)[0]
+    tp = np.array([float(t.flatten()[0]) for t in eq._p_tau]) / float(eq._lam2mu.flatten()[0])
+    # _p_tau holds pi_R t_l; pi_U = pi_R (1 + sum t_l)
+    t = tp * (1.0 + w.sum())
+    assert np.allclose(t, w, rtol=1e-10)
+    wt = 2.0 * np.pi * f_ref / point
+    re_m = 1.0 + np.sum(w * wt ** 2 / (1.0 + wt ** 2))
+    vp_u, vs_u = eq.unrelaxed_velocities()
+    assert np.isclose(float(vp_u.flatten()[0]) ** 2, 3000.0 ** 2 * (1.0 + w.sum()) / re_m, rtol=1e-12)
+    assert np.isclose(float(vs_u.flatten()[0]) ** 2, 1500.0 ** 2 * (1.0 + w.sum()) / re_m, rtol=1e-12)
+    with pytest.raises(ValueError, match="velocities"):
+        _prop(equation_options={"velocities": "group"})._build_eq(_models())
