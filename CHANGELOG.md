@@ -134,6 +134,27 @@ and this project adheres to
   compiled 2.2x | 1.3x on top of the unrolled contractions. A memory field is
   indexed by band row, not by element id.
 
+- **`PropSEM`'s wavelet is the pressure source on the potential forms too**
+  (`AcousticPotentialSEM2D`, the water of `AcousticElasticSEM2D`). The
+  wavelet used to drive chi, so `p = -d2(chi)/dt2` came out two time
+  derivatives off the pressure form's `p` (`AcousticSEM2DDeformed`, FD's
+  `Acoustic`) for the same wavelet. The records are now those of chi driven by
+  minus the wavelet's double time integral: the same `p` waveform on both
+  forms (to 2e-13 in float64; the amplitude still differs by `rho*c^2` at the
+  source), and the fluid-solid `vx`/`vz` stay consistent with that `p`.
+  **`chi`, `u_x`, `u_z` and `vx`/`vz` records change accordingly**: observed
+  data made with the old convention no longer matches. PropSEM takes them from
+  the run the wavelet itself drives -- linear and time-invariant, that run
+  records `p` sample for sample and the rest are its running integrals -- so
+  float32 never differences a double integral; `return_wavefield=True` runs
+  the integrated wavelet instead, so the snapshots are chi and u.
+  `SEMPropagator` and `SEMModelParallel` keep the wavelet as the chi source.
+  **PropSEM's default records are now the pressure** on these forms --
+  `['p']` on the potential form, `['p', 'vx', 'vz']` on the fluid-solid class
+  -- as on PropTorch: chi is now a near-DC tail (fitting it, bf16/int8
+  boundary-saving gradients fell to cos 0.1-0.4 of the full tape's). Ask for
+  `chi` / `u_x` / `u_z` by name; the low-level propagators still record chi.
+
 ### Removed
 - Stale examples and repo-root leftovers: `examples/FWI/` and
   `examples/LSRTM/` (unlinked scripts, covered by the notebooks; their
@@ -240,6 +261,27 @@ and this project adheres to
   so the x wavenumbers were scaled by dz/dx and the Q response depended on the
   grid orientation (a transposed problem's record differed by 28%). They now
   use both spacings; uniform grids are unchanged.
+- The last sample of a `PropSEM` derived receiver component no longer spikes.
+  `p = -d2(chi)/dt2` and `vx`/`vz` = `du/dt` repeated the last base sample
+  past the end of the record, so the final `p` sample was a first difference
+  over `dt^2` (717 after 103 on a 97x193 potential-form run) and the final
+  velocity sample half a step off. The end is now the second-order one-sided
+  difference: a record cut at `nt` ends within 1-2 % of the longer record's
+  value there (was up to 9x its peak), on both backends.
+- The SEM C-PML placement guard no longer flags a source or receiver on the
+  model's edge column (`ix = 0` / `nx - 1`). PropSEM adds the layer outside
+  the model, so that column is the band's inner edge, but the band's
+  thickness comes out of float32 mesh coordinates (200.00002 for 200 m) and
+  the comparison had no tolerance: `"in left band (x<200.0)"`. Points within
+  round-off of the edge now count as inside. The warning that does fire says
+  that on PropSEM such a point is outside the model grid and names
+  `pml_guard='off'` as the forward-call option it is, instead of advising a
+  smaller `pml_thickness_elements`, which PropSEM does not take.
+- A `PropSEM` source or receiver above the `topography` is refused up front,
+  naming the point and the surface row of its column, on every backend. It
+  used to reach the curved-mesh locator, which said only `could not locate
+  (x=..., z=...) in any Quad9 element of column ex=..`. A point on the
+  surface row (fractional rows and columns too) is accepted as before.
 
 ## [0.3.6] - 2026-10-29
 

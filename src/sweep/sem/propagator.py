@@ -879,21 +879,27 @@ def _pml_offenders(mesh, sides, thickness, coords):
     (``2·thickness ≥ extent``) has no interior at all — a degenerate all-absorbing
     domain (e.g. a tiny unit-test box), where flagging every point is noise rather
     than a placement mistake — so that axis is skipped. Returns
-    ``[(i, coord_tuple, reason), ...]``."""
+    ``[(i, coord_tuple, reason), ...]``.
+
+    A point ON the band's inner edge is in the interior: PropSEM puts the
+    model's edge column there, and the extents and ``thickness`` come out of
+    float32 mesh coordinates (``200.00002`` for a 200 m band), so the
+    comparison carries a round-off tolerance."""
     xmax, zmax = float(mesh.x_max), float(mesh.z_max)
     x_interior = 2.0 * thickness < xmax     # opposite bands leave an interior?
     z_interior = 2.0 * thickness < zmax
+    tol = 1e-6 * max(xmax, zmax)
     out = []
     for i, c in enumerate(coords):
         x, z = float(c[0]), float(c[-1])          # (x, z) or (x, y, z)
         hits = []
-        if x_interior and "left" in sides and x < thickness:
+        if x_interior and "left" in sides and x < thickness - tol:
             hits.append(f"left band (x<{thickness:.1f})")
-        if x_interior and "right" in sides and x > xmax - thickness:
+        if x_interior and "right" in sides and x > xmax - thickness + tol:
             hits.append(f"right band (x>{xmax - thickness:.1f})")
-        if z_interior and "top" in sides and z < thickness:
+        if z_interior and "top" in sides and z < thickness - tol:
             hits.append(f"top band (z<{thickness:.1f})")
-        if z_interior and "bottom" in sides and z > zmax - thickness:
+        if z_interior and "bottom" in sides and z > zmax - thickness + tol:
             hits.append(f"bottom band (z>{zmax - thickness:.1f})")
         if hits:
             out.append((i, tuple(round(float(v), 2) for v in c), ", ".join(hits)))
@@ -923,8 +929,11 @@ def _check_pml_placement(eq, source_xz, receiver_xz, guard):
         detail = "; ".join(f"{label}[{i}] {c} in {why}" for i, c, why in bad)
         msg = (f"{len(bad)} {label}(s) fall inside the C-PML absorbing band, where "
                f"the field is artificially damped (non-physical): {detail}. "
-               f"Move them into the interior, enlarge the domain / reduce "
-               f"pml_thickness_elements, or pass pml_guard='off' to silence.")
+               f"Move them into the interior: PropSEM adds its abcn layer "
+               f"outside the model, so there they are outside the model grid; "
+               f"on a hand-built C-PML a smaller pml_thickness_elements also "
+               f"frees them. pml_guard='off' (a PropSEM forward option, as on "
+               f"SEMPropagator.build) silences this check.")
         if guard == "error":
             raise ValueError(msg)
         warnings.warn(msg, stacklevel=3)

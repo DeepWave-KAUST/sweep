@@ -60,12 +60,15 @@ def _wav():
 
 
 def _run(impl, memory, mode, store, backward=True):
+    # receiver_type=["p"]: the pressure, the FWI record. Under PropSEM's
+    # pressure-source convention chi is the pressure's double time integral,
+    # a near-DC tail whose gradient is not what these gates measure.
     p = PropSEM(AcousticPotentialSEM2D, shape=(NZ, NX), dh=DH, dt=DT, nt=NT,
                 n_order=N_ORDER, free_surface=False,
                 abcn=ABCN * N_ORDER, f_dominant=F0, dev="cuda",
                 dtype=torch.float32, impl=impl,
                 memory=None if memory is None else _bs(store),
-                bs_band_mode=mode)
+                bs_band_mode=mode, receiver_type=["p"])
     src = np.array([[int(SRC_X_FRAC * NX), 4]], dtype=np.int64)
     rix = np.arange(3, NX - 3, 2)
     rec = np.stack([rix, np.full_like(rix, 4)], -1)[None]

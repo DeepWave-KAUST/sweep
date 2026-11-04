@@ -588,6 +588,25 @@ and gradients all flow through it unchanged. Derived names are receivers
 only: as a ``source_type``, ``p`` is refused, and on the elastics ``vx`` /
 ``vz`` name a force (see [Source types](#source-types)).
 
+On the potential forms (``AcousticPotentialSEM2D`` and the water of
+``AcousticElasticSEM2D``) the wavelet is the **pressure** source, as on the
+pressure form and ``PropTorch``: the records are those of chi driven by minus
+the wavelet's double time integral, so the same wavelet gives the same ``p``
+waveform on ``AcousticSEM2DDeformed`` and on the potential form, and in the
+fluid-solid class ``p`` agrees with ``vx``/``vz``. The amplitude still
+differs by ``kappa = rho*c^2`` at the source (the potential form's normalization).
+PropSEM gets these records from the run the wavelet itself drives -- the
+equations are linear and time-invariant, so that run records ``p`` sample for
+sample and ``chi``/``u``/``v`` are its running integrals -- which keeps float32
+from differencing a double integral; only ``return_wavefield=True`` runs the
+integrated wavelet, so that the snapshots are chi and u. A wavelet with a
+non-zero mean (or first moment) leaves chi and u a static (or ramping) offset
+that ``p`` and ``v`` do not see. ``SEMPropagator`` and ``SEMModelParallel``
+below PropSEM still take the wavelet as the chi source. Without a
+``receiver_type`` PropSEM records ``p`` on the potential form and ``p``,
+``vx``, ``vz`` on the fluid-solid class (PropTorch's defaults); ``chi`` is a
+near-DC tail, a poor record to fit -- ask for it by name.
+
 ## Source types
 
 On the elastic equations `source_type` takes `PropTorch`'s names as well as

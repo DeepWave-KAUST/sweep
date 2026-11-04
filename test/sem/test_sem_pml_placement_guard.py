@@ -8,10 +8,14 @@ from __future__ import annotations
 
 import warnings
 
+import numpy as np
 import pytest
 import torch
 
-from sweep.sem import ElasticSEM2DDeformed, SEMPropagator, build_axis_aligned_quad9
+from sweep.sem import (ElasticSEM2DDeformed, PropSEM, SEMPropagator,
+                       build_axis_aligned_quad9)
+from sweep.sem.equations import AcousticSEM2DDeformed
+from sweep.sem.equations.acoustic3d_deformed import AcousticSEM3DDeformed
 from sweep.sem.cpml.elastic import build_elastic_cpml
 
 DT_T = torch.float64
@@ -91,3 +95,84 @@ def test_degenerate_all_pml_domain_no_warn():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         _build(eq, src=[(50.0, 100.0)], rec=[(100.0, 100.0)])
+
+
+
+def test_point_on_the_band_edge_is_interior():
+    """The band's inner edge is the interior's first line (PropSEM puts the
+    model's edge column there), and the band's thickness comes out of float32
+    mesh coordinates (200.00002 for a 200 m band in PropSEM). A point on the
+    edge, up to that round-off, must not be flagged; a metre in still is."""
+    eq, cp = _eq()
+    L = cp.pml_thickness
+    for eps in (-2e-4, 0.0, 2e-4):            # round-off of a ~1e3 m extent
+        edges = [(L + eps, 30.0), (1270.0 - L - eps, 30.0), (640.0, 890.0 - L - eps)]
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _build(eq, src=[(640.0, 30.0)], rec=edges)
+    with pytest.warns(UserWarning, match="left band"):
+        _build(eq, src=[(640.0, 30.0)], rec=[(L - 1.0, 30.0)])
+
+
+# --------------------------------------------------------------------------- #
+# PropSEM: the layer is added outside the model, so the model's edge column
+# (ix = 0 or nx-1) is the band's inner edge -- in the model. It was flagged
+# "in left band (x<200.0)" on a topography mesh, the thickness a float32
+# round-off above 200. The warning that does fire names PropSEM's options.
+# --------------------------------------------------------------------------- #
+NZ, NY, NX, DH = 17, 13, 21, 25.0
+NT = 8
+TOPO2 = 1.0 + 0.5 * np.sin(np.arange(NX) / 4.0)
+TOPO3 = TOPO2[None, :] * np.ones((NY, 1))
+EAGER = dict(impl="eager", eager_options=dict(use_compile=False))
+
+
+def _wav():
+    w = torch.zeros(NT)
+    w[2] = 1.0
+    return w
+
+
+def _p3():
+    return PropSEM(AcousticSEM3DDeformed, shape=(NZ, NY, NX), dh=DH, dt=2e-3,
+                   n_order=4, abcn=8, free_surface=True, topography=TOPO3, **EAGER)
+
+
+def _p2(**kw):
+    return PropSEM(AcousticSEM2DDeformed, shape=(NZ, NX), dh=DH, dt=2e-3,
+                   n_order=4, abcn=8, topography=TOPO2, **EAGER, **kw)
+
+
+def _run(p, src, rec, **kw):
+    vp = torch.full(p.shape, 2000.0)
+    with torch.no_grad():
+        return p(_wav(), np.asarray(src), np.asarray(rec), models=[vp], **kw)
+
+
+def test_edge_receivers_3d_topography_do_not_warn():
+    p = _p3()
+    rec = [[[0, 6, 6], [NX - 1, 6, 6], [10, 6, NZ - 1], [0, 6, NZ - 1]]]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _run(p, [[10, 6, 6]], rec)
+
+
+def test_edge_receivers_2d_topography_do_not_warn():
+    p = _p2()
+    rec = [[[0, 6], [NX - 1, 6], [10, NZ - 1], [NX - 1, NZ - 1]]]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _run(p, [[10, 6]], rec)
+
+
+def test_receiver_outside_the_model_warns_with_propsem_options():
+    p = _p2()
+    with pytest.warns(UserWarning, match="left band") as rec:
+        _run(p, [[10, 6]], [[[-1, 6]]])
+    msg = str(rec[0].message)
+    assert "abcn" in msg and "outside the model grid" in msg
+    assert "reduce pml_thickness_elements" not in msg
+    # the option the warning names is one PropSEM's forward takes
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _run(p, [[10, 6]], [[[-1, 6]]], pml_guard="off")
