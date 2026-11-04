@@ -365,6 +365,19 @@ and this project adheres to
   curvilinear grid only.
 
 ### Fixed
+- `PropSEM(memory=BoundarySaving())` on the velocity-stress SEM
+  (`ElasticVSSEM2DDeformed` with VTI/TTI, `ElasticVSSEM3D`,
+  `ElasticVSSEM3DDeformed`) gives the full-tape gradient with a C-PML. The ring
+  holds only the velocities, so the reverse march rebuilt the band's stresses
+  and memories wrong, and the per-step recompute put a wrong velocity on the
+  band nodes, which the model gradient next to the band reads: 4e-4 of the 3-D
+  vp gradient (9e-5 with a free top), 1e-3 of the 2-D rho gradient, records
+  unaffected. Not from the C-PML recursion change: dev before it was off by as
+  much. The recompute now pins the velocity update's output to the stored ring
+  (`boundary_saving.pin_to_ring`, straight through, so the adjoint is
+  unchanged): fp64 round-off in both band splits and both ring modes, with
+  topography and in the multi-shot rollout. No extra storage; `impl='c'` has no
+  boundary saving for these classes.
 - `PropSEM(memory=BoundarySaving(), bs_band_mode='rim')` gives the full-tape
   gradient over the whole model, its edge included. The rim was meant to be
   the band's inner edge, but the C-PML derivative profiles (`dbx_dx` ...,

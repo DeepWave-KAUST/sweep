@@ -31,6 +31,10 @@ physics-specific pieces:
   substituted (for the per-step VJP).
 * ``eq.bs_ring_save`` (field indices) / ``eq.bs_ring_restore``
   (``(field_idx, save_slot, offset)``) — the interface-ring bookkeeping.
+* ``eq.bs_pin_fields`` (optional) — fields whose step output the per-step VJP
+  pins to the ring (``bs_recompute(..., target=...)``, :func:`pin_to_ring`):
+  for equations whose band state the ring does not hold (the velocity-stress
+  forms' element-local stresses and memories).
 
 The non-reversible CPML band is zeroed and the one-element interior interface
 ring restored, so the lossless interior reconstructs exactly (the PML-region
@@ -355,7 +359,7 @@ class SEMReconState:
     # ring's "_eslot" twin IS read, which is what made them look load-bearing)
     __slots__ = ("save_fields", "save_idx", "idx", "cpml_zero_idx",
                  "ring", "scale", "_int8", "frame", "frames", "_ax",
-                 "elem_fields", "_eslot", "elem_idx", "elem_ring")
+                 "elem_fields", "_eslot", "elem_idx", "elem_ring", "_masks")
 
     def __init__(self, nt, save_fields, save_idx, cpml_zero_idx, device, dtype,
                  store_dtype=None, elem_fields=(), elem_idx=None,
@@ -421,6 +425,16 @@ class SEMReconState:
                 *elem_trail, dtype=e_dtype, device=device)
         else:
             self.elem_ring = None
+        self._masks = {}
+
+    def ring_mask(self, f, like):
+        """``(n_nodes,)`` bool: the nodes field ``f``'s ring restores, for a
+        field shaped ``like`` (its node axis, batched or not)."""
+        if f not in self._masks:
+            idx = self.idx[self.save_fields.index(f)]
+            m = torch.zeros(like.shape[self._ax], dtype=torch.bool, device=like.device)
+            self._masks[f] = m.index_fill(0, idx, True)
+        return self._masks[f]
 
     def _band(self, u, idx):
         """``u``'s rows at ``idx`` along the node axis: ``u[idx]`` unbatched,
@@ -482,6 +496,44 @@ class SEMReconState:
 
 
 # --------------------------------------------------------------------------- #
+# The step's known output on the ring, for the per-step VJP.
+# --------------------------------------------------------------------------- #
+def pin_to_ring(v, inv_M, mask, t):
+    """``v`` moved onto ``t`` at the ring nodes ``mask``, straight through.
+
+    For an equation whose band state the ring does not hold (the
+    velocity-stress forms keep their stresses and C-PML memories element-local
+    and ring only the velocities), the reverse march rebuilds the band wrong,
+    and re-running the step from that frame puts a wrong ``v`` on the ring
+    nodes. The step is linear in the fields, so the adjoint never read those
+    values; the MODEL gradient does: the stress update multiplies the
+    stiffness by ``∇v``, and the edge nodes' mass by the increment ``F`` of
+    ``v = v_in + inv_M F``. Both sit next to the band (4e-4 of the 3-D VS
+    gradient against the full tape). The step's true output ``t`` is known on
+    exactly these nodes -- they are the ring -- so add ``inv_M c`` with
+    ``c = (t - v) / inv_M`` held constant: the value is ``t``, the derivatives
+    in the fields are unchanged and the one in ``inv_M`` becomes the true
+    increment ``F + c``. Nodes with ``inv_M = 0`` (the C-PML's pinned outer
+    edge) do not move. Elementwise, so it runs under ``vmap``."""
+    with torch.no_grad():
+        im = inv_M.detach()
+        keep = mask & (im != 0)
+        c = torch.where(keep, (t - v.detach()) / torch.where(keep, im, torch.ones_like(im)),
+                        torch.zeros_like(im))
+    return v + inv_M * c
+
+
+def _pin_targets(eq, recon, out_frame):
+    """``bs_recompute``'s ``target``: the ring masks and the step's output on
+    the fields the equation pins (``bs_pin_fields``, see :func:`pin_to_ring`),
+    or ``None``. ``out_frame`` is the step's output, exact on the ring."""
+    pin = getattr(eq, "bs_pin_fields", ())
+    if not pin or not recon.save_idx.numel():
+        return None
+    return tuple((recon.ring_mask(f, out_frame[f]), out_frame[f]) for f in pin)
+
+
+# --------------------------------------------------------------------------- #
 # One boundary-saved time step (positional).
 # --------------------------------------------------------------------------- #
 class _SEMBoundarySaveStep(torch.autograd.Function):
@@ -508,6 +560,7 @@ class _SEMBoundarySaveStep(torch.autograd.Function):
         model_names = cfg["model_names"]
 
         src_val = _assemble_src(cfg, ctx.wav)
+        out_frame = recon.frame          # this step's output, exact on the ring
 
         # Reconstruct the step's input frame (CPML zeroed), restore the rings.
         # A stored full-state checkpoint at this level overrides the
@@ -533,7 +586,9 @@ class _SEMBoundarySaveStep(torch.autograd.Function):
             else:
                 wav_rg = list(ctx.wav)
             src_rg = _assemble_src(cfg, wav_rg)
-            out = eq.bs_recompute(fields_rg, src_rg, dt, leaves)
+            target = _pin_targets(eq, recon, out_frame)
+            out = (eq.bs_recompute(fields_rg, src_rg, dt, leaves) if target is None
+                   else eq.bs_recompute(fields_rg, src_rg, dt, leaves, target=target))
 
         diff = ([leaves[n] for n in model_names]
                 + [fields_rg[j] for j in gidx]
@@ -729,6 +784,7 @@ class _SEMBoundarySaveStepBatched(torch.autograd.Function):
         model_names = cfg["model_names"]
 
         src_val = [p * w[:, None] for p, w in zip(cfg["src_patterns"], ctx.wav)]
+        out_frame = recon.frame          # this step's output, exact on the ring
         with torch.no_grad():
             in_fields = cfg["vreverse"](recon.frame, src_val)
         in_fields = recon.restore(in_fields, i, eq.bs_ring_restore)
@@ -745,9 +801,16 @@ class _SEMBoundarySaveStepBatched(torch.autograd.Function):
             else:
                 wav_rg = list(ctx.wav)
             src_rg = [p * w[:, None] for p, w in zip(cfg["src_patterns"], wav_rg)]
-            vrec = torch.vmap(lambda f, s: eq.bs_recompute(f, s, dt, leaves),
-                              in_dims=(0, 0))
-            out = vrec(fields_rg, src_rg)
+            target = _pin_targets(eq, recon, out_frame)
+            if target is None:
+                vrec = torch.vmap(lambda f, s: eq.bs_recompute(f, s, dt, leaves),
+                                  in_dims=(0, 0))
+                out = vrec(fields_rg, src_rg)
+            else:                        # the ring masks are shared by the shots
+                masks = [m for m, _ in target]
+                vrec = torch.vmap(lambda f, s, t: eq.bs_recompute(
+                    f, s, dt, leaves, target=tuple(zip(masks, t))), in_dims=(0, 0, 0))
+                out = vrec(fields_rg, src_rg, [t for _, t in target])
 
         diff = ([leaves[n] for n in model_names]
                 + [fields_rg[j] for j in gidx]
