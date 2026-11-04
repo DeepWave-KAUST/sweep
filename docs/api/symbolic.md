@@ -9,6 +9,8 @@ guide: [Symbolic PDEs](../user-guide/symbolic.md).
 
 ::: sweep.symbolic.Model
 
+::: sweep.symbolic.Coefficient
+
 ::: sweep.symbolic.Eq
 
 ::: sweep.symbolic.laplace

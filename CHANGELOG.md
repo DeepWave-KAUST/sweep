@@ -145,10 +145,19 @@ and this project adheres to
   fields, any number of them coupled, right-hand sides linear in the fields with
   model-only coefficients on per-axis second derivatives (`p.dz2`, `p.dx2`,
   `laplace(p)`) or on fields; C-PML on every second derivative; a pressure-release
-  free surface (flat, per edge in 2-D, topography). Anything else raises when the
-  PDE is built. Restating `Acoustic` / `Acoustic3D` reproduces them bit for bit,
-  record and gradient, with the same peak memory. Docs page *Symbolic PDEs*;
-  `test/test_symbolic_pde.py`.
+  free surface (flat, per edge in 2-D, topography). First-order staggered-grid
+  systems: `Field("vx", time_order=1, stagger="x")`, `Eq(vx.dt, ...)`, each
+  right-hand side a model-only coefficient times first derivatives of the other
+  fields, taken as forward or backward staggered differences from the fields'
+  declared positions; C-PML (`cpmls`) on every derivative; the step's sub-steps
+  double as the `interior_substeps` of eager boundary saving; no free surface
+  yet. `Coefficient("mu", rho * vs**2)` is computed once per run
+  (`prepare_models`). Anything else raises when the PDE is built. Restating
+  `Acoustic` / `Acoustic3D` reproduces them bit for bit, record and gradient,
+  with the same peak memory; restating `Acoustic1st` and the 2-D `Elastic` bit
+  for bit uncompiled, the 3-D `Elastic` record bit for bit and gradients to
+  ~1e-7. Docs page *Symbolic PDEs*; `test/test_symbolic_pde.py`,
+  `test/test_symbolic_first_order.py`.
 - **Agent Skill for AI coding assistants** in `skills/sweep-solver/`
   ([agentskills.io](https://agentskills.io) format): a `SKILL.md` entry point
   plus on-demand references (equations, propagators, boundaries, gradients,

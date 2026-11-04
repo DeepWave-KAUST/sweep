@@ -267,11 +267,11 @@ def test_undeclared_free_surface_is_refused():
 
 @pytest.mark.parametrize("equations, error, match", [
     ([Eq(p.dt2, vp**2 * p.dx)], NotImplementedError, "first spatial derivative"),
-    ([Eq(p.dt, vp * p.dx2)], NotImplementedError, "only second time derivatives"),
+    ([Eq(p.dt, vp * p.dx2)], ValueError, "declared with time_order=2"),
     ([Eq(p.dt2, vp**2 * laplace(p) - 0.1 * p.dt)], NotImplementedError, "no damping terms"),
     ([Eq(p.dt2, p * p.dx2)], ValueError, "not linear"),
     ([Eq(p.dt2, vp**2 * laplace(p) + vp)], ValueError, "contains no field"),
-    ([Eq(p.dt2, sympy.Symbol("c") * laplace(p))], ValueError, "neither a Model nor a number"),
+    ([Eq(p.dt2, sympy.Symbol("c") * laplace(p))], ValueError, "neither a Model, a Coefficient nor a number"),
     ([Eq(p.dt2, vp**2 * laplace(q))], ValueError, "no equation of its own"),
     ([Eq(p.dt2, vp**2 * laplace(p)), Eq(p.dt2, vp**2 * p.dx2)], ValueError, "more than one equation"),
     ([Eq(vp, laplace(p))], ValueError, "no time derivative"),
@@ -299,6 +299,6 @@ def test_build_checks_dimension_names_and_models():
     with pytest.raises(ValueError, match="reserved"):
         Field("dt")
     with pytest.raises(NotImplementedError, match="time_order"):
-        Field("u", time_order=1)
+        Field("u", time_order=3)
     with pytest.raises(NotImplementedError, match="'torch' only"):
         ACOUSTIC.build(2)(4, backend="jax")

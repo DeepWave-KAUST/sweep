@@ -1,16 +1,24 @@
-"""Base class of the equations ``sweep.symbolic`` generates.
+"""Base classes of the equations ``sweep.symbolic`` generates.
 
-It holds what does not depend on the PDE: the operator set-up, the default
-source / receiver fields and the free surface. Its set-up mirrors
+They hold what does not depend on the PDE: the operator set-up, the default
+source / receiver fields and the free surface. The second-order set-up mirrors
 :class:`~sweep.equations.Acoustic` (2-D) and :class:`~sweep.equations.Acoustic3D`
 (3-D), first-derivative kernels included: the fixed stencil on a 2-D CUDA
-device, ``torch.gradient`` otherwise.
+device, ``torch.gradient`` otherwise. The first-order one is
+:class:`~sweep.equations.base.FirstOrderEquation`'s staggered-grid operator, as
+:class:`~sweep.equations.Acoustic1st` and :class:`~sweep.equations.Elastic` use.
 """
 from __future__ import annotations
 
 from sweep.equations._free_surface import zero_above_topo
-from sweep.equations.base import SecondOrderEquation
+from sweep.equations.base import FirstOrderEquation, SecondOrderEquation
 from sweep.equations.utils import zero_top_halo_fields
+
+
+def _torch_only(cls, backend):
+    if backend != "torch":
+        raise NotImplementedError(
+            f"{cls.__name__}: backend={backend!r}; generated equations run on 'torch' only")
 
 
 class SymbolicSecondOrderEquation(SecondOrderEquation):
@@ -35,9 +43,7 @@ class SymbolicSecondOrderEquation(SecondOrderEquation):
             device: device of the static stencils. Defaults to ``'cpu'``.
             backend: ``'torch'`` only. Defaults to ``'torch'``.
         """
-        if backend != "torch":
-            raise NotImplementedError(
-                f"{type(self).__name__}: backend={backend!r}; generated equations run on 'torch' only")
+        _torch_only(type(self), backend)
         super().__init__(spatial_order, device, backend, dim=self.NDIM)
         self.init_separable_laplace()
         if self.NDIM == 2 and "cuda" in str(device):
@@ -75,3 +81,47 @@ class SymbolicSecondOrderEquation(SecondOrderEquation):
         if self.NDIM == 2:
             return self._apply_free_surface(out)
         return zero_top_halo_fields(out, self.so // 2, axis=-3)
+
+
+class SymbolicFirstOrderEquation(FirstOrderEquation):
+    NDIM = 2
+    SYMBOLIC_PML = "cpml"
+    DEFAULT_SOURCE_FIELDS = ()
+    DEFAULT_RECEIVER_FIELDS = ()
+    default_pml_type = "cpmls"
+    # Appended by the propagator to its refusal of a topography.
+    image_topography_hint = "A first-order PDE takes no free surface yet."
+
+    def __init__(self, spatial_order=4, device="cpu", backend="torch"):
+        """Build the equation operator.
+
+        Args:
+            spatial_order: FD accuracy order of the staggered first
+                derivatives; an even integer. Defaults to 4.
+            device: device of the static stencils. Defaults to ``'cpu'``.
+            backend: ``'torch'`` only. Defaults to ``'torch'``.
+        """
+        _torch_only(type(self), backend)
+        super().__init__(spatial_order, device, backend, ndim=self.NDIM)
+
+    @property
+    def default_source_fields(self):
+        return list(self.DEFAULT_SOURCE_FIELDS)
+
+    @property
+    def default_receiver_fields(self):
+        return list(self.DEFAULT_RECEIVER_FIELDS)
+
+    # The propagator writes ``equation.free_surface`` once it has resolved the
+    # boundary; the step applies none, so a surface is refused rather than run
+    # as an absorbing top.
+    @property
+    def free_surface(self):
+        return False
+
+    @free_surface.setter
+    def free_surface(self, value):
+        if value:
+            raise NotImplementedError(
+                f"{type(self).__name__} is a first-order PDE, which takes no free surface yet; "
+                "run it with free_surface=False")
