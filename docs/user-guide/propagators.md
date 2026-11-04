@@ -541,8 +541,8 @@ compared or when a solver needs a symmetric operator.
 
 The
 [Hessian-vector products notebook](../notebooks/46_hessian_vector_product.ipynb)
-compares the routes, shows how to choose `eps`, and assembles the full Hessian of a small
-model with the exact first-order route.
+compares the routes, shows how to choose `rel_step`, and assembles the full Hessian and the
+Gauss-Newton matrix of a small model with `hessian_vector_products`.
 
 **Many directions at once.** `hessian_vector_products` takes K directions stacked on a
 leading axis, `(K, *model.shape)` per model, and returns the K products stacked the same

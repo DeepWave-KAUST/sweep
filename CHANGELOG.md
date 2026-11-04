@@ -224,15 +224,16 @@ and this project adheres to
   every mode (its scattered field takes S_n from its own gradient, so at mp = 0
   a tangent would propagate it elliptically). `ViscoAcoustic`'s Q tangent holds
   the fractional exponent fixed, as its gradient does.
-- **Notebook 46, Hessian-vector products**: the exact product by double
-  backward (eager, uncompiled), the difference of two `impl='c'` boundary-saving
-  gradients, the Gauss-Newton product from an `AcousticBorn` record, and the
-  exact product as a first-order gradient of the Born system, which runs with
-  `impl='c'` and boundary saving (and with the compiled eager step) at about the
-  cost of two gradients, against minutes and gigabytes for the double backward
-  on the same model. It also assembles the full Hessian of a small model with
-  that route. The user guide (*Propagators*, "Second derivatives") and the
-  Agent Skill describe the routes.
+- **Notebook 46, Hessian-vector products**, with `sweep.autodiff`: the exact
+  product by double backward (eager, uncompiled) and in forward mode (reverse
+  over forward), the difference of two `impl='c'` boundary-saving gradients with
+  a scan of `rel_step`, the Gauss-Newton product, and the exact product as a
+  first-order gradient of the Born system, which runs with `impl='c'` and
+  boundary saving (and with the compiled eager step) at about the cost of two
+  gradients: a fraction of a second against seconds and gigabytes for the double
+  backward on the same model. It assembles the full Hessian and the Gauss-Newton
+  matrix of a small model with `hessian_vector_products`. The user guide
+  (*Propagators*, "Second derivatives") and the Agent Skill describe the routes.
 - **Agent Skill for AI coding assistants** in `skills/sweep-solver/`
   ([agentskills.io](https://agentskills.io) format): a `SKILL.md` entry point
   plus on-demand references (equations, propagators, boundaries, gradients,
