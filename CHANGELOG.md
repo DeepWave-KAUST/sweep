@@ -336,6 +336,14 @@ and this project adheres to
   `chi` / `u_x` / `u_z` by name; the low-level propagators still record chi.
 
 ### Removed
+- Scripts under `test/` that are not tests: 85 standalone files that no test, CI job,
+  gate script, doc or notebook ran -- the `test/efficiency/` benchmarks, one-off
+  gradient, DD and memory diagnostics, the SEM smoke scripts and the early SPECFEM2D
+  hill and fluid-solid comparison drivers (superseded by `run_compare_box.py` and
+  `run_compare_absorb.py`) -- and five benchmark and diagnostic scripts,
+  `dd_nccl_bench.py`, `dd_nccl_elastic_bench.py`, `dd_session_bench.py`,
+  `dd_cross_gpu_diag.py` and `save_backend_gradient_plots.py`. The multi-GPU checks, the SPECFEM comparisons and
+  the gradient suites that docs and the gate scripts run stay.
 - Stale examples and repo-root leftovers: `examples/FWI/` and
   `examples/LSRTM/` (unlinked scripts, covered by the notebooks; their
   `_shared` helpers `configure_overthrust`, `fwi3d_overthrust`, `mpi_utils`

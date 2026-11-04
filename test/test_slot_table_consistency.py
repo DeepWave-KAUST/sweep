@@ -314,12 +314,9 @@ def test_the_local_capture_copies_that_remain_are_deliberate():
         # test/, so `from conftest import ...` would resolve via sys.path[0],
         # but `python -m test.dd_nccl_check` would not. They need two GPUs, so
         # a migration here could not be verified before landing.
-        "dd_nccl_bench.py": "torchrun script, 2 GPUs, unverifiable here",
         "dd_nccl_check.py": "torchrun script, 2 GPUs, unverifiable here",
-        "dd_nccl_elastic_bench.py": "torchrun script, 2 GPUs, unverifiable here",
         "dd_nccl_elastic_check.py": "torchrun script, 2 GPUs, unverifiable here",
-        # genuinely different bodies
-        "dd_cross_gpu_diag.py": "different body (takes `p`, not `prop`)",
+        # a genuinely different body
         "test_dd_backward_two_tile_3d.py": "a different capture_both",
     }
     here = pathlib.Path(__file__).parent

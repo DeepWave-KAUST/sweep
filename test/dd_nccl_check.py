@@ -232,8 +232,8 @@ def main():
         ref_rec_cpu = record_full.cpu()
         ref_u = runner_full.u_now.cpu()
 
-        # Cross-GPU runs may differ at ulp level even for identical inputs
-        # (see dd_cross_gpu_diag.py); grade bit / tol / fail accordingly.
+        # Cross-GPU runs may differ at ulp level even for identical inputs;
+        # grade bit / tol / fail accordingly.
         REL_TOL = 1e-5
         u_scale = ref_u.abs().max().item() + 1e-30
         rec_all = torch.zeros_like(ref_rec_cpu)

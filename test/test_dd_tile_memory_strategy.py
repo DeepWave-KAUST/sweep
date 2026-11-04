@@ -4,9 +4,9 @@ using only the knobs that apply to the chosen storage.
 The staging trio (transfer_interval / ring_buffers / pinned_memory) is
 meaningless for ``storage='gpu'`` and ``BoundaryOptions.__post_init__`` rejects
 it there. Re-emitting whatever was inherited therefore turned a configuration
-the legacy dict route accepted into a construction error -- including the gpu
-baseline of ``test/dd_session_bench.py`` at that file's own default, i.e. the
-reference its bit-exactness gates compare against.
+the legacy dict route accepted into a construction error -- including a gpu
+baseline that sets the staging knobs for every storage, the reference a DD
+bit-exactness gate compares against.
 
 No GPU and no process group: the method reads five attributes off ``self``.
 """

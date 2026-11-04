@@ -1,8 +1,8 @@
 """The case library of the gradient consistency matrix.
 
 ``backend_gradient_matrix.py`` (eager against the compiled CUDA backend, every
-memory mode) and ``save_backend_gradient_plots.py`` import ``Case``/``CASES``/
-``run_case``/``make_solver`` and the comparison helpers from here.  The grids
+memory mode) imports ``Case``/``CASES``/``run_case``/``make_solver`` and the
+comparison helpers from here.  The grids
 are small on purpose.  Gradient checks report max absolute error, relative L2
 error and cosine similarity, because small gradients can have tiny pointwise
 errors even when their direction is wrong.
