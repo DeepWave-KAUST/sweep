@@ -117,6 +117,7 @@ def generate(name, low, *, free_surface, pml, doc):
     # ---- the step -------------------------------------------------------------
     sp = ", ".join(f"_h{ax}" for ax in axes)
     body = []
+    temps = []  # the tensors the step computes and does not return
     state = []
     for f in low.fields:
         state += [str(f), nm.prev(f)]
@@ -140,12 +141,14 @@ def generate(name, low, *, free_surface, pml, doc):
     for f in low.fields:
         if not any(g == f for g, _ in low.d2):
             continue
-        laps = ", ".join(f"_lap{ax}_{f}" for ax in axes)
-        body.append(f"{laps} = self.separable_d2_{ndim}d({f}, self.laplace_kernels, {sp})")
+        laps = [f"_lap{ax}_{f}" for ax in axes]
+        temps += laps
+        body.append(f"{', '.join(laps)} = self.separable_d2_{ndim}d({f}, self.laplace_kernels, {sp})")
         if use_cpml:
             body.append(f"_src_{f} = ({f}, self.laplace_kernels, ({sp}))")
     if use_cpml:
         for f, ax in low.d2:
+            temps.append(f"_d{ax}_{f}")
             body.append(f"_d{ax}_{f} = self.gradient({f}, h, {axis_index[ax]}, kernels=self.grad_kernels)")
 
     def d2_of(f, ax):
@@ -158,10 +161,12 @@ def generate(name, low, *, free_surface, pml, doc):
     sums = {id(g): d2_of(g.field, g.axes[0]) for g in groups}
     sums.update({id(g): f"_w{k}" for k, g in enumerate(multi)})
     body += [f"{sums[id(g)]} = 0." for g in multi]
+    temps += [sums[id(g)] for g in multi]
     for f, ax in low.d2:
         if use_cpml:
             i = axis_index[ax]
             psi, zeta = nm.psi(f, ax), nm.zeta(f, ax)
+            temps.append(f"_d2{ax}_{f}")
             body.append(f"_d2{ax}_{f}, _{psi}_n, _{zeta}_n = cpml_axis_update(")
             body.append(f"    _lap{ax}_{f}, _d{ax}_{f}, _{psi}, _{zeta}, _a{ax}, _b{ax}, _db{ax}, h, {i},")
             body.append(f"    self.gradient, self.grad_kernels, _src_{f})")
@@ -180,6 +185,12 @@ def generate(name, low, *, free_surface, pml, doc):
         out += [f"_{f}_next", str(f)]
     if use_cpml:
         out += [f"_{n(f, ax)}_n" for n in (nm.psi, nm.zeta) for f, ax in nm.cpml]
+    # The shipped equations compute these inside step_cpml(), which frees them
+    # on return. Kept to the end of an uncompiled step, they would live through
+    # the free surface's new outputs: 3-4 fields more peak memory than Acoustic,
+    # 5-7 than Acoustic3D, in Full and checkpointed runs alike.
+    if temps:
+        body.append(f"del {', '.join(temps)}")
     body.append(f"return self._free_surface_out(({', '.join(out)},))")
 
     flags = []

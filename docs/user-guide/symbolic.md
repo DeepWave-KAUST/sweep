@@ -124,3 +124,10 @@ On CUDA, an uncompiled run is deterministic only with
 `torch.backends.cudnn.deterministic = True`; otherwise cuDNN chooses
 non-deterministic backward algorithms and the gradient moves by about 3e-7
 from run to run, for the shipped equations as well.
+
+## Memory
+
+A restated `Acoustic` / `Acoustic3D` needs the same CUDA memory as the shipped
+class, in 2-D and 3-D: the same memory held for the backward pass and, to within
+0.1 MB, the same peak, compiled or not, with `Full()`, checkpointing and
+boundary saving.

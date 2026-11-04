@@ -6,6 +6,7 @@
   CPML memory. The generated step issues the shipped equations' operations in
   their order; another order of the same operations already moves an
   uncompiled gradient by ~1e-7 (autograd accumulates in graph order).
+* The restated Acoustic peaks at no more CUDA memory than the shipped one.
 * A generated coupled two-field step computes what its PDE says, against a
   reference assembled here from the same operators.
 * Boundary saving matches Full() on that system, and its compiled step captures
@@ -19,6 +20,7 @@ non-deterministic backward algorithms and Acoustic alone differs from itself by
 """
 from __future__ import annotations
 
+import gc
 import importlib.util
 
 import numpy as np
@@ -64,8 +66,11 @@ def _deterministic_cudnn():
     torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark = old
 
 
+SHAPES = {2: (48, 64), 3: (24, 20, 28)}
+
+
 def _run(cls, ndim, order, fs, strips, topography=None):
-    shape = (48, 64) if ndim == 2 else (24, 20, 28)
+    shape = SHAPES[ndim]
     nt = 150 if ndim == 2 else 80
     kw = {} if topography is None else {"topography": topography}
     solver = PropTorch(cls(order, device=DEV), shape=shape, dh=DH, dt=DT, nt=nt, dev=DEV, impl="eager",
@@ -100,6 +105,30 @@ def test_restated_acoustic_is_bitwise(ndim, order, fs, strips, topography):
     d_gen, g_gen = _run(gen, ndim, order, fs, strips, topography)
     assert torch.equal(d_ref, d_gen)
     assert torch.equal(g_ref, g_gen)
+
+
+def _peak_bytes(cls, ndim):
+    """Peak CUDA memory of an uncompiled Full() forward + backward, free
+    surface on, above what was allocated before it."""
+    _run(cls, ndim, 4, True, False)  # cuDNN / cuBLAS handles and workspaces
+    gc.collect()
+    torch.cuda.synchronize()
+    base = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    _run(cls, ndim, 4, True, False)
+    torch.cuda.synchronize()
+    return torch.cuda.max_memory_allocated() - base
+
+
+@pytest.mark.skipif(DEV != "cuda", reason="the peak is read from the CUDA caching allocator")
+@pytest.mark.parametrize("ndim", [2, 3])
+def test_restated_acoustic_peak_memory(ndim):
+    # A step that keeps its temporaries to the end holds them through the free
+    # surface's new outputs: 4 fields above Acoustic, 7 above Acoustic3D here.
+    # Half a field of slack for the caching allocator's block reuse.
+    hand = Acoustic if ndim == 2 else Acoustic3D
+    half_field = 2 * int(np.prod([n + 24 for n in SHAPES[ndim]]))  # fp32, abcn=12 a side
+    assert _peak_bytes(ACOUSTIC.build(ndim), ndim) <= _peak_bytes(hand, ndim) + half_field
 
 
 def _initialised(cls, shape=(20, 24)):

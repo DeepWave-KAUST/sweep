@@ -147,7 +147,8 @@ and this project adheres to
   `laplace(p)`) or on fields; C-PML on every second derivative; a pressure-release
   free surface (flat, per edge in 2-D, topography). Anything else raises when the
   PDE is built. Restating `Acoustic` / `Acoustic3D` reproduces them bit for bit,
-  record and gradient. Docs page *Symbolic PDEs*; `test/test_symbolic_pde.py`.
+  record and gradient, with the same peak memory. Docs page *Symbolic PDEs*;
+  `test/test_symbolic_pde.py`.
 - **Agent Skill for AI coding assistants** in `skills/sweep-solver/`
   ([agentskills.io](https://agentskills.io) format): a `SKILL.md` entry point
   plus on-demand references (equations, propagators, boundaries, gradients,
