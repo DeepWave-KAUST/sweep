@@ -59,6 +59,10 @@ goes **inside** `my_scalar.py` (Part 1) and the CUDA directory (Part 2).
 
 ## Part 1 — Python-only (eager) equation
 
+A second-order wave equation, or a coupled system of them, need not be written
+by hand: [Symbolic PDEs](symbolic.md) generates the class below from the PDE,
+CPML and free surface included.
+
 ### When this is enough
 
 Pick the Python-only path when any of the following is true:

@@ -109,6 +109,7 @@ nav:
           - AI assistants (Agent Skills): user-guide/agent-skills.md
       - Extending:
           - Add a new equation: user-guide/extending.md
+          - Symbolic PDEs: user-guide/symbolic.md
           - Operators: user-guide/operators.md
   - Developer:
       - CUDA driver skeletons: dev/cuda_drivers.md
@@ -234,6 +235,7 @@ nav:
           - PropTorch: api/propagators/prop_torch.md
           - PropJax: api/propagators/prop_jax.md
       - Parallel (DD): api/parallel.md
+      - Symbolic PDEs: api/symbolic.md
       - Spectral element (SEM):
           - api/sem/index.md
           - PropSEM: api/sem/prop_sem.md

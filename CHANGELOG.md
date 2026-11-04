@@ -137,6 +137,17 @@ and this project adheres to
   as well; GPU results are unchanged bit for bit.
 
 ### Added
+- **`sweep.symbolic`: write a wave equation as a PDE, get an eager equation
+  class.** `PDE([Eq(p.dt2, vp**2 * laplace(p))], name=..., free_surface="zero")
+  .build(ndim=2)` writes the class as Python source (`PDE.source`, `PDE.export`)
+  and runs through `PropTorch(impl="eager")` with autograd gradients,
+  `torch.compile`, eager boundary saving and `cpml_strips`. Supported: second-order
+  fields, any number of them coupled, right-hand sides linear in the fields with
+  model-only coefficients on per-axis second derivatives (`p.dz2`, `p.dx2`,
+  `laplace(p)`) or on fields; C-PML on every second derivative; a pressure-release
+  free surface (flat, per edge in 2-D, topography). Anything else raises when the
+  PDE is built. Restating `Acoustic` / `Acoustic3D` reproduces them bit for bit,
+  record and gradient. Docs page *Symbolic PDEs*; `test/test_symbolic_pde.py`.
 - **Agent Skill for AI coding assistants** in `skills/sweep-solver/`
   ([agentskills.io](https://agentskills.io) format): a `SKILL.md` entry point
   plus on-demand references (equations, propagators, boundaries, gradients,
