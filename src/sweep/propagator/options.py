@@ -15,7 +15,9 @@ class EagerDefaults:
     compile_backend: str | None = None
     compile_fullgraph: bool = False
     store_last_wavefield: bool = False
-    cpml_strips: bool = False
+    # None: decided by grid -- strips in 3-D, the full grid in 2-D and with
+    # topography (see EagerOptions).
+    cpml_strips: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -75,15 +77,35 @@ PROP_DEFAULTS = PropagatorDefaults()
 
 @dataclass
 class EagerOptions:
+    """Options of the eager (pure PyTorch) step, for ``impl='eager'``.
+
+    ``cpml_strips`` keeps the CPML memory fields (those whose spec names a
+    ``cpml_axis``) on the absorbing strips only; see ``sweep.equations._cpml``.
+    ``None``, the default, decides by grid: strips on a 3-D grid, the full grid
+    on a 2-D one and with ``topography=``. ``True`` or ``False`` forces a layout
+    (``True`` with ``topography=`` raises). The layout only changes where the
+    memory fields are kept: snapshots (``return_wavefield=True``) and
+    ``last_wavefields`` hold full-grid fields either way.
+
+    The strips skip the CPML's full-grid memory traffic but add kernels, so they
+    pay off when the absorbing layers are a small part of the grid. They cut the
+    peak memory of a forward without gradients by about a third and of boundary
+    saving by a fifth to a third (3-D, ``abcn=50``); with checkpointing, the
+    eager default, by 3-9%. A 2-D step of ~1000^2 cells is launch-bound, and
+    strips make it slower. In 3-D with ``abcn=50`` (A100, V100, compiled) the
+    acoustic forward is faster from about 128^3 inner cells and its gradient
+    from about 160^3; smaller grids, and elastic gradients up to 160^3, run
+    5-50% slower, where ``cpml_strips=False`` is faster.
+    """
     use_compile: bool = EAGER_DEFAULTS.use_compile
     compile_mode: str = EAGER_DEFAULTS.compile_mode
     compile_dynamic: bool = EAGER_DEFAULTS.compile_dynamic
     compile_backend: str | None = EAGER_DEFAULTS.compile_backend
     compile_fullgraph: bool = EAGER_DEFAULTS.compile_fullgraph
     store_last_wavefield: bool = EAGER_DEFAULTS.store_last_wavefield
-    # CPML memory fields on the absorbing strips only (fields whose spec names
-    # a ``cpml_axis``); see ``sweep.equations._cpml``.
-    cpml_strips: bool = EAGER_DEFAULTS.cpml_strips
+    # CPML memory fields on the absorbing strips only; None decides by grid
+    # (see the class docstring).
+    cpml_strips: bool | None = EAGER_DEFAULTS.cpml_strips
 
 
 @dataclass

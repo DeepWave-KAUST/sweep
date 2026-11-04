@@ -122,9 +122,7 @@ class _PropTorchEager(
         self.source_indices = [self.wavefield_names.index(name) for name in self.source_type]
         self.receiver_indices = [self.wavefield_names.index(name) for name in self.receiver_type]
         # CPML strips: the eager state holds a strip-held field as its two strips.
-        self._strips = StripLayout(self.equation) if self.cpml_strips else None
-        if self._strips is not None and len(self._strips) == len(self.wavefield_names):
-            self._strips = None                     # no field to strip
+        self._strips = self._strip_layout()
         if self._strips is not None:
             self.source_indices = [self._strips.slots(k)[0] for k in self.source_indices]
             self.receiver_indices = [self._strips.slots(k)[0] for k in self.receiver_indices]
@@ -135,6 +133,35 @@ class _PropTorchEager(
         self._custom_gradients = {}
         self._plain_step_func = self._build_step_func()
         self.step_func = self._maybe_compile(self._plain_step_func)
+
+    def _strip_layout(self):
+        """The eager state's layout: a ``StripLayout`` when the CPML memory fields
+        are kept on the absorbing strips, else None. ``cpml_strips=None`` decides
+        by grid: strips in 3-D, the full grid in 2-D (a medium 2-D step is
+        launch-bound, and the strips' extra kernels cost more than they save) and
+        with topography (its staircase is applied to full-grid fields). Decided
+        here, before the CPML profiles exist, so the number of state tensors and
+        their positions do not depend on the strip widths."""
+        topography = getattr(self, "_topo_rows_runtime", None) is not None
+        strips = self.cpml_strips
+        if strips is None:
+            strips = self.ndim == 3 and not topography
+        if not strips:
+            return None
+        layout = StripLayout(self.equation)
+        if len(layout) == len(self.wavefield_names):
+            return None                             # no field to strip
+        if topography:
+            raise NotImplementedError(
+                "EagerOptions(cpml_strips=True) with topography=: the staircase is applied to "
+                "full-grid fields. Leave cpml_strips unset (the default keeps the full grid "
+                "with topography) or pass False.")
+        return layout
+
+    def _full_wavefields(self, wavefield):
+        """The eager state as one full-grid tensor per wavefield, in wavefield
+        order (a strip-held field with its strips put back in place)."""
+        return list(wavefield) if self._strips is None else self._strips.full_fields(wavefield)
 
     def _as_device_tensor(self, value, *, dtype):
         if isinstance(value, torch.Tensor):
@@ -501,10 +528,9 @@ class _PropTorchEager(
                                                  source=src.step_args(wavelet_steps[time]),
                                                  compiled=settled.compiled(i, wavefield)))
             if return_wavefield and i in snapshot_lookup:
+                fields = self._full_wavefields([w.detach() for w in wavefield])
                 snapshots[snapshot_lookup[i]] = torch.stack(
-                    [self._crop_runtime_halo(w).detach().cpu() for w in wavefield],
-                    0,
-                )
+                    [self._crop_runtime_halo(f).cpu() for f in fields], 0)
             columns.append(self._sample_receivers(rec, wavefield, receivers))
         # One stack instead of nt in-place slice writes. Writing into a live
         # autograd tensor builds a chain of nt CopySlices nodes, and EACH of
@@ -587,8 +613,6 @@ class _PropTorchEager(
         rec = ReceiverTorch(receivers, gather_kernel=sr_stencil, shape=shape_wavefield)
 
         has_aux = False
-        if return_wavefield and self._strips is not None:
-            raise NotImplementedError("return_wavefield with cpml_strips: the CPML fields are strips.")
         if return_wavefield:
             has_aux = True
             snapshot_shape = (len(snapshot_indices), len(self.wavefield_names), batch_size, 1) + self.shape
@@ -651,7 +675,7 @@ class _PropTorchEager(
                 return_wavefield, snapshots, snapshot_lookup,
             )
 
-        self.last_wavefields = tuple(wavefield) if self.store_last_wavefield else None
+        self.last_wavefields = tuple(self._full_wavefields(wavefield)) if self.store_last_wavefield else None
         if not has_aux:
             return record
         # ``snapshots`` is allocated per call above, so it aliases no workspace

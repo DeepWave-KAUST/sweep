@@ -156,7 +156,7 @@ quick reference:
 
 | Option block | Used with | Configures |
 | --- | --- | --- |
-| `EagerOptions` | `impl="eager"` | `torch.compile` flags, debug knobs |
+| `EagerOptions` | `impl="eager"` | `torch.compile` flags, the CPML strip layout (`cpml_strips`, on by default in 3-D), debug knobs |
 | `CUDAOptions` | `impl="c"` | Container for `impl="c"`-only options; its `memory=` is equivalent to `PropTorch(memory=...)` |
 | `Full` | as `memory=` | Keep the whole forward wavefield. No parameters |
 | `BoundarySaving` | as `memory=` | Boundary saving with GPU / CPU / disk storage |

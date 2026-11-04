@@ -332,6 +332,34 @@ and this project adheres to
   3-D velocity-stress classes, the Biot classes), with `Ckpt(chunks=64)` as their default
   memory; they ran on eager. `return_wavefield=True` needs `impl='eager'` there, as on
   the other classes with kernels.
+- **3-D eager runs keep the CPML memory fields on the absorbing strips by
+  default.** `EagerOptions(cpml_strips=None)`, the new default, picks the strips
+  on a 3-D grid and the full grid on a 2-D one or with `topography=`;
+  `True`/`False` force a layout, and `True` with `topography=` now raises at
+  construction. The strips cut a forward's peak memory by about a third
+  (`abcn=50`, A100: `Acoustic3D` 1.08 to 0.76 GiB at 128^3 inner cells,
+  `Elastic3D` 3.99 to 2.59), boundary saving's by 18-32% and checkpointing's,
+  the eager default, by 3-9%.
+  Their speed depends on the share of the grid the layers take, since each
+  strip adds kernels: with `abcn=50` the acoustic forward is faster from about
+  128^3 inner cells (0.69-0.92x the full-grid time per step on A100 and V100)
+  and its gradient from about 160^3 (0.88-0.96x), while smaller grids and the
+  elastic gradients run 5-50% slower; pass `cpml_strips=False` there. In 2-D,
+  where a step of 1000^2 cells is launch-bound, the strips cost more than they
+  save and stay off.
+- Snapshots (`return_wavefield=True`) and `last_wavefields` hold full-grid
+  fields under CPML strips too: the strips are put back in place, and
+  uncompiled the fields equal the full-grid layout's bit for bit.
+  `return_wavefield=True` with strips used to raise.
+- Staggered CPML strips add the new memory field to the derivative zero-padded
+  instead of replacing the derivative on the strips with a `where`, so the
+  step's main kernel reads the strips back instead of retaking the derivative
+  on them. Inductor had fused that retake into one kernel of 171 loads for the
+  order-8 `Elastic3D`: its forward with strips took 10.4 ms of GPU time per step
+  against 1.2 ms on the full grid (A100, 64^3 inner cells), now 1.65 ms; on a
+  V100 the wall time went from 7.9x to 0.97x the full grid's. The order-4
+  forward is 8-12% faster too. The second-order strips read their inner-cell
+  mask as a constant built with the layout, not one built in every step.
 - The CPU test workflow runs as four parallel jobs (`sem-biot`, `sem`,
   `rest`, `skill`), each with its own executed-test floor, instead of one
   job.
@@ -550,6 +578,11 @@ and this project adheres to
   source encoding, in the multi-shot rollout and compiled; with a bf16 or int8
   ring 4-16x closer to the full tape than before. `impl='c'` was not affected
   (its ring is read at the right level).
+- The custom-gradient forward (`register_gradient`) on the eager propagator
+  read its receivers from the wrong field under CPML strips when the receiver
+  field comes after strip-held fields, as `sh1` does in `AcousticBorn` and
+  `AcousticBorn3D`: the record came out zero. It steps full-grid fields, so it
+  now finds them by name instead of by their position in the strip-held state.
 - `PropSEM(memory=BoundarySaving(), bs_band_mode='rim')` gives the full-tape
   gradient over the whole model, its edge included. The rim was meant to be
   the band's inner edge, but the C-PML derivative profiles (`dbx_dx` ...,

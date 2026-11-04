@@ -15,7 +15,8 @@ class FieldSpec:
     internal: bool = False
     boundary_related: bool = False
     # A CPML memory variable of a derivative along this axis ("z", "y" or "x"):
-    # with EagerOptions(cpml_strips=True) it is kept on the absorbing strips only.
+    # with CPML strips (EagerOptions(cpml_strips=...), the default in 3-D) the
+    # eager propagator keeps it on the absorbing strips only.
     cpml_axis: str = ""
 
 

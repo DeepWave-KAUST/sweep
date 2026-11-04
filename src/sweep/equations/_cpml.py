@@ -23,14 +23,18 @@ stays where it was.
 
 **Strips.** Away from the absorbing layers the profiles are zero, the memory
 fields stay zero and both updates hand the derivative back unchanged, so a
-memory field only needs to cover the absorbing strips. With
-``EagerOptions(cpml_strips=True)`` the eager propagator keeps every field whose
-spec names a ``cpml_axis`` as a :class:`Strips` -- its two strips along that
-axis, laid out by :class:`StripLayout` -- and both updates then run on the
-strips only. The step code is the same in either layout. Its ``src`` argument
-says how the derivative was taken, so that the compiled step can retake the
-derivative on the strips from a window of the field: the full-grid derivative is
-then read by the interior only and stays fused into the step's main kernel.
+memory field only needs to cover the absorbing strips. With CPML strips
+(``EagerOptions(cpml_strips=...)``, the default on a 3-D grid) the eager
+propagator keeps every field whose spec names a ``cpml_axis`` as a
+:class:`Strips` -- its two strips along that axis, laid out by
+:class:`StripLayout` -- and both updates then run on the strips only. The step
+code is the same in either layout. Its ``src`` argument says how the derivative
+was taken, so that the compiled step can retake the derivative on the strips
+from a window of the field: the full-grid derivative is never stored and stays
+fused into the step's main kernel. The staggered update adds the new memory
+field to it padded (zero past its strips), so that kernel reads the strips back
+rather than retaking the derivative on them; the second-order one puts its strip
+contribution in place with one ``where``.
 """
 from __future__ import annotations
 
@@ -58,12 +62,24 @@ def cpml_update(d, m, a, b, src=None):
         # Scalar zero profiles (a lossless interior sub-step): nothing absorbs.
         return d, Strips(torch.zeros_like(m.lo), torch.zeros_like(m.hi), *m[2:])
 
-    def side(start, width, keep, lo, m_s):
-        d_s = _strip_derivative(d, src, m.axis, start, width)
-        m_s = a.narrow(m.axis, start, width) * m_s + b.narrow(m.axis, start, width) * d_s
-        return d_s + m_s, m_s
+    axis, (w_lo, w_hi) = m.axis, m.widths
+    n = d.shape[axis]
 
-    return _on_strips(d, (m,), side)
+    def side(start, width, m_s):
+        if not width:
+            return m_s
+        d_s = _strip_derivative(d, src, axis, start, width)
+        return a.narrow(axis, start, width) * m_s + b.narrow(axis, start, width) * d_s
+
+    m = Strips(side(0, w_lo, m.lo), side(n - w_hi, w_hi, m.hi), *m[2:])
+    # d + m' with m' zero past its strips: the strips go in padded, so the step's
+    # main kernel reads them back from m' instead of retaking d on them, and the
+    # backward hands d its gradient unmasked.
+    if w_lo:
+        d = d + _pad_axis(m.lo, axis, 0, n - w_lo)
+    if w_hi:
+        d = d + _pad_axis(m.hi, axis, n - w_hi, 0)
+    return d, m
 
 
 def cpml_axis_update(lap_axis, du, psi, zeta, a, b, dbd, h, axis, grad_op,
@@ -124,13 +140,15 @@ class Strips(NamedTuple):
     may be empty). ``keep[s]`` holds strip ``s``'s grid-edge masks for the
     gradient (second order only): the cells it keeps, keyed by its kernel's
     half-widths, or ``"edge"`` for ``torch.gradient`` (all but its one-sided
-    cell). Built once, outside the step: a mask built inside the compiled step
-    is saved for its backward, a kernel each."""
+    cell). ``inner`` marks the cells of the axis between the two strips. The
+    masks are built once, outside the step: a mask built inside the compiled
+    step is saved for its backward, a kernel each."""
     lo: torch.Tensor
     hi: torch.Tensor
     axis: int
     widths: tuple
     keep: tuple
+    inner: torch.Tensor
 
 
 _AXES = {2: {"z": -2, "x": -1}, 3: {"z": -3, "y": -2, "x": -1}}
@@ -148,8 +166,8 @@ class StripLayout:
         specs = {s.name: s for s in equation.field_specs}
         self.ndim = equation.ndim
         self.axes = [names.get(getattr(specs.get(f), "cpml_axis", ""), None) for f in equation.wavefields]
-        self.strips = {}                    # axis -> (widths, keep)
-        self._masks = {}                    # built once per strip and gradient
+        self.strips = {}                    # axis -> (widths, keep, inner)
+        self._masks = {}                    # built once per grid shape
 
     def __len__(self):
         return sum(1 if ax is None else 2 for ax in self.axes)
@@ -165,6 +183,7 @@ class StripLayout:
         (``a, b, db`` per axis) also take the cells that ``grad(a psi)`` reaches
         past a non-zero ``a``, and get the gradient's grid-edge masks; staggered
         ones (``a, b, ah, bh``) need neither."""
+        self.shape = tuple(shape)
         profiles = equation.b
         per_axis = len(profiles) // self.ndim
         second_order = per_axis == 3
@@ -180,16 +199,17 @@ class StripLayout:
                 if second_order and width:
                     edge = [0] * self.ndim
                     edge[axis] = 1
-                    masks["edge"] = self._mask(shape, axis, start, width, tuple(edge), device)
+                    masks["edge"] = self._mask(_strip_mask, shape, axis, start, width, tuple(edge), device)
                     if axis in grad_kernels:
                         halo = _halo(grad_kernels[axis])
-                        masks[halo] = self._mask(shape, axis, start, width, halo, device)
+                        masks[halo] = self._mask(_strip_mask, shape, axis, start, width, halo, device)
                 keep.append(masks)
-            self.strips[axis] = (widths, tuple(keep))
+            self.strips[axis] = (widths, tuple(keep), self._mask(_inner_mask, shape, axis, widths, device))
 
-    def _mask(self, *key):
+    def _mask(self, build, *args):
+        key = (build, *args)
         if key not in self._masks:
-            self._masks[key] = _strip_mask(*key)
+            self._masks[key] = build(*args)
         return self._masks[key]
 
     def shapes(self, shape):
@@ -224,6 +244,20 @@ class StripLayout:
             out.extend((f.lo, f.hi) if isinstance(f, Strips) else (f,))
         return out
 
+    def full_fields(self, flat):
+        """The eager state as full-grid fields, one per wavefield: a strip-held
+        field is its two strips with zeros between them. Between the strips the
+        profiles are zero, so a memory field is zero there in the full-grid
+        layout too."""
+        out = []
+        for f in self.group(flat):
+            if isinstance(f, Strips):
+                gap = list(f.lo.shape)
+                gap[f.axis] = self.shape[f.axis] - f.widths[0] - f.widths[1]
+                f = torch.cat((f.lo, f.lo.new_zeros(gap), f.hi), dim=f.axis)
+            out.append(f)
+        return out
+
 
 def _dilate(mask, r):
     out = mask.clone()
@@ -245,6 +279,16 @@ def _extent(live):
 def _halo(kernel):
     """The cells a kernel gradient zeroes at each grid edge, per spatial dim."""
     return tuple(k // 2 for k in kernel.shape[2:])
+
+
+def _inner_mask(shape, axis, widths, device):
+    """The cells of ``axis`` between its two strips, shaped to broadcast against
+    the fields (trailing dims ``shape``)."""
+    n = shape[axis]
+    idx = torch.arange(n, device=device)
+    view = [1] * len(shape)
+    view[axis] = n
+    return ((idx >= widths[0]) & (idx < n - widths[1])).view(view)
 
 
 def _strip_mask(shape, axis, start, width, halo, device):
@@ -279,15 +323,16 @@ def _on_strips(d, mems, side):
             parts.append(part)
             for new_m, u in zip(new, updated):
                 new_m[k] = u
-    out = _assemble(d, parts, axis, widths) if parts else d
+    out = _assemble(d, parts, axis, widths, first.inner) if parts else d
     # Strips(...), not _replace: Dynamo cannot rebuild a NamedTuple made by
     # _replace in a frame resumed after a graph break.
     return (out, *(Strips(lo, hi, *m[2:]) for m, (lo, hi) in zip(mems, new)))
 
 
-def _assemble(d, parts, axis, widths):
+def _assemble(d, parts, axis, widths, inner):
     """``d`` with its strips replaced by ``parts`` (low strip first): each part
-    zero-padded to the axis, one ``where`` -- no cut or concatenation."""
+    zero-padded to the axis, one ``where`` on the constant mask ``inner`` -- no
+    cut or concatenation."""
     n = d.shape[axis]
     lo, hi = widths
     strips = None
@@ -296,10 +341,7 @@ def _assemble(d, parts, axis, widths):
     if hi:
         pad_hi = _pad_axis(parts[-1], axis, n - hi, 0)
         strips = pad_hi if strips is None else strips + pad_hi
-    idx = torch.arange(n, device=d.device)
-    shape = [1] * d.ndim
-    shape[axis] = n
-    return torch.where(((idx >= lo) & (idx < n - hi)).view(shape), d, strips)
+    return torch.where(inner, d, strips)
 
 
 def _strip_derivative(d, src, axis, start, width):
