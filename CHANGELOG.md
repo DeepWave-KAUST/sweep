@@ -327,6 +327,11 @@ and this project adheres to
   `test/sem/test_sem_spatial_receivers.py`, notebook `47_sem_receivers`.
 
 ### Changed
+- **`impl=None` on a GPU runs the velocity-stress and Biot SEM classes on the CUDA
+  kernels** (`ElasticVSSEM2DDeformed` and its VTI, TTI and visco-elastic variants, the
+  3-D velocity-stress classes, the Biot classes), with `Ckpt(chunks=64)` as their default
+  memory; they ran on eager. `return_wavefield=True` needs `impl='eager'` there, as on
+  the other classes with kernels.
 - The CPU test workflow runs as four parallel jobs (`sem-biot`, `sem`,
   `rest`, `skill`), each with its own executed-test floor, instead of one
   job.

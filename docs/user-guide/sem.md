@@ -1456,9 +1456,9 @@ element's own `phi / T` and `rho_f / rho_bar` (its masses
 an interface node shared by elements whose ratios differ, that is not the
 assembled system.
 
-`impl='eager'` only. Boundary saving is refused because the viscous
-drag is dissipative everywhere, so the field cannot be stepped back; use
-`Full()` or `Ckpt(chunks=...)`.
+Boundary saving is refused on both backends because the viscous drag is
+dissipative everywhere, so the field cannot be stepped back; use `Full()` or
+`Ckpt(chunks=...)`.
 
 ### In 3-D
 

@@ -214,7 +214,7 @@ waves. The
 
 -   ![SEM visco-elastic in 3-D](../../figures/gallery/59_sem_visco_elastic3d.png){ loading=lazy }
 
-    **Visco-elastic attenuation in 3-D**
+    **Attenuation · visco-elastic in 3-D**
 
     ---
 
@@ -226,7 +226,7 @@ waves. The
 
 -   ![SEM anisotropy in 3-D](../../figures/gallery/60_sem_tti3d.png){ loading=lazy }
 
-    **Anisotropy in 3-D**
+    **Anisotropy · VTI and TTI in 3-D**
 
     ---
 
@@ -237,7 +237,7 @@ waves. The
 
 -   ![SEM curved sea floor in 3-D](../../figures/gallery/61_sem_seafloor3d.png){ loading=lazy }
 
-    **A curved sea floor in 3-D**
+    **Interfaces · a curved sea floor in 3-D**
 
     ---
 
