@@ -1551,7 +1551,7 @@ class ModelParallel:
         meaningless for ``storage='gpu'`` and ``BoundaryOptions.__post_init__``
         rejects it there, so re-emitting whatever was inherited turned a config
         the legacy dict route accepted into a construction error -- including
-        the gpu baseline of ``test/dd_session_bench.py`` at its own default.
+        a gpu baseline that sets the staging knobs for every storage.
         """
         kwargs = dict(
             # inherited from the wrapped prop (PropTorch memory= API);

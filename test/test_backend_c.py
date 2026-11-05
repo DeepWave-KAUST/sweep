@@ -883,7 +883,7 @@ class TestBoundarySession:
     def test_used_is_a_read_only_property_as_on_dev(self):
         """dev's pybind binding exposes ``used`` as a read-only property.  As a
         method, ``if session.used:`` is always true and a caller that records
-        it gets a bound method (dd_session_bench failed to json-dump it)."""
+        it gets a bound method (a DD benchmark failed to json-dump it)."""
         import inspect
         import json
         from sweep.backend.c.runners import BoundarySession

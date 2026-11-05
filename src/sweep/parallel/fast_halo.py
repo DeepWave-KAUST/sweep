@@ -1,7 +1,7 @@
 """Low-overhead forward-only halo exchanger for the per-step DD loop.
 
-``exchange_halos`` (halo.py) costs ~415 µs/call on V100 (measured,
-dd_cross_gpu_diag): ~330 µs is autograd.Function + per-call slice/exclude
+``exchange_halos`` (halo.py) costs ~415 µs/call on V100 (measured with a
+cross-GPU diagnostic): ~330 µs is autograd.Function + per-call slice/exclude
 computation + per-call ``contiguous()``/``empty_like`` allocations, ~85 µs
 the bare batched P2P. The production forward/backward DD loops don't need
 autograd through the exchange (gradients flow through the stepped C++

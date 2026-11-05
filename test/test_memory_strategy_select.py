@@ -182,8 +182,8 @@ def test_eager_strategies():
 def test_legacy_dict_with_knobs_its_storage_ignores_still_reads():
     """The legacy ``boundary_saving_config`` dict never validated the staging
     knobs, so a config that set them for every storage (``pinned_memory: True``
-    with ``storage: 'gpu'``, the shape of ``test/dd_session_bench.py``'s gpu
-    baseline) read fine on dev.  The capability check added for the dict route
+    with ``storage: 'gpu'``, the shape of a DD benchmark's gpu baseline) read
+    fine on dev.  The capability check added for the dict route
     must not turn it into a construction error; the typed API stays strict."""
     from sweep.propagator.options import BoundarySaving
     cfg = {"enabled": True, "storage": "gpu", "transfer_interval": 1,
