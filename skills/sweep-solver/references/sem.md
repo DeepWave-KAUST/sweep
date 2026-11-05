@@ -121,7 +121,8 @@ the FD classes. `models=` per class: `api-signatures.md`.
   falls back to a per-shot loop (same result).
 - Per-shot models `(nshots, nz, nx)`: `AcousticPotentialSEM2D` only.
 - Boundary saving storage dtypes and coverage per class: see the user guide
-  (`docs/user-guide/sem.md`); Biot classes refuse it.
+  (`docs/user-guide/sem.md`); the dissipative classes (visco-elastic, visco-acoustic,
+  Biot) refuse it, and `impl=None` runs a class on eager where its CUDA kernels have none.
 - Illumination: `solver.compute_illumination = True`, then `solver.source_illumination`
   (`sum_t |a|^2`, a pseudo-Hessian) and, after `backward()`, `solver.receiver_illumination`
   (`sum_t |adjoint|^2`), shaped like the models as the gradient is; precondition with

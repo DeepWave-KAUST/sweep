@@ -301,12 +301,12 @@ carries the per-equation column:
 
 | Backend | Coverage |
 | --- | --- |
-| `impl='eager'` | every equation (the BS framework hooks any `field_specs`) |
+| `impl='eager'` | every equation but the dissipative ones (visco-elastic, visco-acoustic, Biot), which refuse it: stepping their attenuation or drag back amplifies the round-off |
 | `impl='c'` | the five C-PML paths: `AcousticPotentialSEM2D`, `ElasticSEM2DDeformed`, `AcousticElasticSEM2D` (each requiring their C-PML), `AcousticSEM3D`, `AcousticSEM3DDeformed` |
 
-Asking for boundary saving anywhere else on `impl='c'` raises
-`NotImplementedError` — it used to be accepted and silently run the full
-tape, which looked like it worked.
+Elsewhere `impl=None` runs the equation on eager, and `impl='c'` raises
+`NotImplementedError` when the `PropSEM` is built — the kernels once accepted
+it and silently ran the full tape, which looked like it worked.
 
 Knobs:
 

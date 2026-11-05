@@ -365,6 +365,12 @@ and this project adheres to
   curvilinear grid only.
 
 ### Fixed
+- `PropSEM(impl=None, memory=BoundarySaving())` runs on eager where the CUDA
+  kernels have no boundary saving (`ElasticVSSEM3D`, `ElasticSEM3D`,
+  `ElasticSEM3DDeformed`, the 2-D paths without their C-PML) instead of
+  taking the kernels and refusing at the first call; `impl='c'` refuses it
+  when the `PropSEM` is built. The docs listed eager boundary saving for every
+  equation; the dissipative ones (visco-elastic, visco-acoustic, Biot) refuse it.
 - `PropSEM(memory=BoundarySaving(), bs_band_mode='rim')` gives the full-tape
   gradient over the whole model, its edge included. The rim was meant to be
   the band's inner edge, but the C-PML derivative profiles (`dbx_dx` ...,
