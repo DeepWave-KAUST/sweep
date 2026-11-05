@@ -183,9 +183,10 @@ def test_tti_tilt_is_differentiable():
 
 def test_tti_boundary_saving_matches_the_full_tape():
     # the six stiffnesses are the leaves the boundary-saved backward substitutes
-    # (bs_model_attrs): one left out would leave its model's gradient wrong. The
-    # velocity-stress boundary saving is not exact next to its C-PML band (the
-    # isotropic class too: ~1e-5 on the whole grid, ~1e-7 four cells in)
+    # (bs_model_attrs): one left out would leave its model's gradient wrong.
+    # Exact up to the C-PML band too: the per-step VJP pins the velocity
+    # update to the ring (boundary_saving.pin_to_ring; before that ~1e-5 on
+    # the whole grid, ~1e-7 four cells in, the isotropic class too)
     from sweep.propagator import BoundarySaving, Full
     from sweep.sem import PropSEM
     shape = (25, 41)
@@ -207,8 +208,6 @@ def test_tti_boundary_saving_matches_the_full_tape():
     r0, g0 = run(Full())
     r1, g1 = run(BoundarySaving())
     assert (r1 - r0).abs().max() <= 1e-12 * r0.abs().max()
-    inner = (slice(None, -4), slice(4, -4))      # the free top kept
     for a, b in zip(g1, g0):
         assert b.abs().max() > 0
-        assert (a - b).norm() <= 1e-4 * b.norm()
-        assert (a - b)[inner].norm() <= 1e-6 * b[inner].norm()
+        assert (a - b).norm() <= 1e-12 * b.norm()

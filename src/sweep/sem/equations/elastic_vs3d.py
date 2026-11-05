@@ -34,6 +34,7 @@ from typing import ClassVar, Optional
 import torch
 
 from .._assembly import assemble_each, contract, first_copies
+from ..boundary_saving import pin_to_ring
 from ..cpml.band import active_elements, element_split
 from ..cpml.elastic_vs import pin_outer_edge
 from ..cpml.elastic_vs3d import (SimpleElasticCPML3DProfile,
@@ -272,7 +273,9 @@ class ElasticVSSEM3D(DerivedInitState):
     # ================================================================== #
     # SEMPropagator interface (staggered leapfrog).
     # ================================================================== #
-    def step(self, fields: tuple, src, dt: float) -> tuple:
+    def step(self, fields: tuple, src, dt: float, target=None) -> tuple:
+        """One staggered-leapfrog step (v at n+1/2, σ at n+1). ``target`` is
+        boundary saving's (see :meth:`bs_recompute`)."""
         (vx, vy, vz,
          sxx, syy, szz, sxy, sxz, syz,
          m_sxx_x, m_sxy_y, m_sxz_z, m_sxy_x, m_syy_y, m_syz_z,
@@ -322,6 +325,8 @@ class ElasticVSSEM3D(DerivedInitState):
         vx = vx + dt * inv_M * (-R_x + b_x)
         vy = vy + dt * inv_M * (-R_y + b_y)
         vz = vz + dt * inv_M * (-R_z + b_z)
+        if target is not None:
+            vx, vy, vz = (pin_to_ring(v, inv_M, *t) for v, t in zip((vx, vy, vz), target))
 
         # ----- stress update from new v (velocity-gradient CPML) -----
         # Split: the bare increment on every element, plus -- the update being
@@ -361,9 +366,14 @@ class ElasticVSSEM3D(DerivedInitState):
     # ================================================================== #
     # Boundary-saving hooks ('substep' reverse — undo the leapfrog at −dt
     # with CPML memory zeroed; exact in the lossless interior, natural BC).
+    # The ring holds the velocities only, so the band's stresses and
+    # memories come back wrong; the per-step VJP pins the velocity update's
+    # output to the ring (bs_pin_fields, see boundary_saving.pin_to_ring),
+    # which is what the model gradient reads there.
     # ================================================================== #
     bs_ring_save: ClassVar[list] = [0, 1, 2]
     bs_ring_restore: ClassVar[list] = [(0, 0, 0), (1, 1, 0), (2, 2, 0)]
+    bs_pin_fields: ClassVar[tuple] = (0, 1, 2)
     bs_model_attrs: ClassVar[tuple] = ("_lam", "_mu", "_lam2mu")
 
     def reverse_step(self, fields, src, dt):
@@ -391,7 +401,10 @@ class ElasticVSSEM3D(DerivedInitState):
         d["mass_rho"] = self.mass_rho
         return d
 
-    def bs_recompute(self, fields, src, dt, leaves):
+    def bs_recompute(self, fields, src, dt, leaves, target=None):
+        """One forward step with the model tensors replaced by ``leaves`` (the
+        per-step VJP); ``target``: the ring masks and the step's output on
+        them, for the velocity update (see ``boundary_saving.pin_to_ring``)."""
         saved = {a: getattr(self, a) for a in self.bs_model_attrs}
         saved_inv = self._inv_M
         for a in self.bs_model_attrs:
@@ -400,7 +413,9 @@ class ElasticVSSEM3D(DerivedInitState):
         self._inv_M = torch.where(saved_inv == 0, torch.zeros_like(saved_inv),
                                   1.0 / leaves["mass_rho"])
         try:
-            return self.step(fields, src, dt)
+            if target is None:
+                return self.step(fields, src, dt)
+            return self.step(fields, src, dt, target=target)
         finally:
             for a, v in saved.items():
                 setattr(self, a, v)
