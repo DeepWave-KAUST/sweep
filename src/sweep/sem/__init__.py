@@ -38,6 +38,7 @@ from .mesh import (
     boundary_element_faces,
     Hex27Mesh,
     build_axis_aligned_hex27,
+    build_layered_hex27,
     build_topography_hex27,
     hex27_from_control_nodes,
 )
@@ -59,7 +60,7 @@ from .cpml import (
 from . import equations as _equations
 from .equations import *                                    # noqa: F401,F403
 globals().update(_equations.equation_classes())
-from .constitutive import thomsen_to_tti_cij, thomsen_to_vti_cij
+from .constitutive import thomsen_to_cij3d, thomsen_to_tti_cij, thomsen_to_vti_cij
 from .propagator import (SEMPropagator, PointStamp, PointStamp3D, EdgeStamp, GradientStamp,
                          build_point_stamp, build_point_stamps, build_moment_stamp,
                          locate_points)
@@ -86,6 +87,7 @@ __all__ = [
     "boundary_element_faces",
     "Hex27Mesh",
     "build_axis_aligned_hex27",
+    "build_layered_hex27",
     "build_topography_hex27",
     "hex27_from_control_nodes",
     "CPMLProfile",

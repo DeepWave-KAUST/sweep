@@ -90,14 +90,20 @@ Spectral element (sweep.sem, run with PropSEM):
   ElasticSEM3DDeformed         hex27 3-D, topography  ['vp', 'vs', 'rho']                                                 yes            yes
   ElasticSHSEM2DDeformed       quad9 2-D, topography  ['vs', 'rho']                                                       no             no
   ElasticTTISEM2DDeformed      quad9 2-D, topography  ['vp', 'vs', 'rho', 'epsilon', 'delta', 'theta']                    no             no
+  ElasticTTISEM3D              hex8 3-D               ['vp', 'vs', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']    no             no
+  ElasticTTISEM3DDeformed      hex27 3-D, topography  ['vp', 'vs', 'rho', 'epsilon', 'delta', 'gamma', 'theta', 'phi']    no             no
   ElasticVSSEM2DDeformed       quad9 2-D, topography  ['vp', 'vs', 'rho']                                                 no             no
   ElasticVSSEM3D               hex8 3-D               ['vp', 'vs', 'rho']                                                 yes            yes
   ElasticVSSEM3DDeformed       hex27 3-D, topography  ['vp', 'vs', 'rho']                                                 no             no
   ElasticVTISEM2DDeformed      quad9 2-D, topography  ['vp', 'vs', 'rho', 'epsilon', 'delta']                             no             no
+  ElasticVTISEM3D              hex8 3-D               ['vp', 'vs', 'rho', 'epsilon', 'delta', 'gamma']                    no             no
+  ElasticVTISEM3DDeformed      hex27 3-D, topography  ['vp', 'vs', 'rho', 'epsilon', 'delta', 'gamma']                    no             no
   ViscoAcousticPotentialSEM2D  quad9 2-D, topography  ['vp', 'Qk']                                                        no             no
   ViscoBiotVSSEM2DDeformed     quad9 2-D, topography  ['H', 'mu', 'C', 'M', 'rho', 'rho_f', 'm', 'b', 'Qp', 'Qs']         no             no
   ViscoElasticSEM2DDeformed    quad9 2-D, topography  ['vp', 'vs', 'rho', 'Qk', 'Qmu']                                    no             no
   ViscoElasticVSSEM2DDeformed  quad9 2-D, topography  ['vp', 'vs', 'rho', 'Qp', 'Qs']                                     no             no
+  ViscoElasticVSSEM3D          hex8 3-D               ['vp', 'vs', 'rho', 'Qp', 'Qs']                                     no             no
+  ViscoElasticVSSEM3DDeformed  hex27 3-D, topography  ['vp', 'vs', 'rho', 'Qp', 'Qs']                                     no             no
 ```
 
 The unified facades `DAS` (formerly `DASModeler`) and `AcousticAniso` are

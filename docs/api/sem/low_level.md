@@ -43,3 +43,5 @@ usual way to ask for it. See
 ::: sweep.sem.thomsen_to_vti_cij
 
 ::: sweep.sem.thomsen_to_tti_cij
+
+::: sweep.sem.thomsen_to_cij3d

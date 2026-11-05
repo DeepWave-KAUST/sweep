@@ -26,6 +26,50 @@ and this project adheres to
   skill.  The docs page *AI assistants (Agent Skills)* covers the install,
   and `test/test_skill_snippets.py` runs every code block of the skill so
   its examples cannot fall behind the API.
+- **`ViscoElasticVSSEM3D`, `ViscoElasticVSSEM3DDeformed`: visco-elastic attenuation on the
+  3-D SEM.** The GSLS of `ViscoElasticVSSEM2DDeformed` on `ElasticVSSEM3D` (Hex8) and
+  `ElasticVSSEM3DDeformed` (Hex27, a topography): six memory variables per mechanism, the
+  models `vp, vs, rho, Qp, Qs`, the 2-D class's options, all five models differentiable,
+  `Q = inf` the elastic step bit for bit; with the C-PML, the 3-D classes that combine
+  attenuation, a topography and absorbing boundaries. A point force in a whole space matches
+  the visco-elastic Green's function (the elastic one with the GSLS complex moduli) to
+  0.7e-3 to 1.2e-3 in relative L2, where the attenuation changes the records by 12% to 47%
+  (`test/sem/test_sem_visco_elastic3d.py`). Eager; no boundary saving (dissipative).
+- **Curved internal interfaces in 3-D: `PropSEM(interfaces=...)` on the Hex27 classes and
+  `sweep.sem.build_layered_hex27`.** Each interface is `(ny, nx)` rows; the element layers
+  follow the interfaces, graded linearly in every column of control nodes, and
+  `layered_model` gives each layer its material. The mid-nodes lie on the interfaces, so the
+  faces between the layers follow their curvature, where SPECFEM3D's internal mesher builds
+  straight-sided elements; on that straight-sided mesh `ElasticVSSEM3DDeformed` agrees with
+  SPECFEM3D to 3e-14 across a curved interface. A curved sea floor for
+  `BiotVSSEM3DDeformed` (water and rock, each element wholly one medium) is the case that needs
+  it (`test/sem/test_sem_interfaces3d.py`); notebook 61: a seamount.
+- **`ElasticVTISEM3D`, `ElasticTTISEM3D` (and their `...Deformed` versions on Hex27):
+  transversely isotropic media on the 3-D SEM.** The velocity-stress step of `ElasticVSSEM3D`
+  with the stiffnesses of a VTI medium (`vp, vs, rho, epsilon, delta, gamma`) or of one whose
+  symmetry axis is tilted by `theta` toward the azimuth `phi` (radians): the parameters and the
+  Bond rotation of the FD `ElasticTTISG3D` (`sweep.sem.thomsen_to_cij3d`), all 21 stiffnesses
+  in the step, the C-PML, the free surface, topography and the gradients of the parent. A TTI
+  medium without tilt is the VTI step bit for bit, while the gradient in `theta` there stays the
+  rotation's, so an inversion can start from a vertical axis. An axis tilted by 90 degrees
+  toward x or y reproduces the turned VTI problem to round-off, and against SPECFEM3D's
+  anisotropic medium (its `model_aniso.f90` given the same stiffnesses) the records agree to
+  5e-14 for a vertical and a tilted axis (`test/sem/test_sem_tti3d.py`,
+  `run_compare_box3d.py`). Notebook 60: wavefronts and shear-wave splitting. Eager.
+- **The 3-D SEM against SPECFEM3D.** `test/sem/specfem_compare/run_compare_box3d.py` runs the
+  3-D classes against SPECFEM3D 4.1.1 in double precision on a box with six free sides
+  (`make_specfem3d_box_cases.py`: a point force, stations inside elements, on faces and edges
+  and on the surface). `ElasticVSSEM3D`, `ElasticVSSEM3DDeformed` and `ElasticSEM3D` agree to
+  5e-14 to 8e-14. On SPECFEM3D's own mechanisms (Qkappa = Qmu = 30; Qkappa = 60, Qmu = 20)
+  `ViscoElasticVSSEM3D` agrees to 3.6e-3 and 4.4e-3, which is the time discretization of the
+  memory variables: with SPECFEM3D's memory update in our step the records agree to 1.3e-14.
+  SPECFEM3D's update overstates the strain it is driven by a factor `1 + (omega dt)^2`, and
+  its complex modulus is off by 1.3e-4 at 25 Hz and dt = 0.25 ms; ours is off by 3e-6.
+  `BiotVSSEM3DDeformed` with water over the dry rock agrees with SPECFEM3D's acoustic-elastic
+  coupling to round-off (the pressure, and the velocities in the rock and inside the water's
+  elements, 2e-12): its fluid region is SPECFEM3D's potential scheme once the fluid velocity
+  is eliminated. At a station on an element face the fluid velocity across the face differs
+  by 2e-3 to 5e-3 (SPECFEM3D takes one element, ours averages them).
 - **Plane-wave incidence on the SEM, SPECFEM2D's `initialfield`: `sweep.sem.PlaneWave` in
   place of the source coordinates** (`prop(wavelet, PlaneWave("SV", 30.0), receivers, ...)`).
   A plane P or SV wave from below at any angle, a Rayleigh wave along the surface, or a plane

@@ -212,4 +212,39 @@ waves. The
 
     [:material-notebook-outline: Open notebook](../../notebooks/58_sem_plane_wave.ipynb)
 
+-   ![SEM visco-elastic in 3-D](../../figures/gallery/59_sem_visco_elastic3d.png){ loading=lazy }
+
+    **Visco-elastic attenuation in 3-D**
+
+    ---
+
+    `ViscoElasticVSSEM3D` against the whole-space visco-elastic Green's
+    function of a point force, and `ViscoElasticVSSEM3DDeformed` under a hill:
+    attenuation, a topography and absorbing boundaries together.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/59_sem_visco_elastic3d.ipynb)
+
+-   ![SEM anisotropy in 3-D](../../figures/gallery/60_sem_tti3d.png){ loading=lazy }
+
+    **Anisotropy in 3-D**
+
+    ---
+
+    `ElasticVTISEM3D` and `ElasticTTISEM3D`: the wavefronts of a point force in a VTI
+    and a tilted medium, and a shear wave splitting across a horizontal symmetry axis.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/60_sem_tti3d.ipynb)
+
+-   ![SEM curved sea floor in 3-D](../../figures/gallery/61_sem_seafloor3d.png){ loading=lazy }
+
+    **A curved sea floor in 3-D**
+
+    ---
+
+    `PropSEM(interfaces=...)` on the Hex27 mesh: element layers that follow a
+    seamount, water and rock in `BiotVSSEM3DDeformed`, an air gun recorded by
+    hydrophones and sea-floor geophones.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/61_sem_seafloor3d.ipynb)
+
 </div>

@@ -143,6 +143,26 @@ First-order in time; the source and receiver fields are `v_x`, `v_z` (and
       inherited_members: true
       show_if_no_docstring: true
 
+::: sweep.sem.ElasticVTISEM3D
+    options:
+      heading_level: 3
+      members: [build]
+
+::: sweep.sem.ElasticVTISEM3DDeformed
+    options:
+      heading_level: 3
+      members: [build]
+
+::: sweep.sem.ElasticTTISEM3D
+    options:
+      heading_level: 3
+      members: [build]
+
+::: sweep.sem.ElasticTTISEM3DDeformed
+    options:
+      heading_level: 3
+      members: [build]
+
 ::: sweep.sem.ElasticSHSEM2DDeformed
     options:
       heading_level: 3
@@ -152,6 +172,16 @@ First-order in time; the source and receiver fields are `v_x`, `v_z` (and
     options:
       heading_level: 3
       members: [build, unrelaxed_velocities]
+
+::: sweep.sem.ViscoElasticVSSEM3D
+    options:
+      heading_level: 3
+      members: [build, unrelaxed_velocities]
+
+::: sweep.sem.ViscoElasticVSSEM3DDeformed
+    options:
+      heading_level: 3
+      members: [build]
 
 ::: sweep.sem.ViscoElasticSEM2DDeformed
     options:
