@@ -8,7 +8,9 @@ the band elements only, and keep their memory fields on the band rows
 no-op, so this is the full-mesh step it replaced, rearranged: checked here
 against that step, kept below as the oracle, to fp64 round-off -- records and
 every model gradient, full tape and boundary saving, flat and with topography,
-and the essential free surface of the VS form.
+and the essential free surface of the VS form. The VS oracles run on the full
+tape only: a boundary-saved oracle shares the ring's blind spots (it hid the
+VS gradient error next to the band, test_sem_vs_bs_exact.py).
 """
 from __future__ import annotations
 
@@ -242,10 +244,6 @@ class _FullMeshVSStep:
 
     field_specs = _on_every_element(ElasticVSSEM2DDeformed.field_specs)
 
-    def reverse_step(self, fields, src, dt):
-        out = ElasticVSSEM2DDeformed.reverse_step(self, fields, src, dt)
-        return out[:5] + tuple(torch.zeros_like(fields[2]) for _ in range(8))
-
     def step(self, fields, src, dt):
         (v_x, v_z, sigma_xx, sigma_zz, sigma_xz,
          m_sxx_x, m_sxz_z, m_sxz_x, m_szz_z, m_vxx, m_vzz, m_vxz, m_vzx) = fields
@@ -337,7 +335,7 @@ def _vs_cases():
 @pytest.mark.parametrize("eq, oracle, vals, memory, topo, split", _vs_cases())
 def test_vs_equals_the_full_mesh_step(eq, oracle, vals, memory, topo, split):
     r1, g1 = _run_vs(eq, vals, memory, topo, split)
-    r0, g0 = _oracle(_run_vs, oracle, vals, memory, topo)
+    r0, g0 = _oracle(_run_vs, oracle, vals, Full(), topo)
     assert _rel(r1, r0) < 1e-12
     for a, b in zip(g1, g0):
         assert _rel(a, b) < 1e-12
@@ -376,10 +374,6 @@ class _FullMeshVS3DStep:
     """The 3-D velocity-stress step on every element (the 2-D oracle's C-PML)."""
 
     field_specs = _on_every_element(ElasticVSSEM3D.field_specs)
-
-    def reverse_step(self, fields, src, dt):
-        out = ElasticVSSEM3D.reverse_step(self, fields, src, dt)
-        return out[:9] + tuple(torch.zeros_like(fields[3]) for _ in range(18))
 
     def step(self, fields, src, dt):
         (vx, vy, vz, sxx, syy, szz, sxy, sxz, syz, *m) = fields
@@ -444,7 +438,7 @@ def _run_vs3d(eq, memory=Full(), topo=False, split=None):
 @pytest.mark.parametrize("split", [True, False], ids=["split", "unsplit"])
 def test_vs3d_equals_the_full_mesh_step(eq, oracle, memory, topo, split):
     r1, g1 = _run_vs3d(eq, memory, topo, split)
-    r0, g0 = _oracle(_run_vs3d, oracle, memory, topo)
+    r0, g0 = _oracle(_run_vs3d, oracle, Full(), topo)
     assert _rel(r1, r0) < 1e-12
     for a, b in zip(g1, g0):
         assert _rel(a, b) < 1e-12

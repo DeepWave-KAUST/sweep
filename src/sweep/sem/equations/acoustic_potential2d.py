@@ -272,9 +272,12 @@ class AcousticPotentialSEM2D(DerivedInitState, DirichletNodes):
     # reverse reconstruction restores the exact step input everywhere and the
     # BS gradient equals the full-tape gradient (the memories are exactly zero
     # outside the band).
+    # The memories at offset 0, like chi: a step's input memories are the
+    # previous step's output. They read ring[i - 1] before, one step stale,
+    # which cost 7e-5 of the vp gradient on the model's edge line.
     bs_ring_save: ClassVar[list] = [0, 2, 3, 4, 5]
-    bs_ring_restore: ClassVar[list] = [(0, 0, 0), (1, 0, -1), (2, 1, -1),
-                                       (3, 2, -1), (4, 3, -1), (5, 4, -1)]
+    bs_ring_restore: ClassVar[list] = [(0, 0, 0), (1, 0, -1), (2, 1, 0),
+                                       (3, 2, 0), (4, 3, 0), (5, 4, 0)]
     # Each memory field is exactly zero off ITS axis's support (psi_x' =
     # b_x * q + a_x * psi_x from zero), so its ring lives on band & (b_x != 0)
     # rather than on the whole band -- see boundary_saving.band_support_idx.

@@ -51,6 +51,7 @@ from typing import ClassVar, Optional
 import torch
 
 from .._assembly import assemble, contract, first_copies, phys_grads
+from ..boundary_saving import pin_to_ring
 from ..cpml.band import active_elements, element_split
 from ..cpml.elastic_vs import (SimpleElasticCPMLProfile, build_simple_elastic_cpml,
                                pin_outer_edge)
@@ -378,8 +379,9 @@ class ElasticVSSEM2DDeformed(DerivedInitState):
         inc_xz = dt * mu * (d_vx_dz + d_vz_dx)
         return inc_xx, inc_zz, inc_xz
 
-    def step(self, fields: tuple, src, dt: float) -> tuple:
-        """One staggered-leapfrog step (v at n+1/2, σ at n+1)."""
+    def step(self, fields: tuple, src, dt: float, target=None) -> tuple:
+        """One staggered-leapfrog step (v at n+1/2, σ at n+1). ``target`` is
+        boundary saving's (see :meth:`bs_recompute`)."""
         (v_x, v_z, sigma_xx, sigma_zz, sigma_xz,
          m_sxx_x, m_sxz_z, m_sxz_x, m_szz_z,
          m_vxx, m_vzz, m_vxz, m_vzx) = fields
@@ -422,6 +424,8 @@ class ElasticVSSEM2DDeformed(DerivedInitState):
             R_z = R_z + acc[:, 1]
         v_x = v_x + dt * inv_M * (-R_x + b_x)
         v_z = v_z + dt * inv_M * (-R_z + b_z)
+        if target is not None:
+            v_x, v_z = (pin_to_ring(v, inv_M, *t) for v, t in zip((v_x, v_z), target))
 
         # ----- stress update from new v (with v-gradient CPML) -----
         # Split: the bare increment on every element, plus -- the update being
@@ -483,10 +487,13 @@ class ElasticVSSEM2DDeformed(DerivedInitState):
 
     bs_ring_save: ClassVar[list] = [0, 1]
     bs_ring_restore: ClassVar[list] = [(0, 0, 0), (1, 1, 0)]   # (field, slot, offset)
+    # The ring holds v only, so the band's σ and memories come back wrong;
+    # the per-step VJP pins the velocity update's output to the ring, which
+    # is what the model gradient reads there (boundary_saving.pin_to_ring).
+    bs_pin_fields: ClassVar[tuple] = (0, 1)
     bs_model_attrs: ClassVar[tuple] = ("_lam", "_mu", "_lam2mu")
-    # The BS grad_idx (boundary_saving.py) = fields with not boundary_related,
-    # i.e. v (0,1) AND stress (2,3,4) — stress carries the per-step adjoint
-    # (σ feeds v via the divergence); CPML memory (5..12) is boundary_related.
+    # Every field threads the per-step adjoint (boundary_saving._bs_setup),
+    # the C-PML memories included.
 
     def reverse_step(self, fields, src, dt):
         """Reconstruct the step's input state from its output (CPML zeroed)."""
@@ -517,10 +524,12 @@ class ElasticVSSEM2DDeformed(DerivedInitState):
         d["mass_rho"] = self.mass_rho
         return d
 
-    def bs_recompute(self, fields, src, dt, leaves):
+    def bs_recompute(self, fields, src, dt, leaves, target=None):
         """Re-run one forward step with the model tensors replaced by ``leaves``
         (for the per-step VJP): substitute the constitutive attrs + inv_M (from
-        ``mass_rho``) on ``self``, run, then restore."""
+        ``mass_rho``) on ``self``, run, then restore. ``target``: the ring
+        masks and the step's output on them, for the velocity update (see
+        ``boundary_saving.pin_to_ring``)."""
         saved = {a: getattr(self, a) for a in self.bs_model_attrs}
         saved_inv = self._inv_M
         for a in self.bs_model_attrs:
@@ -529,7 +538,9 @@ class ElasticVSSEM2DDeformed(DerivedInitState):
         self._inv_M = torch.where(saved_inv == 0, torch.zeros_like(saved_inv),
                                   1.0 / leaves["mass_rho"])
         try:
-            return self.step(fields, src, dt)
+            if target is None:
+                return self.step(fields, src, dt)
+            return self.step(fields, src, dt, target=target)
         finally:
             for a, v in saved.items():
                 setattr(self, a, v)
