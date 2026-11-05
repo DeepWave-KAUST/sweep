@@ -371,6 +371,36 @@ and this project adheres to
   taking the kernels and refusing at the first call; `impl='c'` refuses it
   when the `PropSEM` is built. The docs listed eager boundary saving for every
   equation; the dissipative ones (visco-elastic, visco-acoustic, Biot) refuse it.
+- `PropSEM(memory=BoundarySaving())` on the velocity-stress SEM
+  (`ElasticVSSEM2DDeformed` with VTI/TTI, `ElasticVSSEM3D`,
+  `ElasticVSSEM3DDeformed`) gives the full-tape gradient with a C-PML. The ring
+  holds only the velocities, so the reverse march rebuilt the band's stresses
+  and memories wrong, and the per-step recompute put a wrong velocity on the
+  band nodes, which the model gradient next to the band reads: 4e-4 of the 3-D
+  vp gradient (9e-5 with a free top), 1e-3 of the 2-D rho gradient, records
+  unaffected. Not from the C-PML recursion change: dev before it was off by as
+  much. The recompute now pins the velocity update's output to the stored ring
+  (`boundary_saving.pin_to_ring`, straight through, so the adjoint is
+  unchanged): fp64 round-off in both band splits and both ring modes, with
+  topography and in the multi-shot rollout. No extra storage; `impl='c'` has no
+  boundary saving for these classes.
+- `PropSEM(memory=BoundarySaving())` on the scalar SEM (`AcousticSEM2D`,
+  `AcousticSEM2DDeformed`, `AcousticPotentialSEM2D`, `ElasticSHSEM2DDeformed`,
+  `AcousticSEM3D`, `AcousticSEM3DDeformed`) gives the full-tape gradient with a
+  C-PML, eager. The model's edge nodes read the C-PML memories of the band
+  element next to them, and the per-step recompute had them wrong: zeroed in
+  the classes whose ring holds `u` only, one step stale in the three that ring
+  them (restored from `ring[i - 1]`; a step's input memories are `ring[i]`).
+  The vp gradient on the model's edge line was off by 4e-5 (2-D), 3e-6 (3-D),
+  7e-5 (potential form) and the SH rho gradient by 1e-6, up to 1e-3 with the
+  source next to the band; records unaffected. The memories now come back at
+  the right level, and the classes that do not ring them pin `u`'s update to
+  the ring (`boundary_saving.pin_to_ring`) instead: ringing them would cost
+  2.6-3.4x the ring and, with a bf16 or int8 ring, land 2-15x further from the
+  full tape. fp64 round-off in both ring modes, with a free top, topography,
+  source encoding, in the multi-shot rollout and compiled; with a bf16 or int8
+  ring 4-16x closer to the full tape than before. `impl='c'` was not affected
+  (its ring is read at the right level).
 - `PropSEM(memory=BoundarySaving(), bs_band_mode='rim')` gives the full-tape
   gradient over the whole model, its edge included. The rim was meant to be
   the band's inner edge, but the C-PML derivative profiles (`dbx_dx` ...,
