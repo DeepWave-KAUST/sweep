@@ -249,10 +249,15 @@ class AcousticSEM3D(DerivedInitState, DirichletNodes):
     # Ring-save u AND the six CPML memories on the full band so the reverse
     # reconstruction restores the exact step input (memories are exactly zero
     # outside the band) and the BS gradient equals the full-tape one.
+    # A step's input memories are the previous step's output, ring[i] like u
+    # (offset 0); only u_prev, u one level back, reads ring[i - 1]. They read
+    # ring[i - 1] before: one step stale, which the model's edge nodes see
+    # through the band element next door (3e-6 of the vp gradient, 7e-5 with
+    # the source next to the band).
     bs_ring_save: ClassVar[list] = [0, 2, 3, 4, 5, 6, 7]
-    bs_ring_restore: ClassVar[list] = [(0, 0, 0), (1, 0, -1), (2, 1, -1),
-                                       (3, 2, -1), (4, 3, -1), (5, 4, -1),
-                                       (6, 5, -1), (7, 6, -1)]
+    bs_ring_restore: ClassVar[list] = [(0, 0, 0), (1, 0, -1), (2, 1, 0),
+                                       (3, 2, 0), (4, 3, 0), (5, 4, 0),
+                                       (6, 5, 0), (7, 6, 0)]
     # psi_d / zeta_d are exactly zero off b_d's support, so each rings on
     # band & (b_d != 0) -- the union of the three slabs is ~2.4x any one.
     bs_ring_support: ClassVar[dict] = {2: "b_x", 3: "b_y", 4: "b_z",
