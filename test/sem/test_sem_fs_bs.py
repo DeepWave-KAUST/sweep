@@ -150,11 +150,10 @@ def test_bs_peak_memory_is_smaller():
 
 def test_bare_box_still_refuses_boundary_saving():
     """The bs path needs the coupled C-PML (its rings ARE the C-PML bands);
-    the bare box must refuse loudly, not silently run the full tape."""
-    p = _prop(abcn=0, memory=BoundarySaving())
-    ms = _models(p, grad=True)
-    with pytest.raises(NotImplementedError, match="boundary"):
-        p(_wav(), SRC, REC, models=ms)
+    the bare box must refuse loudly, not silently run the full tape -- when the
+    PropSEM is built."""
+    with pytest.raises(NotImplementedError, match="without a C-PML"):
+        _prop(abcn=0, memory=BoundarySaving())
 
 
 def test_low_precision_ring_matches_the_fp32_ring():

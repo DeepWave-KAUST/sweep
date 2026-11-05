@@ -812,7 +812,9 @@ class PropSEM:
         self.dev = _resolve_device(device, dev)
         self.dtype = dtype
 
-        self._select_backend(equation, impl, self.dev, density)
+        from sweep.propagator.options import as_memory_strategy
+        memory = as_memory_strategy(memory)
+        self._select_backend(equation, impl, self.dev, density, memory)
         self.eager_options = self._resolve_eager_options(eager_options)
         self._resolve_memory(memory, bs_store_dtype_elem)
         self._check_compile_mode()
@@ -1120,11 +1122,12 @@ class PropSEM:
             return None
         return self.eager_options
 
-    def _select_backend(self, equation, impl, dev, density):
+    def _select_backend(self, equation, impl, dev, density, memory=None):
         """impl=None / 'auto' / 'eager' / 'c', as on PropTorch: the CUDA
         backend serves exactly the equations its dispatch implements, read
-        from prop_c.C_SUPPORTED, and 'auto' takes it wherever it can run.
-        ``self.impl`` is the one chosen."""
+        from prop_c.C_SUPPORTED, and 'auto' takes it wherever it can run --
+        for ``memory=BoundarySaving()``, wherever its kernels save the boundary
+        (prop_c.c_boundary_saving_supported). ``self.impl`` is the one chosen."""
         # impl='c': route through the CUDA SEM backend. It implements the 2-D
         # AcousticPotentialSEM2D (variable-density potential form); vp is the FWI
         # model and ``density`` is the fixed density. impl='eager' and impl='c'
@@ -1153,6 +1156,22 @@ class PropSEM:
             elif equation in C_SUPPORTED:
                 if sem_c_available() and str(dev).startswith("cuda"):
                     self._use_c = True
+                    from sweep.propagator.options import BoundarySaving
+                    from .prop_c import _BS_NEEDS_CPML, c_boundary_saving_supported
+                    if (isinstance(memory, BoundarySaving)
+                            and not c_boundary_saving_supported(equation, has_cpml)):
+                        # 'auto' saves the boundary on eager; impl='c' refuses it
+                        # here -- both used to take the kernels and refuse at the
+                        # first call
+                        if impl == "c":
+                            where = (" without a C-PML"
+                                     if issubclass(equation, _BS_NEEDS_CPML) else "")
+                            raise NotImplementedError(
+                                getattr(equation, "bs_refusal", None)
+                                or f"memory=BoundarySaving() has no impl='c' kernels for "
+                                f"{equation.__name__}{where}: use impl='eager', or "
+                                "impl=None, which runs it there.")
+                        self._use_c = False
                 elif impl == "c":
                     raise RuntimeError(
                         "impl='c' needs CUDA (dev='cuda') and a sweep core "

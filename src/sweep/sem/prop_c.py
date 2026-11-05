@@ -781,8 +781,8 @@ class SEMCudaPropagator(SEMPropagator):
         raise NotImplementedError(
             f"memory='boundary' is not implemented for {type(eq).__name__} on "
             f"impl='c' {why}. It used to be accepted and ignored, which looked "
-            f"like it worked. Use impl='eager' (boundary saving is implemented "
-            f"there for every equation) or memory=None.")
+            f"like it worked. Use impl='eager' (it saves the boundary for every "
+            f"equation but the dissipative ones) or memory=None.")
 
     def _forward_acoustic(self, wav):
         """Bare 2-D acoustic potential: no C-PML, so no memory fields."""

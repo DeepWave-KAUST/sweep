@@ -23,9 +23,9 @@ import numpy as np
 import pytest
 import torch
 
-from sweep.propagator import Ckpt, EagerOptions
+from sweep.propagator import BoundarySaving, Ckpt, EagerOptions, Full
 from sweep.sem import (PropSEM, AcousticSEM3D, ElasticSEM2DDeformed,
-                       ElasticSEM3D, build_axis_aligned_quad9)
+                       ElasticSEM3D, ElasticVSSEM3D, build_axis_aligned_quad9)
 from sweep.sem.cpml.acoustic import build_cpml
 from sweep.sem.cpml.elastic import build_elastic_cpml
 from sweep.sem.equations.acoustic_potential2d import AcousticPotentialSEM2D
@@ -110,6 +110,53 @@ def test_memory_none_is_never_rejected():
     p = _prop(eq, elastic=True)
     p._assert_memory_supported(None)
     p._assert_memory_supported("")
+
+
+# ------------- PropSEM: BoundarySaving() picks the backend ------------------ #
+def _bs_propsem(cls, shape, abcn, impl, memory=None, dh=DH, dt=1e-3):
+    return PropSEM(cls, shape=shape, dh=dh, dt=dt, nt=60, n_order=NO,
+                   free_surface=("top",), abcn=abcn, f_dominant=8.0, dev="cuda",
+                   impl=impl, memory=BoundarySaving() if memory is None else memory)
+
+
+@cuda
+def test_auto_saves_the_boundary_on_eager_where_the_kernels_have_none():
+    """impl=None took the CUDA kernels and refused BoundarySaving() at the first
+    call; it runs eager's boundary saving there, and keeps the kernels where they
+    save the boundary."""
+    for cls, shape, abcn in ((ElasticVSSEM3D, (13, 13, 13), 2 * NO),
+                             (ElasticSEM3D, (13, 13, 13), 0),
+                             (ElasticSEM2DDeformed, (17, 17), 0)):
+        p = _bs_propsem(cls, shape, abcn, None)
+        assert (p.impl, p.memory_strategy) == ("eager", "boundary"), cls.__name__
+    assert _bs_propsem(ElasticSEM2DDeformed, (17, 17), 2 * NO, None).impl == "c"
+
+    # and it runs: the full tape's records and gradients
+    def run(memory):
+        p = _bs_propsem(ElasticVSSEM3D, (13, 13, 13), 2 * NO, None, memory=memory,
+                        dh=25.0, dt=1.5e-3)
+        ms = [torch.full((13, 13, 13), v, device="cuda", requires_grad=True)
+              for v in (2400.0, 1250.0, 2000.0)]
+        rix = np.arange(3, 10)
+        rec = np.stack([rix, np.full_like(rix, 6), np.full_like(rix, 2)], -1)[None]
+        w, _ = _shot(13, 13, 60, 1.5e-3)
+        s = p(1e10 * w.cuda(), np.array([[6, 6, 4]]), rec, models=ms)
+        s.square().sum().backward()
+        return p.impl, s.detach(), [m.grad for m in ms]
+    i_bs, s_bs, g_bs = run(None)
+    i_full, s_full, g_full = run(Full())
+    assert (i_bs, i_full) == ("eager", "c")
+    assert ((s_bs - s_full).norm() / s_full.norm()).item() < 1e-5
+    for a, b in zip(g_bs, g_full):
+        assert ((a - b).norm() / b.norm()).item() < 1e-4
+
+
+@cuda
+def test_impl_c_refuses_boundary_saving_when_built():
+    with pytest.raises(NotImplementedError, match="no impl='c' kernels for ElasticVSSEM3D"):
+        _bs_propsem(ElasticVSSEM3D, (13, 13, 13), 2 * NO, "c")
+    with pytest.raises(NotImplementedError, match="ElasticSEM2DDeformed without a C-PML"):
+        _bs_propsem(ElasticSEM2DDeformed, (17, 17), 0, "c")
 
 
 # ------------------------------- Ckpt ------------------------------------- #

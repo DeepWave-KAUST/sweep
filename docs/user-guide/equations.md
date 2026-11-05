@@ -87,8 +87,9 @@ The `impl="c"` column says whether `PropSEM(impl='c')` can route the class to
 the CUDA kernels; every class runs on `impl="eager"`. The
 `BoundarySaving()` column is the CUDA-side coverage of
 [boundary saving](sem.md#boundary-saving) -- on `impl="eager"` it works for
-every class but the dissipative ones (Biot, visco-elastic); ✅ = both backends, "eager" = eager
-only, and the C-PML is required wherever the ring IS the C-PML band.
+every class but the dissipative ones (Biot, visco-elastic, visco-acoustic); ✅ = both backends,
+"eager" = eager only (`impl=None` runs those on eager with `BoundarySaving()`), and the C-PML
+is required wherever the ring IS the C-PML band.
 
 | Equation | Models | Mesh | Dim | Notes | `impl="c"` | `BoundarySaving()` |
 | --- | --- | --- | --- | --- | --- | --- |
