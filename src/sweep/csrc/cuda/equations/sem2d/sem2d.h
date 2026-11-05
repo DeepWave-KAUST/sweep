@@ -82,4 +82,13 @@ void fluid_solid_forward(const SemFluidSolidForwardInputCore& in);
 // grad_el_inv_M, grad_el_w_rho_J, grad_wavelet).
 void fluid_solid_backward(const SemFluidSolidBackwardInputCore& in);
 
+// The 2-D velocity-stress SEM (vs2d.cu): ElasticVSSEM2DDeformed and its VTI /
+// TTI / visco-elastic subclasses, bare or with the C-PML, save-all.
+void elastic_vs2d_forward(const Sem2dVsForwardInputCore& in);
+void elastic_vs2d_backward(const Sem2dVsBackwardInputCore& in);
+
+// The 2-D Biot SEM (biot2d.cu): BiotVSSEM2DDeformed and BiotAnisoPermSEM2DDeformed.
+void biot2d_forward(const Sem2dBiotForwardInputCore& in);
+void biot2d_backward(const Sem2dBiotBackwardInputCore& in);
+
 } // namespace sem2d

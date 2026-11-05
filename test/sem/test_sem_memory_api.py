@@ -93,7 +93,13 @@ def test_impl_c_saves_the_boundary_where_its_kernels_can(real_default):
     p = PropSEM(AcousticPotentialSEM2D, shape=(25, 25), dh=25.0, dt=2e-4, nt=20, n_order=4,
                 free_surface=("top",), abcn=8, f_dominant=8.0, dev="cuda", impl="c")
     assert p.memory == BoundarySaving() and p.memory_strategy == "boundary"
-    # kernels that keep the whole history: the full tape
+    # the velocity-stress kernels: checkpoints in chunks (sweep.sem.drivers.vs_chunks)
+    from sweep.sem.prop_c import C_CHECKPOINT_CHUNK
     q = PropSEM(ElasticVSSEM3D, shape=(17, 17, 17), dh=10.0, dt=8e-4, n_order=4, abcn=8,
                 free_surface=True, f_dominant=12.0, dev="cuda", impl="c")
-    assert q.memory == Full() and q.memory_strategy == "full"
+    assert q.memory == Ckpt(chunks=C_CHECKPOINT_CHUNK) and q.memory_strategy == "ckpt"
+    # kernels that keep the whole history: the full tape
+    from sweep.sem.equations.elastic3d import ElasticSEM3D
+    r = PropSEM(ElasticSEM3D, shape=(17, 17, 17), dh=10.0, dt=8e-4, n_order=4, abcn=0,
+                free_surface=True, f_dominant=12.0, dev="cuda", impl="c")
+    assert r.memory == Full() and r.memory_strategy == "full"

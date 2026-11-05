@@ -732,6 +732,30 @@ void elastic_vs3d_backward(const Sem3dVsBackwardInputCore& in) {
     const float* wHy = in.wHy.data_ptr<float>();
     const float* wHz = in.wHz.data_ptr<float>();
     const float* inv_M = in.inv_M.data_ptr<float>();
+    const bool def = in.deformed != 0;           // Hex27: the deformed transposes
+    const int nc = in.aniso;                     // VTI 9 / TTI 21 stiffnesses
+    SWEEP_CHECK(nc == 0 || nc == 9 || nc == 21,
+                "sem3d VS aniso must be 0, 9 or 21 stiffnesses");
+    const float* cij = nc ? in.cij.data_ptr<float>() : nullptr;
+    float* gC = nc ? in.grad_cij.data_ptr<float>() : nullptr;
+    const int nsls = in.nsls;                    // GSLS mechanisms (visco-elastic)
+    SWEEP_CHECK(nsls == 0 || nc == 0, "sem3d VS: GSLS memories need the isotropic moduli");
+    const float* ptau = nsls ? in.ptau.data_ptr<float>() : nullptr;
+    const float* mtau = nsls ? in.mtau.data_ptr<float>() : nullptr;
+    const float* gsls_w = nsls ? in.gsls_w.data_ptr<float>() : nullptr;
+    float* lrmem = nsls ? in.lrmem.data_ptr<float>() : nullptr;
+    float* gPt = nsls ? in.grad_ptau.data_ptr<float>() : nullptr;
+    float* gMt = nsls ? in.grad_mtau.data_ptr<float>() : nullptr;
+    const float* wJ  = def ? in.wJ.data_ptr<float>()  : nullptr;
+    const float* Ixx = def ? in.ixx.data_ptr<float>() : nullptr;
+    const float* Ixy = def ? in.ixy.data_ptr<float>() : nullptr;
+    const float* Ixz = def ? in.ixz.data_ptr<float>() : nullptr;
+    const float* Iex = def ? in.iex.data_ptr<float>() : nullptr;
+    const float* Iey = def ? in.iey.data_ptr<float>() : nullptr;
+    const float* Iez = def ? in.iez.data_ptr<float>() : nullptr;
+    const float* Igx = def ? in.igx.data_ptr<float>() : nullptr;
+    const float* Igy = def ? in.igy.data_ptr<float>() : nullptr;
+    const float* Igz = def ? in.igz.data_ptr<float>() : nullptr;
     const float* ax = cp ? in.a_x.data_ptr<float>() : nullptr;
     const float* bx = cp ? in.b_x.data_ptr<float>() : nullptr;
     const float* ay = cp ? in.a_y.data_ptr<float>() : nullptr;
@@ -775,31 +799,46 @@ void elastic_vs3d_backward(const Sem3dVsBackwardInputCore& in) {
     const int nb = (ng + TPB - 1) / TPB;
     const int rj = nrec > 0 ? (nrec * m + TPB - 1) / TPB : 0;
 
-    for (int k = nt - 1; k >= 0; --k) {
+    const int t0 = in.t0, t1 = in.t1 > 0 ? in.t1 : nt;
+    SWEEP_CHECK(0 <= t0 && t0 < t1 && t1 <= nt, "sem3d VS: bad step range");
+    for (int k = t1 - 1; k >= t0; --k) {
         if (nrec > 0) {
             sem2d::sem2d_adjoint_source<<<rj, TPB, 0, stream>>>(gsx, rec_G, rec_W, lvx, k, nt, nrec, m);
             sem2d::sem2d_adjoint_source<<<rj, TPB, 0, stream>>>(gsy, rec_G, rec_W, lvy, k, nt, nrec, m);
             sem2d::sem2d_adjoint_source<<<rj, TPB, 0, stream>>>(gsz, rec_G, rec_W, lvz, k, nt, nrec, m);
         }
-        sem3d_vs_stress_update_T<<<grid, m, sh9, stream>>>(
-            lsig, sgv + static_cast<size_t>(k) * 9 * Em, lmvel,
-            ax, bx, ay, by, az, bz, lam, mu, l2m, ibool, D,
-            ihx, ihy, ihz, dt, lvx, lvy, lvz, gLam, gMu, gL2m, ngll, E, ng);
-        const size_t ok = static_cast<size_t>(k) * ng;
-        const float* vk1x = k >= 1 ? svx + (ok - ng) : nullptr;
-        const float* vk1y = k >= 1 ? svy + (ok - ng) : nullptr;
-        const float* vk1z = k >= 1 ? svz + (ok - ng) : nullptr;
+        const float* gv_k = sgv + static_cast<size_t>(k - t0) * 9 * Em;
+        if (def)
+            SEM3D_VS_LAUNCH_NC(nc, sem3d_vs_stress_update_T_deformed, grid, m, sh9, stream,
+                lsig, gv_k, lmvel, ax, bx, ay, by, az, bz, lam, mu, l2m, cij,
+                nsls, ptau, mtau, gsls_w, lrmem, gPt, gMt,
+                Ixx, Ixy, Ixz, Iex, Iey, Iez, Igx, Igy, Igz, ibool, D,
+                dt, lvx, lvy, lvz, gLam, gMu, gL2m, gC, ngll, E, ng);
+        else
+            SEM3D_VS_LAUNCH_NC(nc, sem3d_vs_stress_update_T, grid, m, sh9, stream,
+                lsig, gv_k, lmvel,
+                ax, bx, ay, by, az, bz, lam, mu, l2m, cij,
+                nsls, ptau, mtau, gsls_w, lrmem, gPt, gMt, ibool, D,
+                ihx, ihy, ihz, dt, lvx, lvy, lvz, gLam, gMu, gL2m, gC, ngll, E, ng);
+        // v^k at history row k - t0 + 1, v^(k-1) one row up (row 0: the call's start)
+        const size_t ok = static_cast<size_t>(k - t0 + 1) * ng;
         sem3d_vs_vel_update_T<<<nb, TPB, 0, stream>>>(
-            lvx, lvy, lvz, svx + ok, svy + ok, svz + ok, vk1x, vk1y, vk1z,
+            lvx, lvy, lvz, svx + ok, svy + ok, svz + ok,
+            svx + (ok - ng), svy + (ok - ng), svz + (ok - ng),
             inv_M, dt, lRx, lRy, lRz, gM, ng);
         sem2d::sem2d_accum_gradW<<<nb, TPB, 0, stream>>>(px_, inv_M, lvx, dt, k, gW, ng);
         sem2d::sem2d_accum_gradW<<<nb, TPB, 0, stream>>>(py_, inv_M, lvy, dt, k, gW, ng);
         sem2d::sem2d_accum_gradW<<<nb, TPB, 0, stream>>>(pz_, inv_M, lvz, dt, k, gW, ng);
         if (cp)
             sem3d_vs_cpml_nodal_T<<<nb, TPB, 0, stream>>>(a_n, lRx, lRy, lRz, lmsig, lP, ng);
-        sem3d_vs_sigma_div_T<<<grid, m, sh9, stream>>>(
-            lRx, lRy, lRz, lP, lsig, ax, bx, ay, by, az, bz,
-            wHx, wHy, wHz, ibool, D, ngll, E, ng);
+        if (def)
+            sem3d_vs_sigma_div_T_deformed<<<grid, m, sh9, stream>>>(
+                lRx, lRy, lRz, lP, lsig, ax, bx, ay, by, az, bz, wJ,
+                Ixx, Ixy, Ixz, Iex, Iey, Iez, Igx, Igy, Igz, ibool, D, ngll, E, ng);
+        else
+            sem3d_vs_sigma_div_T<<<grid, m, sh9, stream>>>(
+                lRx, lRy, lRz, lP, lsig, ax, bx, ay, by, az, bz,
+                wHx, wHy, wHz, ibool, D, ngll, E, ng);
     }
     SWEEP_CUDA_CHECK(cudaGetLastError());
 }

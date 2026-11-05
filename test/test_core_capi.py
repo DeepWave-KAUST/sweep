@@ -57,7 +57,7 @@ def test_abi_version_and_entry_table_match_the_module():
         assert lib.sweep_entry_kind(i) == {"forward": 0, "rtm": 2}.get(op, 1), nm
     # The SEM entries (kind 3): the sem2d_/sem3d_ names the SEM drivers call,
     # each bound on sweep._C and each naming a struct the mirror knows.
-    assert len(sem) == 43, len(sem)
+    assert len(sem) == 49, len(sem)
     lib.sweep_entry_struct.restype = ctypes.c_char_p
     lib.sweep_entry_struct.argtypes = [ctypes.c_int]
     for i, nm in enumerate(names):

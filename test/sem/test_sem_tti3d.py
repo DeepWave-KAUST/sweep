@@ -8,7 +8,8 @@ to round-off, a check of the Bond rotation and of every one of the 21 stiffnesse
 step; the stiffnesses are the FD ``ElasticTTISG3D``'s; the gradient in the tilt at zero tilt is
 the derivative of the records; boundary saving (a bare box) gives the full tape's gradients; a
 tilted medium in the C-PML dies away instead of growing; a flat Hex27 mesh gives the Hex8
-records; ``impl='c'`` is refused.
+records; all four classes are on the CUDA dispatch (impl='c' against eager:
+test_sem_c_tti3d.py).
 """
 import math
 
@@ -186,6 +187,10 @@ def test_a_tilted_medium_decays_in_the_cpml():
 
 @pytest.mark.parametrize("equation", [ElasticVTISEM3D, ElasticTTISEM3D,
                                       ElasticVTISEM3DDeformed, ElasticTTISEM3DDeformed])
-def test_impl_c_is_refused(equation):
-    with pytest.raises(NotImplementedError, match="impl='c'"):
-        PropSEM(equation, shape=SHAPE, dh=10.0, dt=DT, n_order=4, dev="cpu", impl="c")
+def test_on_the_cuda_dispatch(equation):
+    """Each class has its own row (its stiffnesses, not the parent's Lame set):
+    an exact entry of C_SUPPORTED, and the row it takes is its own."""
+    from sweep.sem.prop_c import C_SUPPORTED, _C_ROUTES
+    assert equation in C_SUPPORTED
+    first = next(kind for kind, _, _ in _C_ROUTES if issubclass(equation, kind))
+    assert first is equation

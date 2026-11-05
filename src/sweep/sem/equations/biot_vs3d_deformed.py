@@ -30,8 +30,9 @@ the equations and the discretisation. What differs:
   a node holding the node's value, as in the 2-D class), three for the pressure gradient and
   nine for the velocity gradients -- live on every element.
 
-``src`` is aligned with ``(v_x, v_y, v_z, p, q_x, q_y, q_z)``. Eager only; no boundary
-saving (the drag is dissipative).
+``src`` is aligned with ``(v_x, v_y, v_z, p, q_x, q_y, q_z)``. ``impl='c'`` runs it on the
+kernels of ``sem3d/biot3d.cu`` (:mod:`sweep.sem.drivers.biot3d`); no boundary saving on either
+backend (the drag is dissipative).
 """
 
 from __future__ import annotations

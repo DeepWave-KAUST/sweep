@@ -5,7 +5,8 @@ for bit (Hex8 and Hex27), a finite Q attenuates more with distance, a point forc
 whole-space visco-elastic Green's function (the elastic one, near field included, with the
 GSLS complex moduli), the checkpointed and vmapped rollouts give the full tape, the gradients
 in ``vp``, ``Qp`` and ``Qs`` are the derivatives of the records, a flat Hex27 mesh gives the
-Hex8 records, and what it cannot do is refused.
+Hex8 records, both classes are on the CUDA dispatch (impl='c' against eager:
+test_sem_c_visco3d.py), and what it cannot do is refused.
 """
 import numpy as np
 import pytest
@@ -176,8 +177,9 @@ def test_gradients_are_the_derivative_of_the_records(which):
 def test_what_it_cannot_do_is_refused(equation):
     with pytest.raises(NotImplementedError, match="dissipative"):
         _prop(equation, memory=BoundarySaving())
-    with pytest.raises(NotImplementedError, match="impl='c'"):
-        PropSEM(equation, shape=SHAPE, dh=10.0, dt=DT, n_order=4, dev="cpu", impl="c")
+    from sweep.sem.prop_c import C_SUPPORTED, _C_ROUTES
+    assert equation in C_SUPPORTED          # its own row: the GSLS kernels, not the elastic ones
+    assert next(k for k, _, _ in _C_ROUTES if issubclass(equation, k)) is equation
     vp, vs, rho, qp, qs = _models()
     with pytest.raises(ValueError, match="Bound Q from below"):
         _call(_prop(equation), [vp, vs, rho, torch.full(SHAPE, 1.1, dtype=F64), qs])

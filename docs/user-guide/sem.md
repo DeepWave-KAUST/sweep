@@ -52,9 +52,10 @@ The options PropTorch has mean what they mean there:
 - `memory` — `Full()`, `BoundarySaving(storage_dtype=...)` or
   `Ckpt(chunks=...)` from `sweep.propagator` (see
   [Boundary saving](#boundary-saving)). Without it PropSEM takes PropTorch's
-  default strategy: boundary saving on `impl='c'` where its kernels have it
-  (else the full tape) and checkpointing on eager, in chunks of 8 steps;
-  `memory_strategy` reports `'full'`, `'boundary'` or `'ckpt'`;
+  default strategy: on `impl='c'` boundary saving where its kernels have it,
+  checkpoints in chunks of 64 steps for the velocity-stress classes, else the full
+  tape; on eager checkpointing in chunks of 8 steps; `memory_strategy` reports
+  `'full'`, `'boundary'` or `'ckpt'`;
 - `impl` — `None` runs the CUDA kernels where the equation has them and the
   device is CUDA, eager otherwise; `'eager'` / `'c'` choose;
 - `eager_options` — `EagerOptions(...)` from `sweep.propagator` (or its dict),
@@ -198,14 +199,33 @@ forward + backward call in GB:
 | eager, `use_compile=False`, `Ckpt(chunks=8)` | 0.41 / 1.47 (1.3) | 1.48 / 5.65 (3.9) | 0.80 / 3.36 (7.9) |
 | eager, `Ckpt(chunks=8)` (the defaults) | 0.072 / 0.33 (1.2) | 0.48 / 2.17 (3.5) | 0.42 / 1.53 (7.7) |
 
+On a Hex27 mesh, `ElasticVSSEM3DDeformed` runs the same CUDA time loop as
+`ElasticVSSEM3D`; its four element kernels apply the full 3 × 3 inverse Jacobian at
+every GLL node instead of the Hex8 kernels' one scale factor per axis. On an A100
+(order 4, C-PML on five sides, 10³ and 16³ elements, 400 steps) that took 1.15–1.3×
+the Hex8 time on the same number of elements, at the same peak memory.
+
+The velocity-stress classes on `impl='c'` (2-D and 3-D, isotropic, VTI / TTI and
+visco-elastic) have no boundary saving; their adjoint needs, per step, the velocities
+and the stretched velocity gradients, several times the state. `memory=Full()` keeps
+them for the whole record. `memory=Ckpt(chunks=K)`, PropSEM's default there with
+`K = 64`, keeps the state at the start of every `K`-step chunk instead and reruns each
+chunk in the backward pass (one more forward pass in all), with the same records and
+gradients up to the kernels' run-to-run rounding (`test/sem/test_sem_c_vs_ckpt.py`).
+On an A100, one forward and backward call with the default options:
+
+| | `impl='eager'` (compiled, `Ckpt(8)`) | `impl='c'`, `Full()` | `impl='c'`, `Ckpt(64)` |
+| --- | --- | --- | --- |
+| `ElasticVSSEM2DDeformed`, 401 × 801, 2000 steps | 2.28 s, 7.3 GB | 0.81 s, 23.3 GB | 1.16 s, 1.8 GB |
+| `ElasticVSSEM3DDeformed`, 65³, 1000 steps | 9.84 s, 12.5 GB | 0.91 s, 36.4 GB | 1.32 s, 4.4 GB |
+
 Where the equation has CUDA kernels (the `impl="c"` column of the
 [equation table](equations.md#sem-family-spectral-elements)), `impl='c'` is the
 faster backend: in the table the fastest eager configuration takes 1.4–2.9× as
 long per forward step, and 1.5–2.8× as long per forward + backward step as
 `impl='c'` with `BoundarySaving()` (1.8–5.5× against `Full()`). `impl='eager'`
 runs everything else: the equations without CUDA kernels
-(`AcousticSEM2DDeformed`, `ElasticVSSEM2DDeformed`, `ElasticVTISEM2DDeformed`,
-`ElasticTTISEM2DDeformed`, `ElasticVSSEM3DDeformed` and the Biot forms), the CPU, fp64,
+(`AcousticSEM2DDeformed` and `ElasticSHSEM2DDeformed`), the CPU, fp64,
 [wavefield snapshots](#wavefield-snapshots) and second derivatives
 (`create_graph=True` with `Full()`). On a GPU, its defaults — the compiled
 step and `Ckpt(chunks=8)` — are its fastest configuration for single shots, at
@@ -432,7 +452,9 @@ the equation path.
 
 Each equation family's autograd Functions sit in one module of
 `sweep/sem/drivers/` (`acoustic2d`, `acoustic3d`, `elastic2d`,
-`fluid_solid`, and `bare` for the paths without a C-PML) — the fused
+`fluid_solid`, `vs2d` for the 2-D velocity-stress family, and `bare` for the
+paths without a C-PML and the 3-D velocity-stress classes, whose chunked
+checkpoints both velocity-stress modules take from `vs_chunks`) — the fused
 single-domain Function (the C entry runs the time loop) next to the strip
 Function `SEMModelParallel` steps (Python runs the stepped entries with one
 exchange per assembly). A module names
@@ -945,6 +967,15 @@ long runs in such media need checking. Against SPECFEM3D's anisotropic medium, g
 [Against SPECFEM3D](#against-specfem3d)). Notebook 60 shows the wavefronts and shear-wave
 splitting.
 
+All four classes run on `impl='c'`: the CUDA kernels of `ElasticVSSEM3D` (and of
+`ElasticVSSEM3DDeformed` on Hex27) with the nine or 21 stiffnesses in the stress update, and
+the stiffness gradients go on to the Thomsen parameters, the tilt and the azimuth through the
+same `thomsen_to_cij3d` as on eager. The records and the gradients in every model agree with
+eager to 2e-7 to 2e-6 in relative L2, with the C-PML, on Hex8 and on a curved Hex27
+(`test/sem/test_sem_c_tti3d.py`). On an A100 (16³ elements, order 4, 400 steps, forward and
+backward) the VTI classes took 1.1× and the TTI classes 1.4× the time of the isotropic
+kernels on the same mesh.
+
 ## Visco-elastic attenuation
 
 `ViscoElasticVSSEM2DDeformed` adds attenuation to `ElasticVSSEM2DDeformed` with the
@@ -1026,9 +1057,18 @@ to 0.7e-3 to 1.2e-3 in relative L2 at 60 to 113 m from the source, where the att
 changes the records by 12% to 47%. On the same grid the elastic class is 1.2e-3 to 1.7e-3
 from its own Green's function. `test/sem/test_sem_visco_elastic3d.py` runs a coarser version
 of that check, the elastic limit on both meshes, the checkpointed and vmapped rollouts and the
-gradients in `vp`, `Qp` and `Qs`. Eager only. Against SPECFEM3D the records agree to 3.6e-3
+gradients in `vp`, `Qp` and `Qs`. Against SPECFEM3D the records agree to 3.6e-3
 on its own mechanisms, which is the time discretization of the memory variables (see
 [Against SPECFEM3D](#against-specfem3d)).
+
+Both classes run on `impl='c'`: the CUDA kernels of the elastic classes with the unrelaxed
+moduli, the memories advancing in the stress kernel and their adjoint in its transpose (the
+adjoint needs no history of the memories, only the saved strain rates). The records and the
+gradients in all five models agree with eager to 2e-7 to 4e-6 in relative L2, with the C-PML,
+on Hex8 and on a curved Hex27, and `Q = inf` gives the elastic kernels' records
+(`test/sem/test_sem_c_visco3d.py`). With three mechanisms a forward and backward call took
+1.55–1.6× the elastic time on an A100 (16³ elements, 400 steps). Boundary saving stays
+refused on both backends.
 
 ### SPECFEM2D's displacement scheme
 
@@ -1352,6 +1392,29 @@ in -- `"primary"`, `"density"` (density-normalised) and `"wavespeed"` -- and
 turns a coefficient gradient into a family's kernels by the exact chain rule
 (`biot_family_kernels`).
 
+### On CUDA
+
+`BiotVSSEM2DDeformed`, `BiotAnisoPermSEM2DDeformed` and `ViscoBiotVSSEM2DDeformed` (its GSLS
+frame memories in the stress kernel, as for the visco-elastic classes) run on `impl='c'` (two
+core entries,
+`sem2d_biot_forward` / `_backward`): the same step as eager in one kernel per sub-step --
+the injected pressure and its pin, the strong pressure gradient, the stress divergence, the
+flux copies of every node advanced together with the drag's exact step (the eager class's
+`drag_operators`, whose matrix exponentials autograd differentiates), the frame stress and the
+weak flux divergence, the fluid-solid interface, the viscous memory and the C-PML on every
+derivative -- and the transposes of each. Records of all eight receiver fields and the
+gradients in every coefficient agree with eager to the two backends' run-to-run rounding,
+for every kind of source, with the C-PML or an open-pore surface, through water, porous and
+dry regions, with the viscous memory and with a drag tensor
+(`test/sem/test_sem_c_biot2d.py`). The adjoint checkpoints in chunks, PropSEM's default there,
+as for the velocity-stress classes. On an A100, a layered porous rock on 201 × 401 for 2000
+steps (order 4, forward and backward) took 1.58 s and 6.1 GB, against 7.00 s and 5.7 GB with
+eager's defaults. `BiotVSSEM3DDeformed` runs the same step with y (`sem3d_biot_forward` /
+`_backward`); its flux copies go in groups of their number (1 inside an element, 2 on a face,
+4 on an edge, 8 at a corner), one launch per group, with the eager class's blocks of the drag
+step. It agrees with eager the same way (`test/sem/test_sem_c_biot3d.py`, the fluid-solid faces
+included); on 41³ for 600 steps it took 1.04 s and 2.4 GB against 4.20 s and 4.5 GB.
+
 ### Validation
 
 `test/sem/test_biot_sem.py` checks the analytic line source (solid velocity
@@ -1393,9 +1456,9 @@ element's own `phi / T` and `rho_f / rho_bar` (its masses
 an interface node shared by elements whose ratios differ, that is not the
 assembled system.
 
-`impl='eager'` only. Boundary saving is refused because the viscous
-drag is dissipative everywhere, so the field cannot be stepped back; use
-`Full()` or `Ckpt(chunks=...)`.
+Boundary saving is refused on both backends because the viscous drag is
+dissipative everywhere, so the field cannot be stepped back; use `Full()` or
+`Ckpt(chunks=...)`.
 
 ### In 3-D
 

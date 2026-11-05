@@ -111,9 +111,12 @@ def test_gradients_are_the_derivative_of_the_records(which):
 def test_what_it_cannot_do_is_refused():
     with pytest.raises(NotImplementedError, match="dissipative"):
         _prop(memory=BoundarySaving())
-    with pytest.raises(NotImplementedError, match="impl='c'"):
-        PropSEM(ViscoElasticVSSEM2DDeformed, shape=SHAPE, dh=10.0, dt=DT, n_order=4,
-                dev="cpu", impl="c")
+    from sweep.sem.prop_c import C_SUPPORTED, _C_ROUTES
+    # on the CUDA dispatch, with its own row: the GSLS kernels, not the elastic ones
+    # (impl='c' against eager: test_sem_c_vs2d.py)
+    assert ViscoElasticVSSEM2DDeformed in C_SUPPORTED
+    assert next(k for k, _, _ in _C_ROUTES
+                if issubclass(ViscoElasticVSSEM2DDeformed, k)) is ViscoElasticVSSEM2DDeformed
     vp, vs, rho, qp, qs = _models()
     with pytest.raises(ValueError, match="Bound Q from below"):
         _call(_prop(), [vp, vs, rho, torch.full(SHAPE, 1.1, dtype=F64), qs])

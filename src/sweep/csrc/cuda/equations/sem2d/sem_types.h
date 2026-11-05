@@ -615,3 +615,136 @@ struct SemElasticBackwardInput {
     double dt = 0.0;
     int nt = 0, ngll = 0, n_elements = 0, n_global = 0, n_rec = 0, ndim = 2;
 };
+
+// SEM 2D velocity-stress elastic (ElasticVSSEM2DDeformed and its VTI / TTI /
+// visco-elastic subclasses) on Quad9, natural free surface, save-all: v x2
+// (global), sigma x3 + 4 velocity-gradient C-PML memories (element-local; slots
+// vx_x vz_z vx_z vz_x), the divergence by physical direction P and its 4 memories
+// (NODAL; slot 2i + j = (R_x,x) (R_x,z) (R_z,x) (R_z,z)). Coefficients a/b per
+// axis element-local and per node (a_n). Optional save-all: the v history and the
+// 4 STRETCHED velocity gradients per step. See sem2d/vs2d_kernels.cuh.
+struct Sem2dVsForwardInput {
+    torch::Tensor ibool, D, lam, mu, lam2mu;         // (E, ngll^2); lam.. empty when aniso
+    torch::Tensor wJ, ixx, ixz, iex, iez, inv_M;     // w2 |J|, d(xi,eta)/d(x,z); 1/mass_rho
+    torch::Tensor a_x, b_x, a_z, b_z;                // (E, ngll^2); empty = bare
+    torch::Tensor a_n;                               // (4, n_global) a_x b_x a_z b_z per node
+    torch::Tensor pat_x, pat_z, wavelet, rec_G, rec_W;
+    torch::Tensor vx, vz, Rx, Rz;                    // (n_global,)
+    torch::Tensor P, msig;                           // (4, n_global); empty = bare
+    torch::Tensor sig;                               // (3, E*ngll^2): xx zz xz
+    torch::Tensor mvel;                              // (4, E*ngll^2)
+    torch::Tensor seis_x, seis_z;
+    torch::Tensor save_vx, save_vz;                  // (nt, n_global) OPTIONAL
+    torch::Tensor save_gv;                           // (nt, 4, E*ngll^2) OPTIONAL
+    double dt = 0.0;
+    int nt = 0, ngll = 0, n_elements = 0, n_global = 0, n_rec = 0;
+    int ndim = 2, batch = 1;
+    // aniso = 4 (VTI: c11 c13 c33 c55) or 6 (TTI: c11 c13 c15 c33 c35 c55): the
+    // stiffnesses cij (aniso, E*ngll^2) replace lam / mu / lam2mu.
+    int aniso = 0;
+    torch::Tensor cij;
+    // nsls > 0: ViscoElasticVSSEM2DDeformed's GSLS memories rmem (3 nsls, E*ngll^2;
+    // xx zz xz per mechanism), as on Sem3dVsForwardInput.
+    int nsls = 0;
+    torch::Tensor ptau, mtau, gsls_w, rmem;
+    // The steps [t0, t1) this call runs (t1 = 0: all nt), for the checkpointed
+    // adjoint; records and the wavelet stay indexed by the global step. The v
+    // history holds t1 - t0 + 1 rows, the first the v the call starts from (the
+    // driver copies it in; zero at t0 = 0); the gradient history t1 - t0.
+    int t0 = 0, t1 = 0;
+};
+
+// Backward of Sem2dVsForwardInput. Returns (grad_lam, grad_mu, grad_lam2mu,
+// grad_inv_M, grad_wavelet); grad_cij / grad_ptau / grad_mtau when aniso / nsls.
+struct Sem2dVsBackwardInput {
+    torch::Tensor ibool, D, lam, mu, lam2mu;
+    torch::Tensor wJ, ixx, ixz, iex, iez, inv_M;
+    torch::Tensor a_x, b_x, a_z, b_z, a_n;
+    torch::Tensor pat_x, pat_z, wavelet, rec_G, rec_W;
+    torch::Tensor save_vx, save_vz, save_gv;
+    torch::Tensor grad_sx, grad_sz;                  // (n_rec, nt) upstream
+    // adjoint state: lv x2 (global), lsig (3, E*m), lmsig (4, n_global), lmvel
+    // (4, E*m); lP the divergence-by-direction adjoint (4, n_global, scratch)
+    torch::Tensor lvx, lvz, lRx, lRz, lP, lmsig;
+    torch::Tensor lsig, lmvel;
+    torch::Tensor grad_lam, grad_mu, grad_lam2mu, grad_inv_M, grad_wavelet;
+    double dt = 0.0;
+    int nt = 0, ngll = 0, n_elements = 0, n_global = 0, n_rec = 0;
+    int ndim = 2, batch = 1;
+    int aniso = 0;
+    torch::Tensor cij, grad_cij;
+    int nsls = 0;
+    torch::Tensor ptau, mtau, gsls_w, lrmem, grad_ptau, grad_mtau;
+    // The steps [t0, t1) of the forward call whose histories this one reads
+    // (t1 = 0: all nt), in reverse; the adjoint state carries across calls.
+    int t0 = 0, t1 = 0;
+};
+
+// SEM 2D Biot poroelastic velocity-stress (BiotVSSEM2DDeformed and
+// BiotAnisoPermSEM2DDeformed) on Quad9, save-all or chunked (t0, t1). Nodal:
+// v_x, v_z (solid), p (pore pressure, pinned to 0 on dirichlet_idx); element-
+// local: the flux copies q (2, E*m), the total stress sig (3, E*m: xx zz xz), the
+// viscous memory r (2, E*m). The flux copies at a node advance together, q <- E q
+// + Psi r over the node's slots (slot_elem: the element node of each, -1 empty),
+// E / Psi from the eager drag_operators for this dt. C-PML (empty = bare): the
+// grad p and grad v memories element-local (mp 2, mv 4), the divergence-by-
+// direction memories of sigma (msig 4) and of q (mq 2) nodal. The fluid-solid
+// interface points (ifc_*, empty = none). See sem2d/biot2d_kernels.cuh.
+struct Sem2dBiotForwardInput {
+    torch::Tensor ibool, D, wJ, ixx, ixz, iex, iez;  // (E, ngll^2)
+    torch::Tensor qmask;                             // (E,) 1 where there is a pore fluid
+    torch::Tensor inv_M, inv_Mp, inv_M1, inv_Mm;     // (n_global,) masked inverse masses
+    torch::Tensor pin_n;                             // (n_global,) 0 on the open-pore nodes, else 1
+    torch::Tensor lam_d, mu, alpha;                  // (E, ngll^2) drained lambda, mu, C / M
+    torch::Tensor slot_elem;                         // (n_global * kmax,) int32
+    torch::Tensor wr, share;                         // (n_global, kmax)
+    torch::Tensor dragE, dragP;                      // (n_global, K, K), K = kmax (2 kmax tensor)
+    torch::Tensor b_xx, b_xz, b_zz;                  // (E, ngll^2) relaxed drag (viscous memory)
+    torch::Tensor a_x, b_x, a_z, b_z, a_n;           // C-PML (a_n (4, n_global)); empty = bare
+    torch::Tensor dirichlet_idx;                     // (k,) int64
+    torch::Tensor ifc_idx, ifc_w, ifc_nx, ifc_nz;    // interface points; empty = none
+    torch::Tensor pat_vx, pat_vz, pat_p, pat_qx, pat_qz, wavelet;
+    torch::Tensor rec_G, rec_W, rec_Ge;              // (n_rec, ngll^2): node / element-node ids
+    torch::Tensor seis;                              // (8, n_rec, nt): vx vz p qx qz sxx szz sxz
+    torch::Tensor vx, vz, p, q, sig, r;              // state
+    torch::Tensor mp, mv, msig, mq;                  // C-PML memories (empty = bare)
+    torch::Tensor Rx, Rz, P, Pq, gp, f, adiv, divq, dp;   // scratch
+    torch::Tensor save_f, save_qs, save_rs, save_rhs, save_gv, save_q;  // histories (OPTIONAL)
+    double dt = 0.0, decay = 1.0, gain = 0.0;        // viscous memory: r <- decay r + gain B q
+    int nt = 0, ngll = 0, n_elements = 0, n_global = 0, n_rec = 0;
+    int ndim = 2, batch = 1;
+    int kmax = 0, tensor_drag = 0, velocity_mode = 0, viscous = 0;
+    // the steps [t0, t1) this call runs (t1 = 0: all nt); the histories hold t1 - t0 rows
+    // nsls > 0: ViscoBiotVSSEM2DDeformed's GSLS frame memories rmem (3 nsls, E*ngll^2), as
+    // on Sem2dVsForwardInput (ptau / mtau on the drained P and shear moduli)
+    int nsls = 0;
+    torch::Tensor ptau, mtau, gsls_w, rmem;
+    int t0 = 0, t1 = 0;
+};
+
+// Backward of Sem2dBiotForwardInput. Fills the gradients of the leaves.
+struct Sem2dBiotBackwardInput {
+    torch::Tensor ibool, D, wJ, ixx, ixz, iex, iez, qmask;
+    torch::Tensor inv_M, inv_Mp, inv_M1, inv_Mm, pin_n;
+    torch::Tensor lam_d, mu, alpha, slot_elem, wr, share, dragE, dragP;
+    torch::Tensor b_xx, b_xz, b_zz;
+    torch::Tensor a_x, b_x, a_z, b_z, a_n;
+    torch::Tensor dirichlet_idx, ifc_idx, ifc_w, ifc_nx, ifc_nz;
+    torch::Tensor pat_vx, pat_vz, pat_p, pat_qx, pat_qz, wavelet;
+    torch::Tensor rec_G, rec_W, rec_Ge;
+    torch::Tensor grad_seis;                         // (8, n_rec, nt) upstream
+    torch::Tensor save_f, save_qs, save_rs, save_rhs, save_gv, save_q;
+    // adjoint state (carried across steps) and scratch
+    torch::Tensor lvx, lvz, lp, lq, lsig, lr, lmp, lmv, lmsig, lmq;
+    torch::Tensor lRx, lRz, lP, lPq, lf, ldp, ldivq, lgp, lgv, lg;
+    torch::Tensor grad_inv_M, grad_inv_Mp, grad_inv_M1, grad_inv_Mm;
+    torch::Tensor grad_lam_d, grad_mu, grad_alpha, grad_wr, grad_share;
+    torch::Tensor grad_dragE, grad_dragP, grad_b_xx, grad_b_xz, grad_b_zz, grad_wavelet;
+    double dt = 0.0, decay = 1.0, gain = 0.0;
+    int nt = 0, ngll = 0, n_elements = 0, n_global = 0, n_rec = 0;
+    int ndim = 2, batch = 1;
+    int kmax = 0, tensor_drag = 0, velocity_mode = 0, viscous = 0;
+    int nsls = 0;
+    torch::Tensor ptau, mtau, gsls_w, lrmem, grad_ptau, grad_mtau;
+    int t0 = 0, t1 = 0;
+};

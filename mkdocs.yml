@@ -161,9 +161,9 @@ nav:
               - Illumination · RTM under a hill: notebooks/48_sem_illumination.ipynb
               - Attenuation · nonlinear Q fit, attenuating C-PML: notebooks/49_sem_attenuation.ipynb
               - Plane waves · P, SV, SH, Rayleigh through an injection band: notebooks/58_sem_plane_wave.ipynb
-              - Visco-elastic attenuation in 3-D: notebooks/59_sem_visco_elastic3d.ipynb
-              - Anisotropy in 3-D: notebooks/60_sem_tti3d.ipynb
-              - A curved sea floor in 3-D: notebooks/61_sem_seafloor3d.ipynb
+              - Attenuation · visco-elastic in 3-D: notebooks/59_sem_visco_elastic3d.ipynb
+              - Anisotropy · VTI and TTI in 3-D: notebooks/60_sem_tti3d.ipynb
+              - Interfaces · a curved sea floor in 3-D: notebooks/61_sem_seafloor3d.ipynb
           - Imaging:
               - examples/imaging/index.md
               - RTM · Marmousi: notebooks/08_rtm_acoustic_marmousi.ipynb

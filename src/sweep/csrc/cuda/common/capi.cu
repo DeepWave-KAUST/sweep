@@ -206,9 +206,15 @@ const char* const ENTRY_NAMES[SWEEP_ENTRY_COUNT] = {
     "elastic_born2d_backward",
     "elastic_born2d_backward_bs",
     "elastic_born2d_backward_ckpt",
-    "elastic_born2d_backward_recursive_ckpt"
+    "elastic_born2d_backward_recursive_ckpt",
+    "sem2d_elastic_vs_forward",
+    "sem2d_elastic_vs_backward",
+    "sem2d_biot_forward",
+    "sem2d_biot_backward",
+    "sem3d_biot_forward",
+    "sem3d_biot_backward"
 };
-const int ENTRY_KINDS[SWEEP_ENTRY_COUNT] = { 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 0, 1, 1, 1, 1 };
+const int ENTRY_KINDS[SWEEP_ENTRY_COUNT] = { 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 0, 1, 1, 1, 1, 3, 3, 3, 3, 3, 3 };
 
 void fill_err(char* err, int cap, const char* what)
 {
@@ -225,10 +231,25 @@ int guarded(F f, char* err, int cap)
     catch (...) { fill_err(err, cap, "sweep core: unknown exception"); return 1; }
 }
 
-// The SEM entries (kind 3) are the run [SEM_FIRST, SEM_END); each takes its own
-// twin struct.  Entries appended after the run are forward/backward entries again.
+// The SEM entries (kind 3) are the run [SEM_FIRST, SEM_END) and the run
+// [SEM2_FIRST, SEM2_END) appended after the born entries; each takes its own twin
+// struct.  The entries between the two runs are forward/backward entries.
 constexpr int SEM_FIRST = SWEEP_ENTRY_SEM2D_ACOUSTIC_FORWARD;
 constexpr int SEM_END = SWEEP_ENTRY_SEM3D_ELASTIC_VS_BACKWARD + 1;
+constexpr int SEM2_FIRST = SWEEP_ENTRY_SEM2D_ELASTIC_VS_FORWARD;
+constexpr int SEM2_END = SWEEP_ENTRY_SEM3D_BIOT_BACKWARD + 1;
+const char* const SEM2_STRUCTS[SEM2_END - SEM2_FIRST] = {
+    "Sem2dVsForwardInputCore",
+    "Sem2dVsBackwardInputCore",
+    "Sem2dBiotForwardInputCore",
+    "Sem2dBiotBackwardInputCore",
+    "Sem3dBiotForwardInputCore",
+    "Sem3dBiotBackwardInputCore"
+};
+inline bool is_sem_entry(int entry)
+{
+    return (entry >= SEM_FIRST && entry < SEM_END) || (entry >= SEM2_FIRST && entry < SEM2_END);
+}
 const char* const SEM_STRUCTS[SEM_END - SEM_FIRST] = {
     "SemForwardInputCore",
     "SemBackwardInputCore",
@@ -322,13 +343,19 @@ void sem_dispatch(int entry, const void* in, int64_t arg)
         case SWEEP_ENTRY_SEM3D_ELASTIC_BACKWARD: sem3d::elastic3d_backward(*static_cast<const Sem3dElasticBackwardInputCore*>(in)); return;
         case SWEEP_ENTRY_SEM3D_ELASTIC_VS_FORWARD: sem3d::elastic_vs3d_forward(*static_cast<const Sem3dVsForwardInputCore*>(in)); return;
         case SWEEP_ENTRY_SEM3D_ELASTIC_VS_BACKWARD: sem3d::elastic_vs3d_backward(*static_cast<const Sem3dVsBackwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM2D_ELASTIC_VS_FORWARD: sem2d::elastic_vs2d_forward(*static_cast<const Sem2dVsForwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM2D_ELASTIC_VS_BACKWARD: sem2d::elastic_vs2d_backward(*static_cast<const Sem2dVsBackwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM2D_BIOT_FORWARD: sem2d::biot2d_forward(*static_cast<const Sem2dBiotForwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM2D_BIOT_BACKWARD: sem2d::biot2d_backward(*static_cast<const Sem2dBiotBackwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM3D_BIOT_FORWARD: sem3d::biot3d_forward(*static_cast<const Sem3dBiotForwardInputCore*>(in)); return;
+        case SWEEP_ENTRY_SEM3D_BIOT_BACKWARD: sem3d::biot3d_backward(*static_cast<const Sem3dBiotBackwardInputCore*>(in)); return;
         default: SWEEP_CHECK(false, "sweep_sem_call: entry ", entry, " is not a SEM entry");
     }
 }
 
 void dispatch(int entry, const void* in, void* out)
 {
-    SWEEP_CHECK(entry < SEM_FIRST || entry >= SEM_END, "sweep_call: ", sweep_entry_name(entry),
+    SWEEP_CHECK(!is_sem_entry(entry), "sweep_call: ", sweep_entry_name(entry),
                 " is a SEM entry; call it through sweep_sem_call");
     switch (entry) {
         case 0: *static_cast<ForwardOutputCore*>(out) = acoustic2d::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
@@ -508,7 +535,12 @@ int sweep_sem_call(int entry, const void* in, int64_t arg, char* err, int err_ca
 {
     return guarded([&] { sem_dispatch(entry, in, arg); }, err, err_cap);
 }
-const char* sweep_entry_struct(int entry) { return (entry >= SEM_FIRST && entry < SEM_END) ? SEM_STRUCTS[entry - SEM_FIRST] : nullptr; }
+const char* sweep_entry_struct(int entry)
+{
+    if (entry >= SEM_FIRST && entry < SEM_END) return SEM_STRUCTS[entry - SEM_FIRST];
+    if (entry >= SEM2_FIRST && entry < SEM2_END) return SEM2_STRUCTS[entry - SEM2_FIRST];
+    return nullptr;
+}
 
 int sweep_forward_runner_create(int entry, const void* in, void** handle, char* err, int err_cap)
 {

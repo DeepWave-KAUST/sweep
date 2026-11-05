@@ -28,6 +28,22 @@ from .equations.acoustic3d_deformed import AcousticSEM3DDeformed
 from .equations.elastic3d import ElasticSEM3D
 from .equations.elastic3d_deformed import ElasticSEM3DDeformed
 from .equations.elastic_vs3d import ElasticVSSEM3D
+from .equations.elastic_vs3d_deformed import ElasticVSSEM3DDeformed
+from .equations.elastic_tti_vs3d import (_CIJ, _VTI, ElasticTTISEM3D,
+                                         ElasticTTISEM3DDeformed, ElasticVTISEM3D,
+                                         ElasticVTISEM3DDeformed)
+from .equations.visco_elastic_vs3d import ViscoElasticVSSEM3D, ViscoElasticVSSEM3DDeformed
+from .equations.visco_elastic_vs_deformed import (ViscoElasticVSSEM2DDeformed,
+                                                 gsls_weights)
+from .equations.elastic_vs_deformed import ElasticVSSEM2DDeformed
+from .equations.elastic_vti_vs_deformed import (ElasticTTISEM2DDeformed,
+                                                ElasticVTISEM2DDeformed)
+from .drivers.vs2d import _SEMElasticVS2DC
+from .drivers.biot2d import _SEMBiot2DC
+from .drivers.biot3d import _SEMBiot3DC
+from .equations.biot_vs3d_deformed import BiotVSSEM3DDeformed
+from .equations.biot_vs_deformed import BiotAnisoPermSEM2DDeformed, BiotVSSEM2DDeformed
+from .equations.visco_biot_vs_deformed import ViscoBiotVSSEM2DDeformed
 from .equations.elastic2d_deformed import ElasticSEM2DDeformed
 from .cdrive import (AC_CPML_FIELDS, EL_CPML_FIELDS, EL_CPML_TRIPLES,
                      METRIC_NAMES)
@@ -35,7 +51,8 @@ from .drivers.acoustic2d import _SEMAcousticCpmlC
 from .drivers.elastic2d import _SEMElasticCpmlC
 from .drivers.fluid_solid import _SEMFluidSolidC
 from .drivers.bare import (_SEMAcousticC, _SEMElasticC, _SEMAcoustic3DC,
-                           _SEMElastic3DC, _SEMElasticVS3DC, _VS3D_CPML)
+                           _SEMElastic3DC, _SEMElasticVS3DC, _SEMElasticVS3DAnisoC,
+                           _SEMViscoElasticVS3DC, _VS3D_CPML)
 # The autograd Functions live in sweep.sem.drivers (one module per equation
 # family, filled through sweep.sem.cdrive); they are re-exported here for
 # the callers and tests that import them from prop_c. The bar for moving one
@@ -365,6 +382,21 @@ _C_ROUTES = (
     (AcousticPotentialSEM2D, "_forward_acoustic_cpml",   "_forward_acoustic"),
     (ElasticSEM2DDeformed,   "_forward_elastic_cpml",    "_forward_elastic"),
     (AcousticElasticSEM2D,   "_forward_fluid_solid",     "_forward_fluid_solid"),
+    (BiotVSSEM3DDeformed,    "_forward_biot3d",          "_forward_biot3d"),
+    (ViscoBiotVSSEM2DDeformed, "_forward_biot2d",        "_forward_biot2d"),
+    (BiotAnisoPermSEM2DDeformed, "_forward_biot2d",      "_forward_biot2d"),
+    (BiotVSSEM2DDeformed,    "_forward_biot2d",          "_forward_biot2d"),
+    (ElasticTTISEM2DDeformed, "_forward_elastic_vs2d",   "_forward_elastic_vs2d"),
+    (ElasticVTISEM2DDeformed, "_forward_elastic_vs2d",   "_forward_elastic_vs2d"),
+    (ViscoElasticVSSEM2DDeformed, "_forward_elastic_vs2d", "_forward_elastic_vs2d"),
+    (ElasticVSSEM2DDeformed, "_forward_elastic_vs2d",    "_forward_elastic_vs2d"),
+    (ElasticVTISEM3DDeformed, "_forward_elastic_vs3d",   "_forward_elastic_vs3d"),
+    (ElasticTTISEM3DDeformed, "_forward_elastic_vs3d",   "_forward_elastic_vs3d"),
+    (ElasticVTISEM3D,        "_forward_elastic_vs3d",    "_forward_elastic_vs3d"),
+    (ElasticTTISEM3D,        "_forward_elastic_vs3d",    "_forward_elastic_vs3d"),
+    (ViscoElasticVSSEM3DDeformed, "_forward_elastic_vs3d", "_forward_elastic_vs3d"),
+    (ViscoElasticVSSEM3D,    "_forward_elastic_vs3d",    "_forward_elastic_vs3d"),
+    (ElasticVSSEM3DDeformed, "_forward_elastic_vs3d",    "_forward_elastic_vs3d"),
     (ElasticVSSEM3D,         "_forward_elastic_vs3d",    "_forward_elastic_vs3d"),
     (ElasticSEM3DDeformed,   "_forward_elastic3d_deformed",
                              "_forward_elastic3d_deformed"),
@@ -688,6 +720,20 @@ _BS_ANY_CPML = (AcousticSEM3D, AcousticSEM3DDeformed)
 _BS_NEEDS_CPML = (AcousticPotentialSEM2D, ElasticSEM2DDeformed, AcousticElasticSEM2D)
 
 
+# The forward methods whose drivers checkpoint in chunks (sweep.sem.drivers.vs_chunks),
+# and PropSEM's default chunk for them on impl='c': near the memory optimum
+# sqrt(2 nt) steps for nt from 500 to 8000 (within 1.25x of it), as the save-all
+# histories per step are about half the state.
+_CKPT_ROUTES = ("_forward_elastic_vs3d", "_forward_elastic_vs2d", "_forward_biot2d",
+                "_forward_biot3d")
+C_CHECKPOINT_CHUNK = 64
+
+
+def c_checkpoint_supported(equation) -> bool:
+    """Do the CUDA kernels run ``memory=Ckpt(chunks=...)`` for ``equation`` (a class)?"""
+    return any(c_route(equation, cp) in _CKPT_ROUTES for cp in (False, True))
+
+
 def c_boundary_saving_supported(equation, has_cpml) -> bool:
     """Do the CUDA kernels run boundary saving for ``equation`` (a class)?"""
     return (issubclass(equation, _BS_ANY_CPML)
@@ -734,7 +780,8 @@ class SEMCudaPropagator(SEMPropagator):
         }
 
     def forward(self, source_wavelet: torch.Tensor, memory=None,
-                bs_store_dtype=None, bs_store_dtype_elem=None, **kwargs):
+                bs_store_dtype=None, bs_store_dtype_elem=None, ckpt_chunk=None,
+                **kwargs):
         """Seismogram ``(nt, nrec, ncomp)`` -- the same contract as the eager
         :meth:`SEMPropagator.forward`. The private ``_forward_*`` dispatch
         targets below return one tensor per receiver-capable field, in
@@ -748,7 +795,7 @@ class SEMCudaPropagator(SEMPropagator):
                     f"SEMPropagator for snapshots.")
         return self._assemble(self._forward_components(
             source_wavelet, memory=memory, bs_store_dtype=bs_store_dtype,
-            bs_store_dtype_elem=bs_store_dtype_elem))
+            bs_store_dtype_elem=bs_store_dtype_elem, ckpt_chunk=ckpt_chunk))
 
     def _assemble(self, comps):
         recv = [sp.name for sp in self.eq.field_specs if sp.supports_receiver]
@@ -819,7 +866,7 @@ class SEMCudaPropagator(SEMPropagator):
 
     def _forward_components(self, source_wavelet: torch.Tensor, memory=None,
                             bs_store_dtype=None, bs_store_dtype_elem=None,
-                            **kwargs):
+                            ckpt_chunk=None, **kwargs):
         """One shot through the family's forward method -- the (C-PML, bare)
         pair of the FIRST row of ``_C_ROUTES`` the equation is an instance of.
         The rows are ordered most-derived first, so a deformed equation never
@@ -835,6 +882,12 @@ class SEMCudaPropagator(SEMPropagator):
                         f"{type(self.eq).__name__} "
                         f"{'with' if cpml is not None else 'without'} a C-PML "
                         f"has no impl='c' kernel; use impl='eager'.")
+                if ckpt_chunk is not None and name not in _CKPT_ROUTES:
+                    raise NotImplementedError(
+                        f"ckpt_chunk: {type(self.eq).__name__} keeps the whole history "
+                        "on impl='c' (only the velocity-stress classes checkpoint).")
+                # the chunk the velocity-stress drivers checkpoint in (None: save-all)
+                self._c_ckpt = None if ckpt_chunk is None else int(ckpt_chunk)
                 if self.illumination is not None and name not in _ILLUM_ROUTES:
                     raise NotImplementedError(
                         f"compute_illumination is not wired on impl='c' for "
@@ -1067,13 +1120,25 @@ class SEMCudaPropagator(SEMPropagator):
         return (sx, sy, sz)
 
     def _elastic_vs3d_consts(self):
-        """Velocity-stress Hex8 elastic, with the per-axis C-PML coefficients
+        """Velocity-stress elastic, with the per-axis C-PML coefficients
         (broadcast to (E, m) like the quadrature) when the equation has one;
-        ``has_cpml`` tells the driver whether to fill or hand empties."""
+        ``has_cpml`` tells the driver whether to fill or hand empties. On a
+        Hex27 mesh (ElasticVSSEM3DDeformed) the full per-node metric drives the
+        *_deformed kernels and wH* / ih* are placeholders they never read."""
         b, eq = self._base(), self.eq
+        if isinstance(eq, ElasticVSSEM3DDeformed):
+            E, m = b.E, b.m
+            wJ = _f32(eq._w_jac.reshape(E, m))
+            J = eq._inv_J                       # (..., a, j) = d xi_a / d x_j
+            geom = {"wHx": wJ, "wHy": wJ, "wHz": wJ,
+                    "ihx": 1.0, "ihy": 1.0, "ihz": 1.0, "deformed": 1, "wJ": wJ,
+                    **{nm: _f32(J[..., k // 3, k % 3].reshape(E, m))
+                       for k, nm in enumerate(METRIC_NAMES)}}
+        else:
+            geom = b.vs3d_geom()
         c = {
             "ibool": b.ibool_flat(), "D": b.D(eq),
-            **b.vs3d_geom(),
+            **geom,
             "pat_x": b.pattern(0), "pat_y": b.pattern(1), "pat_z": b.pattern(2),
             **b.rec(),
             "has_cpml": eq.cpml is not None,
@@ -1086,14 +1151,252 @@ class SEMCudaPropagator(SEMPropagator):
         return c
 
     def _forward_elastic_vs3d(self, wav):
+        """The isotropic Lame set, for the VTI / TTI classes their nine / 21
+        Voigt stiffnesses (``aniso`` in the kernels), for the visco-elastic
+        classes the unrelaxed Lame set plus the GSLS memories (``nsls``) --
+        flat or Hex27 alike."""
         eq = self.eq
         c = self._elastic_vs3d_consts()
+        c["ckpt"] = getattr(self, "_c_ckpt", None)
         E, m = c["n_elements"], c["ngll"] ** 3
         t = lambda x: x.to("cuda", torch.float32).reshape(E, m)
+        inv_M = eq._inv_M.to("cuda", torch.float32)
+        if isinstance(eq, ElasticTTISEM3D):
+            names = _VTI if isinstance(eq, ElasticVTISEM3D) else _CIJ
+            cij = torch.stack([t(getattr(eq, a)) for a in names])
+            return tuple(_SEMElasticVS3DAnisoC.apply(cij, inv_M, wav, c))
+        if isinstance(eq, ViscoElasticVSSEM3D):
+            a_l, c_l = gsls_weights(eq._tau_sigma, self.dt)
+            c["gsls_w"] = torch.tensor(list(a_l) + list(c_l), dtype=torch.float32,
+                                       device="cuda")
+            ptau = torch.stack([t(x) for x in eq._p_tau])
+            mtau = torch.stack([t(x) for x in eq._m_tau])
+            return tuple(_SEMViscoElasticVS3DC.apply(
+                t(eq._lam), t(eq._mu), t(eq._lam2mu), ptau, mtau, inv_M, wav, c))
         sx, sy, sz = _SEMElasticVS3DC.apply(
-            t(eq._lam), t(eq._mu), t(eq._lam2mu),
-            eq._inv_M.to("cuda", torch.float32), wav, c)
+            t(eq._lam), t(eq._mu), t(eq._lam2mu), inv_M, wav, c)
         return (sx, sy, sz)
+
+    # -- 2-D velocity-stress -------------------------------------------- #
+    def _elastic_vs2d_consts(self):
+        """The 2-D velocity-stress family on Quad9: the per-node metric, and with
+        a C-PML its per-axis coefficients element-local and per node (the
+        divergence memories are nodal). The strong free surface
+        (``free_top=True``, which PropSEM never sets) has no kernel."""
+        b, eq = self._base(), self.eq
+        if getattr(eq, "free_top", False):
+            raise NotImplementedError(
+                f"{type(eq).__name__}(free_top=True): the strong free-surface "
+                "projection has no impl='c' kernel; use impl='eager', or the natural "
+                "free surface (free_top=False, PropSEM's).")
+        E, m = b.E, b.m
+        f = lambda t: _f32(t.reshape(E, m))
+        c = {
+            "ibool": b.ibool_flat(), "D": b.D(eq), "wJ": f(eq._w_J),
+            "ixx": f(eq._ixx), "ixz": f(eq._ixz), "iex": f(eq._iex), "iez": f(eq._iez),
+            "pat_x": b.pattern(0), "pat_z": b.pattern(1),
+            **b.rec(),
+            "has_cpml": eq.cpml is not None,
+            **b.tail,
+        }
+        if eq.cpml is not None:
+            names = ("a_x", "b_x", "a_z", "b_z")
+            c.update({nm: f(getattr(eq.cpml, nm)) for nm in names})
+            c["a_n"] = b.nodal(*(c[nm] for nm in names))
+        return c
+
+    def _forward_elastic_vs2d(self, wav):
+        """ElasticVSSEM2DDeformed: the Lame set; the VTI / TTI classes: their four
+        / six stiffnesses; the visco-elastic class: the unrelaxed Lame set and the
+        GSLS memories."""
+        eq = self.eq
+        c = self._elastic_vs2d_consts()
+        c["ckpt"] = getattr(self, "_c_ckpt", None)
+        E, m = c["n_elements"], c["ngll"] ** 2
+        t = lambda x: x.to("cuda", torch.float32).reshape(E, m)
+        inv_M = eq._inv_M.to("cuda", torch.float32)
+        if isinstance(eq, ElasticVTISEM2DDeformed):       # VTI, TTI
+            c["mode"] = "aniso"
+            mats = (torch.stack([t(getattr(eq, a)) for a in type(eq).bs_model_attrs]),)
+        elif isinstance(eq, ViscoElasticVSSEM2DDeformed):
+            a_l, c_l = gsls_weights(eq._tau_sigma, self.dt)
+            c["mode"] = "visco"
+            c["gsls_w"] = torch.tensor(list(a_l) + list(c_l), dtype=torch.float32,
+                                       device="cuda")
+            mats = (t(eq._lam), t(eq._mu), t(eq._lam2mu),
+                    torch.stack([t(x) for x in eq._p_tau]),
+                    torch.stack([t(x) for x in eq._m_tau]))
+        else:
+            c["mode"] = "iso"
+            mats = (t(eq._lam), t(eq._mu), t(eq._lam2mu))
+        sx, sz = _SEMElasticVS2DC.apply(inv_M, wav, c, *mats)
+        return (sx, sz)
+
+    # -- 2-D Biot -------------------------------------------------------- #
+    def _biot2d_consts(self):
+        """BiotVSSEM2DDeformed / BiotAnisoPermSEM2DDeformed / ViscoBiotVSSEM2DDeformed:
+        the Quad9 metric, the media (the flux mask, the open-pore pin), the flux
+        copies' slots, the fluid-solid interface, both receiver gathers (nodal
+        fields and element fields), the five source fields, the C-PML, the GSLS
+        frame's weights and the step's flags."""
+        import math
+        from .propagator import receiver_gather
+        b, eq = self._base(), self.eq
+        if type(eq) not in (BiotVSSEM2DDeformed, BiotAnisoPermSEM2DDeformed,
+                            ViscoBiotVSSEM2DDeformed):
+            raise NotImplementedError(
+                f"{type(eq).__name__} has no impl='c' kernel (the 2-D Biot kernels serve "
+                "BiotVSSEM2DDeformed, BiotAnisoPermSEM2DDeformed and "
+                "ViscoBiotVSSEM2DDeformed); use impl='eager'.")
+        if eq.source_mode not in ("load", "velocity"):
+            raise ValueError(f"source_mode must be 'load' or 'velocity', got {eq.source_mode!r}")
+        E, m, ng, dev = b.E, b.m, b.ng, torch.device("cuda")
+        f = lambda t: _f32(t.reshape(E, m))
+        kmax = int(eq._kmax)
+        slot_elem = torch.full((ng * kmax,), -1, dtype=torch.int32, device=dev)
+        slot_elem[eq._slot_idx.to(dev)] = torch.arange(E * m, dtype=torch.int32, device=dev)
+        pin = torch.ones(ng, dtype=torch.float32, device=dev)
+        if eq.dirichlet_idx.numel():
+            pin[eq.dirichlet_idx.to(dev)] = 0.0
+        ifc = eq.ifc
+        e64, e32 = (torch.zeros(0, dtype=t, device=dev) for t in (torch.int64, torch.float32))
+        if ifc.n_face:
+            ifc_c = {"ifc_idx": _i64(ifc.node_idx.reshape(-1)), "ifc_w": _f32(ifc.weight.reshape(-1)),
+                     "ifc_nx": _f32(ifc.nx.reshape(-1)), "ifc_nz": _f32(ifc.nz.reshape(-1))}
+        else:
+            ifc_c = {"ifc_idx": e64, "ifc_w": e32, "ifc_nx": e32, "ifc_nz": e32}
+        if len(self.receivers):
+            G, _ = receiver_gather(eq.mesh, self.receivers, layout="element")
+            rec_Ge = _i64(G)
+        else:
+            rec_Ge = torch.zeros((0, m), dtype=torch.int64, device=dev)
+        tau_e, tau_s = eq._tau
+        decay = math.exp(-float(self.dt) / tau_s)
+        c = {
+            "ibool": b.ibool_flat(), "D": b.D(eq), "wJ": f(eq._w_J),
+            "ixx": f(eq._ixx), "ixz": f(eq._ixz), "iex": f(eq._iex), "iez": f(eq._iez),
+            "qmask": _f32(eq._qmask.reshape(-1)), "pin_n": pin, "slot_elem": slot_elem,
+            "dirichlet_idx": _i64(eq.dirichlet_idx), **ifc_c,
+            "pat_vx": b.pattern(0), "pat_vz": b.pattern(1), "pat_p": b.pattern(2),
+            "pat_qx": b.pattern(3), "pat_qz": b.pattern(4),
+            **b.rec(), "rec_Ge": rec_Ge,
+            "has_cpml": eq.cpml is not None, "kmax": kmax,
+            "tensor_drag": int(eq.tensor_drag),
+            "velocity_mode": int(eq.source_mode == "velocity"),
+            "viscous": int(eq.viscous_q is not None),
+            "decay": decay, "gain": (1.0 - decay) * (tau_e / tau_s - 1.0),
+            **b.tail,
+        }
+        if eq.cpml is not None:
+            names = ("a_x", "b_x", "a_z", "b_z")
+            c.update({nm: f(getattr(eq.cpml, nm)) for nm in names})
+            c["a_n"] = b.nodal(*(c[nm] for nm in names))
+        if isinstance(eq, ViscoBiotVSSEM2DDeformed):
+            a_l, c_l = gsls_weights(eq._tau_sigma, self.dt)
+            c["nsls"] = int(eq.n_sls)
+            c["gsls_w"] = torch.tensor(list(a_l) + list(c_l), dtype=torch.float32, device=dev)
+        return c
+
+    def _forward_biot2d(self, wav):
+        """The eight receiver fields of the 2-D Biot run, in field_specs order."""
+        eq = self.eq
+        c = self._biot2d_consts()
+        c["ckpt"] = getattr(self, "_c_ckpt", None)
+        E, m = c["n_elements"], c["ngll"] ** 2
+        t = lambda x: x.to("cuda", torch.float32).reshape(E, m)
+        n = lambda x: x.to("cuda", torch.float32).contiguous()
+        drag_E, drag_P = eq.drag_operators(float(self.dt))
+        if c.get("nsls"):
+            gsls = (torch.stack([t(x) for x in eq._p_tau]),
+                    torch.stack([t(x) for x in eq._m_tau]))
+        else:
+            empty = torch.zeros(0, dtype=torch.float32, device="cuda")
+            gsls = (empty, empty.clone())
+        leaves = (n(eq._inv_M), n(eq._inv_Mp), n(eq._inv_M1), n(eq._inv_Mm),
+                  t(eq._lam_d), t(eq.mu_e), t(eq._alpha), n(eq._wr), n(eq._share),
+                  n(drag_E), n(drag_P), t(eq.b_e[0]), t(eq.b_e[1]), t(eq.b_e[2])) + gsls
+        return tuple(_SEMBiot2DC.apply(c, wav, *leaves).unbind(0))
+
+    # -- 3-D Biot -------------------------------------------------------- #
+    def _biot3d_consts(self):
+        """BiotVSSEM3DDeformed: the Hex27 metric, the media, the flux copies' perm
+        order and groups (the eager class's _flux_blocks), the fluid-solid faces,
+        both receiver gathers, the seven source fields, the C-PML and the flags."""
+        import math
+        b, eq = self._base(), self.eq
+        if type(eq) is not BiotVSSEM3DDeformed:
+            raise NotImplementedError(
+                f"{type(eq).__name__} has no impl='c' kernel; use impl='eager'.")
+        if eq.source_mode not in ("load", "velocity"):
+            raise ValueError(f"source_mode must be 'load' or 'velocity', got {eq.source_mode!r}")
+        E, m, ng, dev = b.E, b.m, b.ng, torch.device("cuda")
+        f = lambda t: _f32(t.reshape(E, m))
+        if len(eq._blocks) > 4:
+            raise NotImplementedError(
+                f"{len(eq._blocks)} groups of flux copies; the 3-D Biot kernels take four "
+                "(1, 2, 4, 8 copies, a structured Hex27 mesh)")
+        groups = {}
+        for g, blk in enumerate(eq._blocks):
+            groups[f"g{g}_k"], groups[f"g{g}_n"] = int(blk.k), int(blk.nodes.numel())
+        for g in range(len(eq._blocks), 4):
+            groups[f"g{g}_k"], groups[f"g{g}_n"] = 0, 0
+        pin = torch.ones(ng, dtype=torch.float32, device=dev)
+        if eq.dirichlet_idx.numel():
+            pin[eq.dirichlet_idx.to(dev)] = 0.0
+        ifc = eq.ifc
+        e64, e32 = (torch.zeros(0, dtype=t, device=dev) for t in (torch.int64, torch.float32))
+        if ifc.n_face:
+            ifc_c = {"ifc_idx": _i64(ifc.node_idx.reshape(-1)), "ifc_w": _f32(ifc.weight.reshape(-1)),
+                     "ifc_nx": _f32(ifc.nx.reshape(-1)), "ifc_ny": _f32(ifc.ny.reshape(-1)),
+                     "ifc_nz": _f32(ifc.nz.reshape(-1))}
+        else:
+            ifc_c = {"ifc_idx": e64, "ifc_w": e32, "ifc_nx": e32, "ifc_ny": e32, "ifc_nz": e32}
+        if len(self.receivers):
+            G, _ = receiver_gather(eq.mesh, self.receivers, layout="element")
+            rec_Ge = _i64(G)
+        else:
+            rec_Ge = torch.zeros((0, m), dtype=torch.int64, device=dev)
+        J = eq._inv_J
+        tau_e, tau_s = eq._tau
+        decay = math.exp(-float(self.dt) / tau_s)
+        c = {
+            "ibool": b.ibool_flat(), "D": b.D(eq), "wJ": f(eq._w_J),
+            **{nm: f(J[..., k // 3, k % 3]) for k, nm in enumerate(METRIC_NAMES)},
+            "qmask": _f32(eq._qmask.reshape(-1)), "pin_n": pin,
+            "perm": eq._perm.to(device=dev, dtype=torch.int32).contiguous(),
+            "node_order": torch.cat([blk.nodes for blk in eq._blocks]).to(
+                device=dev, dtype=torch.int32).contiguous(),
+            "dirichlet_idx": _i64(eq.dirichlet_idx), **ifc_c,
+            **{nm: b.pattern(k) for k, nm in enumerate(
+                ("pat_vx", "pat_vy", "pat_vz", "pat_p", "pat_qx", "pat_qy", "pat_qz"))},
+            **b.rec(), "rec_Ge": rec_Ge,
+            "has_cpml": eq.cpml is not None,
+            "velocity_mode": int(eq.source_mode == "velocity"),
+            "viscous": int(eq.viscous_q is not None),
+            "decay": decay, "gain": (1.0 - decay) * (tau_e / tau_s - 1.0),
+            **groups, **b.tail,
+        }
+        if eq.cpml is not None:
+            names = ("a_x", "b_x", "a_y", "b_y", "a_z", "b_z")
+            c.update({nm: f(getattr(eq.cpml, nm)) for nm in names})
+            c["a_n"] = b.nodal(*(c[nm] for nm in names))
+        return c
+
+    def _forward_biot3d(self, wav):
+        """The thirteen receiver fields of the 3-D Biot run, in field_specs order."""
+        eq = self.eq
+        c = self._biot3d_consts()
+        c["ckpt"] = getattr(self, "_c_ckpt", None)
+        E, m = c["n_elements"], c["ngll"] ** 3
+        t = lambda x: x.to("cuda", torch.float32).reshape(E, m)
+        n = lambda x: x.to("cuda", torch.float32).contiguous()
+        drag_E, drag_P = eq.drag_operators(float(self.dt))
+        flat = lambda xs: n(torch.cat([x.reshape(-1) for x in xs]))
+        leaves = (n(eq._inv_M), n(eq._inv_Mp), n(eq._inv_M1), n(eq._inv_Mm),
+                  t(eq._lam_d), t(eq.mu_e), t(eq._alpha), t(eq.b_e),
+                  flat([blk.wr for blk in eq._blocks]), flat([blk.share for blk in eq._blocks]),
+                  flat(drag_E), flat(drag_P))
+        return tuple(_SEMBiot3DC.apply(c, wav, *leaves).unbind(0))
 
     # -- 2-D coupled fluid-solid ----------------------------------------- #
     def _fluid_solid_consts(self):

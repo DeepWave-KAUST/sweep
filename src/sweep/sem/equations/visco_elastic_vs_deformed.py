@@ -38,8 +38,9 @@ The explicit stress update runs at the unrelaxed velocities, above ``vp`` / ``vs
 finite Q (~8% at Q = 10 for the default band of a factor 12): take ``dt`` from those
 (:meth:`ViscoElasticVSSEM2DDeformed.unrelaxed_velocities`). The C-PML terms run on every
 element: the band split of :class:`ElasticVSSEM2DDeformed` would need the memories' share of
-the stretched strain rate on the band rows. Eager only; no boundary saving, since the
-attenuation is dissipative.
+the stretched strain rate on the band rows. ``impl='c'`` runs the 2-D velocity-stress CUDA
+kernels with the memories in the stress kernel (:mod:`sweep.sem.drivers.vs2d`); no boundary
+saving on either backend, since the attenuation is dissipative.
 """
 
 from __future__ import annotations
