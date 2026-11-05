@@ -6,8 +6,10 @@ an extra term in the profile's gradient that sent a low-frequency echo back from
 the top of the layer, the same at any resolution. Here: a free-surface box with
 a 160 m layer below and beside it against the same box in a model large enough
 that nothing comes back within the record (twice as deep, wider by the box's
-half-width on each side). Measured (CPU, float64): elastic
-4.0e-3 before, 9.5e-5 now; Biot vz 2.7e-2 / 2.6e-4, p 7.1e-3 / 6.3e-5.
+half-width on each side). Measured (CPU, float64): Biot vz 2.7e-2 before, 2.6e-4 now,
+p 7.1e-3 / 6.3e-5. The elastic and visco-elastic classes are gated by
+test_sem_vs_cpml_absorption.py, whose reflection tells the old scheme apart far more
+clearly (0.54 and 0.55 there, against about 3e-3; the echo here was 4.0e-3 and 3.4e-3).
 """
 from __future__ import annotations
 
@@ -17,8 +19,8 @@ import numpy as np
 import torch
 
 from sweep.equations.biot import biot_from_biot_constants
-from sweep.sem import (BiotVSSEM2DDeformed, ElasticTTISEM2DDeformed, ElasticVSSEM2DDeformed,
-                       PropSEM, ViscoBiotVSSEM2DDeformed, ViscoElasticVSSEM2DDeformed)
+from sweep.sem import (BiotVSSEM2DDeformed, ElasticTTISEM2DDeformed, PropSEM,
+                       ViscoBiotVSSEM2DDeformed)
 from test_biot import DAI1
 
 ABCN = 16                        # four elements of layer
@@ -46,25 +48,12 @@ def _echo(eq, models, dh, dt, nt, f0, receivers):
             for k in range(len(receivers))]
 
 
-def test_elastic_layer_echo():
-    (e,) = _echo(ElasticVSSEM2DDeformed, (2400.0, 1300.0, 2000.0), 10.0, 6e-4, 700, 15.0,
-                 ["vz"])
-    assert e < 1e-3, f"echo {e:.2e}"
-
-
 def test_biot_layer_echo():
     """The flux q of the pressure equation took the same route as the stress."""
     models = biot_from_biot_constants(**DAI1, b=7e4, phi=0.3)
     e_vz, e_p = _echo(BiotVSSEM2DDeformed, models, 4.0, 2e-4, 900, 30.0, ["vz", "p"])
     assert e_vz < 2e-3, f"vz echo {e_vz:.2e}"
     assert e_p < 1e-3, f"p echo {e_p:.2e}"
-
-
-def test_visco_elastic_layer_echo():
-    """The attenuating class has its own step (Qp = 50, Qs = 30 in both models)."""
-    (e,) = _echo(ViscoElasticVSSEM2DDeformed, (2400.0, 1300.0, 2000.0, 50.0, 30.0), 10.0,
-                 6e-4, 700, 15.0, ["vz"])
-    assert e < 1e-3, f"echo {e:.2e}"
 
 
 def test_tti_layer_echo():

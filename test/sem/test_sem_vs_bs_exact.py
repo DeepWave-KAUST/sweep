@@ -75,8 +75,11 @@ def _check(eq, fs, split=None, topo=False, **bs):
         assert rel < 1e-12, f"{name}: boundary saving vs full tape {rel:.2e}"
 
 
+# C-PML on all six sides. With a free top the same check is
+# test_sem_cpml_band_split.py::test_vs3d_equals_the_full_mesh_step[*-hex8_boundary_saving]
+# (both fail when the pin is taken out) and test_multishot_vmapped_rollout[3d].
 @pytest.mark.parametrize("split", [True, False], ids=["split", "unsplit"])
-@pytest.mark.parametrize("fs", [False, True], ids=["no_free_surface", "free_top"])
+@pytest.mark.parametrize("fs", [False], ids=["no_free_surface"])
 def test_vs3d(fs, split):
     _check(ElasticVSSEM3D, fs, split)
 

@@ -61,11 +61,10 @@ def displacement_reflection():
     return _reflection(ElasticSEM2DDeformed, ROCK)
 
 
-@pytest.mark.parametrize("band_split", [False, True])
-def test_velocity_stress_layer_reflects_like_the_displacement_one(band_split,
-                                                                  displacement_reflection):
-    refl = _reflection(ElasticVSSEM2DDeformed, ROCK,
-                       equation_options={"band_split": band_split})
+def test_velocity_stress_layer_reflects_like_the_displacement_one(displacement_reflection):
+    # unsplit: the band split is the same step to 1e-12
+    # (test_sem_cpml_band_split.py::test_vs_equals_the_full_mesh_step)
+    refl = _reflection(ElasticVSSEM2DDeformed, ROCK, equation_options={"band_split": False})
     assert displacement_reflection < 1e-2, displacement_reflection
     assert refl < 2.0 * displacement_reflection, (refl, displacement_reflection)
 

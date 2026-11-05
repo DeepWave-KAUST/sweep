@@ -1,9 +1,10 @@
 """Guards for two previously-untested SEM paths:
 
 1. the compiled step (``eager_options=EagerOptions(use_compile=True)``, the default:
-   torch.compile of the per-step graph, used by the FWI
-   notebook and the multi-shot loop) must reproduce the eager seismograms AND
-   model gradient.
+   torch.compile of the per-step graph) under vmap, the multi-shot loop, must
+   reproduce the eager seismograms AND model gradient (the single-shot compiled
+   step: test_sem_eager_options.py, test_sem_compile_equations.py,
+   test_sem_ckpt_rollout.py::test_graphs_with_the_compiled_step).
 2. Boundary-saving for the **deformed** acoustic equation
    (:class:`AcousticSEM2DDeformed`) — its BS hooks (reverse_step / bs_recompute)
    were implemented but never exercised; here the BS model gradient must match
@@ -36,34 +37,6 @@ def _ricker(nt, dt, f0=10.0, t0=0.06, scale=1.0, dtype=torch.float64):
 def _cos(x, y):
     x, y = x.reshape(-1), y.reshape(-1)
     return (x @ y / (x.norm() * y.norm() + 1e-300)).item()
-
-
-@pytest.mark.skipif(DEV != "cuda", reason="torch.compile speedup path is CUDA")
-def test_compiled_step_matches_eager():
-    """PropSEM acoustic: the compiled step == uncompiled (seismograms + vp gradient)."""
-    nz, nx, nt, dh, dt = 61, 81, 300, 10.0, 5.0e-4
-    f0 = 12.0
-    wav = _ricker(nt, dt, f0=f0, t0=0.08, scale=1.0, dtype=torch.float32)
-    sources = torch.tensor([[nx // 2, 3]])
-    rec_x = torch.arange(2, nx - 2, 3)
-    receivers = torch.stack([rec_x, torch.full_like(rec_x, 3)], 1)[None]
-
-    def run(compile):
-        prop = PropSEM(AcousticSEM2D, shape=(nz, nx), dh=dh, dt=dt, nt=nt,
-                       n_order=4, free_surface=True, abcn=8 * 4,
-                       f_dominant=f0, dev=DEV, dtype=torch.float32,
-                       impl="eager", eager_options=EagerOptions(use_compile=compile))
-        vp = torch.full((nz, nx), 2000.0, device=DEV, requires_grad=True)
-        out = prop(wav, sources, receivers, models=[vp])
-        out.pow(2).sum().backward()
-        return out.detach(), vp.grad.detach()
-
-    seis_e, g_e = run(False)
-    seis_c, g_c = run(True)
-    assert torch.isfinite(seis_c).all() and torch.isfinite(g_c).all()
-    # only FP reassociation between the eager and compiled kernels
-    assert (seis_c - seis_e).abs().max() / (seis_e.abs().max() + 1e-30) < 1e-4
-    assert (g_c - g_e).norm() / (g_e.norm() + 1e-30) < 1e-4
 
 
 @pytest.mark.skipif(DEV != "cuda", reason="torch.compile speedup path is CUDA")
