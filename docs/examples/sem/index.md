@@ -23,8 +23,7 @@ The [SEM user guide](../../user-guide/sem.md) has the rest of the API.
     ---
 
     `PropSEM` on a two-layer model: one shot gather, then one `.backward()`
-    for the vp gradient on the grid, with the full tape and with
-    `memory=BoundarySaving()`.
+    for the vp gradient on the grid.
 
     [:material-notebook-outline: Open notebook](../../notebooks/43_sem_forward_backward.ipynb)
 
@@ -48,8 +47,7 @@ The [SEM user guide](../../user-guide/sem.md) has the rest of the API.
     ---
 
     The equation table, what each equation takes as `models=` and which run on
-    `impl='c'`, four 2-D equations on one model, record against record, and the
-    SH equation.
+    `impl='c'`, four 2-D equations on one model, and the SH equation.
 
     [:material-notebook-outline: Open notebook](../../notebooks/51_sem_equations_and_models.ipynb)
 
@@ -72,7 +70,7 @@ The [SEM user guide](../../user-guide/sem.md) has the rest of the API.
     ---
 
     `abcn` from none to the default, `free_surface` by edge, an elastic surface
-    over a hill, wavefield snapshots, and the one refused C-PML layout.
+    over a hill, and wavefield snapshots.
 
     [:material-notebook-outline: Open notebook](../../notebooks/53_sem_boundaries_and_snapshots.ipynb)
 
@@ -175,7 +173,7 @@ The [SEM user guide](../../user-guide/sem.md) has the rest of the API.
 
     One marine run records every sensor where it sits: a dual-sensor streamer
     in the water, nodes on the sea floor (velocity, pressure, rotation) and a
-    DAS fibre's strain rate, the gradient receivers checked against differences.
+    DAS fibre's strain rate.
 
     [:material-notebook-outline: Open notebook](../../notebooks/47_sem_receivers.ipynb)
 
@@ -221,9 +219,9 @@ The [SEM user guide](../../user-guide/sem.md) has the rest of the API.
 
     ---
 
-    `ViscoElasticVSSEM3D` against the whole-space visco-elastic Green's
-    function of a point force, and `ViscoElasticVSSEM3DDeformed` under a hill:
-    attenuation, a topography and absorbing boundaries together.
+    `ViscoElasticVSSEM3D`: a point force in a whole space with and without
+    attenuation; `ViscoElasticVSSEM3DDeformed`: the same under a hill, with a
+    free surface.
 
     [:material-notebook-outline: Open notebook](../../notebooks/59_sem_visco_elastic3d.ipynb)
 
