@@ -2,7 +2,7 @@
 
 The spectral-element solver, `sweep.sem.PropSEM`: `PropTorch`'s call on a
 Quad9 mesh that follows the free surface. Start with *Hello · SEM* for one
-forward and one gradient, then the eight short *SEM basics* notebooks, each on
+forward and one gradient, then eight short notebooks, each on
 one part of the API, from the mesh to 3-D and to anisotropic and porous rocks.
 The examples after them compare topography against the finite-difference
 solvers, run FWI on Marmousi (one model and every shot's window in one batched
@@ -30,7 +30,7 @@ The [SEM user guide](../../user-guide/sem.md) has the rest of the API.
 
 -   ![SEM mesh and time step](../../figures/gallery/50_sem_mesh_and_time_step.png){ loading=lazy }
 
-    **Basics 1 · The mesh and the time step**
+    **Mesh and time step · tiling, topography, interfaces**
 
     ---
 
@@ -43,7 +43,7 @@ The [SEM user guide](../../user-guide/sem.md) has the rest of the API.
 
 -   ![SEM equations](../../figures/gallery/51_sem_equations_and_models.png){ loading=lazy }
 
-    **Basics 2 · Choosing an equation**
+    **Equations · choosing one, and its models**
 
     ---
 
@@ -55,7 +55,7 @@ The [SEM user guide](../../user-guide/sem.md) has the rest of the API.
 
 -   ![SEM sources and receivers](../../figures/gallery/52_sem_sources_and_receivers.png){ loading=lazy }
 
-    **Basics 3 · Sources, receivers and records**
+    **Sources and receivers · positions, types, shots**
 
     ---
 
@@ -67,7 +67,7 @@ The [SEM user guide](../../user-guide/sem.md) has the rest of the API.
 
 -   ![SEM boundaries](../../figures/gallery/53_sem_boundaries_and_snapshots.png){ loading=lazy }
 
-    **Basics 4 · Boundaries and snapshots**
+    **Boundaries · C-PML, free surfaces, snapshots**
 
     ---
 
@@ -78,7 +78,7 @@ The [SEM user guide](../../user-guide/sem.md) has the rest of the API.
 
 -   ![SEM gradients](../../figures/gallery/54_sem_gradients_and_memory.png){ loading=lazy }
 
-    **Basics 5 · Gradients and memory**
+    **Gradients · backends and memory**
 
     ---
 
@@ -91,7 +91,7 @@ The [SEM user guide](../../user-guide/sem.md) has the rest of the API.
 
 -   ![SEM fluid-solid](../../figures/gallery/55_sem_fluid_solid.png){ loading=lazy }
 
-    **Basics 6 · Water over an elastic sea floor**
+    **Fluid-solid · water over an elastic sea floor**
 
     ---
 
@@ -103,7 +103,7 @@ The [SEM user guide](../../user-guide/sem.md) has the rest of the API.
 
 -   ![SEM 3-D](../../figures/gallery/56_sem_3d.png){ loading=lazy }
 
-    **Basics 7 · A 3-D model**
+    **3-D · acoustic, elastic, topography, Biot**
 
     ---
 
@@ -115,7 +115,7 @@ The [SEM user guide](../../user-guide/sem.md) has the rest of the API.
 
 -   ![SEM VTI and Biot](../../figures/gallery/57_sem_vti_and_biot.png){ loading=lazy }
 
-    **Basics 8 · Anisotropic and poroelastic rocks**
+    **Anisotropic and poroelastic · VTI, TTI, Biot**
 
     ---
 
