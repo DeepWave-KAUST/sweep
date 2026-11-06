@@ -164,7 +164,7 @@ nav:
               - Batched local windows · FWI: notebooks/44_sem_batched_local_window_fwi.ipynb
               - Receivers · pressure, velocity, rotation, DAS: notebooks/47_sem_receivers.ipynb
               - Illumination · RTM under a hill: notebooks/48_sem_illumination.ipynb
-              - Attenuation · Q fits, attenuating C-PML, 2-D visco classes: notebooks/49_sem_attenuation.ipynb
+              - Attenuation · records with and without Q, the constant-Q fit: notebooks/49_sem_attenuation.ipynb
               - Plane waves · P, SV, SH, Rayleigh through an injection band: notebooks/58_sem_plane_wave.ipynb
               - Attenuation · visco-elastic in 3-D: notebooks/59_sem_visco_elastic3d.ipynb
               - Anisotropy · VTI and TTI in 3-D: notebooks/60_sem_tti3d.ipynb

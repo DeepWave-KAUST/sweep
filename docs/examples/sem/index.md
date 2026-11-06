@@ -83,9 +83,9 @@ The [SEM user guide](../../user-guide/sem.md) has the rest of the API.
     ---
 
     vp, vs and rho gradients from one multi-shot call, then `Full()`,
-    `BoundarySaving()` and `Ckpt()` on both backends: time, peak memory and the
-    gradient, the smaller rim-mode boundary saving, rings in bf16 and int8, and
-    the same gradients on a velocity-stress class.
+    `BoundarySaving()` and `Ckpt()` on both backends: time and peak memory,
+    smaller rings (rim mode, bf16 and int8), and the same gradients on a
+    velocity-stress class.
 
     [:material-notebook-outline: Open notebook](../../notebooks/54_sem_gradients_and_memory.ipynb)
 
@@ -193,14 +193,13 @@ The [SEM user guide](../../user-guide/sem.md) has the rest of the API.
 
 -   ![SEM attenuation](../../figures/gallery/49_sem_attenuation.png){ loading=lazy }
 
-    **Attenuation · Q fits, attenuating C-PML, 2-D visco classes**
+    **Attenuation · records with and without Q, the constant-Q fit**
 
     ---
 
-    SPECFEM2D's nonlinear constant-Q fit (`fit="nonlinear"`) against the
-    linear one, in Q(f) and in a strongly attenuated P wave, the absorbing
-    layer that attenuates as the medium does, and the visco-acoustic and
-    velocity-stress classes measured the same way.
+    An elastic and an acoustic record with and without attenuation
+    (`ViscoElasticVSSEM2DDeformed`, `ViscoAcousticPotentialSEM2D`), and the Q
+    that the default and the nonlinear (`fit="nonlinear"`) constant-Q fits realise.
 
     [:material-notebook-outline: Open notebook](../../notebooks/49_sem_attenuation.ipynb)
 
@@ -236,7 +235,7 @@ The [SEM user guide](../../user-guide/sem.md) has the rest of the API.
 
     `ElasticVTISEM3D` and `ElasticTTISEM3D`: the wavefronts of a point force in a VTI
     and a tilted medium, a shear wave splitting across a horizontal symmetry axis,
-    and the deformed classes under a hill with a free surface.
+    and the tilted medium under a hill with a free surface.
 
     [:material-notebook-outline: Open notebook](../../notebooks/60_sem_tti3d.ipynb)
 
