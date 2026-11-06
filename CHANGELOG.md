@@ -669,6 +669,16 @@ and this project adheres to
   one shot: 0.65 to 0.28) faster than before, and the peak memory of an 8-shot
   elastic call fell from 2.3 to 0.96 GB. `return_wavefield=True` still raises
   under boundary saving.
+- **`impl='c'` runs under `torch.inference_mode()`.** Every call there failed
+  in the C adapter before the forward ran ("Inference tensors do not track
+  version counter"): the host copies of the source and receiver field indices
+  and of the checkpoint steps are cached while the tensor keeps its identity
+  and its `_version`, and a tensor made under inference mode has no version
+  counter. Those tensors are now copied on every call and never cached; the
+  record is the `torch.no_grad()` one bit for bit, with boundary saving, the
+  full history and checkpoints (`test/test_c_inference_mode.py`).
+  `ModelParallel` still takes its first call outside inference mode, as
+  before.
 - `PropSEM(impl=None, memory=BoundarySaving())` runs on eager where the CUDA
   kernels have no boundary saving (`ElasticVSSEM3D`, `ElasticSEM3D`,
   `ElasticSEM3DDeformed`, the 2-D paths without their C-PML) instead of

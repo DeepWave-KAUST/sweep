@@ -93,7 +93,14 @@ def _host_int32_cached(obj, name: str, t):
     (measured: +170 us/step).  In-place writes bump ``_version``, a new tensor
     fails the identity check, and holding the reference keeps its storage from
     being recycled under the same id.  Objects that refuse the attribute get no
-    cache."""
+    cache.
+
+    An inference tensor (made under ``torch.inference_mode()``) has no version
+    counter -- reading ``_version`` raises -- so a write to it could not be
+    seen: it is copied on every call and never cached."""
+    is_inference = getattr(t, "is_inference", None)
+    if is_inference is not None and is_inference():
+        return _host_int32(t)
     ver = getattr(t, "_version", None)
     cache = getattr(obj, _HOST_CACHE_ATTR, None)
     if cache is None:

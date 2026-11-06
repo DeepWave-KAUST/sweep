@@ -738,6 +738,24 @@ class TestHostCopyCache:
         h = adapt._host_int32_cached(Rigid(), "receiver_field_indices", idx)
         assert h.dtype == torch.int32 and h.tolist() == [0, 1, 2]
 
+    def test_an_inference_tensor_is_copied_every_call(self):
+        """A tensor made under torch.inference_mode() has no version counter
+        (reading ``_version`` raises), so a write to it cannot be seen: it is
+        copied on every call and never cached. Every impl='c' call under
+        inference_mode used to fail here."""
+        torch = pytest.importorskip("torch")
+        import sweep.backend.c.adapt as adapt
+        from sweep.backend.c import abi
+        p = abi.ForwardInput()
+        with torch.inference_mode():
+            idx = torch.arange(6, dtype=torch.int64)
+            h1 = adapt._host_int32_cached(p, "source_field_indices", idx)
+            idx[0] = 41                                     # no version counter to bump
+            h2 = adapt._host_int32_cached(p, "source_field_indices", idx)
+        assert h1.dtype == torch.int32 and h1.tolist() == list(range(6))
+        assert h2[0].item() == 41
+        assert "source_field_indices" not in getattr(p, adapt._HOST_CACHE_ATTR, {})
+
 
 class TestInputValidation:
     @pytest.mark.parametrize("steps", [[0, 10, 20], (0, 10, 20), np.array([0, 10, 20])])
