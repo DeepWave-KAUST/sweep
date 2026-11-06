@@ -7,8 +7,10 @@ one part of the API, from the mesh to 3-D and to anisotropic and porous rocks.
 The examples after them compare topography against the finite-difference
 solvers, run FWI on Marmousi (one model and every shot's window in one batched
 call), and then turn to marine receivers, illumination, attenuation and plane
-waves. The
-[SEM user guide](../../user-guide/sem.md) has the rest of the API.
+waves. A model larger than one GPU holds runs across several with
+`sweep.sem.dd`; the script page
+[SEM · multi-GPU domain decomposition](../sem_dd.md) runs one 3-D shot that way.
+The [SEM user guide](../../user-guide/sem.md) has the rest of the API.
 
 ## Basics
 
@@ -82,7 +84,8 @@ waves. The
 
     vp, vs and rho gradients from one multi-shot call, then `Full()`,
     `BoundarySaving()` and `Ckpt()` on both backends: time, peak memory and the
-    gradient, and the smaller rim-mode boundary saving.
+    gradient, the smaller rim-mode boundary saving, rings in bf16 and int8, and
+    the same gradients on a velocity-stress class.
 
     [:material-notebook-outline: Open notebook](../../notebooks/54_sem_gradients_and_memory.ipynb)
 
@@ -190,13 +193,14 @@ waves. The
 
 -   ![SEM attenuation](../../figures/gallery/49_sem_attenuation.png){ loading=lazy }
 
-    **Attenuation · nonlinear Q fit, attenuating C-PML**
+    **Attenuation · Q fits, attenuating C-PML, 2-D visco classes**
 
     ---
 
     SPECFEM2D's nonlinear constant-Q fit (`fit="nonlinear"`) against the
-    linear one, in Q(f) and in a strongly attenuated P wave, and the absorbing
-    layer that now attenuates as the medium does.
+    linear one, in Q(f) and in a strongly attenuated P wave, the absorbing
+    layer that attenuates as the medium does, and the visco-acoustic and
+    velocity-stress classes measured the same way.
 
     [:material-notebook-outline: Open notebook](../../notebooks/49_sem_attenuation.ipynb)
 
@@ -206,9 +210,9 @@ waves. The
 
     ---
 
-    SPECFEM2D's `initialfield` on the C-PML: a plane wave from below, past the
-    critical angle, or a Rayleigh wave, entering through a band around a box,
-    then a hill, a canyon and a soft basin inside it.
+    SPECFEM2D's `initialfield` on the C-PML: a plane SV wave from below, past
+    the critical angle, a Rayleigh wave, a P wave and an SH wave, entering
+    through a band around a box, then a hill, a canyon and a soft basin inside it.
 
     [:material-notebook-outline: Open notebook](../../notebooks/58_sem_plane_wave.ipynb)
 
@@ -231,7 +235,8 @@ waves. The
     ---
 
     `ElasticVTISEM3D` and `ElasticTTISEM3D`: the wavefronts of a point force in a VTI
-    and a tilted medium, and a shear wave splitting across a horizontal symmetry axis.
+    and a tilted medium, a shear wave splitting across a horizontal symmetry axis,
+    and the deformed classes under a hill with a free surface.
 
     [:material-notebook-outline: Open notebook](../../notebooks/60_sem_tti3d.ipynb)
 
