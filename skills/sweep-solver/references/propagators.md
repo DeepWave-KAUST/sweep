@@ -147,7 +147,7 @@ assert p.shape == (2, *shape)
 | `Full()` | `memory=` | none |
 | `BoundarySaving(...)` | `memory=` | `storage` `"gpu"`/`"cpu"`/`"disk"`, `storage_dtype` `"fp32"`/`"fp16"`/`"bf16"`/`"int8"`, `transfer_interval`, `pinned_memory`, `ring_buffers`, `disk_dir`, `disk_async_read`, `tail_steps` (c, Acoustic only) |
 | `Ckpt(...)` | `memory=` | `mode` `"chunk"`/`"recursive"` (recursive: c only), `chunks` (steps per chunk, 100), `count`, `storage` `"gpu"`/`"cpu"` |
-| `EagerOptions(...)` | `eager_options=` with `impl="eager"` | `use_compile` (True), `compile_mode`, `compile_dynamic`, `compile_backend`, `compile_fullgraph`, `store_last_wavefield`, `cpml_strips` (`None`: CPML memories on the absorbing strips in 3-D, full grid in 2-D or with topography), `steps_per_call` (None: 4 for 2-D gradient rollouts on a GPU, else 1) |
+| `EagerOptions(...)` | `eager_options=` with `impl="eager"` | `use_compile` (True), `compile_mode`, `compile_dynamic`, `compile_backend`, `compile_fullgraph`, `store_last_wavefield`, `cpml_strips` (`None`: CPML memories on the absorbing strips in 3-D, full grid in 2-D or with topography), `steps_per_call` (None: 4 for 2-D gradient rollouts on a GPU, else 1), `compile_cpp_wrapper` / `compile_combo_kernels` (None = on with Inductor for 2-D grids on CUDA, torch >= 2.9; the C++ wrapper needs the CUDA toolkit, `CUDA_HOME`) |
 | `CUDAOptions(memory=...)` | `cuda_options=` with `impl="c"` | only a memory strategy; prefer `memory=` |
 
 Invalid combinations raise at construction (e.g. `disk_async_read=True` with `storage="cpu"`,

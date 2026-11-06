@@ -19,6 +19,8 @@ class EagerDefaults:
     # topography (see EagerOptions).
     cpml_strips: bool | None = None
     steps_per_call: int | None = None
+    compile_cpp_wrapper: bool | None = None
+    compile_combo_kernels: bool | None = None
 
 
 def _check_steps_per_call(steps, use_compile=True):
@@ -156,6 +158,18 @@ class EagerOptions:
     # call's host overhead outlasts the step itself, else 1. See
     # _PropTorchEager._stepper and _default_steps_per_call.
     steps_per_call: int | None = EAGER_DEFAULTS.steps_per_call
+    # Two Inductor options of the compiled step.  cpp_wrapper generates the host
+    # code of each compiled call (allocations, kernel launches) as C++ instead
+    # of Python: the same kernels, results bit for bit.  combo_kernels launches
+    # independent small kernels of one graph as one: results the same up to
+    # float32 round-off.  None = on with Inductor for a 2-D grid on a CUDA
+    # device from torch 2.9 (cpp_wrapper only in a compile_mode without CUDA
+    # graphs and where torch finds the CUDA toolkit), off elsewhere, 3-D
+    # included; True / False force them.
+    # A step whose C++ wrapper does not build compiles without it.  See
+    # docs/user-guide/propagators.md.
+    compile_cpp_wrapper: bool | None = EAGER_DEFAULTS.compile_cpp_wrapper
+    compile_combo_kernels: bool | None = EAGER_DEFAULTS.compile_combo_kernels
 
     def __post_init__(self):
         self.steps_per_call = _check_steps_per_call(self.steps_per_call, self.use_compile)

@@ -1110,6 +1110,11 @@ class PropSEM:
             raise NotImplementedError(
                 "EagerOptions(steps_per_call=...) is PropTorch's; PropSEM compiles one "
                 "step a call.")
+        for name in ("compile_cpp_wrapper", "compile_combo_kernels"):
+            if getattr(opts, name) != getattr(EAGER_DEFAULTS, name):
+                raise NotImplementedError(
+                    f"EagerOptions({name}=...) is an Inductor option of PropTorch's step; "
+                    "PropSEM compiles its step without it.")
         return opts
 
     def _check_compile_mode(self):

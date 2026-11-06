@@ -1,3 +1,5 @@
+import functools
+import os
 import types
 import warnings
 import weakref
@@ -49,6 +51,30 @@ OWN_CODE_PER_COMPILE = (2, 2) <= torch.__version__ < (2, 3)
 # that off, so on CPU the step runs uncompiled.
 INDUCTOR_23 = (2, 3) <= torch.__version__ < (2, 4)
 
+# Two Inductor options the step compiles with on a 2-D grid on a CUDA device
+# from torch 2.9, the version they were measured on, cpp_wrapper where torch
+# finds the CUDA toolkit (EagerOptions(compile_cpp_wrapper=...,
+# compile_combo_kernels=...) override it: see _resolve_inductor_extras).  On a
+# 2-D grid the host time of each compiled call sets the pace, and both cut it
+# (a gradient step 1.04-1.21 times faster on an RTX 6000 Ada at 1000^2 under
+# boundary saving); a 3-D step keeps the GPU busy, and there they gained
+# nothing (combo_kernels made the elastic gradient 1.5 % slower).  cpp_wrapper
+# generates the host code of a call (allocations, kernel launches) as C++
+# instead of Python: the same kernels, so the same results bit for bit.
+# combo_kernels launches the independent small kernels of a graph (C-PML
+# strips, source, receivers, boundary ring) as one: results the same up to
+# float32 round-off.
+INDUCTOR_EXTRAS_DEFAULT = torch.__version__ >= (2, 9)
+# The order in which a step that does not compile drops them: a C++ wrapper
+# is built with a C++ compiler against the CUDA toolkit (see _cuda_toolkit).
+INDUCTOR_EXTRAS = ("cpp_wrapper", "combo_kernels")
+
+# Device types on which Inductor could not build a step's C++ wrapper in this
+# process, with the error: later compiles there go without it at once instead
+# of failing again (each failure costs the lowering of the graph).
+_CPP_WRAPPER_FAILED: dict = {}
+_COMBO_FAILED_WARNED = False
+
 
 def _takes_invariants(equation):
     """Whether the class that defines the equation's ``func`` declares
@@ -75,13 +101,93 @@ def _with_own_code(fn):
     return own
 
 
-def _no_buffer_reuse(mode, dynamic):
-    """Inductor options for ``mode`` with buffer reuse off (see INDUCTOR_23).
-    torch.compile takes a mode or options, not both, so the mode is spelt out."""
+def _mode_options(mode, dynamic):
+    """The Inductor options ``mode`` stands for.  torch.compile takes a mode or
+    options, not both, so a compile that adds options spells the mode out."""
     from torch._inductor import list_mode_options
-    options = {} if mode in (None, "default") else dict(list_mode_options(mode, dynamic))
-    options["allow_buffer_reuse"] = False
-    return options
+    return {} if mode in (None, "default") else dict(list_mode_options(mode, dynamic))
+
+
+def _no_buffer_reuse(mode, dynamic):
+    """Inductor options for ``mode`` with buffer reuse off (see INDUCTOR_23)."""
+    return {**_mode_options(mode, dynamic), "allow_buffer_reuse": False}
+
+
+@functools.lru_cache(maxsize=None)
+def _cuda_toolkit():
+    """Whether torch finds the CUDA toolkit Inductor builds a C++ wrapper
+    against: ``torch.utils.cpp_extension.CUDA_HOME`` ($CUDA_HOME or $CUDA_PATH,
+    else the nvcc on the PATH, else /usr/local/cuda) with ``include/cuda.h``.
+    Without it the build fails ("CUDA_HOME environment variable is not set";
+    "cuda.h: No such file or directory" with CUDA_HOME at a conda environment,
+    whose CUDA packages keep their headers under targets/x86_64-linux), so the
+    default leaves the wrapper out instead of failing once in every process."""
+    try:
+        from torch.utils.cpp_extension import CUDA_HOME
+    except Exception:           # e.g. a torch without its build tools
+        return False
+    return bool(CUDA_HOME) and os.path.exists(os.path.join(CUDA_HOME, "include", "cuda.h"))
+
+
+def _cpp_wrapper_companions():
+    """The Inductor settings torch puts next to a C++ wrapper (its
+    ``get_cpp_wrapper_config``: kernel configs picked at compile time, cubins
+    kept, no CUDA graphs).  torch.compile applies its options to every graph it
+    compiles, but torch 2.9 adds these to a backward graph -- compiled when
+    autograd first runs it, after the forward -- only when the wrapper is on in
+    the global config: with the option alone, generating that backward fails
+    ("CudaKernelParamCache not populated").  Passed with the option, they reach
+    the backward too; the forward graphs get them either way."""
+    try:
+        from torch._inductor.compile_fx import get_cpp_wrapper_config
+    except ImportError:
+        return {}
+    return dict(get_cpp_wrapper_config())
+
+
+def _compile_kwargs(mode, dynamic, fullgraph, backend, extras):
+    """torch.compile's keywords for the step: the EagerOptions settings, with
+    the Inductor ``extras`` (see INDUCTOR_EXTRAS) and torch 2.3's buffer-reuse
+    fix as options.  Without either, the mode is passed as it is."""
+    kwargs = {"mode": mode, "dynamic": dynamic, "fullgraph": fullgraph}
+    if backend is not None:
+        kwargs["backend"] = backend
+    options = {**_cpp_wrapper_companions(), **extras} if extras.get("cpp_wrapper") else dict(extras)
+    if INDUCTOR_23 and backend in (None, "inductor"):
+        options["allow_buffer_reuse"] = False
+    if options:
+        kwargs["options"] = {**_mode_options(kwargs.pop("mode"), dynamic), **options}
+    return kwargs
+
+
+def _warn_extras_dropped(dropped, exc, device_type, what):
+    """A step compiled once the Inductor options ``dropped`` were taken out of
+    its compile, the last of them after ``exc``: say so, once per process for
+    each option.  A C++ wrapper that does not build is the environment's doing,
+    so it is remembered for the device type (see _CPP_WRAPPER_FAILED)."""
+    global _COMBO_FAILED_WARNED
+    if dropped[-1] == "cpp_wrapper":
+        if device_type in _CPP_WRAPPER_FAILED:
+            return
+        _CPP_WRAPPER_FAILED[device_type] = exc
+        warnings.warn(
+            f"Inductor could not build the C++ wrapper of {what} on {device_type} "
+            f"({type(exc).__name__}: {failure_reason(exc)}); the step compiles with the "
+            "Python wrapper instead, as do the later compiles of this process. That gives the "
+            "same result and is slower when the host sets the pace (one shot on a 2-D grid). "
+            "A C++ wrapper is built with a C++ compiler (torch._inductor.config.cpp.cxx, "
+            "seeded from $CXX) against the CUDA toolkit under $CUDA_HOME. Pass "
+            "eager_options=EagerOptions(compile_cpp_wrapper=False) to skip the attempt.",
+            RuntimeWarning, stacklevel=3)
+    elif not _COMBO_FAILED_WARNED:
+        _COMBO_FAILED_WARNED = True
+        warnings.warn(
+            f"torch.compile could not build {what} on {device_type} with Inductor's "
+            f"combo_kernels ({type(exc).__name__}: {failure_reason(exc)}); it compiles the "
+            f"step without {' and '.join(dropped)} instead, which is slower when the host sets "
+            "the pace and gives the same result up to float32 round-off. Pass "
+            "eager_options=EagerOptions(compile_combo_kernels=False) to skip the attempt.",
+            RuntimeWarning, stacklevel=3)
 
 
 def _record_column(fields, at, taps, footprint, batch, nrec):
@@ -163,11 +269,14 @@ class _PropTorchEager(
         self.compile_mode = kwargs.pop("compile_mode", EAGER_DEFAULTS.compile_mode)
         self.compile_dynamic = kwargs.pop("compile_dynamic", EAGER_DEFAULTS.compile_dynamic)
         self.compile_fullgraph = kwargs.pop("compile_fullgraph", EAGER_DEFAULTS.compile_fullgraph)
+        self.compile_cpp_wrapper = kwargs.pop("compile_cpp_wrapper", EAGER_DEFAULTS.compile_cpp_wrapper)
+        self.compile_combo_kernels = kwargs.pop("compile_combo_kernels", EAGER_DEFAULTS.compile_combo_kernels)
         self.cpml_strips = kwargs.pop("cpml_strips", EAGER_DEFAULTS.cpml_strips)
         self.steps_per_call = _check_steps_per_call(
             kwargs.pop("steps_per_call", EAGER_DEFAULTS.steps_per_call), self.use_compile)
         torch.nn.Module.__init__(self)
         super().__init__(*args, **kwargs)
+        self._inductor_extras = self._resolve_inductor_extras()
 
         self.register_buffer("dt", torch.tensor(self._dt, device=self.dev, dtype=torch.float32))
         self.register_buffer("dh", torch.tensor(self._grid_spacing, device=self.dev, dtype=torch.float32))
@@ -303,12 +412,23 @@ class _PropTorchEager(
         (``_steps_fn``) and the eager boundary-saving step; ``what`` names the
         compile in its notice (default: "the <Equation> step").
 
+        The compile adds the Inductor options of ``_resolve_inductor_extras``
+        (by default for a 2-D grid on a CUDA device: cpp_wrapper and
+        combo_kernels, see INDUCTOR_EXTRAS).
+
         The compiled step is wrapped so that a compiler that cannot build it
         (Inductor's CPU backend needs g++ >= 10, for one) costs speed, not the
         run: the step is a pure function of its arguments, so the failing call
-        is repeated uncompiled, and so is every later one.  On torch 2.3,
-        Inductor runs with buffer reuse off, and not at all on CPU
-        (INDUCTOR_23)."""
+        is repeated.  First compiled again without those options, one at a
+        time in the order of INDUCTOR_EXTRAS (a C++ wrapper that does not build
+        is then left out of every later compile on the device type: see
+        _CPP_WRAPPER_FAILED); with none left, uncompiled, and so is every later
+        call.  A graph Inductor compiles while autograd runs the backward pass
+        (that of a step that records) fails there, out of this wrapper's reach;
+        the forward graph of the same step compiles first, with the same
+        options and toolchain, and meets a failing C++ compiler before it.
+        On torch 2.3, Inductor runs with buffer reuse off, and not at all on
+        CPU (INDUCTOR_23)."""
         if not self.use_compile:
             return fn
         if not hasattr(torch, "compile"):
@@ -320,16 +440,14 @@ class _PropTorchEager(
                              "(fixed in torch 2.4)")
             return fn
         _raise_dynamo_recompile_limit()
-        compile_kwargs = {
-            "mode": self.compile_mode,
-            "dynamic": self.compile_dynamic,
-            "fullgraph": self.compile_fullgraph,
-        }
-        if self.compile_backend is not None:
-            compile_kwargs["backend"] = self.compile_backend
-        if INDUCTOR_23 and inductor:
-            compile_kwargs["options"] = _no_buffer_reuse(compile_kwargs.pop("mode"), self.compile_dynamic)
-        compiled = torch.compile(_with_own_code(fn) if OWN_CODE_PER_COMPILE else fn, **compile_kwargs)
+        settings = (self.compile_mode, self.compile_dynamic, self.compile_fullgraph, self.compile_backend)
+        device_type = "cuda" if "cuda" in str(self.dev) else "cpu"
+        what = what or f"the {type(self.equation).__name__} step"
+        extras = dict(self._inductor_extras)
+        if extras.get("cpp_wrapper") and device_type in _CPP_WRAPPER_FAILED:
+            del extras["cpp_wrapper"]            # it did not build here before: warned then
+        target = _with_own_code(fn) if OWN_CODE_PER_COMPILE else fn
+        compiled = torch.compile(target, **_compile_kwargs(*settings, extras))
         # Weak: the step ends up inside autograd graphs (the eager boundary-
         # saving Function keeps it in its ctx) that tensors cached on this
         # propagator keep alive.  A strong reference closes a cycle through the
@@ -342,11 +460,12 @@ class _PropTorchEager(
         # models are arguments of the step, and _SettledSteps keeps one set of flags
         # per rollout, so the notice repeats a line only for a new compile.
         grid = "x".join(str(n) for n in self._shape_phys)
-        notice = compile_notice(what or f"the {type(self.equation).__name__} step",
+        notice = compile_notice(what,
                                 lambda shape: f"{shape[0]} shots on a {grid} grid"
                                 if shape and shape[0] > 1 else f"a {grid} grid")
 
         def step(*args, **kwargs):
+            nonlocal compiled, extras
             prop = owner()
             if prop is not None and not prop.use_compile:
                 return fn(*args, **kwargs)
@@ -354,11 +473,85 @@ class _PropTorchEager(
             try:
                 return compiled(*args, **kwargs)
             except _compiler_failures() as exc:
-                if prop is not None:
-                    prop._disable_compile(exc)
-                return fn(*args, **kwargs)
+                failure = exc
+            dropped = []
+            while True:
+                name = next((n for n in INDUCTOR_EXTRAS if extras.get(n)), None)
+                if name is None:
+                    if prop is not None:
+                        prop._disable_compile(failure)
+                    return fn(*args, **kwargs)
+                dropped.append(name)
+                extras = {k: v for k, v in extras.items() if k != name}
+                compiled = torch.compile(target, **_compile_kwargs(*settings, extras))
+                try:
+                    out = compiled(*args, **kwargs)
+                except _compiler_failures() as exc:
+                    failure = exc
+                    continue
+                _warn_extras_dropped(dropped, failure, device_type, what)
+                return out
 
         return step
+
+    def _resolve_inductor_extras(self):
+        """The Inductor options ``EagerOptions(compile_cpp_wrapper=...,
+        compile_combo_kernels=...)`` add to the step's compile, as
+        ``{option: bool}`` (see INDUCTOR_EXTRAS).  ``None`` takes the default:
+        both on with Inductor for a 2-D grid on a CUDA device from torch 2.9,
+        cpp_wrapper only in a compile mode without CUDA graphs and where torch
+        finds the CUDA toolkit (_cuda_toolkit); elsewhere (3-D among them)
+        nothing is added and the step compiles as before.  The default looks at
+        the dimension, the device, the backend, the mode, the torch version and
+        the toolkit only, never at the grid's size or the shots.  An explicit
+        value the compile would not use raises."""
+        asked = {"cpp_wrapper": self.compile_cpp_wrapper,
+                 "combo_kernels": self.compile_combo_kernels}
+        explicit = {name: value for name, value in asked.items() if value is not None}
+        spelt = ", ".join(f"compile_{name}={value!r}" for name, value in explicit.items())
+        inductor = self.compile_backend in (None, "inductor")
+        if explicit and not self.use_compile:
+            raise ValueError(
+                f"EagerOptions({spelt}) sets an Inductor option of the compiled step, and "
+                "use_compile=False compiles nothing: drop it, or compile the step.")
+        if explicit and not inductor:
+            raise ValueError(
+                f"EagerOptions({spelt}) sets an Inductor option, which "
+                f"compile_backend={self.compile_backend!r} does not read: drop it, or "
+                "compile with Inductor.")
+        gpu = "cuda" in str(self.dev)
+        by_default = INDUCTOR_EXTRAS_DEFAULT and gpu and self.ndim == 2
+        if not self.use_compile or not inductor or not (explicit or by_default):
+            return {}
+        from torch._inductor import config as inductor_config
+        # A C++ wrapper turns the CUDA graphs of the mode off (Inductor's
+        # get_cpp_wrapper_config): by default the mode keeps them.
+        graphs = bool(_mode_options(self.compile_mode, self.compile_dynamic).get("triton.cudagraphs"))
+        if explicit.get("cpp_wrapper") and graphs:
+            raise ValueError(
+                f"EagerOptions(compile_cpp_wrapper=True, compile_mode={self.compile_mode!r}): "
+                "Inductor turns off the CUDA graphs of that mode for a C++ wrapper. Use "
+                "compile_mode='default' with the C++ wrapper, or drop compile_cpp_wrapper.")
+        if explicit.get("combo_kernels") and not gpu:
+            raise ValueError(
+                "EagerOptions(compile_combo_kernels=True) needs a CUDA device: Inductor "
+                f"generates combo kernels for Triton, and compiles the step on {self.dev} "
+                "without them. Drop it.")
+        default = {"cpp_wrapper": (by_default and not graphs and asked["cpp_wrapper"] is None
+                                   and _cuda_toolkit()),
+                   "combo_kernels": by_default}
+        extras = {}
+        for name, value in asked.items():
+            if not hasattr(inductor_config, name):
+                if value is not None:
+                    raise ValueError(
+                        f"EagerOptions(compile_{name}={value!r}): torch {torch.__version__}'s "
+                        f"Inductor has no {name} option.")
+            elif value is not None:
+                extras[name] = bool(value)
+            elif default[name]:
+                extras[name] = True
+        return extras
 
     def _no_compile(self, why):
         """This torch cannot compile the step (``why``): run uncompiled, and

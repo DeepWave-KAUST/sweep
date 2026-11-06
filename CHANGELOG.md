@@ -327,6 +327,25 @@ and this project adheres to
   `test/sem/test_sem_spatial_receivers.py`, notebook `47_sem_receivers`.
 
 ### Changed
+- **`impl="eager"` on a 2-D grid on a GPU compiles its step with Inductor's
+  `cpp_wrapper` and `combo_kernels`.** The first generates the host code of each compiled call as
+  C++ instead of Python, the second launches the independent small kernels of a
+  graph as one; both shorten the host's time per call, which sets the pace of
+  a 2-D step of one shot. On an RTX 6000 Ada a gradient step under boundary
+  saving on a 2-D grid of 1000² cells was 1.10 (acoustic) and 1.21 (elastic)
+  times faster for one shot, 1.20 and 1.04 times for 8 shots, with the first
+  compile about 10 s longer; in 3-D they gained nothing (the elastic gradient
+  was 1 % slower) and stay off. Records and gradients stay those of the compile
+  without them bit for bit, except that `combo_kernels` moves gradients by
+  float32 round-off. They are on with Inductor for a 2-D grid on a CUDA device
+  from torch 2.9 (`cpp_wrapper` only where torch finds the CUDA toolkit, `CUDA_HOME`, and not
+  in the compile modes that replay CUDA graphs, which Inductor turns off for
+  it) and off elsewhere; the new
+  `EagerOptions(compile_cpp_wrapper=..., compile_combo_kernels=...)` turn
+  them on or off, and raise where they cannot take effect. A step whose C++
+  wrapper does not build compiles without it, with one warning, instead of
+  running uncompiled; PropSEM refuses both options. See
+  [Inductor options of the eager step](docs/user-guide/propagators.md#inductor-options).
 - **`impl=None` on a GPU runs the velocity-stress and Biot SEM classes on the CUDA
   kernels** (`ElasticVSSEM2DDeformed` and its VTI, TTI and visco-elastic variants, the
   3-D velocity-stress classes, the Biot classes), with `Ckpt(chunks=64)` as their default

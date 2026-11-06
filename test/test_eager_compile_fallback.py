@@ -186,6 +186,7 @@ def test_torch_23_compiles_on_gpu_with_buffer_reuse_off(monkeypatch):
     import sweep.propagator._torch_eager as TE
     calls = []
     monkeypatch.setattr(TE, "INDUCTOR_23", True)
+    monkeypatch.setattr(TE, "INDUCTOR_EXTRAS_DEFAULT", False)      # torch 2.3 < 2.9
     monkeypatch.setattr(torch, "compile", _compile_never_called(calls))
     dev = torch.device("cuda")
     solver = PropTorch(Acoustic(device=dev), shape=SHAPE, dh=10.0, dt=1e-3, dev=dev, impl="eager")
