@@ -857,6 +857,48 @@ and this project adheres to
   it. Keep one face of the pair absorbing, or free all four. `Acoustic` and
   `ViscoAcoustic` accept every layout; an equation declares a solid with
   `free_plate_unstable`.
+- **`impl='c'` refuses a wavelet that requires grad where its backward
+  returns none**: `Elastic`, `Elastic3D`, `ElasticVRR`, `ElasticTTI2nd`,
+  `ElasticTTISG`, `ElasticTTISG3D`, `ViscoElastic`, the four DAS equations
+  and `AcousticVTI1st` / `AcousticVTI1st3D` raise `NotImplementedError`
+  before anything runs. They left `wavelet.grad` at None without a word, so
+  a wavelet inversion through them never moved.  Detach the wavelet, or use
+  `impl='eager'`.  `Acoustic`, `Acoustic3D`, `AcousticVTI`, `AcousticTTI` and
+  `ViscoAcoustic` return the wavelet gradient as before.
+- **`impl='c'`: several gradient forwards on one propagator before their
+  backwards give the right gradient.** The boundary strips, `last_two` and the
+  checkpoint snapshots a backward reads lived on the propagator, and the next
+  gradient forward rewrote them: `(loss(A) + loss(B)).backward()`, or any
+  second forward before the first one's backward, reconstructed the earlier
+  call from the later one's boundaries.  With `BoundarySaving()` on GPU or CPU,
+  in every `storage_dtype`, the gradient came out wrong without a warning
+  (relative L2 error 0.13-1.6 on two-shot test problems); disk storage and
+  `Ckpt()` raised "modified by an inplace operation".  That storage now belongs
+  to the forward whose backward is pending, and a forward that finds it taken
+  allocates storage of its own, freed with its graph.  A forward -> backward
+  loop allocates nothing extra; `Full()` was always right.
+- **`impl='c'` under `torch.no_grad()` prepares no backward**, whatever
+  `requires_grad` its inputs carry.  A per-shot wavelet `(nshots, nt)` that
+  requires grad reaches the compiled forward as a view, which keeps
+  `requires_grad=True` under no_grad, so such a call (a line search or a QC
+  forward during a wavelet inversion) saved the boundary ring and allocated the
+  adjoint fields, kept the whole `nt` history under `Full()`, and was refused
+  by `AcousticVRZ` and the Born equations ("does not return the wavelet
+  gradient") and by boundary saving under `topography=`.  Whether a call runs
+  a backward is now decided before the autograd Function, from grad mode.
+- **`impl='c'`, `BoundarySaving(storage="disk")`: a no_grad forward between a
+  gradient forward and its backward no longer breaks that backward.** It
+  zeroed the host staging and `last_two` the backward reads, which then raised
+  "modified by an inplace operation".  Only a call that saves boundaries
+  touches the boundary storage now -- which also ends the "batch growth"
+  failure: after a boundary-saving gradient call, a no_grad call with more
+  shots narrowed that call's boundary ring past its end and raised
+  `start (0) + length (n) exceeds dimension size (m)`.
+- **`ModelParallel` refuses a forward while a backward is pending.**  Its
+  backward reads the ring and geometry the instance keeps for its last
+  forward, so a second forward -- `torch.no_grad()` included -- gave the
+  pending backward a wrong gradient with no error.  It now raises
+  `RuntimeError`; call `backward()` after each forward.
 
 ## [0.3.6] - 2026-10-29
 

@@ -87,9 +87,8 @@ assert torch.allclose(b[0], a1.sum(0), atol=1e-4 * a1.abs().max().item())
 - One call simulates all shots of the batch in parallel; gradients are summed over shots.
   Memory scales with the batch, so loop over shot chunks and accumulate `.grad` (call
   `backward()` per chunk).
-- `impl='c'` preallocates buffers for `B` shots and grows them on demand, **except** that a
-  `no_grad` call with more shots than the preceding gradient call fails
-  (`start (0) + length (n) exceeds dimension size (m)`). Construct with `B=` your largest batch.
+- `impl='c'` preallocates buffers for `B` shots and grows them on demand (`allow_growth=True`,
+  the default). Construct with `B=` your largest batch to allocate once.
 - Per-shot models: pass each model as `(nshots, nz, nx)`. On `impl='c'` only equations with
   `supports_batched_models` (`Acoustic`, `Elastic`, `ViscoAcoustic`) accept it; others raise.
 

@@ -109,7 +109,8 @@ assert all(cos(grads["full"], g) > 0.999 for g in grads.values())
 | Case | Behaviour |
 |---|---|
 | eager, any equation | autograd: every model and the wavelet |
-| `impl='c'` `Acoustic`, `Elastic`, ... | models and wavelet |
+| `impl='c'` `Acoustic`, `Acoustic3D`, `AcousticVTI`, `AcousticTTI`, `ViscoAcoustic` | models and wavelet |
+| `impl='c'` `Elastic*`, `ElasticVRR`, `ElasticTTI*`, `ViscoElastic`, `DAS*`, `AcousticVTI1st*` | models only: a wavelet requiring grad is **refused** (`NotImplementedError`); detach it or use eager |
 | `impl='c'` `AcousticBorn*`, `AcousticVRZ*` | wavelet gradient **refused** (`NotImplementedError`); detach the wavelet |
 | `impl='c'` `AcousticBorn*` with `Ckpt` | `vp` (RWI) gradient refused; `mp` only. Use `Full()`/`BoundarySaving()` |
 | `impl='c'` qP Born pair | `mp` gradient only |
