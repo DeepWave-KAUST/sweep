@@ -94,17 +94,22 @@ nav:
       - Installation: getting-started/installation.md
       - Quick Start: getting-started/quickstart.md
   - User Guide:
-      - Backends: user-guide/backends.md
-      - Equations: user-guide/equations.md
-      - "Pure-qP VTI / TTI: forward, adjoint, Born": user-guide/qp_born.md
-      - Operators: user-guide/operators.md
-      - Propagators: user-guide/propagators.md
-      - Domain decomposition: user-guide/parallel.md
-      - SEM: user-guide/sem.md
-      - Datasets: user-guide/datasets.md
-      - Extending: user-guide/extending.md
-      - CLI: user-guide/cli.md
-      - AI assistants (Agent Skills): user-guide/agent-skills.md
+      - Core concepts:
+          - Propagators: user-guide/propagators.md
+          - Equations:
+              - Overview: user-guide/equations.md
+              - Pure-qP VTI / TTI: user-guide/qp_born.md
+          - Backends: user-guide/backends.md
+      - Advanced:
+          - Spectral elements (SEM): user-guide/sem.md
+          - Domain decomposition: user-guide/parallel.md
+      - Data and tools:
+          - Datasets: user-guide/datasets.md
+          - CLI: user-guide/cli.md
+          - AI assistants (Agent Skills): user-guide/agent-skills.md
+      - Extending:
+          - Add a new equation: user-guide/extending.md
+          - Operators: user-guide/operators.md
   - Developer:
       - CUDA driver skeletons: dev/cuda_drivers.md
       - Building the CUDA core: dev/building.md
