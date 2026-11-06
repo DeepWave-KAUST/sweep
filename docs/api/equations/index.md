@@ -80,6 +80,136 @@ through the equation class.
     implementation, the equation `backend` should still normally be `"torch"`,
     not `"cuda"`.
 
+## Absorbing boundaries
+
+Outgoing waves are absorbed in a layer of `abcn` cells (default 50) that the
+propagator adds outside the model on every face that is not a free surface.
+The propagator argument `pml_type` selects the formulation. Every equation
+accepts only its `default_pml_type`, except `Acoustic1st`, which also accepts
+`spml`.
+
+Both convolutional PML (CPML) forms replace a spatial derivative inside a
+layer normal to $x$ by the stretched derivative
+
+$$
+\frac{\partial}{\partial \tilde{x}} = \frac{1}{s_x} \frac{\partial}{\partial x},
+\qquad
+s_x = 1 + \frac{d_x}{\alpha_x + i\omega},
+$$
+
+with no real stretching factor ($\kappa_x = 1$). In the time domain $1/s_x$
+is a convolution, which is updated recursively at every time step with the
+coefficients
+
+$$
+a_x = e^{-(d_x + \alpha_x)\Delta t},
+\qquad
+b_x = \frac{d_x}{d_x + \alpha_x} \left( a_x - 1 \right).
+$$
+
+The same rules apply along $y$ and $z$.
+
+### Damping profiles
+
+`cpmlr` and `cpmls` share the profiles
+
+$$
+d_x = d_0 \left( \frac{\ell}{L} \right)^{2},
+\qquad
+d_0 = -\frac{3\, v_{\max} \ln R}{2 L_{\max}},
+\qquad
+\alpha_x = \pi f_{\mathrm{pml}} \left( 1 - \frac{\ell}{L} \right),
+$$
+
+that is, a power $n = 2$ in $d_0 = -(n+1)\, v_{\max} \ln R / (2L_{\max})$,
+with $R = 10^{-3}$. Here $\ell/L \in [0, 1]$ is the distance into the layer
+on that side, measured in cells from its inner edge and divided by the
+layer's width; $L_{\max}$ is the physical thickness of the thicker of the
+two layers along the axis. $v_{\max}$ and $f_{\mathrm{pml}}$ are the keyword
+arguments `max_vel` (default 4500 m/s) and `pml_freq` (default 25 Hz) of the
+propagator call; $v_{\max}$ is not taken from the model. Where $\ell = 0$,
+which includes the whole interior, $a_x = b_x = 0$, so the memory variables
+stay zero and the derivatives are unchanged.
+
+### `cpmlr`: second-order equations
+
+The second-order equations (`Acoustic`, `Acoustic3D`, `AcousticBorn`,
+`AcousticVRZ`, `ViscoAcoustic` and others) replace each term
+$\partial_{xx} u$ of the Laplacian by
+$\partial_{\tilde{x}} ( \partial_{\tilde{x}} u )$, following Pasalic and
+McGarry (2010). The two convolutions are carried by two memory variables per
+axis, `psi*` and `zeta*`:
+
+$$
+\psi_x^{n} = a_x \psi_x^{n-1} + b_x\, \partial_x u^{n},
+\qquad
+\zeta_x^{n} = a_x \zeta_x^{n-1}
+ + b_x \left( \partial_{xx} u^{n} + \partial_x \psi_x^{n} \right),
+$$
+
+$$
+\partial_{\tilde{x}} \left( \partial_{\tilde{x}} u \right)
+ \approx \partial_{xx} u^{n} + \partial_x \psi_x^{n} + \zeta_x^{n}.
+$$
+
+The step evaluates $\partial_x \psi_x^{n}$ as
+$\partial_x (a_x \psi_x^{n-1}) + (\partial_x b_x)\, \partial_x u^{n}
++ b_x\, \partial_{xx} u^{n}$, so each axis carries three profiles,
+`a, b, db`, where `db` is the central-difference derivative of $b_x$ along
+the axis. The first derivatives $\partial_x u$ and $\partial_x(a_x\psi_x)$
+are central differences; the second derivative $\partial_{xx} u$ is the
+equation's own stencil of order `spatial_order`.
+
+### `cpmls`: staggered-grid first-order equations
+
+The first-order equations on staggered grids (`Acoustic1st`, `Elastic`,
+`Elastic3D` and others) follow Komatitsch and Martin (2007). Each spatial
+derivative in the step that is taken inside a layer has its own memory
+variable:
+
+$$
+\psi^{n} = a_x \psi^{n-1} + b_x\, \partial_x u,
+\qquad
+\partial_{\tilde{x}} u = \partial_x u + \psi^{n},
+$$
+
+where $\partial_x u$ is the staggered derivative at the time level used by
+that update. Derivatives that fall on integer nodes use the profiles `a, b`,
+and derivatives that fall half a cell forward use `ah, bh`, the same
+formulas evaluated at $x + \Delta x/2$. Each axis therefore carries four
+profiles, `a, b, ah, bh`.
+
+### `spml`: split-field PML (`Acoustic1st` only)
+
+With `pml_type="spml"`, `Acoustic1st` splits the pressure into
+$p = p_x + p_z$ and damps each pressure component and each particle
+velocity with the profile of its own axis, without the frequency shift
+$\alpha$:
+
+$$
+\left( 1 + \tfrac{1}{2} d_x \Delta t \right) q^{\mathrm{new}}
+ = \left( 1 - \tfrac{1}{2} d_x \Delta t \right) q^{\mathrm{old}}
+ + \Delta t\, F_x,
+$$
+
+where $q$ is $v_x$ or $p_x$ and $F_x$ is the undamped right-hand side of
+its update ($z$ likewise). The profile is
+$d_x = -3\, v_{\max} \ln R\, (\ell / L)^2 / (2L)$ with $R = 10^{-5}$,
+$\ell$ the physical distance into the layer (one cell at its inner edge)
+and $L$ the thickness of the thicker of the two layers along the axis.
+`pml_freq` has no effect in this mode.
+
+### References
+
+- Komatitsch, D., and R. Martin, 2007, An unsplit convolutional perfectly
+  matched layer improved at grazing incidence for the seismic wave equation:
+  Geophysics, 72(5), SM155–SM167,
+  [doi:10.1190/1.2757586](https://doi.org/10.1190/1.2757586).
+- Pasalic, D., and R. McGarry, 2010, Convolutional perfectly matched layer for
+  isotropic and anisotropic acoustic wave equations: SEG Technical Program
+  Expanded Abstracts 2010, 2925–2929,
+  [doi:10.1190/1.3513453](https://doi.org/10.1190/1.3513453).
+
 ## API Tabs
 
 === "Acoustic"
