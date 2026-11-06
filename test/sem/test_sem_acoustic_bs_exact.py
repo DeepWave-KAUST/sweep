@@ -101,8 +101,11 @@ def _check(eq, fs, *, topo=False, stress=False, **bs):
         assert rel < 1e-12, f"{name}: boundary saving vs full tape {rel:.2e}"
 
 
-@pytest.mark.parametrize("fs", [False, True], ids=["no_free_surface", "free_top"])
-@pytest.mark.parametrize("eq", EQS, ids=IDS)
+# The free top on the two classes without a topography case. Without a free top every class
+# runs the same check in test_source_next_to_the_band, with the band loaded; the other four
+# run the free top in test_topography.
+@pytest.mark.parametrize("fs", [True], ids=["free_top"])
+@pytest.mark.parametrize("eq", [AcousticSEM2D, AcousticSEM3D], ids=["AcousticSEM2D", "AcousticSEM3D"])
 def test_matches_full_tape(eq, fs):
     _check(eq, fs)
 

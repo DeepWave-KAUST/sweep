@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from sweep.propagator import EagerOptions
-from sweep.sem import (PropSEM, AcousticSEM2DDeformed, ElasticSEM2DDeformed, ElasticVSSEM2DDeformed,
+from sweep.sem import (PropSEM, AcousticSEM2DDeformed, ElasticVSSEM2DDeformed,
                        BiotVSSEM2DDeformed, AcousticSEM3D, ElasticVSSEM3D)
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="the compiled GPU step")
@@ -28,10 +28,11 @@ def _biot():
     return tuple(float(c) for c in biot_from_biot_constants(**DAI1, b=7e4, phi=0.3))
 
 
-# name: (equation, shape, dt, model values, source_type, receiver_type, topography, abcn)
+# name: (equation, shape, dt, model values, source_type, receiver_type, topography, abcn).
+# ElasticSEM2DDeformed's compiled step is checked the same way, inside the checkpointed rollout,
+# by test_sem_ckpt_rollout.py::test_graphs_with_the_compiled_step.
 CASES = {
     "acoustic2d_deformed": (AcousticSEM2DDeformed, (41, 81), 1e-3, (2500.0,), None, None, True, None),
-    "elastic2d_deformed": (ElasticSEM2DDeformed, (41, 81), 1e-3, EL, ["sxx", "szz"], ["vx", "vz"], True, None),
     "elastic_vs2d_deformed": (ElasticVSSEM2DDeformed, (41, 81), 1e-3, EL, ["sxx", "szz"], ["vx", "vz"], True,
                               None),
     "biot2d": (BiotVSSEM2DDeformed, (41, 81), 5e-4, None, ["sxx", "szz"], ["vx", "vz", "p"], False, None),

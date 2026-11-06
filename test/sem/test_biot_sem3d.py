@@ -60,8 +60,10 @@ def _gll(mesh, coef):
 # ------------------------------------------------------------------------------------------ #
 # limits
 # ------------------------------------------------------------------------------------------ #
+# fx runs under the hill only: the flat mesh is the hill's with the cross terms zero, and the
+# velocity source runs on it
 @pytest.mark.parametrize("source, elastic_source, hill", [
-    (["fx"], ["vx"], False), (["vz"], ["vz"], False), (["fx"], ["vx"], True),
+    (["vz"], ["vz"], False), (["fx"], ["vx"], True),
     (["sxx", "syy", "szz"], ["sxx", "syy", "szz"], True)])
 def test_a_dry_solid_is_the_elastic_sem(source, elastic_source, hill):
     # no pore fluid (M = 0): v and the stress obey ElasticVSSEM3DDeformed, C-PML, free surface
@@ -89,8 +91,8 @@ def test_a_dry_solid_is_the_elastic_sem(source, elastic_source, hill):
     assert err < 1e-12, err
 
 
-@pytest.mark.parametrize("source, elastic_source", [
-    (["fx"], ["vx"]), (["fz"], ["vz"]), (["vz"], ["vz"])])
+@pytest.mark.parametrize("source, elastic_source", [    # fx is the same load on another axis
+    (["fz"], ["vz"]), (["vz"], ["vz"])])
 def test_no_relative_flow_limit_is_the_undrained_elastic(source, elastic_source):
     # b -> infinity freezes q: v and the total stress obey ElasticVSSEM3DDeformed in the
     # undrained medium. Not to round-off (see the 2-D test): the alpha^2 M part of the
@@ -156,10 +158,11 @@ def analytic_point_source(models, t, x, y, z, s_time, force, b_of_w=None):
 
 
 @cuda
-@pytest.mark.parametrize("b_dai, viscous_q", [(0.0, None), (7e3, None), (7e3, (5.0, 30.0))])
+# the drag alone (7e3, no viscous_q) is the same step; the viscous memory only adds to it
+@pytest.mark.parametrize("b_dai, viscous_q", [(0.0, None), (7e3, (5.0, 30.0))])
 def test_point_injection_matches_analytic(b_dai, viscous_q):
     # Dai's medium, inviscid and with a drag that leaves the slow wave propagating at 30 Hz
-    # but attenuated, also with the viscous attenuation. With more drag (Dai's b = 7e4) the
+    # but attenuated, with the viscous attenuation on it. With more drag (Dai's b = 7e4) the
     # slow wave dies within a few metres of the source, and the solid's response to a pure
     # injection is its residue, which 16 m elements do not resolve: 17-41% there, 2-5% on 8 m
     # elements (the 2-D class alike: 10%, 1%). The receiver 55 m off in all three axes, the C-PML's
@@ -192,16 +195,16 @@ def test_point_injection_matches_analytic(b_dai, viscous_q):
 
 
 @cuda
-@pytest.mark.parametrize("b_dai", [0.0, 7e4, 9e8])
+# Critically damped only. b = 0 and the Darcy limit (9e8) run the same step, b scaling the
+# drag's exponential: the injection test keeps the inviscid slow wave analytic, and
+# test_no_relative_flow_limit_is_the_undrained_elastic the stiff end.
+@pytest.mark.parametrize("b_dai", [7e4])
 def test_split_source_matches_analytic(b_dai):
     # the 2-D tests' split source in 3-D: the explosion on the total stress and qpart / phi
-    # of it in the relative flow, from inviscid to the Darcy limit; the explosion drives the
-    # solid, so the slow wave's unresolved residue near the source (see above) is a small
-    # part of it. The fast P wave's echo from the C-PML is 2-3% of it, so the box is larger
-    # than the injection's and the record ends as the echo arrives, after the slow wave:
-    # 33k elements. (Alone, the injection's far field vanishes towards the Darcy limit: at
-    # Dai's b = 9e8 it is 1e-6 of the explosion's, and the SEM's is the unresolved residue
-    # of a diffusion a few centimetres long, 16 times that.)
+    # of it in the relative flow; the explosion drives the solid, so the slow wave's
+    # unresolved residue near the source (see above) is a small part of it. The fast P
+    # wave's echo from the C-PML is 2-3% of it, so the box is larger than the injection's
+    # and the record ends as the echo arrives, after the slow wave: 33k elements.
     dh, dt, nt, f0, t0, qpart, phi = 4.0, 2e-4, 550, 30.0, 0.04, 0.1, 0.3
     shape, src, off = (81, 81, 81), (40, 40, 40), (10, 8, 5)
     models = biot_from_biot_constants(**DAI1, b=b_dai, phi=phi)
@@ -463,7 +466,7 @@ def _green3(eq, dt, nt, field, src_node, rec_field, rec_node, w):
     return torch.stack(out)
 
 
-@pytest.mark.parametrize("b", [0.0, 7e5])
+@pytest.mark.parametrize("b", [7e5])         # with the drag; b = 0 is its special case
 def test_the_interfaces_are_reciprocal(b):
     # the interface integrals are exact transposes and the sealed interface the natural one,
     # so the Green's functions are symmetric across every interface, with the drag too:

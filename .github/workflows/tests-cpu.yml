@@ -30,8 +30,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # One job ran the whole suite in ~15 min, most of it in a few dozen SEM /
-    # Biot physics tests. Four jobs of a few minutes each run side by side;
-    # a new test file lands in `rest` (or in `sem` under test/sem/).
+    # Biot physics tests. Jobs of a few minutes each run side by side; a new
+    # test file lands in `rest` (or in `sem` under test/sem/).
+    #
+    # test/sem without Biot took 25 min in one job, near the timeout. It runs in
+    # four shards of about 6 min each (per-file times measured 2026-11-05):
+    # sem-1..3 take the slowest files by name, `sem` everything else.
     strategy:
       fail-fast: false
       matrix:
@@ -39,9 +43,39 @@ jobs:
           - name: sem-biot
             args: test/sem/test_biot_sem.py
             floor: 30
+          - name: sem-1
+            args: >-
+              test/sem/test_biot_sem3d.py
+              test/sem/test_sem_vs_cpml_absorption.py
+              test/sem/test_sem_vs_cpml_derivative_order.py
+            floor: 15
+          - name: sem-2
+            args: >-
+              test/sem/test_sem_acoustic_bs_exact.py
+              test/sem/test_sem_plane_wave.py
+              test/sem/test_sem_tti3d.py
+              test/sem/test_sem_visco_elastic3d.py
+            floor: 50
+          - name: sem-3
+            args: >-
+              test/sem/test_sem_fs_cpml_interface.py
+              test/sem/test_sem_visco_elastic_displacement.py
+              test/sem/test_sem_vs_bs_exact.py
+            floor: 15
           - name: sem
-            args: test/sem --ignore=test/sem/test_biot_sem.py
-            floor: 100
+            args: >-
+              test/sem --ignore=test/sem/test_biot_sem.py
+              --ignore=test/sem/test_biot_sem3d.py
+              --ignore=test/sem/test_sem_vs_cpml_absorption.py
+              --ignore=test/sem/test_sem_vs_cpml_derivative_order.py
+              --ignore=test/sem/test_sem_acoustic_bs_exact.py
+              --ignore=test/sem/test_sem_plane_wave.py
+              --ignore=test/sem/test_sem_tti3d.py
+              --ignore=test/sem/test_sem_visco_elastic3d.py
+              --ignore=test/sem/test_sem_fs_cpml_interface.py
+              --ignore=test/sem/test_sem_visco_elastic_displacement.py
+              --ignore=test/sem/test_sem_vs_bs_exact.py
+            floor: 300
           - name: rest
             args: test --ignore=test/sem --ignore=test/test_skill_snippets.py
             floor: 300

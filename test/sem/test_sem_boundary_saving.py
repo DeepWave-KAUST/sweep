@@ -1,19 +1,17 @@
-"""Boundary-saving correctness gate for the SEM backend.
+"""Boundary-saving correctness gate for the SEM backend, below PropSEM.
 
-Asserts that ``PropSEM(..., memory=BoundarySaving())`` (reverse-time wavefield
-reconstruction in the backward pass) gives (a) bit-identical seismograms and
-(b) a model gradient that matches the full-tape autograd reference, while the
-backward-pass peak memory is strictly lower.
+Asserts that the boundary-saved runner (reverse-time wavefield reconstruction in
+the backward pass) gives a model gradient that matches the full-tape autograd
+reference in the interior, while the backward-pass peak memory is strictly
+lower. PropSEM's ``memory=BoundarySaving()`` is held to the full tape at 1e-12 in
+test_sem_acoustic_bs_exact.py and test_sem_vs_bs_exact.py.
 """
 import math
 
 import pytest
 import torch
 
-from sweep.propagator import BoundarySaving, Full
-from sweep.sem import (
-    PropSEM, ElasticVSSEM2DDeformed, build_axis_aligned_quad9,
-)
+from sweep.sem import ElasticVSSEM2DDeformed, build_axis_aligned_quad9
 from sweep.sem.equations.acoustic2d import AcousticSEM2D
 from sweep.sem.mesh.quad4 import build_quad4_mesh
 from sweep.sem.cpml.acoustic import build_cpml
@@ -37,40 +35,7 @@ def _cos(x, y):
 
 
 # --------------------------------------------------------------------------- #
-# 1. End-to-end through the PropSEM user API (grad wrt the (nz,nx) grid model).
-# --------------------------------------------------------------------------- #
-def test_propsem_boundary_saving_matches_full_tape():
-    nz, nx, dh, dt, nt = 81, 121, 12.0, 0.0015, 300
-    grid = (1800.0 + torch.linspace(0, 600, nz, device=DEV, dtype=torch.float64)[:, None]
-            ).expand(nz, nx).contiguous()
-    grid[nz // 3:2 * nz // 3, nx // 3:2 * nx // 3] += 180.0
-    wav = _ricker(nt, dt)
-    src = torch.tensor([[nx // 2, nz // 4]])
-    rec = torch.tensor([[[ix, 3] for ix in range(8, nx - 8, 8)]])
-
-    def grad(memory):
-        m = grid.clone().requires_grad_(True)
-        prop = PropSEM(AcousticSEM2D, shape=(nz, nx), dh=dh, dt=dt, nt=nt,
-                       free_surface=True, abcn=8 * 4, dev=DEV,
-                       dtype=torch.float64, impl="eager", memory=memory)
-        seis = prop(wav, src, rec, models=[m])
-        seis.pow(2).sum().backward()
-        return seis.detach(), m.grad.detach()
-
-    seis_full, g_full = grad(Full())
-    seis_bs, g_bs = grad(BoundarySaving())
-
-    # End-to-end through the grid<->GLL interpolation: the seismograms are
-    # identical and the (nz,nx) model gradient is an FWI-grade descent
-    # direction. (The strict interior-exact / memory check is the low-level
-    # test below, which isolates the gradient from the interp + PML edge.)
-    assert (seis_bs - seis_full).norm() / seis_full.norm() < 1e-5
-    assert _cos(g_bs, g_full) > 0.997
-    assert (g_bs - g_full).norm() / g_full.norm() < 1e-1
-
-
-# --------------------------------------------------------------------------- #
-# 2. Low-level: exact interior gradient + memory reduction (needs CUDA).
+# 1. Low-level: exact interior gradient + memory reduction (needs CUDA).
 # --------------------------------------------------------------------------- #
 @pytest.mark.skipif(DEV != "cuda", reason="memory measurement needs CUDA")
 def test_boundary_saving_interior_exact_and_saves_memory():
@@ -132,7 +97,7 @@ def test_boundary_saving_interior_exact_and_saves_memory():
 
 
 # --------------------------------------------------------------------------- #
-# 3. ELASTIC velocity-stress (substep driver): interior gradient + memory.
+# 2. ELASTIC velocity-stress (substep driver): interior gradient + memory.
 # --------------------------------------------------------------------------- #
 @pytest.mark.skipif(DEV != "cuda", reason="memory measurement needs CUDA")
 def test_elastic_vs_boundary_saving():

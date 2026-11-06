@@ -2,14 +2,15 @@
 
 test/sem/specfem_compare/run_compare_box.py checks it against SPECFEM2D; here: its surface is
 traction-free (a free top doubles the field instead of zeroing it), it is the potential form's
-operators with ``vp = vs`` and the density ``1 / (rho vs^2)``, the boundary-saved gradients are
-the full tape's, the gradients in ``vs`` and ``rho`` exist, and what it cannot do is refused.
+operators with ``vp = vs`` and the density ``1 / (rho vs^2)``, the gradients in ``vs`` and ``rho``
+exist, and what it cannot do is refused. Its boundary-saved gradients are the full tape's to 1e-12
+in test_sem_acoustic_bs_exact.py.
 """
 import numpy as np
 import pytest
 import torch
 
-from sweep.propagator import BoundarySaving, EagerOptions, Full
+from sweep.propagator import EagerOptions, Full
 from sweep.sem import AcousticPotentialSEM2D, ElasticSHSEM2DDeformed, PropSEM
 
 SHAPE, DT, NT = (41, 81), 6e-4, 400
@@ -48,16 +49,6 @@ def test_the_surface_is_traction_free():
     pot = AcousticPotentialSEM2D.build(sh.mesh, sh.vp_e, sh.rho_e, dirichlet=(), cpml=sh.cpml)
     assert sh.dirichlet_idx.numel() == 0
     assert torch.equal(sh._inv_M, pot._inv_M) and torch.equal(sh._inv_rho, pot._inv_rho)
-
-
-def test_boundary_saving_gives_the_full_tape():
-    vs0, rho0 = _models(grad=True)
-    _shot(_prop(receiver_type=["vy"]), [vs0, rho0]).square().sum().backward()
-    vs1, rho1 = _models(grad=True)
-    _shot(_prop(receiver_type=["vy"], memory=BoundarySaving()), [vs1, rho1]).square().sum().backward()
-    for a, b in ((vs1.grad, vs0.grad), (rho1.grad, rho0.grad)):
-        assert torch.isfinite(b).all() and b.abs().max() > 0
-        assert (a - b).norm() <= 1e-9 * b.norm()
 
 
 def test_what_it_cannot_do_is_refused():
