@@ -206,6 +206,7 @@ def _graphable_call(prop, memory=None, batch=None):
     from .equations.acoustic_elastic2d import AcousticElasticSEM2D
     from .equations.acoustic_potential2d import AcousticPotentialSEM2D
     from .equations.elastic2d_deformed import ElasticSEM2DDeformed
+    from .cdrive import apply_recorded
     from .prop_c import _SEMAcousticCpmlC, _SEMElasticCpmlC
 
     eq = prop.eq
@@ -225,8 +226,8 @@ def _graphable_call(prop, memory=None, batch=None):
         f32 = lambda t: t.to(device="cuda", dtype=torch.float32)
 
         def call(air, aim, akp, lam, mu, l2m, eim, wrj, wav):
-            return _SEMFluidSolidC.apply(air, aim, akp, lam, mu, l2m,
-                                         eim, wrj, wav, c)
+            return apply_recorded(_SEMFluidSolidC, air, aim, akp, lam, mu, l2m,
+                                  eim, wrj, wav, c)
 
         def leaf_fn(e, wav):
             return (f32(e.ac._inv_rho), f32(e.ac._inv_M), f32(e.ac.kappa_node),
@@ -241,7 +242,8 @@ def _graphable_call(prop, memory=None, batch=None):
         f32 = lambda t: t.to(device="cuda", dtype=torch.float32)
 
         def call(lam, mu, lam2mu, inv_M, w_rho_J, wav):
-            return _SEMElasticCpmlC.apply(lam, mu, lam2mu, inv_M, w_rho_J, wav, c)
+            return apply_recorded(_SEMElasticCpmlC, lam, mu, lam2mu, inv_M,
+                                  w_rho_J, wav, c)
 
         def leaf_fn(e, wav):
             return (f32(e._lam), f32(e._mu), f32(e._lam2mu),
@@ -255,7 +257,7 @@ def _graphable_call(prop, memory=None, batch=None):
         f32 = lambda t: t.to(device="cuda", dtype=torch.float32)
 
         def call(inv_rho, inv_M, kappa, wav):
-            return (_SEMAcousticCpmlC.apply(inv_rho, inv_M, kappa, wav, c),)
+            return (apply_recorded(_SEMAcousticCpmlC, inv_rho, inv_M, kappa, wav, c),)
 
         def leaf_fn(e, wav):
             return (f32(e._inv_rho), f32(e._inv_M), f32(e.kappa_node), wav)

@@ -190,9 +190,9 @@ fastest backward), `BoundarySaving(storage="gpu"|"cpu"|"disk", storage_dtype=...
 19. **`ElasticTTI2nd` (second-order displacement) with plain CPML grows at late times**; keep
     the default `mpml_ratio=0.05` (multiaxial PML), do not set it to 0.
 20. **`theta`/`phi` are radians.** Degrees are accepted silently and model a different tilt.
-21. **`register_gradient(..., mode="gradient")` needs `memory=Full()`** (eager only). Under the
-    eager default checkpointing the registration is silently ignored and plain autograd
-    gradients come back.
+21. **`register_gradient(..., mode="gradient")` needs `memory=Full()`** (eager only). It raises
+    under the eager default checkpointing and under `BoundarySaving()`; older versions silently
+    ignored it under checkpointing and returned plain autograd gradients.
 22. **`ModelParallel` wants 3-D `sources` `(1, nsrc, ndim)`**, `impl='c'` and boundary saving;
     see `references/parallel.md`.
 

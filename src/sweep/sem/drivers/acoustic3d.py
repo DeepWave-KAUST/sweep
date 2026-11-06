@@ -9,7 +9,7 @@ from __future__ import annotations
 import torch
 
 from ..cdrive import (METRIC_NAMES, Alloc, check_filled, dd_grads, dims,
-                      fill, give, put,
+                      fill, give, need_backward, put,
                       roll, swap, take)
 
 _AC3D_CONSTS = ("ibool", "D", "w_jac", "w_jx", "w_jy", "w_jz", "inv_M",
@@ -229,7 +229,7 @@ class _SEMAcoustic3DCpmlDDC(torch.autograd.Function):
     def forward(ctx, wavelet, parts, exchange, bs, *mats):
         import sweep._C as _C
         nt = parts[0].c["nt"]
-        need_bwd = wavelet.requires_grad or any(t.requires_grad for t in mats)
+        need_bwd = need_backward(parts[0].c)
         mode, wtape, slab = _ac3d_mode(parts[0].c, need_bwd)
         built = [_ac3d_forward_input(p.c, vp2, wavelet, mode, wtape, slab)
                  for p, vp2 in zip(parts, mats)]

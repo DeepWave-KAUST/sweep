@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import torch
 
-from ..cdrive import Alloc, check_filled, dims, fill, give, grads_or_none, put, take
+from ..cdrive import (Alloc, check_filled, dims, fill, give, grads_or_none,
+                      need_backward, put, take)
 from .vs_chunks import backward_chunks, chunk_of, forward_chunks
 
 _GEOM = ("ibool", "D", "wJ", "ixx", "ixz", "iex", "iez", "qmask", "pin_n", "slot_elem",
@@ -87,7 +88,7 @@ class _SEMBiot2DC(torch.autograd.Function):
     @staticmethod
     def forward(ctx, c, wavelet, *leaves):
         import sweep._C as _C
-        need_bwd = any(t.requires_grad for t in (wavelet,) + leaves)
+        need_bwd = need_backward(c)
         A = Alloc(wavelet.device, c["n_global"], c["nt"])
         K = chunk_of(c, need_bwd)
         s = _forward_input(c, A, leaves, wavelet, c["nt"] if need_bwd and K is None else None)

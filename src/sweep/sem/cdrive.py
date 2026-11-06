@@ -95,6 +95,52 @@ def memory_mode(c, need_bwd):
     return "ring" if bool(c.get("bs")) else "tape"
 
 
+def backward_will_run(*inputs):
+    """Whether a backward can run through the call about to be made on
+    ``inputs`` (tensors, ``None``, or lists / tuples of them): grad mode on,
+    and one of them requires grad.
+
+    Decided at the call site. Inside ``Function.forward`` grad mode is always
+    off, and ``requires_grad`` (or ``ctx.needs_input_grad``) does not see an
+    outer ``torch.no_grad()``: a leaf that requires grad, passed in under
+    ``no_grad``, made the drivers keep a whole tape for a backward that never
+    came."""
+    if not torch.is_grad_enabled():
+        return False
+    stack = list(inputs)
+    while stack:
+        t = stack.pop()
+        if isinstance(t, (list, tuple)):
+            stack.extend(t)
+        elif torch.is_tensor(t) and t.requires_grad:
+            return True
+    return False
+
+
+def apply_recorded(fn, *args):
+    """``fn.apply(*args)`` for a driver Function, with the backward decided
+    here: ``c``, the one dict among ``args``, gets ``need_bwd`` from
+    :func:`backward_will_run` over the tensor arguments. The forward keeps
+    its backward state (the save-all tapes, the C-PML band ring, the saved
+    inputs) only when it is set."""
+    (c,) = [a for a in args if isinstance(a, dict)]
+    c["need_bwd"] = backward_will_run(*[a for a in args if torch.is_tensor(a)])
+    return fn.apply(*args)
+
+
+def need_backward(c):
+    """A driver forward's ``need_bwd``: the call site's decision
+    (:func:`apply_recorded`; the strip drivers' ``dd.py`` sets it on every
+    part)."""
+    try:
+        return bool(c["need_bwd"])
+    except KeyError:
+        raise KeyError(
+            "c['need_bwd'] is unset: call the driver Function through "
+            "sweep.sem.cdrive.apply_recorded, which decides it at the call site "
+            "(the forward cannot see an outer torch.no_grad())") from None
+
+
 # The nine inv_J streams of a deformed 3-D mesh, under the names every deformed
 # kernel indexes them by and in the ``eq._I`` order the producer emits. The
 # drivers' fill lists are built FROM this instead of repeating it: there were

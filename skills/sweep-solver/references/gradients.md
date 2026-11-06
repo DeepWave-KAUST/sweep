@@ -61,7 +61,7 @@ The backward needs the forward wavefield. Choose how it is kept with
 
 | Strategy | Memory | Time | Default for | Notes |
 |---|---|---|---|---|
-| `Full()` | whole history (`nt` x grid), largest | fastest backward | `impl='c'` `ViscoAcoustic`, `DASZhao3D` | needed for eager snapshots and eager `register_gradient` |
+| `Full()` | whole history (`nt` x grid), largest | fastest backward | `impl='c'` `ViscoAcoustic`, `DASZhao3D` | needed for eager snapshots and eager `register_gradient(mode="gradient")` |
 | `BoundarySaving(storage="gpu")` | CPML-ring strips per step | ~1 extra forward | `impl='c'` (others) | reconstructs the wavefield backwards in time |
 | `BoundarySaving(storage="cpu", pinned_memory=True)` / `"disk"` | ring in host RAM / files | slower | | `disk_dir=`, `disk_async_read=True` for disk |
 | `BoundarySaving(storage_dtype="bf16"\|"fp16"\|"int8")` | 2x / ~2x / ~4x smaller ring | | | lossy: perturbs the gradient; validate before use |
@@ -186,10 +186,17 @@ wavefields keyed by field name, on the padded grid). `mode="imaging"` leaves `.g
 is read with `solver.imaging(wavelet, sources, receivers, models=..., observed=obs)` (returns
 `{name: image}`). `solver.clear_gradients()` removes registrations.
 
-- **Requires `memory=Full()` (or `use_ckpt=False`)**: under checkpointing (the eager default)
-  a `mode="gradient"` registration is **silently ignored** and the ordinary autograd gradient is
-  returned (measured: a registered zero gradient came back non-zero with `Ckpt`, zero with
-  `Full()`).
+- **`mode="gradient"` requires `memory=Full()` (or `use_ckpt=False`)**: the hooks read every
+  step's forward wavefield off the full tape. `register_gradient` raises `ValueError` on a
+  propagator built with `Ckpt()` (the eager default) or `BoundarySaving()`. Older versions
+  **silently ignored** the registration under checkpointing and returned the ordinary autograd
+  gradient, and kept the whole tape anyway under boundary saving.
+- It applies to a call that records the registered model's gradient (grad mode on, the model
+  requires grad); the other models and the wavelet keep their autograd gradients. A call that
+  records nothing (`torch.no_grad()`, or no registered model requiring grad) runs the standard
+  path. A recording call with `adj=True` or `return_wavefield=True` raises.
+- `imaging()` keeps its own tape whatever `memory` is, and runs under `torch.no_grad()` (not
+  under `torch.inference_mode()`).
 - Not available on `impl='c'` (`AttributeError`).
 
 ## 7. Precision

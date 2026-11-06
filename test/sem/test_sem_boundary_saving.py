@@ -143,3 +143,53 @@ def test_elastic_vs_boundary_saving():
     assert _cos(g_bs[ni], g_full[ni]) > 0.999
     assert (g_bs[ni] - g_full[ni]).norm() / g_full[ni].norm() < 1e-2
     assert mem_bs < 0.5 * mem_full
+
+
+# --------------------------------------------------------------------------- #
+# 3. PropSEM: a call that records nothing keeps no ring (CPU).
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("nshots", [1, 3], ids=["one_shot", "vmapped_batch"])
+def test_a_call_that_records_nothing_keeps_no_ring(monkeypatch, nshots):
+    """``BoundarySaving()`` built its reconstruction state and saved the band
+    every step on calls whose backward never runs: under ``no_grad``, or with
+    nothing that requires grad (61 saves a call at nt=60). Such a call runs
+    the full-tape runner instead (it records nothing then) and gives
+    ``Full()``'s record exactly."""
+    import sweep.sem.boundary_saving as BSmod
+    from sweep.propagator import BoundarySaving, EagerOptions, Full
+    from sweep.sem import PropSEM
+
+    built, saved = [], []
+    real_init, real_save = BSmod.SEMReconState.__init__, BSmod.SEMReconState.save
+    monkeypatch.setattr(BSmod.SEMReconState, "__init__",
+                        lambda self, *a, **k: built.append(1) or real_init(self, *a, **k))
+    monkeypatch.setattr(BSmod.SEMReconState, "save",
+                        lambda self, *a, **k: saved.append(1) or real_save(self, *a, **k))
+
+    shape, nt, dt, f0 = (9, 17), 120, 5e-4, 20.0
+
+    def prop(memory):
+        return PropSEM(AcousticSEM2D, shape=shape, dh=10.0, dt=dt, n_order=4, abcn=8,
+                       f_dominant=f0, dev="cpu", dtype=torch.float64, impl="eager",
+                       memory=memory, eager_options=EagerOptions(use_compile=False))
+
+    z = torch.linspace(0, 1, shape[0], dtype=torch.float64)[:, None]
+    vp = (2400.0 + 200.0 * z).expand(shape).contiguous()
+    t = torch.arange(nt, dtype=torch.float64) * dt - 0.05
+    a = (math.pi * f0 * t) ** 2
+    w = (1 - 2 * a) * torch.exp(-a)
+    src = torch.tensor([[8.0 + k - nshots // 2, 4.0] for k in range(nshots)])
+    rec = torch.tensor([[[x, 2.0] for x in (2, 6, 10, 14)]] * nshots)
+    with torch.no_grad():
+        ref = prop(Full())(w, src, rec, models=[vp])
+
+    bs = prop(BoundarySaving())
+    with torch.no_grad():
+        under_no_grad = bs(w, src, rec, models=[vp.clone().requires_grad_(True)])
+    nothing_requires_grad = bs(w, src, rec, models=[vp])
+    assert not built and not saved
+    assert torch.equal(under_no_grad, ref)
+    assert torch.equal(nothing_requires_grad, ref)
+    # a call that records still saves the boundary
+    bs(w, src, rec, models=[vp.clone().requires_grad_(True)]).square().sum().backward()
+    assert built and saved

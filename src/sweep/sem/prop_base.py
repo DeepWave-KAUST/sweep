@@ -81,6 +81,7 @@ from .mesh import MESH_BUILDERS
 from .mesh.hex8 import hex8_layout
 from .cpml.acoustic import build_cpml
 from .cpml.acoustic3d import build_cpml3d
+from .cdrive import backward_will_run
 from .cpml.elastic_vs import refuse_free_waveguide
 from .equations.acoustic2d import AcousticSEM2D
 from .equations.acoustic3d import AcousticSEM3D
@@ -2027,7 +2028,9 @@ class PropSEM:
                                    compile_options=compile_options,
                                    checkpoint_chunk=self._ckpt_chunk,
                                    store_dtype=self._bs_store,
-                                   illumination=self._illumination)
+                                   illumination=self._illumination,
+                                   records=backward_will_run(
+                                       models, acq.wav_per_shot, acq.sv))
 
     # ------------------------------------------------------------------ #
     # Plane-wave incidence (sweep.sem.plane_wave): one shot whose source is the
@@ -2140,7 +2143,8 @@ class PropSEM:
                                    compile_options=compile_options,
                                    checkpoint_chunk=self._ckpt_chunk,
                                    store_dtype=self._bs_store,
-                                   illumination=self._illumination)
+                                   illumination=self._illumination,
+                                   records=backward_will_run(models, acq.wav_per_shot))
 
     def _illumination_for(self, models, snap_steps):
         """This call's illumination holder, or ``None`` when it is off."""
@@ -2386,7 +2390,7 @@ class PropSEM:
     # ------------------------------------------------------------------ #
     def _forward_eager(self, eq, pershot_eqs, props, acq, *, memory=None,
                        compile_options=None, checkpoint_chunk=None,
-                       store_dtype=None, illumination=None):
+                       store_dtype=None, illumination=None, records=True):
         """Run the built props under one memory mode -> ``(nshots, nt, nrec,
         ncomp)``. Reads like ``prop_c.sem_c_forward_shot_batch``: the props carry
         the acquisition, the keywords carry the mode, and the body is the runner
@@ -2395,17 +2399,23 @@ class PropSEM:
         Four runners, in the order the conditions are tested:
 
         ==========================  ================================================
-        memory='boundary'           single shot -> ``_forward_bs_single``
-                                    per-shot models -> the same, looped (the
+        memory='boundary',          single shot -> ``_forward_bs_single``
+        a call that records         per-shot models -> the same, looped (the
                                     vmapped rollout closure-captures ONE
                                     equation's coefficients)
                                     shared model, nshots>1 -> ``_forward_bs_batched``
-        memory=None/'full'/Ckpt     single shot -> ``props[0].forward`` (no vmap
-                                    overhead)
-                                    per-shot models -> that, looped
+        memory=None/'full'/Ckpt,    single shot -> ``props[0].forward`` (no vmap
+        or a call that records      overhead)
+        nothing                     per-shot models -> that, looped
                                     shared model, nshots>1 -> ``_run_batched``
                                     (vmapped)
         ==========================  ================================================
+
+        ``records`` (``cdrive.backward_will_run`` over the call's models,
+        wavelet and source vector) is whether a backward can run through the
+        call. One that cannot has no boundary to save, and the full-tape
+        runner then keeps nothing either: boundary saving used to build its
+        reconstruction state and save the band every step under ``no_grad``.
 
         ``checkpoint_chunk`` (``Ckpt(chunks=...)``) reaches all three full-tape
         branches: ``props[b].forward`` runs the checkpointed rollout of
@@ -2432,7 +2442,7 @@ class PropSEM:
                                                  illumination=illumination)
                                 for b in range(nshots)], 0)
 
-        if memory == "boundary":
+        if memory == "boundary" and records:
             if nshots == 1:                          # single shot: no vmap overhead
                 return self._forward_bs_single(
                     eq, props[0], acq.wav_per_shot[0], recv_idxs,

@@ -18,6 +18,7 @@ import pytest
 import torch
 
 import sweep.sem as S
+from sweep.sem.cdrive import apply_recorded
 from sweep.propagator import BoundarySaving
 from sweep.sem.dd import (SEMModelParallel, StripTopology,
                           _SEMElasticCpmlDDC)
@@ -116,8 +117,8 @@ def _fused_reference(prop, models, wav, src, rec, memory=None):
     parts, mats = d1._parts(eq, tuple(pats), rec)
     c = dict(parts[0].c)
     c["bs"], c["bs_kind"] = memory == "boundary", 0
-    sx, sz = _SEMElasticCpmlC.apply(mats[0], mats[1], mats[2], mats[3],
-                                    mats[4], wav, c)
+    sx, sz = apply_recorded(_SEMElasticCpmlC, mats[0], mats[1], mats[2], mats[3],
+                            mats[4], wav, c)
     return torch.stack([sx, sz], -1).transpose(0, 1)      # (nt, nrec, 2)
 
 

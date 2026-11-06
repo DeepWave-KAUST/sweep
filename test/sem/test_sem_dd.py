@@ -16,6 +16,7 @@ import torch
 import sweep.sem as S
 from sweep.propagator import BoundarySaving
 from sweep.sem.dd import SEMModelParallel, StripTopology, _SEMAcousticCpmlDDC
+from sweep.sem.cdrive import apply_recorded
 from sweep.sem.drivers.acoustic2d import _AC2D_RINGS
 from sweep.sem.equations import AcousticPotentialSEM2D
 from sweep.sem.prop_c import _SEMAcousticCpmlC, sem_c_available
@@ -71,7 +72,7 @@ def _fused_reference(prop, vp, wav, src, rec):
     c["bs"], c["bs_kind"] = False, 0
     # px=1: rec_slot is the identity ordering, so the fused seis rows are
     # already in input order
-    seis = _SEMAcousticCpmlC.apply(mats[0], mats[1], mats[2], wav, c)
+    seis = apply_recorded(_SEMAcousticCpmlC, mats[0], mats[1], mats[2], wav, c)
     return seis.transpose(0, 1)
 
 
@@ -300,8 +301,8 @@ def test_dd_boundary_saving_adds_no_error(px):
         parts, mats = d1._parts(eq, pattern, r)
         c = dict(parts[0].c)
         c["bs"], c["bs_kind"] = True, 0
-        return _SEMAcousticCpmlC.apply(mats[0], mats[1], mats[2], wav,
-                                       c).transpose(0, 1)
+        return apply_recorded(_SEMAcousticCpmlC, mats[0], mats[1], mats[2], wav,
+                              c).transpose(0, 1)
 
     g_ref_tape = grads(_fused_reference)
     g_dd_tape = grads(lambda p, v, w, s, r: _run_dd(p, v, w, s, r, px))
@@ -467,8 +468,8 @@ def test_dd_low_precision_ring(store):
             e, pat, rec)
         c = dict(pp[0].c)
         c["bs"], c["bs_kind"] = True, kind
-        out = _SEMAcousticCpmlC.apply(mats[0], mats[1], mats[2], wav,
-                                      c).transpose(0, 1)
+        out = apply_recorded(_SEMAcousticCpmlC, mats[0], mats[1], mats[2], wav,
+                             c).transpose(0, 1)
         (out ** 2).sum().div(out.detach().pow(2).sum().clamp_min(1e-30)
                              ).backward()
         return v.grad.clone()

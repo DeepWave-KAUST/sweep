@@ -11,7 +11,7 @@ from sweep.receivers.torch import ReceiverTorch
 
 
 class _GradBridgeFn(torch.autograd.Function):
-    """Bridge between user model leaves and the hook-accumulated grads.
+    """Bridge between the registered model leaves and the hook-accumulated grads.
 
     The custom-gradient path runs the forward step-by-step under autograd
     (no manual adjoint).  PyTorch's own reverse pass delivers each saved
@@ -20,22 +20,20 @@ class _GradBridgeFn(torch.autograd.Function):
     the user-registered ``fn(uf_t, ub_t, models, dt, dh)``, accumulating
     into ``holder``.
 
-    Model leaves don't participate in autograd through the propagator chain
-    (they pass through this Function as identity-then-detach).  When the
-    reverse pass finally reaches this node — *after* every per-step hook has
-    fired, because they sit topologically between ``loss`` and the model
-    inputs — we crop the runtime-padded accumulator and hand the result back
-    as each leaf's grad.
+    Only the models with a registration pass through this Function (as
+    identity-then-detach); the others stay in autograd.  When the reverse
+    pass finally reaches this node — *after* every per-step hook has fired,
+    because they sit topologically between ``loss`` and the model inputs —
+    we crop each leaf's runtime-padded accumulator and hand it back as the
+    leaf's grad.
     """
 
     @staticmethod
-    def forward(ctx, holder, model_shapes, registered_idx, crop_fn,
-                *model_leaves):
+    def forward(ctx, holder, keys, model_shapes, crop_fn, *model_leaves):
         ctx.holder = holder                       # {model_idx: tensor(shape_wf)}
-        ctx.model_shapes = model_shapes
-        ctx.registered_idx = registered_idx       # {model_idx: imaging_fn}
+        ctx.keys = keys                           # each leaf's model_idx
+        ctx.model_shapes = model_shapes           # each leaf's shape
         ctx.crop_fn = crop_fn
-        ctx.n_models = len(model_leaves)
         # Identity-detach: the propagator works on detached views so vp does
         # NOT propagate gradients through eq.func — we'll fill its grad
         # ourselves on backward.
@@ -46,13 +44,9 @@ class _GradBridgeFn(torch.autograd.Function):
         # grad_outputs (one per detached output) are whatever autograd would
         # have written to the detached tensors — we ignore them entirely and
         # substitute the hook-accumulated grads.
-        out = [None] * ctx.n_models
-        for i in ctx.registered_idx:
-            buf = ctx.holder.get(i)
-            if buf is None:
-                continue
-            out[i] = ctx.crop_fn(buf, ctx.model_shapes[i])
-        return (None, None, None, None, *out)
+        return (None, None, None, None,
+                *(ctx.crop_fn(ctx.holder[k], shape)
+                  for k, shape in zip(ctx.keys, ctx.model_shapes)))
 
 
 class _CustomGradientMixin:
@@ -82,7 +76,10 @@ class _CustomGradientMixin:
                 Which keys are populated is controlled by ``imaging_type``.
 
             mode: ``"gradient"`` — the formula replaces the optimizer gradient
-                (``param.grad`` after ``loss.backward()``);
+                (``param.grad`` after ``loss.backward()``) of a plain forward
+                call that records it; it needs ``memory=Full()``, as it reads
+                every step's forward wavefield off the full autograd tape.
+                The other models and the wavelet keep autograd's gradient.
                 ``"imaging"`` — the formula is only produced by :meth:`imaging`,
                 leaving autograd gradients untouched.
             imaging_type: list of wavefield names to expose to ``fn``.
@@ -128,11 +125,54 @@ class _CustomGradientMixin:
                 )
             if len(imaging_type) == 0:
                 raise ValueError("imaging_type list cannot be empty.")
+        if mode == "gradient":
+            self._refuse_custom_gradient_memory()
         self._custom_gradients[param_name] = (imaging_fn, mode, imaging_type)
 
     def clear_gradients(self):
         """Remove all registered custom gradient / imaging conditions."""
         self._custom_gradients = {}
+
+    def _refuse_custom_gradient_memory(self):
+        """A gradient-mode registration needs the full tape: the hooks read
+        every step's forward wavefield off it. Chunk checkpointing ignored the
+        registration and returned autograd's gradient; boundary saving
+        honoured it but kept the whole tape, saving nothing."""
+        if self.use_ckpt or getattr(self, "_eager_bs", False):
+            memory = "Ckpt()" if self.use_ckpt else "BoundarySaving()"
+            raise ValueError(
+                "register_gradient(mode='gradient') needs memory=Full(): its "
+                "hooks read every step's forward wavefield off the full autograd "
+                f"tape, and this propagator runs memory={memory}. Build it with "
+                "memory=Full(), or register mode='imaging' and call imaging(), "
+                "which keeps its own tape whatever the strategy.")
+
+    def _registered_recording(self, models):
+        """The gradient-mode registrations this call records, as
+        ``{model_index: (fn, imaging_type)}``: those whose model requires grad,
+        with grad mode on. Any other call has no gradient for a registration
+        to replace and takes the standard path."""
+        registered = self._registered_indices("gradient")
+        if not registered or not torch.is_grad_enabled():
+            return {}
+        models = list(self.parameters()) if models is None else list(models)
+        return {i: reg for i, reg in registered.items()
+                if torch.is_tensor(models[i]) and models[i].requires_grad}
+
+    def _refuse_custom_gradient_call(self, adj, return_wavefield):
+        """A call that records a registered model's gradient replaces it only
+        on plain forward modelling under the full tape. The others below used
+        to take the standard path and return autograd's gradient silently."""
+        self._refuse_custom_gradient_memory()
+        given = [name for name, on in (("adj=True", adj),
+                                       ("return_wavefield=True", return_wavefield)) if on]
+        if given:
+            raise ValueError(
+                f"{' and '.join(given)} on a call that records the gradient of a "
+                "model with a register_gradient(mode='gradient') condition: the "
+                "registration replaces the gradient of plain forward modelling "
+                "only. Run this call under torch.no_grad() (or with the model "
+                "detached), or clear_gradients() first.")
 
     def _registered_indices(self, mode):
         """Return {model_index: (fn, imaging_type)} for registrations of mode.
@@ -182,6 +222,11 @@ class _CustomGradientMixin:
         via :class:`_GradBridgeFn` (gradient mode) or read directly
         (imaging mode).
 
+        ``wavelet`` is injected into every ``source_type`` field, as the
+        standard path does. Something in the graph must require grad for the
+        per-step fields to be in it: a bridged model (gradient mode) or an
+        internal wavelet leaf (:meth:`imaging`).
+
         Returns ``record`` of shape (B, nt, nrec, 1) — autograd-aware.
         """
         eq = self.equation
@@ -217,12 +262,9 @@ class _CustomGradientMixin:
         rec = ReceiverTorch(rec_loc, gather_kernel=sr_stencil, shape=shape_wf)
 
         nt = wavelet.shape[-1]
-        # Source-injection needs at least one require_grad leaf for autograd
-        # to retain the per-step ``wf[h1]`` tensors in the graph (model
-        # leaves are detached by _GradBridgeFn). We clone the wavelet as an
-        # internal leaf with requires_grad=True purely to anchor the graph —
-        # its .grad is never read.
-        wavelet_leaf = wavelet.detach().clone().requires_grad_(True)
+        # One view per step, as the standard path takes them: a slice per
+        # step would cost a whole-wavelet backward per step.
+        wavelet_steps = wavelet.movedim(-1, 0).contiguous().unbind(0)
 
         wf = [torch.zeros(shape_wf, dtype=torch.float32, device=self.dev)
               for _ in self.wavefield_names]
@@ -270,7 +312,8 @@ class _CustomGradientMixin:
 
         for i in range(nt):
             wf = list(eq.func(wf, runtime_models, dt, h, None))
-            wf[h1] = src(wf[h1], wavelet_leaf[..., i])
+            for k in self.source_indices:
+                wf[k] = src(wf[k], wavelet_steps[i])
 
             # Hook the targeted wavefields IF they're already in autograd's
             # reverse graph at this step.  Early timesteps may have certain
@@ -319,16 +362,18 @@ class _CustomGradientMixin:
         return wavelet_t, src_loc, rec_loc, shape_wf
 
     def _custom_gradient_forward(self, wavelet, sources, receivers, models,
-                                 batch_size, source_encoding, **kwargs):
+                                 batch_size, source_encoding, registered_idx,
+                                 **kwargs):
         """Plain forward whose backward uses the registered gradient-mode
-        imaging condition(s).
+        imaging condition(s) ``registered_idx`` (``_registered_recording``).
 
         Implementation: runs the forward under autograd with per-step hooks
         on ``wf[source_idx]``; PyTorch's reverse pass delivers each step's
         true ``ub_t``, and the hooks accumulate ``fn(uf_t, ub_t, …)`` into
-        a buffer.  Model leaves pass through :class:`_GradBridgeFn` which
-        substitutes the cropped accumulator for ``vp.grad`` on backward.
-        No manually written adjoint.
+        a buffer.  The registered model leaves pass through
+        :class:`_GradBridgeFn`, which substitutes the cropped accumulator for
+        ``vp.grad`` on backward; the other models and the wavelet stay in
+        autograd and get its gradient.  No manually written adjoint.
         """
         if models is None:
             models = list(self.parameters())
@@ -336,26 +381,27 @@ class _CustomGradientMixin:
             wavelet, sources, receivers, batch_size, **kwargs
         )
         nrec = rec_loc.shape[1]
-        registered_idx = self._registered_indices("gradient")
 
         models_dev = [self._as_device_tensor(m, dtype=torch.float32)
                       for m in models]
-        model_shapes = [tuple(m.shape) for m in models_dev]
+        keys = sorted(registered_idx)
 
         # Runtime-padded grad accumulator.  Each entry is filled by the per-
         # step hooks during backward, then handed to _GradBridgeFn.backward.
         holder = {i: torch.zeros(shape_wf, dtype=torch.float32, device=self.dev)
-                  for i in registered_idx}
+                  for i in keys}
 
-        # _GradBridgeFn outputs detached views of the leaves AND wires the
-        # bridge into autograd: when backward reaches this node it pulls from
-        # ``holder`` (which the per-step hooks have already filled) and
-        # writes each leaf's grad.
+        # _GradBridgeFn outputs detached views of the registered leaves AND
+        # wires the bridge into autograd: when backward reaches this node it
+        # pulls from ``holder`` (which the per-step hooks have already
+        # filled) and writes each leaf's grad.
         bridged = _GradBridgeFn.apply(
-            holder, model_shapes, registered_idx, self._crop_to_model,
-            *models_dev,
+            holder, keys, [tuple(models_dev[i].shape) for i in keys],
+            self._crop_to_model, *(models_dev[i] for i in keys),
         )
-        _, runtime_models = self._pad_models(list(bridged))
+        for i, m in zip(keys, bridged):
+            models_dev[i] = m
+        _, runtime_models = self._pad_models(models_dev)
 
         return self._run_with_hooks(
             wavelet_t, src_loc, rec_loc, source_encoding, shape_wf,
@@ -377,7 +423,9 @@ class _CustomGradientMixin:
         Implementation: same autograd-with-hooks path as the gradient mode,
         but the reverse pass is triggered explicitly by ``record.backward
         (gradient=adj_src)`` so that no ``param.grad`` is written (the
-        models enter detached, with no bridge).
+        models enter detached, with no bridge).  It records its own graph
+        whatever the caller's grad mode, so it runs under ``torch.no_grad()``
+        too.
         """
         registered = {self.model_names.index(n): (fn, wavefields)
                       for n, (fn, m, wavefields) in self._custom_gradients.items()
@@ -386,6 +434,17 @@ class _CustomGradientMixin:
             raise ValueError(
                 "imaging() called but no mode='imaging' gradient is registered."
             )
+        if torch.is_inference_mode_enabled():
+            raise RuntimeError(
+                "imaging() back-propagates through its own forward, which "
+                "torch.inference_mode() forbids; call it under torch.no_grad() "
+                "instead.")
+        with torch.enable_grad():
+            return self._imaging(registered, wavelet, sources, receivers, models,
+                                 adjoint_source, observed)
+
+    def _imaging(self, registered, wavelet, sources, receivers, models,
+                 adjoint_source, observed):
         mode, B, _, _, source_encoding = self._normalize_io(wavelet, sources, receivers)
         sources = self._place_on_curvilinear(sources, "source")
         receivers = self._place_on_curvilinear(receivers, "receiver")
@@ -408,8 +467,12 @@ class _CustomGradientMixin:
 
         holder = {i: torch.zeros(shape_wf, dtype=torch.float32, device=self.dev)
                   for i in registered}
+        # The models enter detached, so nothing would put the per-step fields
+        # in the graph: inject an internal wavelet leaf instead, purely to
+        # anchor it (its .grad is never read).
+        wavelet_leaf = wavelet_t.detach().clone().requires_grad_(True)
         record = self._run_with_hooks(
-            wavelet_t, src_loc, rec_loc, source_encoding, shape_wf,
+            wavelet_leaf, src_loc, rec_loc, source_encoding, shape_wf,
             B, nrec, runtime_models, registered, holder,
         )
 

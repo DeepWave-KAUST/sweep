@@ -679,6 +679,37 @@ and this project adheres to
   full history and checkpoints (`test/test_c_inference_mode.py`).
   `ModelParallel` still takes its first call outside inference mode, as
   before.
+- Eager `PropTorch` under chunk checkpointing (the eager default): two forwards
+  before one backward (`(loss1 + loss2).backward()`, or a `torch.no_grad()`
+  call between a forward and its backward) raised "modified by an inplace
+  operation". The initial wavefield was a workspace cached on the propagator
+  and zeroed in place by every call, and the first chunk's checkpoint saves
+  it. It is allocated per call now
+  (`test/test_eager_two_forwards_one_backward.py`).
+- Eager `register_gradient(mode="gradient")` raises `ValueError` on a
+  propagator built with `Ckpt()` (the eager default), which ignored the
+  registration and returned the autograd gradient, and with `BoundarySaving()`,
+  which kept the full tape anyway; and on a recording call with `adj=True` or
+  `return_wavefield=True`, which also ignored it. The hooked path runs only on
+  a call that records a registered model's gradient: under `torch.no_grad()`,
+  or with no registered model requiring grad, it kept per-step snapshots and
+  returned a record that required grad. On it the other models and the
+  wavelet lost their gradients (`Acoustic1st` with `vp` registered: no `rho`
+  gradient), and the source went into the first `source_type` field only
+  (`Elastic` with `['sxx', 'szz']`: the record off by its own size).
+  `imaging()` runs under `torch.no_grad()`.
+- `PropSEM(impl='eager', memory=BoundarySaving())`: a call that no backward
+  can run through (under `torch.no_grad()`, or nothing requiring grad) built
+  the reconstruction state and saved the band every step. It takes the
+  full-tape runner now, which keeps nothing then, and gives `Full()`'s record
+  exactly.
+- `PropSEM(impl='c')`: the CUDA drivers decided inside their autograd
+  Functions whether a backward would run, from `requires_grad`, which does not
+  see an outer `torch.no_grad()`. A wavelet that required grad, passed in under
+  `no_grad`, kept the save-all tape or the C-PML band ring: 2.9 to 160 MiB more
+  on the test cases. The call site decides now
+  (`sweep.sem.cdrive.apply_recorded`), for all 17 Functions
+  (`test/sem/test_sem_c_nograd_tapes.py`).
 - `PropSEM(impl=None, memory=BoundarySaving())` runs on eager where the CUDA
   kernels have no boundary saving (`ElasticVSSEM3D`, `ElasticSEM3D`,
   `ElasticSEM3DDeformed`, the 2-D paths without their C-PML) instead of

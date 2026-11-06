@@ -12,7 +12,7 @@ import torch
 
 from ..cdrive import (METRIC_NAMES, Alloc, check_filled, dims, fill, give,
                       grads_or_none,
-                      memory_mode, put, take)
+                      memory_mode, need_backward, put, take)
 from .vs_chunks import backward_chunks, chunk_of, forward_chunks
 
 
@@ -32,7 +32,7 @@ class _SEMAcousticC(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inv_M, inv_rho, wavelet, c):
         import sweep._C as _C
-        need_bwd = any(t.requires_grad for t in (inv_M, inv_rho, wavelet))
+        need_bwd = need_backward(c)
         A = Alloc(wavelet.device, c["n_global"], c["nt"])
         s = _C.SemForwardInput()
         fill(s, c, _AC2D_BARE)
@@ -79,7 +79,7 @@ class _SEMElasticC(torch.autograd.Function):
     def forward(ctx, lam, mu, lam2mu, inv_M, wavelet, c):
         import sweep._C as _C
         mats = (lam, mu, lam2mu, inv_M)
-        need_bwd = any(t.requires_grad for t in mats + (wavelet,))
+        need_bwd = need_backward(c)
         A = Alloc(wavelet.device, c["n_global"], c["nt"])
         s = _C.SemElasticForwardInput()
         fill(s, c, _EL2D_BARE)
@@ -185,7 +185,7 @@ class _SEMAcoustic3DC(torch.autograd.Function):
     @staticmethod
     def forward(ctx, c2_node, inv_M, wavelet, c):
         import sweep._C as _C
-        need_bwd = any(t.requires_grad for t in (c2_node, inv_M, wavelet))
+        need_bwd = need_backward(c)
         s = _ac3d_bare_forward_input(c, c2_node, inv_M, wavelet,
                                      memory_mode(c, need_bwd))
         seis = _C.sem3d_acoustic_forward(s)
@@ -232,7 +232,7 @@ class _SEMElastic3DC(torch.autograd.Function):
     def forward(ctx, lam, mu, lam2mu, inv_M, wavelet, c):
         import sweep._C as _C
         mats = (lam, mu, lam2mu, inv_M)
-        need_bwd = any(t.requires_grad for t in mats + (wavelet,))
+        need_bwd = need_backward(c)
         A = Alloc(wavelet.device, c["n_global"], c["nt"])
         s = _C.Sem3dElasticForwardInput()
         fill(s, c, _EL3D_BARE)
@@ -401,7 +401,7 @@ class _SEMElasticVS3DC(torch.autograd.Function):
     @staticmethod
     def forward(ctx, lam, mu, lam2mu, inv_M, wavelet, c):
         mats = (lam, mu, lam2mu, inv_M)
-        need_bwd = any(t.requires_grad for t in mats + (wavelet,))
+        need_bwd = need_backward(c)
         A = Alloc(wavelet.device, c["n_global"], c["nt"])
 
         def set_moduli(s):
@@ -431,7 +431,7 @@ class _SEMElasticVS3DAnisoC(torch.autograd.Function):
     Thomsen parameters through the class's ``thomsen_to_cij3d``."""
     @staticmethod
     def forward(ctx, cij, inv_M, wavelet, c):
-        need_bwd = any(t.requires_grad for t in (cij, inv_M, wavelet))
+        need_bwd = need_backward(c)
         A = Alloc(wavelet.device, c["n_global"], c["nt"])
 
         def set_moduli(s):
@@ -465,7 +465,7 @@ class _SEMViscoElasticVS3DC(torch.autograd.Function):
     @staticmethod
     def forward(ctx, lam, mu, lam2mu, ptau, mtau, inv_M, wavelet, c):
         mats = (lam, mu, lam2mu, ptau, mtau, inv_M)
-        need_bwd = any(t.requires_grad for t in mats + (wavelet,))
+        need_bwd = need_backward(c)
         E, m = c["n_elements"], c["ngll"] ** 3
         A = Alloc(wavelet.device, c["n_global"], c["nt"])
         L = int(ptau.shape[0])

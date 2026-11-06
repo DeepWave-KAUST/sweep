@@ -19,8 +19,8 @@ import torch
 
 from ..cdrive import (AC_CPML_FIELDS, EL_CPML_FLAT, Alloc, check_filled,
                       dd_grads, dims, fill, give, grads_or_none, illum_alloc,
-                      illum_receiver, illum_source, memory_mode, put, roll,
-                      swap, take)
+                      illum_receiver, illum_source, memory_mode,
+                      need_backward, put, roll, swap, take)
 
 _FS_CONSTS = ("ibool", "D", "wJ", "w1d", "ixx", "ixz", "iex", "iez",
               "ac_mask_e", "el_mask_e", "dirichlet_idx",
@@ -253,7 +253,7 @@ class _SEMFluidSolidC(torch.autograd.Function):
         B = int(c.get("B", 1))
         mats = (ac_inv_rho, ac_inv_M, ac_kappa, el_lam, el_mu, el_lam2mu,
                 el_inv_M, el_w_rho_J)
-        need_bwd = any(t.requires_grad for t in mats + (wavelet,))
+        need_bwd = need_backward(c)
         s = _fs_forward_input(c, mats, wavelet, memory_mode(c, need_bwd), B)
         seis_chi, seis_x, seis_z = _C.sem2d_fluid_solid_forward(s)
         part = illum_source(c, s.illum, B, c["n_global"])
@@ -307,7 +307,7 @@ class _SEMFluidSolidDDC(torch.autograd.Function):
     def forward(ctx, wavelet, parts, exchange, bs, *mats):
         import sweep._C as _C
         nt, K = parts[0].c["nt"], len(_FS_MATS)
-        need_bwd = wavelet.requires_grad or any(t.requires_grad for t in mats)
+        need_bwd = need_backward(parts[0].c)
         mode = memory_mode(parts[0].c, need_bwd)
         inps = [_fs_forward_input(p.c, mats[K * i:K * i + K], wavelet, mode)
                 for i, p in enumerate(parts)]
