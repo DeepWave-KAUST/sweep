@@ -327,11 +327,166 @@ and this project adheres to
   `test/sem/test_sem_spatial_receivers.py`, notebook `47_sem_receivers`.
 
 ### Changed
+- **`impl="eager"` on a 2-D grid on a GPU compiles its step with Inductor's
+  `cpp_wrapper` and `combo_kernels`.** The first generates the host code of each compiled call as
+  C++ instead of Python, the second launches the independent small kernels of a
+  graph as one; both shorten the host's time per call, which sets the pace of
+  a 2-D step of one shot. On an RTX 6000 Ada a gradient step under boundary
+  saving on a 2-D grid of 1000² cells was 1.10 (acoustic) and 1.21 (elastic)
+  times faster for one shot, 1.20 and 1.04 times for 8 shots, with the first
+  compile about 10 s longer; in 3-D they gained nothing (the elastic gradient
+  was 1 % slower) and stay off. Records and gradients stay those of the compile
+  without them bit for bit, except that `combo_kernels` moves gradients by
+  float32 round-off. They are on with Inductor for a 2-D grid on a CUDA device
+  from torch 2.9 (`cpp_wrapper` only where torch finds the CUDA toolkit, `CUDA_HOME`, and not
+  in the compile modes that replay CUDA graphs, which Inductor turns off for
+  it) and off elsewhere; the new
+  `EagerOptions(compile_cpp_wrapper=..., compile_combo_kernels=...)` turn
+  them on or off, and raise where they cannot take effect. A step whose C++
+  wrapper does not build compiles without it, with one warning, instead of
+  running uncompiled; PropSEM refuses both options. See
+  [Inductor options of the eager step](docs/user-guide/propagators.md#inductor-options).
 - **`impl=None` on a GPU runs the velocity-stress and Biot SEM classes on the CUDA
   kernels** (`ElasticVSSEM2DDeformed` and its VTI, TTI and visco-elastic variants, the
   3-D velocity-stress classes, the Biot classes), with `Ckpt(chunks=64)` as their default
   memory; they ran on eager. `return_wavefield=True` needs `impl='eager'` there, as on
   the other classes with kernels.
+- **One call of the compiled eager step advances several time steps
+  (`EagerOptions(steps_per_call=...)`).** A call costs the host its Dynamo
+  guards, autograd wrappers and kernel launches whatever it computes, and on a
+  2-D grid that took longer than the step on the GPU: at 1000² the GPU was busy
+  9-40% of the time. A call now runs `steps_per_call` steps with the source
+  injection and the receiver sampling inside, on the full-tape and checkpointed
+  rollouts; `None` (the default) takes 4 for rollouts with gradients on a 2-D
+  grid on a GPU and 1 otherwise. Without gradients Inductor fuses the steps of
+  a call into one another and, on a large grid, spends more GPU time than the
+  call saves the host (a 2000² acoustic forward ran twice as long per step),
+  so forwards keep one step a call unless `steps_per_call` is set. Calls start
+  on multiples of `steps_per_call`; the steps before
+  (until the inputs' `requires_grad` settles) and the last
+  `nt % steps_per_call` run uncompiled, so no graph is compiled for a
+  remainder, and a checkpoint chunk is rounded up to whole calls (boundary
+  saving: see the next entry). `return_wavefield=True` advances one step a
+  call; an explicit `steps_per_call > 1` is refused without `use_compile` and
+  on PropSEM. Records and gradients move by float32
+  round-off (~1e-6 relative). On an A100 and an RTX 6000 Ada a 2-D gradient
+  (acoustic, elastic) runs 1.8-3.1x faster at 1000² and 1.1-1.5x at 2000²;
+  its first compile takes 2-3x as long (11-19 s) and its peak memory grows
+  3-12% under checkpointing. The receivers are sampled inside the compiled
+  call at one step a call too (a one-shot 2-D forward at 1000² took 0.15
+  instead of 0.21 ms a step), except in a rollout with gradients on CPML
+  strips, the 3-D default, which compiles the step alone and samples them
+  after it as before: there the sampling inside made Inductor split the
+  step's backward into more full-grid kernels (a 160³ acoustic gradient took
+  2.95 instead of 2.62 ms a step on an RTX 6000 Ada). Records are the same
+  bit for bit either way. `torch.compiler.cudagraph_mark_step_begin()` is
+  called only in the compile modes that replay CUDA graphs. See
+  [Several time steps per compiled call](docs/user-guide/propagators.md#steps-per-call).
+- **Eager boundary saving takes `steps_per_call` steps a call too.** A call of
+  `k` steps (`_BoundarySaveSteps`) stores the `k` steps' boundary rings
+  together; its backward reconstructs the `k` inputs backwards in time and
+  differentiates the `k` steps in one compiled call, each step at its own
+  reconstructed input, so the gradient is autograd's and that of one step a
+  call up to float32 round-off (records bitwise and gradients within 9e-7
+  relative across Acoustic, Acoustic3D, Acoustic1st, Elastic, Elastic3D,
+  DASMu, DASMu3D and ElasticVRR when both run the same ops). The forward runs
+  the `k` steps as one graph, whatever the grid size. The default
+  `steps_per_call=None` gives 4 for 2-D gradient rollouts on
+  a GPU, as on the other rollouts. Peak memory grows with `k` (1000^2
+  acoustic, 8 shots: 1.5 GB at `k = 1`, 2.5 GB at `k = 4`, 1.3 GB at `k = 4`
+  with `cpml_strips=True`). On a 2-D grid the backward's reconstruction and
+  re-run are one compiled call (2-10% faster there; on a 160^3 elastic grid
+  one call ran 2-3x slower, so 3-D keeps two). On an RTX 6000 Ada at 1000^2,
+  boundary saving on both sides and the stencil change below included, a 2-D
+  gradient ran 3.6x faster at one shot (acoustic 1.83 to 0.50 ms a step,
+  elastic 3.34 to 0.92) and 1.2-1.4x at 4-8 shots; with `cpml_strips=True`
+  from 4 shots, 2.4-2.5x (acoustic) and 1.65x (elastic), within 1.71x and
+  1.21x of `impl='c'` at 8 shots. A 160^3 gradient with `steps_per_call=2`
+  ran 1.45x (acoustic) and 1.56x (elastic) faster than before. The first
+  compile of a gradient takes 45-150 s. Previously an explicit
+  `steps_per_call > 1` was refused with boundary saving.
+- **The compiled slice stencils differentiate as their transpose.** The
+  zero-padded correlation that `torch.compile`d eager steps evaluate
+  (`sweep.operators.torch._apply_taps`) is an `autograd.Function` whose
+  derivative is the same correlation with the offsets negated, gathered on the
+  field's own grid, instead of autograd's `slice_backward` per tap into a
+  padded zero buffer that Inductor could not fuse. The gradient moves by
+  float32 round-off; second derivatives go through the same form and
+  `torch.func.vmap` still applies (there is no forward-mode rule: Dynamo
+  cannot trace a custom `jvp`). An 8-shot 1000^2 boundary-saving gradient with
+  CPML strips ran 1.12x (acoustic) and 1.20x (elastic) faster (RTX 6000 Ada).
+- **3-D eager runs keep the CPML memory fields on the absorbing strips by
+  default.** `EagerOptions(cpml_strips=None)`, the new default, picks the strips
+  on a 3-D grid and the full grid on a 2-D one or with `topography=`;
+  `True`/`False` force a layout, and `True` with `topography=` now raises at
+  construction. The strips cut a forward's peak memory by about a third
+  (`abcn=50`, A100: `Acoustic3D` 1.08 to 0.76 GiB at 128^3 inner cells,
+  `Elastic3D` 3.99 to 2.59), boundary saving's by 18-32% and checkpointing's,
+  the eager default, by 3-9%.
+  Their speed depends on the share of the grid the layers take, since each
+  strip adds kernels: with `abcn=50` the acoustic forward is faster from about
+  128^3 inner cells (0.69-0.92x the full-grid time per step on A100 and V100)
+  and its gradient from about 160^3 (0.88-0.96x), while smaller grids and the
+  elastic gradients run 5-50% slower; pass `cpml_strips=False` there. In 2-D,
+  where a step of 1000^2 cells is launch-bound, the strips cost more than they
+  save and stay off by default; a 2-D gradient of about 3 million cells a call
+  (shots x padded grid cells) or more runs faster with `cpml_strips=True`
+  (measured in the user guide, *C-PML memory fields on the absorbing strips*).
+- Snapshots (`return_wavefield=True`) and `last_wavefields` hold full-grid
+  fields under CPML strips too: the strips are put back in place, and
+  uncompiled the fields equal the full-grid layout's bit for bit.
+  `return_wavefield=True` with strips used to raise.
+- Staggered CPML strips add the new memory field to the derivative zero-padded
+  instead of replacing the derivative on the strips with a `where`, so the
+  step's main kernel reads the strips back instead of retaking the derivative
+  on them. Inductor had fused that retake into one kernel of 171 loads for the
+  order-8 `Elastic3D`: its forward with strips took 10.4 ms of GPU time per step
+  against 1.2 ms on the full grid (A100, 64^3 inner cells), now 1.65 ms; on a
+  V100 the wall time went from 7.9x to 0.97x the full grid's. The order-4
+  forward is 8-12% faster too. The second-order strips read their inner-cell
+  mask as a constant built with the layout, not one built in every step.
+- **Uncompiled eager rollouts keep far fewer fields for the backward.** A conv's
+  autograd node saves its input, which only the kernel's gradient reads, and the
+  stencil kernels are constants. The uncompiled stencils (`apply_kernels`,
+  `apply_kernels_3d`, `separable_d2_2d`/`3d`, the kernel path of `gradient`) now
+  run through an autograd Function that keeps the kernel alone; its backward is
+  the transposed conv with the same kernel and padding, the call the conv's own
+  backward makes, so records and gradients are bitwise those of before, on every
+  eager equation, CPU and CUDA, forward mode included; second derivatives as
+  well, or within float round-off where the conv's double backward sums in
+  another order (a GitHub CPU runner, float64).
+  Fields kept per time step: 2-D Acoustic 5 -> 2, Elastic 13 -> 8, AcousticVTI
+  7 -> 5, ViscoElastic 20 -> 15, Elastic with a free surface 24 -> 12; 3-D
+  Elastic 28 -> 19. A 1000x1000 full-tape gradient (V100) peaks at 2.8 GB
+  instead of 6.8 (Acoustic) and 10.9 GB instead of 17.6 (Elastic), and takes as
+  long as before or up to 5% less there. Where the step is bound by host overhead
+  (2-D 1000x1000 on an RTX 6000 Ada) the acoustic equations run 7-11% faster
+  (`gradient` lost four CopySlices nodes) and the staggered-grid elastic ones
+  (Elastic, DAS) 12-14% slower: each derivative is now a Python autograd node,
+  ~25 us more host time per call than the conv's. A second derivative
+  (`create_graph=True`) no longer runs cuDNN's weight-gradient kernels, which
+  the conv's own double backward did: a Hessian-vector product on 2-D Acoustic
+  (100x200, 4 shots, V100) takes 6.0 ms a step instead of 84. Compiled steps
+  (the slice form) and runs without gradients are unchanged; `ElasticTTI`'s
+  rotated-staggered-grid derivative keeps the plain conv.
+  `sweep.operators.torch.STENCIL_BACKWARD_KEEPS_KERNEL_ONLY = False` restores
+  the plain conv everywhere.
+- **An uncompiled eager rollout makes the step's time-invariant coefficients
+  once.** `dt / rho`, `vp**2 * dt**2`, `dt * mu`, the VRZ/VRR first-derivative
+  coefficients, the free-surface Robertsson factors and the like depend on the
+  models and `dt` alone; recomputed every step, each was a new field that the
+  product reading it kept for the backward. The full-tape and checkpointed
+  rollouts now hand the step a dict in which they are made once (per rollout,
+  per checkpointed chunk); every eager equation that had such coefficients
+  takes it (all but the qP family, which has none). Records are bitwise the
+  same; gradients move by rounding (at most 2e-6 of their maximum across 60
+  cases, second derivatives included). Fields kept per time step, on top of
+  the stencil change above: 2-D Acoustic 2 -> 1, Elastic 8 -> 5 (12 -> 5 with a
+  free surface), ElasticVRR 26 -> 6, AcousticVRZ 14 -> 4, DASZhao 10 -> 4,
+  ViscoElastic 15 -> 6; 3-D Elastic 19 -> 10. Compiled steps and boundary
+  saving compute the coefficients in place, as before. An equation opts in
+  with `takes_invariants = True` and `sweep.equations._invariants.once`;
+  `sweep.propagator._torch_eager.HOIST_INVARIANTS = False` turns it off.
 - The CPU test workflow runs as four parallel jobs (`sem-biot`, `sem`,
   `rest`, `skill`), each with its own executed-test floor, instead of one
   job.
@@ -503,6 +658,17 @@ and this project adheres to
   `AcousticSEM3DDeformed` at 97^3 on an A100: 12.6 -> 2.7 ms per step forward and
   27.0 -> 8.6 forward + backward, from 24x the CUDA kernels to 5.5x. Records and
   gradients unchanged to fp32 round-off; the other classes keep the unrolled form.
+- **Eager boundary saving saves no boundary on a call without gradients.** A
+  call autograd does not record (grad mode off, or no model or wavelet
+  requiring grad: a line search, forward modelling) has no backward pass; under
+  `memory=BoundarySaving()` it now runs the plain forward steps, as `Full()`
+  and `Ckpt()` do and as `impl='c'` does, instead of saving every step's
+  boundary ring into storage sized for the whole rollout. Its record is
+  `Full()`'s bit for bit, and it runs as fast: on an A100 at 1000^2 cells and
+  1000 steps 1.1x (elastic, 8 shots: 0.94 to 0.82 ms a step) to 2.3x (elastic,
+  one shot: 0.65 to 0.28) faster than before, and the peak memory of an 8-shot
+  elastic call fell from 2.3 to 0.96 GB. `return_wavefield=True` still raises
+  under boundary saving.
 - `PropSEM(impl=None, memory=BoundarySaving())` runs on eager where the CUDA
   kernels have no boundary saving (`ElasticVSSEM3D`, `ElasticSEM3D`,
   `ElasticSEM3DDeformed`, the 2-D paths without their C-PML) instead of
@@ -539,6 +705,11 @@ and this project adheres to
   source encoding, in the multi-shot rollout and compiled; with a bf16 or int8
   ring 4-16x closer to the full tape than before. `impl='c'` was not affected
   (its ring is read at the right level).
+- The custom-gradient forward (`register_gradient`) on the eager propagator
+  read its receivers from the wrong field under CPML strips when the receiver
+  field comes after strip-held fields, as `sh1` does in `AcousticBorn` and
+  `AcousticBorn3D`: the record came out zero. It steps full-grid fields, so it
+  now finds them by name instead of by their position in the strip-held state.
 - `PropSEM(memory=BoundarySaving(), bs_band_mode='rim')` gives the full-tape
   gradient over the whole model, its edge included. The rim was meant to be
   the band's inner edge, but the C-PML derivative profiles (`dbx_dx` ...,

@@ -9,6 +9,7 @@ from .elastic_tti import ElasticTTI
 from .fields import FieldSpec, ModelSpec
 from ._registry import register_equation
 from ._cpml import cpml_update
+from ._invariants import once
 
 
 # Full 21-component Voigt upper triangle produced by the 3-D Bond rotation.
@@ -49,6 +50,7 @@ def step(
     C66,
     dt, h, b, pd,
     pml=None,
+    invariants=None,
 ):
     """One axis-aligned staggered-grid 3-D elastic-TTI step.
 
@@ -93,9 +95,9 @@ def step(
 
     dsyz_dy, m_syzy = cpml_update(dsyz_dy, m_syzy, ay, by, (syz, pd.kyb, pd._spacing["y"]))
 
-    vx = vx + dt / rho * (dsxx_dx + dsxy_dy + dsxz_dz)
-    vy = vy + dt / rho * (dsxy_dx + dsyy_dy + dsyz_dz)
-    vz = vz + dt / rho * (dsxz_dx + dsyz_dy + dszz_dz)
+    vx = vx + once(invariants, "dt/rho", lambda: dt / rho) * (dsxx_dx + dsxy_dy + dsxz_dz)
+    vy = vy + once(invariants, "dt/rho", lambda: dt / rho) * (dsxy_dx + dsyy_dy + dsyz_dz)
+    vz = vz + once(invariants, "dt/rho", lambda: dt / rho) * (dsxz_dx + dsyz_dy + dszz_dz)
 
     dvx_dx = pd.x_backward(vx)
     dvx_dy = pd.y_forward(vx)
@@ -176,6 +178,7 @@ class ElasticTTISG3D(FirstOrderEquation):
 
     prepare_models_for_c = True
     default_pml_type = "cpmls"
+    takes_invariants = True
 
     C_NAME = "elastic_tti_sg3d"
     # No ``elastic_tti_sg3d_backward_recursive_ckpt`` binding is compiled for this

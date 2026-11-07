@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .base import FirstOrderEquation
+from ._invariants import once
 from .fields import FieldSpec, ModelSpec
 from .utils import to_backend
 from sweep.operators.rsg import RSGDerivative
@@ -71,6 +72,7 @@ def step(
     rsg,
     pml=None,
     free_surface=False,   # accepted for signature parity; refused below
+    invariants=None,
 ):
     """One RSG elastic-TTI step.
 
@@ -116,9 +118,9 @@ def step(
     dsxz_dx = dsxz_dx + m_txzx
     dszz_dz = dszz_dz + m_tzzz
 
-    vx = vx + (dt / rho) * (dsxx_dx + dsxz_dz)
-    vy = vy + (dt / rho) * (dsxy_dx + dsyz_dz)
-    vz = vz + (dt / rho) * (dsxz_dx + dszz_dz)
+    vx = vx + once(invariants, "dt/rho", lambda: dt / rho) * (dsxx_dx + dsxz_dz)
+    vy = vy + once(invariants, "dt/rho", lambda: dt / rho) * (dsxy_dx + dsyz_dz)
+    vz = vz + once(invariants, "dt/rho", lambda: dt / rho) * (dsxz_dx + dszz_dz)
 
     dvx_dx = rsg.lx_fwd(vx)
     dvy_dx = rsg.lx_fwd(vy)
@@ -234,6 +236,7 @@ class ElasticTTI(FirstOrderEquation):
     )
 
     default_pml_type = "cpmlr"
+    takes_invariants = True
 
     def __init__(self, spatial_order=8, device="cpu", backend="torch",
                  checkerboard_smoothing=True):

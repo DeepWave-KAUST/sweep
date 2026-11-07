@@ -1,3 +1,5 @@
+import functools
+import os
 import types
 import warnings
 import weakref
@@ -9,9 +11,9 @@ from torch.utils.checkpoint import checkpoint as ckpt_torch
 from sweep._compile import (SettledSteps as _SettledSteps, compile_notice,
                             compiler_failures as _compiler_failures, compiler_hint, failure_reason)
 from sweep.propagator.base import PropBase
-from sweep.propagator.options import EAGER_DEFAULTS
+from sweep.propagator.options import EAGER_DEFAULTS, _check_steps_per_call
 from sweep.equations._cpml import StripLayout
-from sweep.receivers.torch import ReceiverTorch
+from sweep.receivers.torch import ReceiverTorch, gather_flat
 from sweep.sources.torch import SourceTorch, scatter_source
 from sweep.utils.torch import EdgePadding
 from sweep.propagator._eager_boundary_saving import _EagerBoundarySavingMixin
@@ -24,6 +26,11 @@ _NO_COMPILE_WARNED = False
 # Compiling inside a checkpointed forward breaks its recompute before torch 2.5
 # (see _rollout_ckpt).
 CKPT_PLAIN_WARMUP = torch.__version__ < (2, 5)
+
+# An uncompiled rollout makes the step's time-invariant coefficients once
+# (``sweep.equations._invariants``).  A/B switch: False recomputes them every
+# step, as compiled steps do.
+HOIST_INVARIANTS = True
 
 # torch 2.2 keeps the table of compiled backends per thread.  When the autograd
 # thread runs a compiled step (a checkpoint recompute, the boundary-saving
@@ -44,6 +51,40 @@ OWN_CODE_PER_COMPILE = (2, 2) <= torch.__version__ < (2, 3)
 # that off, so on CPU the step runs uncompiled.
 INDUCTOR_23 = (2, 3) <= torch.__version__ < (2, 4)
 
+# Two Inductor options the step compiles with on a 2-D grid on a CUDA device
+# from torch 2.9, the version they were measured on, cpp_wrapper where torch
+# finds the CUDA toolkit (EagerOptions(compile_cpp_wrapper=...,
+# compile_combo_kernels=...) override it: see _resolve_inductor_extras).  On a
+# 2-D grid the host time of each compiled call sets the pace, and both cut it
+# (a gradient step 1.04-1.21 times faster on an RTX 6000 Ada at 1000^2 under
+# boundary saving); a 3-D step keeps the GPU busy, and there they gained
+# nothing (combo_kernels made the elastic gradient 1.5 % slower).  cpp_wrapper
+# generates the host code of a call (allocations, kernel launches) as C++
+# instead of Python: the same kernels, so the same results bit for bit.
+# combo_kernels launches the independent small kernels of a graph (C-PML
+# strips, source, receivers, boundary ring) as one: results the same up to
+# float32 round-off.
+INDUCTOR_EXTRAS_DEFAULT = torch.__version__ >= (2, 9)
+# The order in which a step that does not compile drops them: a C++ wrapper
+# is built with a C++ compiler against the CUDA toolkit (see _cuda_toolkit).
+INDUCTOR_EXTRAS = ("cpp_wrapper", "combo_kernels")
+
+# Device types on which Inductor could not build a step's C++ wrapper in this
+# process, with the error: later compiles there go without it at once instead
+# of failing again (each failure costs the lowering of the graph).
+_CPP_WRAPPER_FAILED: dict = {}
+_COMBO_FAILED_WARNED = False
+
+
+def _takes_invariants(equation):
+    """Whether the class that defines the equation's ``func`` declares
+    ``takes_invariants`` itself: a subclass that overrides ``func`` is not
+    handed the dict unless it says it takes it."""
+    for cls in type(equation).__mro__:
+        if "func" in vars(cls):
+            return bool(vars(cls).get("takes_invariants", False))
+    return False
+
 
 def _with_own_code(fn):
     """``fn`` (or a bound method) with a fresh code object, for torch.compile
@@ -60,13 +101,130 @@ def _with_own_code(fn):
     return own
 
 
-def _no_buffer_reuse(mode, dynamic):
-    """Inductor options for ``mode`` with buffer reuse off (see INDUCTOR_23).
-    torch.compile takes a mode or options, not both, so the mode is spelt out."""
+def _mode_options(mode, dynamic):
+    """The Inductor options ``mode`` stands for.  torch.compile takes a mode or
+    options, not both, so a compile that adds options spells the mode out."""
     from torch._inductor import list_mode_options
-    options = {} if mode in (None, "default") else dict(list_mode_options(mode, dynamic))
-    options["allow_buffer_reuse"] = False
-    return options
+    return {} if mode in (None, "default") else dict(list_mode_options(mode, dynamic))
+
+
+def _no_buffer_reuse(mode, dynamic):
+    """Inductor options for ``mode`` with buffer reuse off (see INDUCTOR_23)."""
+    return {**_mode_options(mode, dynamic), "allow_buffer_reuse": False}
+
+
+@functools.lru_cache(maxsize=None)
+def _cuda_toolkit():
+    """Whether torch finds the CUDA toolkit Inductor builds a C++ wrapper
+    against: ``torch.utils.cpp_extension.CUDA_HOME`` ($CUDA_HOME or $CUDA_PATH,
+    else the nvcc on the PATH, else /usr/local/cuda) with ``include/cuda.h``.
+    Without it the build fails ("CUDA_HOME environment variable is not set";
+    "cuda.h: No such file or directory" with CUDA_HOME at a conda environment,
+    whose CUDA packages keep their headers under targets/x86_64-linux), so the
+    default leaves the wrapper out instead of failing once in every process."""
+    try:
+        from torch.utils.cpp_extension import CUDA_HOME
+    except Exception:           # e.g. a torch without its build tools
+        return False
+    return bool(CUDA_HOME) and os.path.exists(os.path.join(CUDA_HOME, "include", "cuda.h"))
+
+
+def _cpp_wrapper_companions():
+    """The Inductor settings torch puts next to a C++ wrapper (its
+    ``get_cpp_wrapper_config``: kernel configs picked at compile time, cubins
+    kept, no CUDA graphs).  torch.compile applies its options to every graph it
+    compiles, but torch 2.9 adds these to a backward graph -- compiled when
+    autograd first runs it, after the forward -- only when the wrapper is on in
+    the global config: with the option alone, generating that backward fails
+    ("CudaKernelParamCache not populated").  Passed with the option, they reach
+    the backward too; the forward graphs get them either way."""
+    try:
+        from torch._inductor.compile_fx import get_cpp_wrapper_config
+    except ImportError:
+        return {}
+    return dict(get_cpp_wrapper_config())
+
+
+def _compile_kwargs(mode, dynamic, fullgraph, backend, extras):
+    """torch.compile's keywords for the step: the EagerOptions settings, with
+    the Inductor ``extras`` (see INDUCTOR_EXTRAS) and torch 2.3's buffer-reuse
+    fix as options.  Without either, the mode is passed as it is."""
+    kwargs = {"mode": mode, "dynamic": dynamic, "fullgraph": fullgraph}
+    if backend is not None:
+        kwargs["backend"] = backend
+    options = {**_cpp_wrapper_companions(), **extras} if extras.get("cpp_wrapper") else dict(extras)
+    if INDUCTOR_23 and backend in (None, "inductor"):
+        options["allow_buffer_reuse"] = False
+    if options:
+        kwargs["options"] = {**_mode_options(kwargs.pop("mode"), dynamic), **options}
+    return kwargs
+
+
+def _warn_extras_dropped(dropped, exc, device_type, what):
+    """A step compiled once the Inductor options ``dropped`` were taken out of
+    its compile, the last of them after ``exc``: say so, once per process for
+    each option.  A C++ wrapper that does not build is the environment's doing,
+    so it is remembered for the device type (see _CPP_WRAPPER_FAILED)."""
+    global _COMBO_FAILED_WARNED
+    if dropped[-1] == "cpp_wrapper":
+        if device_type in _CPP_WRAPPER_FAILED:
+            return
+        _CPP_WRAPPER_FAILED[device_type] = exc
+        warnings.warn(
+            f"Inductor could not build the C++ wrapper of {what} on {device_type} "
+            f"({type(exc).__name__}: {failure_reason(exc)}); the step compiles with the "
+            "Python wrapper instead, as do the later compiles of this process. That gives the "
+            "same result and is slower when the host sets the pace (one shot on a 2-D grid). "
+            "A C++ wrapper is built with a C++ compiler (torch._inductor.config.cpp.cxx, "
+            "seeded from $CXX) against the CUDA toolkit under $CUDA_HOME. Pass "
+            "eager_options=EagerOptions(compile_cpp_wrapper=False) to skip the attempt.",
+            RuntimeWarning, stacklevel=3)
+    elif not _COMBO_FAILED_WARNED:
+        _COMBO_FAILED_WARNED = True
+        warnings.warn(
+            f"torch.compile could not build {what} on {device_type} with Inductor's "
+            f"combo_kernels ({type(exc).__name__}: {failure_reason(exc)}); it compiles the "
+            f"step without {' and '.join(dropped)} instead, which is slower when the host sets "
+            "the pace and gives the same result up to float32 round-off. Pass "
+            "eager_options=EagerOptions(compile_combo_kernels=False) to skip the attempt.",
+            RuntimeWarning, stacklevel=3)
+
+
+def _record_column(fields, at, taps, footprint, batch, nrec):
+    """One record column, ``(batch, nrec, len(at))``: the receivers sampled in
+    ``fields[k]`` for each ``k`` in ``at`` (``ReceiverTorch.step_args`` gives
+    ``taps`` and ``footprint``)."""
+    if len(at) > 1:
+        return torch.stack([gather_flat(fields[k], taps, footprint) for k in at],
+                           dim=-1).view(batch, nrec, len(at))
+    return gather_flat(fields[at[0]], taps, footprint).view(batch, nrec).unsqueeze(-1)
+
+
+def _default_steps_per_call(ndim, dev, records):
+    """``EagerOptions(steps_per_call=None)``: 4 for a rollout autograd records
+    (``records``) on a 2-D grid on a GPU, else 1.  A compiled call costs the
+    host 0.2-0.5 ms (guards, wrappers, launches) whatever it computes, which on
+    a 2-D grid outlasts the step on the GPU.  Without gradients, though,
+    Inductor fuses the steps of a call into one another: rather than write a
+    step's fields (the CPML memory fields first) it stores derivatives and
+    recomputes the fields from them in the next step, which doubled the GPU
+    time of a 2000^2 acoustic step; with gradients the fields are saved for the
+    backward anyway, and the step runs as fast as one step a call.  A 3-D step
+    keeps the GPU busy on its own, and on a CPU the compute dwarfs the
+    overhead: there more steps a call would only lengthen the compile."""
+    return 4 if records and ndim == 2 and "cuda" in str(dev) else 1
+
+
+def _uses_cudagraphs(mode, dynamic):
+    """Whether torch.compile's ``mode`` replays the step as CUDA graphs, whose
+    trees want each call marked (reduce-overhead, max-autotune)."""
+    if mode in (None, "default"):
+        return False
+    try:
+        from torch._inductor import list_mode_options
+        return bool(list_mode_options(mode, dynamic).get("triton.cudagraphs", False))
+    except Exception:           # an unknown mode or torch: mark, as always before
+        return True
 
 
 def _raise_dynamo_recompile_limit(target=32):
@@ -111,9 +269,14 @@ class _PropTorchEager(
         self.compile_mode = kwargs.pop("compile_mode", EAGER_DEFAULTS.compile_mode)
         self.compile_dynamic = kwargs.pop("compile_dynamic", EAGER_DEFAULTS.compile_dynamic)
         self.compile_fullgraph = kwargs.pop("compile_fullgraph", EAGER_DEFAULTS.compile_fullgraph)
+        self.compile_cpp_wrapper = kwargs.pop("compile_cpp_wrapper", EAGER_DEFAULTS.compile_cpp_wrapper)
+        self.compile_combo_kernels = kwargs.pop("compile_combo_kernels", EAGER_DEFAULTS.compile_combo_kernels)
         self.cpml_strips = kwargs.pop("cpml_strips", EAGER_DEFAULTS.cpml_strips)
+        self.steps_per_call = _check_steps_per_call(
+            kwargs.pop("steps_per_call", EAGER_DEFAULTS.steps_per_call), self.use_compile)
         torch.nn.Module.__init__(self)
         super().__init__(*args, **kwargs)
+        self._inductor_extras = self._resolve_inductor_extras()
 
         self.register_buffer("dt", torch.tensor(self._dt, device=self.dev, dtype=torch.float32))
         self.register_buffer("dh", torch.tensor(self._grid_spacing, device=self.dev, dtype=torch.float32))
@@ -122,9 +285,7 @@ class _PropTorchEager(
         self.source_indices = [self.wavefield_names.index(name) for name in self.source_type]
         self.receiver_indices = [self.wavefield_names.index(name) for name in self.receiver_type]
         # CPML strips: the eager state holds a strip-held field as its two strips.
-        self._strips = StripLayout(self.equation) if self.cpml_strips else None
-        if self._strips is not None and len(self._strips) == len(self.wavefield_names):
-            self._strips = None                     # no field to strip
+        self._strips = self._strip_layout()
         if self._strips is not None:
             self.source_indices = [self._strips.slots(k)[0] for k in self.source_indices]
             self.receiver_indices = [self._strips.slots(k)[0] for k in self.receiver_indices]
@@ -134,7 +295,40 @@ class _PropTorchEager(
         #   {param_name: (imaging_fn, mode)}  with mode in {"gradient", "imaging"}
         self._custom_gradients = {}
         self._plain_step_func = self._build_step_func()
-        self.step_func = self._maybe_compile(self._plain_step_func)
+        self._plain_steps_func = self._build_steps_func(self._plain_step_func)
+        self._steps_funcs = {}          # steps per call -> its compiled steps_func
+        self._step_alone = None         # the compiled step alone (_step_alone_fn)
+        self._mark_steps = (self.use_compile and "cuda" in str(self.dev)
+                            and _uses_cudagraphs(self.compile_mode, self.compile_dynamic))
+
+    def _strip_layout(self):
+        """The eager state's layout: a ``StripLayout`` when the CPML memory fields
+        are kept on the absorbing strips, else None. ``cpml_strips=None`` decides
+        by grid: strips in 3-D, the full grid in 2-D (a medium 2-D step is
+        launch-bound, and the strips' extra kernels cost more than they save) and
+        with topography (its staircase is applied to full-grid fields). Decided
+        here, before the CPML profiles exist, so the number of state tensors and
+        their positions do not depend on the strip widths."""
+        topography = getattr(self, "_topo_rows_runtime", None) is not None
+        strips = self.cpml_strips
+        if strips is None:
+            strips = self.ndim == 3 and not topography
+        if not strips:
+            return None
+        layout = StripLayout(self.equation)
+        if len(layout) == len(self.wavefield_names):
+            return None                             # no field to strip
+        if topography:
+            raise NotImplementedError(
+                "EagerOptions(cpml_strips=True) with topography=: the staircase is applied to "
+                "full-grid fields. Leave cpml_strips unset (the default keeps the full grid "
+                "with topography) or pass False.")
+        return layout
+
+    def _full_wavefields(self, wavefield):
+        """The eager state as one full-grid tensor per wavefield, in wavefield
+        order (a strip-held field with its strips put back in place)."""
+        return list(wavefield) if self._strips is None else self._strips.full_fields(wavefield)
 
     def _as_device_tensor(self, value, *, dtype):
         if isinstance(value, torch.Tensor):
@@ -156,7 +350,7 @@ class _PropTorchEager(
         num_wavefields = len(self.wavefield_names) if strips is None else len(strips)
         source_indices = tuple(self.source_indices)
 
-        def step_func(*flat_args, source=None):
+        def step_func(*flat_args, source=None, invariants=None):
             wavefields = flat_args[:num_wavefields]
             models = flat_args[num_wavefields:-3]
             dt, h, b = flat_args[-3:]
@@ -164,7 +358,10 @@ class _PropTorchEager(
             # before torch 2.4 cannot call a bound method held in a closure.
             if strips is not None:
                 wavefields = strips.group(wavefields)
-            out = equation.func(wavefields, models, dt, h, b)
+            if invariants is None:
+                out = equation.func(wavefields, models, dt, h, b)
+            else:
+                out = equation.func(wavefields, models, dt, h, b, invariants=invariants)
             if strips is not None:
                 out = strips.flatten(out)
             if source is None:
@@ -178,7 +375,33 @@ class _PropTorchEager(
 
         return step_func
 
-    def _maybe_compile(self, fn):
+    def _build_steps_func(self, step):
+        """``steps_func(fields, models, dt, h, b, samples, source, receivers)``
+        runs one ``step`` (``_build_step_func``) per wavelet sample in
+        ``samples``, its source injected (``source`` is the rest of
+        ``SourceTorch.step_args``) and then the receivers sampled
+        (``receivers``: ``ReceiverTorch.step_args``, batch, nrec).  Returns the
+        fields after the last step and the record columns stacked,
+        ``(B, len(samples), nrec, len(receiver_type))``.
+
+        Compiled, one call advances ``len(samples)`` steps, the sampling
+        included: a call costs the host guards, wrappers and launches whatever
+        it computes, which on a 2-D grid outlasts the step on the GPU."""
+        at = tuple(self.receiver_indices)
+
+        def steps_func(fields, models, dt, h, b, samples, source, receivers, invariants=None):
+            columns = []
+            for sample in samples:
+                if invariants is None:
+                    fields = step(*fields, *models, dt, h, b, source=(sample, *source))
+                else:
+                    fields = step(*fields, *models, dt, h, b, source=(sample, *source), invariants=invariants)
+                columns.append(_record_column(fields, at, *receivers))
+            return tuple(fields), torch.stack(columns, dim=1)
+
+        return steps_func
+
+    def _maybe_compile(self, fn, what=None):
         """``torch.compile`` *fn* with the propagator's compile settings, after
         raising Dynamo's recompile limit.  Dynamo specializes the step on
         per-tensor metadata, ``requires_grad`` included, and the graphs of every
@@ -186,15 +409,27 @@ class _PropTorchEager(
         the default cap of 8 it silently falls back to eager.  (A rollout runs
         its first steps, while the wavefields' ``requires_grad`` still changes,
         uncompiled: see ``_SettledSteps``.)  Returns *fn* unchanged when
-        compilation is off.  Shared by the full-tape step and the eager
-        boundary-saving step.
+        compilation is off.  Shared by the full-tape and checkpointed steps
+        (``_steps_fn``) and the eager boundary-saving step; ``what`` names the
+        compile in its notice (default: "the <Equation> step").
+
+        The compile adds the Inductor options of ``_resolve_inductor_extras``
+        (by default for a 2-D grid on a CUDA device: cpp_wrapper and
+        combo_kernels, see INDUCTOR_EXTRAS).
 
         The compiled step is wrapped so that a compiler that cannot build it
         (Inductor's CPU backend needs g++ >= 10, for one) costs speed, not the
         run: the step is a pure function of its arguments, so the failing call
-        is repeated uncompiled, and so is every later one.  On torch 2.3,
-        Inductor runs with buffer reuse off, and not at all on CPU
-        (INDUCTOR_23)."""
+        is repeated.  First compiled again without those options, one at a
+        time in the order of INDUCTOR_EXTRAS (a C++ wrapper that does not build
+        is then left out of every later compile on the device type: see
+        _CPP_WRAPPER_FAILED); with none left, uncompiled, and so is every later
+        call.  A graph Inductor compiles while autograd runs the backward pass
+        (that of a step that records) fails there, out of this wrapper's reach;
+        the forward graph of the same step compiles first, with the same
+        options and toolchain, and meets a failing C++ compiler before it.
+        On torch 2.3, Inductor runs with buffer reuse off, and not at all on
+        CPU (INDUCTOR_23)."""
         if not self.use_compile:
             return fn
         if not hasattr(torch, "compile"):
@@ -206,16 +441,14 @@ class _PropTorchEager(
                              "(fixed in torch 2.4)")
             return fn
         _raise_dynamo_recompile_limit()
-        compile_kwargs = {
-            "mode": self.compile_mode,
-            "dynamic": self.compile_dynamic,
-            "fullgraph": self.compile_fullgraph,
-        }
-        if self.compile_backend is not None:
-            compile_kwargs["backend"] = self.compile_backend
-        if INDUCTOR_23 and inductor:
-            compile_kwargs["options"] = _no_buffer_reuse(compile_kwargs.pop("mode"), self.compile_dynamic)
-        compiled = torch.compile(_with_own_code(fn) if OWN_CODE_PER_COMPILE else fn, **compile_kwargs)
+        settings = (self.compile_mode, self.compile_dynamic, self.compile_fullgraph, self.compile_backend)
+        device_type = "cuda" if "cuda" in str(self.dev) else "cpu"
+        what = what or f"the {type(self.equation).__name__} step"
+        extras = dict(self._inductor_extras)
+        if extras.get("cpp_wrapper") and device_type in _CPP_WRAPPER_FAILED:
+            del extras["cpp_wrapper"]            # it did not build here before: warned then
+        target = _with_own_code(fn) if OWN_CODE_PER_COMPILE else fn
+        compiled = torch.compile(target, **_compile_kwargs(*settings, extras))
         # Weak: the step ends up inside autograd graphs (the eager boundary-
         # saving Function keeps it in its ctx) that tensors cached on this
         # propagator keep alive.  A strong reference closes a cycle through the
@@ -228,11 +461,12 @@ class _PropTorchEager(
         # models are arguments of the step, and _SettledSteps keeps one set of flags
         # per rollout, so the notice repeats a line only for a new compile.
         grid = "x".join(str(n) for n in self._shape_phys)
-        notice = compile_notice(f"the {type(self.equation).__name__} step",
+        notice = compile_notice(what,
                                 lambda shape: f"{shape[0]} shots on a {grid} grid"
                                 if shape and shape[0] > 1 else f"a {grid} grid")
 
         def step(*args, **kwargs):
+            nonlocal compiled, extras
             prop = owner()
             if prop is not None and not prop.use_compile:
                 return fn(*args, **kwargs)
@@ -240,11 +474,85 @@ class _PropTorchEager(
             try:
                 return compiled(*args, **kwargs)
             except _compiler_failures() as exc:
-                if prop is not None:
-                    prop._disable_compile(exc)
-                return fn(*args, **kwargs)
+                failure = exc
+            dropped = []
+            while True:
+                name = next((n for n in INDUCTOR_EXTRAS if extras.get(n)), None)
+                if name is None:
+                    if prop is not None:
+                        prop._disable_compile(failure)
+                    return fn(*args, **kwargs)
+                dropped.append(name)
+                extras = {k: v for k, v in extras.items() if k != name}
+                compiled = torch.compile(target, **_compile_kwargs(*settings, extras))
+                try:
+                    out = compiled(*args, **kwargs)
+                except _compiler_failures() as exc:
+                    failure = exc
+                    continue
+                _warn_extras_dropped(dropped, failure, device_type, what)
+                return out
 
         return step
+
+    def _resolve_inductor_extras(self):
+        """The Inductor options ``EagerOptions(compile_cpp_wrapper=...,
+        compile_combo_kernels=...)`` add to the step's compile, as
+        ``{option: bool}`` (see INDUCTOR_EXTRAS).  ``None`` takes the default:
+        both on with Inductor for a 2-D grid on a CUDA device from torch 2.9,
+        cpp_wrapper only in a compile mode without CUDA graphs and where torch
+        finds the CUDA toolkit (_cuda_toolkit); elsewhere (3-D among them)
+        nothing is added and the step compiles as before.  The default looks at
+        the dimension, the device, the backend, the mode, the torch version and
+        the toolkit only, never at the grid's size or the shots.  An explicit
+        value the compile would not use raises."""
+        asked = {"cpp_wrapper": self.compile_cpp_wrapper,
+                 "combo_kernels": self.compile_combo_kernels}
+        explicit = {name: value for name, value in asked.items() if value is not None}
+        spelt = ", ".join(f"compile_{name}={value!r}" for name, value in explicit.items())
+        inductor = self.compile_backend in (None, "inductor")
+        if explicit and not self.use_compile:
+            raise ValueError(
+                f"EagerOptions({spelt}) sets an Inductor option of the compiled step, and "
+                "use_compile=False compiles nothing: drop it, or compile the step.")
+        if explicit and not inductor:
+            raise ValueError(
+                f"EagerOptions({spelt}) sets an Inductor option, which "
+                f"compile_backend={self.compile_backend!r} does not read: drop it, or "
+                "compile with Inductor.")
+        gpu = "cuda" in str(self.dev)
+        by_default = INDUCTOR_EXTRAS_DEFAULT and gpu and self.ndim == 2
+        if not self.use_compile or not inductor or not (explicit or by_default):
+            return {}
+        from torch._inductor import config as inductor_config
+        # A C++ wrapper turns the CUDA graphs of the mode off (Inductor's
+        # get_cpp_wrapper_config): by default the mode keeps them.
+        graphs = bool(_mode_options(self.compile_mode, self.compile_dynamic).get("triton.cudagraphs"))
+        if explicit.get("cpp_wrapper") and graphs:
+            raise ValueError(
+                f"EagerOptions(compile_cpp_wrapper=True, compile_mode={self.compile_mode!r}): "
+                "Inductor turns off the CUDA graphs of that mode for a C++ wrapper. Use "
+                "compile_mode='default' with the C++ wrapper, or drop compile_cpp_wrapper.")
+        if explicit.get("combo_kernels") and not gpu:
+            raise ValueError(
+                "EagerOptions(compile_combo_kernels=True) needs a CUDA device: Inductor "
+                f"generates combo kernels for Triton, and compiles the step on {self.dev} "
+                "without them. Drop it.")
+        default = {"cpp_wrapper": (by_default and not graphs and asked["cpp_wrapper"] is None
+                                   and _cuda_toolkit()),
+                   "combo_kernels": by_default}
+        extras = {}
+        for name, value in asked.items():
+            if not hasattr(inductor_config, name):
+                if value is not None:
+                    raise ValueError(
+                        f"EagerOptions(compile_{name}={value!r}): torch {torch.__version__}'s "
+                        f"Inductor has no {name} option.")
+            elif value is not None:
+                extras[name] = bool(value)
+            elif default[name]:
+                extras[name] = True
+        return extras
 
     def _no_compile(self, why):
         """This torch cannot compile the step (``why``): run uncompiled, and
@@ -272,25 +580,127 @@ class _PropTorchEager(
             RuntimeWarning, stacklevel=3)
 
     def _mark_compile_step_begin(self):
-        if self.use_compile and self.dev is not None and "cuda" in str(self.dev):
+        """Mark a new call for CUDA-graph trees; only the compile modes that
+        replay CUDA graphs keep them (``_mark_steps``)."""
+        if self._mark_steps and self.use_compile:
             compiler = getattr(torch, "compiler", None)
             if compiler is not None and hasattr(compiler, "cudagraph_mark_step_begin"):
                 compiler.cudagraph_mark_step_begin()
 
-    def _compiled_step(self, wavefields, models, dt, h, b, source=None, compiled=True):
-        """One step; ``source`` (``SourceTorch.step_args``) is injected into
-        the source fields inside it.  ``compiled=False`` runs it uncompiled
-        (see ``_SettledSteps``)."""
-        if not compiled:
-            return self._plain_step_func(*wavefields, *models, dt, h, b, source=source)
-        self._mark_compile_step_begin()
-        return self.step_func(*wavefields, *models, dt, h, b, source=source)
+    def _resolved_steps_per_call(self, records=True):
+        """Steps a compiled call advances: ``steps_per_call``, or when it is
+        None, ``_default_steps_per_call`` (``records``: autograd records the
+        rollout).  Uncompiled, the steps run one by one."""
+        if not self.use_compile:
+            return 1
+        if self.steps_per_call is not None:
+            return self.steps_per_call
+        return _default_steps_per_call(self.ndim, self.dev, records)
+
+    @staticmethod
+    def _records(models, wavelet_steps):
+        """Whether autograd records a rollout of ``models`` and the wavelet:
+        grad mode on and one of them requires grad."""
+        return torch.is_grad_enabled() and (
+            any(m.requires_grad for m in models)
+            or any(w.requires_grad for w in wavelet_steps[:1]))
+
+    def _steps_fn(self, k):
+        """The compiled ``steps_func`` for calls of ``k`` steps (one wrapper
+        per ``k``, for the compile notice; Dynamo keeps the graphs of every
+        ``k`` on the function's one code object)."""
+        fn = self._steps_funcs.get(k)
+        if fn is None:
+            name = type(self.equation).__name__
+            fn = self._maybe_compile(self._plain_steps_func,
+                                     what=f"the {name} step" if k == 1 else f"{k} {name} steps per call")
+            self._steps_funcs[k] = fn
+        return fn
+
+    def _step_alone_fn(self):
+        """The compiled step alone (``_build_step_func``, its source injected
+        inside), for the calls of one step of a rollout with gradients on CPML
+        strips, whose receivers are sampled after the call (``_stepper``)."""
+        if self._step_alone is None:
+            self._step_alone = self._maybe_compile(self._plain_step_func)
+        return self._step_alone
+
+    def _stepper(self, models, wavelet_steps, src, rec, nt, adj, settled, k, invariants=None, records=False):
+        """``advance(fields, t, end) -> (fields, block, n)``: steps ``t`` to
+        ``t + n - 1`` of the rollout, ``block`` their record columns
+        ``(B, n, nrec, len(receiver_type))``.
+
+        Step ``t`` starts a compiled call of ``k`` steps when it is a multiple
+        of ``k``, its inputs' ``requires_grad`` has settled (``settled``, the
+        rollout's ``_SettledSteps``) and the call ends by ``end``; any other
+        step runs alone, uncompiled.  Uncompiled steps are therefore the first
+        ones, up to the first multiple of ``k`` after the inputs settle, and
+        the last ``nt % k`` -- with no graph compiled for a remainder.  The
+        calls sit on multiples of ``k`` whatever ``end`` is, so a rollout cut
+        at multiples of ``k`` (checkpoint chunks, the plain warm-up) takes the
+        same steps compiled as one that is not, and a checkpoint's recompute
+        the same as its forward.  ``invariants`` is the rollout's (or the
+        checkpoint chunk's) dict of time-invariant coefficients
+        (``_hoists_invariants``), None when compiled.
+
+        At one step a call, a rollout autograd records (``records``, decided
+        once for it) on CPML strips compiles the step alone and samples the
+        receivers after the call, outside the graph, as before
+        ``steps_per_call``.  With the sampling inside, the backward graph also
+        scatters the receivers' gradient into the field, and on the strips
+        Inductor then split the step's backward into more full-grid kernels:
+        a 160^3 acoustic gradient (strips are the 3-D default) took 2.95
+        instead of 2.62 ms a step on an RTX 6000 Ada, a 2-D one of 8 shots at
+        1000^2 1.8 instead of 1.6.  On the full grid the two ran alike; and
+        elsewhere the sampling stays inside the call, which spares the host
+        its ops (a one-shot 2-D forward at 1000^2: 0.15 instead of 0.21 ms a
+        step)."""
+        h = self._equation_spacing
+        models = tuple(models)
+        source = src.step_args(wavelet_steps[0])[1:] if nt else ()
+        receivers = (*rec.step_args(), rec.batch, rec.nreceivers)
+        compiled = self._steps_fn(k)
+        plain = self._plain_steps_func
+
+        # Uncompiled only (``_hoists_invariants``), where ``compiled`` is the
+        # plain function as well: a compiled call is handed no dict.
+        extra = {} if invariants is None else {"invariants": invariants}
+        alone = k == 1 and records and self._strips is not None
+        if alone:
+            step = self._step_alone_fn()
+            at = tuple(self.receiver_indices)
+
+        def sample(t):
+            return wavelet_steps[nt - t - 1 if adj else t]
+
+        def advance(fields, t, end):
+            if settled.compiled(t, fields) and t % k == 0 and t + k <= end:
+                self._mark_compile_step_begin()
+                if alone:
+                    fields = step(*fields, *models, self.dt, h, None, source=(sample(t), *source), **extra)
+                    return list(fields), _record_column(fields, at, *receivers).unsqueeze(1), 1
+                fields, block = compiled(tuple(fields), models, self.dt, h, None,
+                                         tuple(sample(t + j) for j in range(k)), source, receivers, **extra)
+                return list(fields), block, k
+            fields, block = plain(tuple(fields), models, self.dt, h, None, (sample(t),), source, receivers,
+                                  **extra)
+            return list(fields), block, 1
+
+        return advance
+
+    def _hoists_invariants(self):
+        """Whether this rollout's uncompiled steps make their time-invariant
+        coefficients once, in a dict (``sweep.equations._invariants``) new for
+        the rollout and for each checkpointed chunk (whose recompute makes them
+        again).  Decided once, at the start of the rollout: a chunk's recompute
+        must save what its forward saved, even after a failed compile turned
+        compiling off in between.  Compiled steps compute them in place."""
+        return not self.use_compile and HOIST_INVARIANTS and _takes_invariants(self.equation)
 
     def _sample_receivers(self, rec, wavefield, receivers):
         """One record column, ``(B, nrec, len(receiver_type))``."""
-        if len(self.receiver_indices) > 1:
-            return rec.sample_fields([wavefield[idx] for idx in self.receiver_indices])
-        return rec(wavefield[self.receiver_indices[0]]).view(*receivers.shape[:-1]).unsqueeze(-1)
+        return _record_column(wavefield, tuple(self.receiver_indices), *rec.step_args(),
+                              rec.batch, rec.nreceivers)
 
     def _prepare_runtime_models(self, models):
         prepare = getattr(self.equation, "prepare_models", None)
@@ -377,17 +787,6 @@ class _PropTorchEager(
             cached.zero_()
         return cached
 
-    def _run_chunk(self, wavefield, models, dt, h, b, wavelet_steps, nt, start_t, chunk_size, src, rec, receivers,
-                   settled, adj=False):
-        columns = []
-        for t in range(start_t, min(start_t + chunk_size, nt)):
-            time = t if not adj else nt - t - 1
-            wavefield = list(self._compiled_step(wavefield, models, dt, h, b,
-                                                 source=src.step_args(wavelet_steps[time]),
-                                                 compiled=settled.compiled(t, wavefield)))
-            columns.append(self._sample_receivers(rec, wavefield, receivers))
-        return tuple(wavefield), torch.stack(columns, dim=1)
-
     def set_parameters(self, model):
         assert len(self.model_names) == len(model), (
             f"Model parameters must be the same length as the model names, got {len(model)} and {len(self.model_names)}"
@@ -423,54 +822,52 @@ class _PropTorchEager(
                       receivers, nt, adj):
         """Time loop under chunk gradient checkpointing: the nt steps are split
         into ``ckpt_chunks``-sized chunks, each wrapped in ``ckpt_torch`` so its
-        activations are recomputed in backward instead of stored.  Returns
+        activations are recomputed in backward instead of stored.  A chunk is
+        rounded up to whole compiled calls (``_stepper``).  Returns
         ``(wavefield, record)``, the record concatenated from the chunks' own
         (see ``_rollout_full`` for why it is not written in place).
         """
-        chunk_size = int(max(1, self.ckpt_chunks))
+        records = self._records(models, wavelet_steps)
+        k = self._resolved_steps_per_call(records)
+        chunk_size = -(-int(max(1, self.ckpt_chunks)) // k) * k
         num_wavefields = len(wavefield)
         num_models = len(models)
 
         settled = _SettledSteps()
+        self._steps_fn(k)              # first, as _rollout_full does
+        hoist = self._hoists_invariants()
         chunk_records = []
         start = 0
         if self.use_compile and CKPT_PLAIN_WARMUP:
             # Before torch 2.5, compiling inside a checkpointed forward saves
             # tensors its recompute does not, and backward raises a
-            # CheckpointError.  Only the first compiled step compiles (see
+            # CheckpointError.  Only the first compiled call compiles (see
             # _SettledSteps), so run the steps up to and including it on the
-            # plain tape.
-            runtime_models = self._prepare_runtime_models(models)
-            while start < min(nt, 8) and settled.first is None:
-                wavefield, column = self._run_chunk(
-                    wavefield, runtime_models, self.dt, self._equation_spacing, None,
-                    wavelet_steps, nt, start, 1, src, rec, receivers, settled, adj=adj)
-                wavefield = list(wavefield)
-                chunk_records.append(column)
-                start += 1
+            # plain tape; it ends on a multiple of k, as the chunks then do.
+            advance = self._stepper(self._prepare_runtime_models(models), wavelet_steps, src, rec,
+                                    nt, adj, settled, k, records=records)
+            compiled = False
+            while start < min(nt, 8 + 2 * k) and not compiled:
+                wavefield, block, n = advance(wavefield, start, nt)
+                compiled = n == k and settled.first is not None
+                chunk_records.append(block)
+                start += n
 
         for start_t in range(start, nt, chunk_size):
 
             def checkpoint_chunk(*chunk_inputs, start_t=start_t):
                 state = list(chunk_inputs[:num_wavefields])
                 chunk_models = list(chunk_inputs[num_wavefields : num_wavefields + num_models])
-                chunk_runtime_models = self._prepare_runtime_models(chunk_models)
-                return self._run_chunk(
-                    state,
-                    chunk_runtime_models,
-                    self.dt,
-                    self._equation_spacing,
-                    None,
-                    wavelet_steps,
-                    nt,
-                    start_t,
-                    chunk_size,
-                    src,
-                    rec,
-                    receivers,
-                    settled,
-                    adj=adj,
-                )
+                advance = self._stepper(self._prepare_runtime_models(chunk_models), wavelet_steps, src,
+                                        rec, nt, adj, settled, k, invariants={} if hoist else None,
+                                        records=records)
+                end = min(start_t + chunk_size, nt)
+                blocks, t = [], start_t
+                while t < end:
+                    state, block, n = advance(state, t, end)
+                    blocks.append(block)
+                    t += n
+                return tuple(state), torch.cat(blocks, dim=1)
 
             wavefield, chunk_record = ckpt_torch(checkpoint_chunk, *wavefield, *models, use_reentrant=False)
             wavefield = list(wavefield)
@@ -482,29 +879,35 @@ class _PropTorchEager(
         """Plain time loop recording the full autograd tape (the default path):
         PyTorch retains every step's activations and backward differentiates the
         whole graph.  This is the only path that supports ``return_wavefield``
-        (wavefield snapshots).  Returns ``(wavefield, record)``; the snapshots,
+        (wavefield snapshots), which takes one step a call: a snapshot is the
+        state after its step.  Returns ``(wavefield, record)``; the snapshots,
         which are detached host copies, are still written in place.
         """
-        settled = _SettledSteps()
-        columns = []
-        for i in range(nt):
-            time = i if not adj else nt - i - 1
-            wavefield = list(self._compiled_step(wavefield, runtime_models, self.dt, self._equation_spacing, None,
-                                                 source=src.step_args(wavelet_steps[time]),
-                                                 compiled=settled.compiled(i, wavefield)))
-            if return_wavefield and i in snapshot_lookup:
-                snapshots[snapshot_lookup[i]] = torch.stack(
-                    [self._crop_runtime_halo(w).detach().cpu() for w in wavefield],
-                    0,
-                )
-            columns.append(self._sample_receivers(rec, wavefield, receivers))
-        # One stack instead of nt in-place slice writes. Writing into a live
-        # autograd tensor builds a chain of nt CopySlices nodes, and EACH of
+        records = self._records(runtime_models, wavelet_steps)
+        k = 1 if return_wavefield else self._resolved_steps_per_call(records)
+        # Set up compiling the calls before deciding on the dict: a torch
+        # without torch.compile (or torch 2.3 on a CPU) turns compiling off
+        # right there, and the rollout then runs as an uncompiled one does.
+        self._steps_fn(k)
+        invariants = {} if self._hoists_invariants() else None
+        advance = self._stepper(runtime_models, wavelet_steps, src, rec, nt, adj, _SettledSteps(), k,
+                                invariants=invariants, records=records)
+        blocks, t = [], 0
+        while t < nt:
+            wavefield, block, n = advance(wavefield, t, nt)
+            t += n
+            if return_wavefield and t - 1 in snapshot_lookup:
+                fields = self._full_wavefields([w.detach() for w in wavefield])
+                snapshots[snapshot_lookup[t - 1]] = torch.stack(
+                    [self._crop_runtime_halo(f).cpu() for f in fields], 0)
+            blocks.append(block)
+        # One concatenation instead of nt in-place slice writes. Writing into a
+        # live autograd tensor builds a chain of nt CopySlices nodes, and EACH of
         # them allocates a full-record buffer and copies the incoming gradient
         # through it, so the record alone cost O(nt^2) backward traffic:
         # 2*nt*|record|, which is 64 GB per shot at nt=4000 with 500 receivers.
-        # Stacking makes it 2*|record|.
-        return wavefield, torch.stack(columns, dim=1)
+        # Concatenating makes it 2*|record|.
+        return wavefield, torch.cat(blocks, dim=1)
 
     def forward(
         self,
@@ -579,8 +982,6 @@ class _PropTorchEager(
         rec = ReceiverTorch(receivers, gather_kernel=sr_stencil, shape=shape_wavefield)
 
         has_aux = False
-        if return_wavefield and self._strips is not None:
-            raise NotImplementedError("return_wavefield with cpml_strips: the CPML fields are strips.")
         if return_wavefield:
             has_aux = True
             snapshot_shape = (len(snapshot_indices), len(self.wavefield_names), batch_size, 1) + self.shape
@@ -627,7 +1028,11 @@ class _PropTorchEager(
             wavefield, record = self._rollout_ckpt(
                 wavefield, models, wavelet_steps, src, rec, receivers, nt, adj
             )
-        elif getattr(self, "_eager_bs", False):
+        elif getattr(self, "_eager_bs", False) and (
+                return_wavefield or self._records(runtime_models, wavelet_steps)):
+            # A call autograd does not record has no backward to save a boundary
+            # for: under boundary saving it takes the plain steps below, as
+            # impl='c' skips its boundary (return_wavefield still raises).
             if return_wavefield:
                 raise ValueError("return_wavefield is not supported with eager boundary saving.")
             wavefield, record = self._rollout_eager_bs(
@@ -639,7 +1044,7 @@ class _PropTorchEager(
                 return_wavefield, snapshots, snapshot_lookup,
             )
 
-        self.last_wavefields = tuple(wavefield) if self.store_last_wavefield else None
+        self.last_wavefields = tuple(self._full_wavefields(wavefield)) if self.store_last_wavefield else None
         if not has_aux:
             return record
         # ``snapshots`` is allocated per call above, so it aliases no workspace

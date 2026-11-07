@@ -1,4 +1,5 @@
 from ._cpml import cpml_axis_update
+from ._invariants import once
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec, history_plain, record_single
 
@@ -16,6 +17,7 @@ def step_cpml(
         grad_op,
         grad_kernels=None,
         src=None,
+        invariants=None,
         ):
 
     az, bz, dbzdz, ax, bx, dbxdx = pml
@@ -38,7 +40,7 @@ def step_cpml(
         lap_x, dudx, psix, zetax, ax, bx, dbxdx, h, -1, grad_op, grad_kernels, src)
     w_sum += contrib_x
 
-    u_next = 2 * u_now - u_pre + vp**2 * dt**2 * w_sum
+    u_next = 2 * u_now - u_pre + once(invariants, "vp2dt2", lambda: vp**2 * dt**2) * w_sum
 
     return u_next, u_now, psixn, psiyn, zetax, zetaz
 
@@ -69,6 +71,7 @@ class Acoustic(SecondOrderEquation):
     )
 
     default_pml_type = "cpmlr"
+    takes_invariants = True
 
     # Eager ``func`` honours a per-edge free surface (any subset of the 4 faces,
     # each pressure-release) via ``self.fs_faces``; see ``_apply_free_surface``.
@@ -130,13 +133,13 @@ class Acoustic(SecondOrderEquation):
     def default_receiver_fields(self):
         return ["h1"]
 
-    def func(self, wavefields, models, dt, h, b, **kwargs):
+    def func(self, wavefields, models, dt, h, b, invariants=None, **kwargs):
         u_now = wavefields[0]
         (vp,) = models
         hz, hx = self._spacings_2d(h)
         lap_u_now_z, lap_u_now_x = self.separable_d2_2d(u_now, self.laplace_kernels, hz, hx)
         out = step_cpml(*wavefields, vp, dt, h, b, lap_u_now_x, lap_u_now_z, self.b, self.gradient, self.grad_kernels,
-                         src=(u_now, self.laplace_kernels, (hz, hx)))
+                         src=(u_now, self.laplace_kernels, (hz, hx)), invariants=invariants)
         if getattr(self, "free_surface", False):
             topo_rows = getattr(self, "_topo_rows_runtime", None)
             if topo_rows is not None:

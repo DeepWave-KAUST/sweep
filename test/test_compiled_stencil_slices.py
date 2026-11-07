@@ -222,6 +222,11 @@ def test_compiled_rollout_is_one_conv_free_graph_matching_uncompiled(cls, shape,
 @pytest.mark.usefixtures("_release_compiled_state")
 @pytest.mark.parametrize("cls,shape,surface", [
     pytest.param(Elastic, (40, 44), {"free_surface": True}, id="elastic2d_free_surface"),
+    # The two strip updates: staggered (the strips added padded) and second order
+    # (the contribution put in place on the constant inner mask).
+    pytest.param(Elastic3D, (16, 14, 12), {}, id="elastic3d"),
+    pytest.param(Acoustic, (40, 44), {"free_surface": True}, id="acoustic2d_free_surface"),
+    pytest.param(Acoustic3D, (16, 14, 12), {}, id="acoustic3d"),
     pytest.param(ElasticCurvilinear, (40, 44), {"free_surface": True, "topography": _CURV_HILL},
                  id="elastic_curvilinear"),
     pytest.param(ElasticCurvilinear, (40, 44), {}, id="elastic_curvilinear_no_free_surface"),

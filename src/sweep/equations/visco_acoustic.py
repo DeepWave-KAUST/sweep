@@ -6,6 +6,7 @@ from .fields import FieldSpec, ModelSpec
 from ._free_surface import zero_above_topo
 from .utils import to_backend
 from .acoustic import step_cpml
+from ._invariants import once
 from ._registry import register_equation
 
 
@@ -23,6 +24,7 @@ def step_visco_cpml(
         B2=None,
         D_frac=None,
         D_k2=None,
+        invariants=None,
         ):
     """Nearly constant-Q visco-acoustic step on top of the CPML acoustic step.
 
@@ -46,6 +48,7 @@ def step_visco_cpml(
         pml,
         grad_op,
         grad_kernels,
+        invariants=invariants,
     )
 
     # NCQ dispersion correction (Zhu & Harris eq. 10, eta term): the CPML step
@@ -65,7 +68,7 @@ def step_visco_cpml(
         dudt = (u_now - u_pre) / dt
         fft_dudt = op.fft.fft2(dudt, u_next.shape[-2:], (-2, -1))
         temp = op.fft.ifft2(k * fft_dudt, u_next.shape[-2:], (-2, -1)).real
-        u_next = u_next - (dt**2 * A) * temp
+        u_next = u_next - once(invariants, "dt2*A", lambda: dt**2 * A) * temp
 
     return u_next, u_prev, psixn, psizn, zetaxn, zetazn
 
@@ -195,6 +198,7 @@ class ViscoAcoustic(SecondOrderEquation):
     )
 
     default_pml_type = "cpmlr"
+    takes_invariants = True
 
     # Eager ``func`` honours a per-edge free surface (any subset of the 4 faces,
     # each pressure-release) via ``self.fs_faces``; the zeroing is the shared
@@ -513,7 +517,7 @@ class ViscoAcoustic(SecondOrderEquation):
         else:
             self.k = to_backend(k_np, self.backend, self.device)
 
-    def func(self, wavefields, models, dt, h, b, **kwargs):
+    def func(self, wavefields, models, dt, h, b, invariants=None, **kwargs):
         u_now = wavefields[0]
         # The torch-eager and CUDA propagators hand the PREPARED coefficients
         # (their prepare_models hooks run once, outside the time loop);
@@ -534,6 +538,7 @@ class ViscoAcoustic(SecondOrderEquation):
             k=k_loss, op=self.op,
             amplitude_damping=self.amplitude_damping,
             B1=B1, B2=B2, D_frac=D_frac, D_k2=D_k2,
+            invariants=invariants,
         )
         if B1 is not None or self.amplitude_damping:
             # Match the C backend's invariant: the spectral FFT terms write

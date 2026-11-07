@@ -1106,6 +1106,15 @@ class PropSEM:
                 "EagerOptions(cpml_strips=...) is PropTorch's strip layout; the SEM's "
                 "C-PML runs on the band elements by mesh size, and "
                 "equation_options={'band_split': True | False} chooses it.")
+        if opts.steps_per_call != EAGER_DEFAULTS.steps_per_call:
+            raise NotImplementedError(
+                "EagerOptions(steps_per_call=...) is PropTorch's; PropSEM compiles one "
+                "step a call.")
+        for name in ("compile_cpp_wrapper", "compile_combo_kernels"):
+            if getattr(opts, name) != getattr(EAGER_DEFAULTS, name):
+                raise NotImplementedError(
+                    f"EagerOptions({name}=...) is an Inductor option of PropTorch's step; "
+                    "PropSEM compiles its step without it.")
         return opts
 
     def _check_compile_mode(self):

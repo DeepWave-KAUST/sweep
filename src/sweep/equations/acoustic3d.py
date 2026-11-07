@@ -1,4 +1,5 @@
 from ._cpml import cpml_axis_update
+from ._invariants import once
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec, history_plain, record_single
 
@@ -16,6 +17,7 @@ def step_cpml(
         pml,
         grad_op,
         src=None,
+        invariants=None,
         ):
 
     az, bz, dbzdz, ay, by, dbydy, ax, bx, dbxdx = pml
@@ -40,7 +42,7 @@ def step_cpml(
         lap_x, dudx, psix, zetax, ax, bx, dbxdx, h, -1, grad_op, src=src)
     w_sum += contrib_x
 
-    u_next = 2 * u_now - u_pre + vp**2 * dt**2 * w_sum
+    u_next = 2 * u_now - u_pre + once(invariants, "vp2dt2", lambda: vp**2 * dt**2) * w_sum
 
     return u_next, u_now, psixn, psiyn, psizn, zetax, zetay, zetaz
 
@@ -75,6 +77,7 @@ class Acoustic3D(SecondOrderEquation):
     )
 
     default_pml_type = "cpmlr"
+    takes_invariants = True
 
     def __init__(self, spatial_order=4, device='cpu', backend = 'torch', dim=3):
         """Build the 3-D acoustic equation operator.
@@ -116,13 +119,13 @@ class Acoustic3D(SecondOrderEquation):
     def default_receiver_fields(self):
         return ["h1"]
 
-    def func(self, wavefields, models, dt, h, b, **kwargs):
+    def func(self, wavefields, models, dt, h, b, invariants=None, **kwargs):
         u_now = wavefields[0]
         (vp,) = models
         hz, hy, hx = self._spacings_3d(h)
         lap_z, lap_y, lap_x = self.separable_d2_3d(u_now, self.laplace_kernels, hz, hy, hx)
         out = step_cpml(*wavefields, vp, dt, h, b, lap_x, lap_y, lap_z, self.b, self.gradient,
-                        src=(u_now, self.laplace_kernels, (hz, hy, hx)))
+                        src=(u_now, self.laplace_kernels, (hz, hy, hx)), invariants=invariants)
         if getattr(self, "free_surface", False):
             topo_rows = getattr(self, "_topo_rows_runtime", None)
             if topo_rows is not None:

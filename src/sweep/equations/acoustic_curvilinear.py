@@ -27,6 +27,7 @@ exponential instability of Stage 1.
 from __future__ import annotations
 
 from .acoustic import step_cpml
+from ._invariants import once
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
@@ -67,6 +68,7 @@ class AcousticCurvilinear(SecondOrderEquation):
     )
 
     default_pml_type = "cpmlr"
+    takes_invariants = True
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch", dim=2):
         super().__init__(spatial_order, device, backend, dim=dim)
@@ -99,7 +101,7 @@ class AcousticCurvilinear(SecondOrderEquation):
     def default_receiver_fields(self):
         return ["h1"]
 
-    def func(self, wavefields, models, dt, h, b, **kwargs):
+    def func(self, wavefields, models, dt, h, b, invariants=None, **kwargs):
         u_now = wavefields[0]
         (vp,) = models
         if self._curv_alpha is None or self._curv_d_eta is None:
@@ -154,12 +156,13 @@ class AcousticCurvilinear(SecondOrderEquation):
             return self.gradient(f, hx, axis, kernels=kernels)
 
         az, bz, dbzdz, ax, bx, dbxdx = self.b
-        pml = (az, bz, dbzdz * (hz_pml / hz) * beta, ax, bx, dbxdx)
+        pml = (az, bz, once(invariants, "dbzdz_phys", lambda: dbzdz * (hz_pml / hz) * beta), ax, bx, dbxdx)
 
         out = step_cpml(
             *wavefields, vp, dt, h, b,
             lap_x_curv, lap_z_curv,
             pml, grad_phys, self.grad_kernels,
+            invariants=invariants,
         )
         if getattr(self, "free_surface", False):
             # On the flat computational top row η=0, the BC is the usual

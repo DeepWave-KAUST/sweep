@@ -1,3 +1,4 @@
+from sweep.operators.torch import _is_compiling
 from sweep.receivers.base import ReceiverBase
 import numpy as np
 import torch
@@ -32,6 +33,28 @@ class _FootprintGather(torch.autograd.Function):
         for t in reversed(range(index.shape[0])):
             out.index_add_(0, index[t], parts[t])
         return out, None, None
+
+
+def gather_flat(field, taps, footprint=None):
+    """``(B * nrec,)`` samples of one ``(B, 1, *spatial)`` field: ``taps``
+    lists ``(flat index, weight or None)`` per gather offset, ``footprint`` is
+    the same stacked for one gather or None (``ReceiverTorch.step_args``).
+
+    A pure function of its tensor arguments, so the eager propagator samples
+    inside its ``torch.compile``'d steps.  Traced, a footprint is gathered tap
+    by tap, as Inductor fuses the taps anyway: its autograd.Function only
+    saves launches uncompiled."""
+    flat = field.reshape(-1)
+    if footprint is not None and not _is_compiling():
+        index, weights = footprint
+        return _FootprintGather.apply(flat, index, weights.to(flat.dtype))
+    out = None
+    for index, w in taps:
+        part = flat.index_select(0, index)
+        if w is not None:
+            part = w * part
+        out = part if out is None else out + part
+    return out
 
 
 class ReceiverTorch(ReceiverBase, torch.nn.Module):
@@ -114,17 +137,14 @@ class ReceiverTorch(ReceiverBase, torch.nn.Module):
 
     def _gather_flat(self, wavefield):
         """``(B * nrec,)`` samples of one ``(B, 1, *spatial)`` field."""
-        flat = wavefield.reshape(-1)
-        if self.footprint is not None:
-            index, weights = self.footprint
-            return _FootprintGather.apply(flat, index, weights.to(flat.dtype))
-        out = None
-        for index, w in self.taps:
-            part = flat.index_select(0, index)
-            if w is not None:
-                part = w * part
-            out = part if out is None else out + part
-        return out
+        return gather_flat(wavefield, self.taps, self.footprint)
+
+    def step_args(self):
+        """``(taps, footprint)``: the arguments of ``gather_flat`` after the
+        field (built from ``shape``)."""
+        if self.taps is None:
+            raise ValueError("ReceiverTorch.step_args needs the wavefield shape at construction")
+        return tuple(self.taps), self.footprint
 
     def forward(self, wavefield):
         """Forward pass of the receiver

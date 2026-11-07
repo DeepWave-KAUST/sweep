@@ -15,6 +15,7 @@ import itertools
 
 import numpy as np
 
+from ._invariants import once
 from .base import FirstOrderEquation
 from .cuda_layout import CUDALayoutSpec, record_multi
 from .elastic import Elastic
@@ -324,6 +325,7 @@ class ViscoElastic(FirstOrderEquation):
     C_NAME = "visco_elastic2d"
     default_pml_type = "cpmls"   # staggered-grid CPML (8 profiles)
     supports_per_edge_free_surface = True
+    takes_invariants = True
     supports_per_edge_free_surface_c = True
     # Attenuation does not stop a PML amplifying a plate's backward Lamb modes
     # (measured at Q 100): the layout is refused as for Elastic.
@@ -441,7 +443,7 @@ class ViscoElastic(FirstOrderEquation):
         return a_l, c_l
 
     # -------------------------------------------------------------------- step
-    def func(self, wavefields, models, dt, h, b, **kwargs):
+    def func(self, wavefields, models, dt, h, b, invariants=None, **kwargs):
         if getattr(self, "_topo_rows_runtime", None) is not None:
             raise NotImplementedError("ViscoElastic does not support topography yet")
         models = self.prepare_models(models)
@@ -458,7 +460,7 @@ class ViscoElastic(FirstOrderEquation):
             lame_lambda=lam, lame_mu=mu, mu_xz=mu, rho_x=rho, rho_z=rho,
             dt=dt, h=h, b=b, pd=self.pd, pml=self.b,
             free_surface=free_surface, fs_faces=fs_faces,
-            lame_lambda_2mu=lam2mu,
+            lame_lambda_2mu=lam2mu, invariants=invariants,
         )
         (vx, vz, sxx, szz, sxz,
          m_vxx, m_vxz, m_vzx, m_vzz,
@@ -473,7 +475,7 @@ class ViscoElastic(FirstOrderEquation):
         vx_z, vz_x, m_vxz, m_vzx = elastic_shear_cpml(vx_z, vz_x, m_vxz, m_vzx, self.b, (vx, vz, self.pd))
         exz = vx_z + vz_x
 
-        a_l, c_l = self.relaxation_coefficients(dt)
+        a_l, c_l = once(invariants, "relaxation", lambda: self.relaxation_coefficients(dt))
         r_xx = rmem[0::3]
         r_zz = rmem[1::3]
         r_xz = rmem[2::3]
@@ -488,8 +490,9 @@ class ViscoElastic(FirstOrderEquation):
         z_sides, x_sides = _fs_sides(fs_faces, free_surface)
         if z_sides or x_sides:
             halo = self.pd.coes.shape[0]
-            den = lam2mu - 0.5 * sum(c_l[l] * p_tau[l] for l in range(L))
-            cross = 0.5 * sum(c_l[l] * (p_tau[l] - 2.0 * m_tau[l]) for l in range(L))
+            den = once(invariants, "fs_den", lambda: lam2mu - 0.5 * sum(c_l[l] * p_tau[l] for l in range(L)))
+            cross = once(invariants, "fs_cross",
+                         lambda: 0.5 * sum(c_l[l] * (p_tau[l] - 2.0 * m_tau[l]) for l in range(L)))
             if z_sides:     # szz = 0: unknown dvz/dz
                 hist = sum(0.5 * (1.0 + a_l[l]) * r_zz[l] for l in range(L))
                 e = -(lam * exx + hist - cross * exx) / den
@@ -506,8 +509,8 @@ class ViscoElastic(FirstOrderEquation):
         new_r = []
         for l in range(L):
             tp = p_tau[l] * theta
-            rxx = a_l[l] * r_xx[l] - c_l[l] * (tp - 2.0 * m_tau[l] * ezz)
-            rzz = a_l[l] * r_zz[l] - c_l[l] * (tp - 2.0 * m_tau[l] * exx)
+            rxx = a_l[l] * r_xx[l] - c_l[l] * (tp - once(invariants, ("2m_tau", l), lambda: 2.0 * m_tau[l]) * ezz)
+            rzz = a_l[l] * r_zz[l] - c_l[l] * (tp - once(invariants, ("2m_tau", l), lambda: 2.0 * m_tau[l]) * exx)
             rxz = a_l[l] * r_xz[l] - c_l[l] * (m_tau[l] * exz)
             sum_xx = sum_xx + (rxx + r_xx[l])
             sum_zz = sum_zz + (rzz + r_zz[l])
@@ -516,7 +519,7 @@ class ViscoElastic(FirstOrderEquation):
 
         szz = szz + dt * (lam2mu * ezz + lam * exx)
         sxx = sxx + dt * (lam2mu * exx + lam * ezz)
-        sxz = sxz + dt * mu * exz
+        sxz = sxz + once(invariants, "dt*mu", lambda: dt * mu) * exz
         szz = szz + (0.5 * dt) * sum_zz
         sxx = sxx + (0.5 * dt) * sum_xx
         sxz = sxz + (0.5 * dt) * sum_xz

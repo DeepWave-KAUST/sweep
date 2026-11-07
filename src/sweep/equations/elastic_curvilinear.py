@@ -61,6 +61,7 @@ import numpy as np
 
 from .base import FirstOrderEquation
 from ._cpml import Strips, cpml_update
+from ._invariants import once
 from .cuda_layout import CUDALayoutSpec
 from .fields import FieldSpec, ModelSpec
 from ._registry import register_equation
@@ -121,6 +122,7 @@ def step_curv_asym(
     damping=None,
     damp_velocity=False,
     hourglass=None,
+    invariants=None,
 ):
     """One collocated velocity-stress step in the computational (xi, eta) grid.
 
@@ -172,9 +174,12 @@ def step_curv_asym(
     d_f3z, m_tzzz = cpml_update(d_f3z, m_tzzz, az, bz,
                                 _z_src(f3z, k["kz_adj"], d_eta, m_tzzz, clear))
 
-    acc = dt / (rho * jac)
-    if free_surface and geom.get("mass_weight") is not None:
-        acc = acc * geom["mass_weight"]
+    def mass():
+        acc = dt / (rho * jac)
+        if free_surface and geom.get("mass_weight") is not None:
+            acc = acc * geom["mass_weight"]
+        return acc
+    acc = once(invariants, "dt/(rho*jac)", mass)
     vx = vx + acc * (d_f1x + d_f3x)
     vz = vz + acc * (d_f1z + d_f3z)
     if free_surface and hourglass is not None:
@@ -245,7 +250,7 @@ def step_curv_asym(
         dvt_xi, m_txzx = cpml_update(dvt_xi, m_txzx, ax, bx, (v_t, k["kx"], d_xi))
         # d(v.t)/ds = eps'_11 + v . dt/ds  ->  subtract the curvature term
         eps_tt = inv_len * dvt_xi - (vx * geom["tau_x"] + vz * geom["tau_z"])
-        m_surf = 4.0 * lame_mu * (lame_lambda + lame_mu) / lame_lambda_2mu
+        m_surf = once(invariants, "fs_coef", lambda: 4.0 * lame_mu * (lame_lambda + lame_mu) / lame_lambda_2mu)
         a_surf = m_surf * eps_tt
         mask = geom["surf_mask"]
         rate_xx = rate_xx + mask * (a_surf * inv_len2 - rate_xx)
@@ -398,6 +403,7 @@ class ElasticCurvilinear(FirstOrderEquation):
     )
 
     default_pml_type = "cpmls"
+    takes_invariants = True
 
     def __init__(self, spatial_order=16, device="cpu", backend="torch",
                  kmax_frac=0.56, nyquist_real=-2.0, surface_reach=1,

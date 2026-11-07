@@ -148,11 +148,11 @@ class _CustomGradientMixin:
 
     def _hook_field_indices(self, registered_idx):
         """Union of wavefield indices that need a backward hook across all
-        registrations.  ``imaging_type=None`` ⇒ hook source_indices[0]; a
+        registrations.  ``imaging_type=None`` ⇒ hook the first source field; a
         list ⇒ hook each named field's index.
         """
         names = set()
-        default_name = self.wavefield_names[self.source_indices[0]]
+        default_name = self.source_type[0]
         for _, (_fn, imaging_type) in registered_idx.items():
             if imaging_type is None:
                 names.add(default_name)
@@ -187,8 +187,12 @@ class _CustomGradientMixin:
         eq = self.equation
         dt = self.dt
         h = self._equation_spacing
-        h1 = self.source_indices[0]
-        default_name = self.wavefield_names[h1]
+        # This path steps full-grid fields, one tensor per wavefield, so it finds
+        # them by name: source_indices / receiver_indices are positions in the
+        # eager state, which differ once CPML strips hold a field as two tensors.
+        default_name = self.source_type[0]
+        h1 = self.wavefield_names.index(default_name)
+        rec_idx = [self.wavefield_names.index(n) for n in self.receiver_type]
 
         # Union of wavefield indices that need a hook + per-registration
         # field lists (kept in stable wavefield_names order for dict assembly).
@@ -290,14 +294,14 @@ class _CustomGradientMixin:
             # output shape matches the main forward (e.g. elastic's vx+vz),
             # which lets ``obs.view_as(record)`` work in imaging() with
             # multi-component observed data.
-            if len(self.receiver_indices) > 1:
+            if len(rec_idx) > 1:
                 sampled = rec.sample_fields(
-                    [wf[idx] for idx in self.receiver_indices]
+                    [wf[idx] for idx in rec_idx]
                 )  # (B, nrec, len(receiver_type))
                 record_buf.append(sampled)
             else:
                 record_buf.append(
-                    rec(wf[self.receiver_indices[0]]).view(B, nrec, 1)
+                    rec(wf[rec_idx[0]]).view(B, nrec, 1)
                 )
 
         record = torch.stack(record_buf, dim=1)  # (B, nt, nrec, len(rec_type))

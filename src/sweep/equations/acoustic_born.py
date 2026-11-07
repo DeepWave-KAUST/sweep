@@ -1,6 +1,7 @@
 import functools
 
 from ._cpml import cpml_axis_update
+from ._invariants import once
 from .base import SecondOrderEquation
 from .cuda_layout import CUDALayoutSpec, history_fields, history_plain, record_single
 from .slot_table import ACOUSTIC_BORN2D, ACOUSTIC_BORN2D_MP
@@ -17,6 +18,7 @@ def step(u_now, u_pre, psix, psiz, zetax, zetaz,
          grad_op,
          src=None,
          ssrc=None,
+         invariants=None,
          ):
     
     az, bz, dbzdz, ax, bx, dbxdx = pml
@@ -38,7 +40,7 @@ def step(u_now, u_pre, psix, psiz, zetax, zetaz,
         lap_ux, dudx, psix, zetax, ax, bx, dbxdx, h, -1, grad_op, src=src)
     w_sum += contrib_x
 
-    u_next = 2 * u_now - u_pre + vp**2 * dt**2 * w_sum
+    u_next = 2 * u_now - u_pre + once(invariants, "vp2dt2", lambda: vp**2 * dt**2) * w_sum
 
     # Scatter wavefield
     w_sum_s = 0.
@@ -49,7 +51,8 @@ def step(u_now, u_pre, psix, psiz, zetax, zetaz,
     contrib_sx, spsixn, szetax = cpml_axis_update(
         lap_sux, dsudx, spsix, szetax, ax, bx, dbxdx, h, -1, grad_op, src=ssrc)
     w_sum_s += contrib_sx
-    su_next = 2 * su_now - su_pre + vp**2 * dt**2 * w_sum_s + ref * vp**2 * dt**2 * w_sum
+    su_next = (2 * su_now - su_pre + once(invariants, "vp2dt2", lambda: vp**2 * dt**2) * w_sum_s
+               + once(invariants, "ref*vp2dt2", lambda: ref * vp**2 * dt**2) * w_sum)
 
     # # background wavefield
     # vp2_nabla_p0 = vp**2*lap_u_now*dt**2
@@ -159,6 +162,7 @@ class AcousticBorn(SecondOrderEquation):
     )
 
     default_pml_type = "cpmlr"
+    takes_invariants = True
 
     def __init__(self, spatial_order=4, device='cpu', backend='torch'):
         """Build the 2-D acoustic LSRTM equation operator.
@@ -195,13 +199,13 @@ class AcousticBorn(SecondOrderEquation):
     def default_receiver_fields(self):
         return ["sh1"]
 
-    def func(self, wavefields, models, dt, h, b, **kwargs):
+    def func(self, wavefields, models, dt, h, b, invariants=None, **kwargs):
         hz, hx = self._spacings_2d(h)
         lap_uz, lap_ux = self.separable_d2_2d(wavefields[0], self.laplace_kernels, hz, hx)
         lap_suz, lap_sux = self.separable_d2_2d(wavefields[6], self.laplace_kernels, hz, hx)
         stencils = (self.laplace_kernels, (hz, hx))
         out = step(*wavefields, *models, dt, h, b, lap_ux, lap_uz, lap_sux, lap_suz, self.b, self.gradient,
-                   src=(wavefields[0], *stencils), ssrc=(wavefields[6], *stencils))
+                   src=(wavefields[0], *stencils), ssrc=(wavefields[6], *stencils), invariants=invariants)
         if getattr(self, "free_surface", False):
             out = zero_top_halo_fields(out, self.so // 2, axis=-2)
         return out

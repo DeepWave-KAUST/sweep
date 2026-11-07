@@ -1,3 +1,4 @@
+from ._invariants import once
 from .base import SecondOrderEquation
 from .fields import FieldSpec, ModelSpec
 from ._registry import register_equation
@@ -24,6 +25,7 @@ def step_cpml(
     dpdx2dz2,
     grad_op,
     grad_kernels=None,
+    invariants=None,
 ):
 
     az, bz, dbzdz, ax, bx, dbxdx = pml
@@ -40,9 +42,9 @@ def step_cpml(
     u_next = (
         2 * u_now
         - u_pre
-        + (1 + 2 * eta) * v**2 * lap_x_pml * dt**2
-        + vv**2 * lap_z_pml * dt**2
-        - 2 * eta * vv**2 * v**2 * dpdx2dz2 * dt**2
+        + once(invariants, "(1+2eta)v2", lambda: (1 + 2 * eta) * v**2) * lap_x_pml * dt**2
+        + once(invariants, "vv2", lambda: vv**2) * lap_z_pml * dt**2
+        - once(invariants, "2eta*vv2*v2", lambda: 2 * eta * vv**2 * v**2) * dpdx2dz2 * dt**2
     )
     f_next = 2 * f_now - f_pre + dt**2 * u_now
 
@@ -95,6 +97,7 @@ class AcousticTariq(SecondOrderEquation):
     )
 
     default_pml_type = "cpmlr"
+    takes_invariants = True
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch", dim=2):
         """Build the 2-D Alkhalifah-eta pseudo-acoustic equation operator.

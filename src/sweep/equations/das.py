@@ -15,6 +15,7 @@ from .elastic3d import stress_substep as _elastic3d_stress_substep
 from .elastic3d import velocity_substep as _elastic3d_velocity_substep
 from ._elastic_step_core import elastic_stress_substep, elastic_velocity_substep
 from ._cpml import cpml_update
+from ._invariants import once
 
 
 def _is_torch_tensor(value):
@@ -538,6 +539,7 @@ def step_das_mu_2d(
     pd,
     pml=None,
     free_surface=False,
+    invariants=None,
 ):
     """One Mu velocity-stress-strain DAS step in 2D.
 
@@ -553,7 +555,8 @@ def step_das_mu_2d(
     """
     kw = dict(lame_lambda=lame_lambda, lame_mu=lame_mu, mu_xz=lame_mu,
               rho_x=rho, rho_z=rho, dt=dt, h=h, b=b, pd=pd, pml=pml,
-              free_surface=free_surface, lame_lambda_2mu=lame_lambda_2mu)
+              free_surface=free_surface, lame_lambda_2mu=lame_lambda_2mu,
+              invariants=invariants)
     fields = das_mu_velocity_substep_2d(
         vx, vz, sxx, szz, sxz, exx, ezz, exz,
         m_vxx, m_vxz, m_vzx, m_vzz,
@@ -633,6 +636,7 @@ def step_das_mu_3d(
     pd,
     pml=None,
     free_surface=False,
+    invariants=None,
 ):
     """One Mu velocity-stress-strain DAS step in 3D.
 
@@ -644,7 +648,7 @@ def step_das_mu_3d(
     hands back the CPML-corrected velocity gradients the stress update
     consumed, which are exactly what the strain-rate state integrates.
     """
-    kw = dict(dt=dt, pd=pd, pml=pml, free_surface=free_surface)
+    kw = dict(dt=dt, pd=pd, pml=pml, free_surface=free_surface, invariants=invariants)
     fields = das_mu_velocity_substep_3d(
         vx, vy, vz, sxx, syy, szz, sxy, sxz, syz,
         exx, eyy, ezz, exy, exz, eyz,
@@ -687,6 +691,7 @@ def step_das_zhao_2d(
     b,
     pd,
     pml=None,
+    invariants=None,
 ):
     """One 2D stress and normal-strain-rate elastic step.
 
@@ -703,13 +708,13 @@ def step_das_zhao_2d(
 
     shear_xz = dzz_txx + dxx_tzz
 
-    exx = exx + dt / rho * (dxx_sxx + shear_xz)
-    ezz = ezz + dt / rho * (dzz_szz + shear_xz)
+    exx = exx + once(invariants, "dt/rho", lambda: dt / rho) * (dxx_sxx + shear_xz)
+    ezz = ezz + once(invariants, "dt/rho", lambda: dt / rho) * (dzz_szz + shear_xz)
 
-    sxx = sxx + dt * ((lame_lambda + 2 * lame_mu) * exx + lame_lambda * ezz)
-    szz = szz + dt * ((lame_lambda + 2 * lame_mu) * ezz + lame_lambda * exx)
-    txx = txx + dt * lame_mu * exx
-    tzz = tzz + dt * lame_mu * ezz
+    sxx = sxx + dt * (once(invariants, "lam+2mu", lambda: lame_lambda + 2 * lame_mu) * exx + lame_lambda * ezz)
+    szz = szz + dt * (once(invariants, "lam+2mu", lambda: lame_lambda + 2 * lame_mu) * ezz + lame_lambda * exx)
+    txx = txx + once(invariants, "dt*mu", lambda: dt * lame_mu) * exx
+    tzz = tzz + once(invariants, "dt*mu", lambda: dt * lame_mu) * ezz
 
     das35_t = helical_das_response(exx, ezz, angle=35.3)
     das54x_t = helical_das_response(exx, ezz, angle=54.7, core_axis="x")
@@ -778,6 +783,7 @@ def step_das_zhao_3d(
     b,
     pd,
     pml=None,
+    invariants=None,
 ):
     """One 3D stress and normal-strain-rate elastic step from Eq. (9)."""
 
@@ -793,17 +799,17 @@ def step_das_zhao_3d(
     dxx_tzz, m_tzz_xf, m_tzz_xb = _dxx_cpml(tzz, pd, m_tzz_xf, m_tzz_xb, ax, bx, axh, bxh)
     dyy_tzz, m_tzz_yf, m_tzz_yb = _dyy_cpml(tzz, pd, m_tzz_yf, m_tzz_yb, ay, by, ayh, byh)
 
-    exx = exx + dt / rho * (dxx_sxx + dyy_txx + dxx_tyy + dzz_txx + dxx_tzz)
-    eyy = eyy + dt / rho * (dyy_syy + dyy_txx + dxx_tyy + dzz_tyy + dyy_tzz)
-    ezz = ezz + dt / rho * (dzz_szz + dzz_txx + dxx_tzz + dzz_tyy + dyy_tzz)
+    exx = exx + once(invariants, "dt/rho", lambda: dt / rho) * (dxx_sxx + dyy_txx + dxx_tyy + dzz_txx + dxx_tzz)
+    eyy = eyy + once(invariants, "dt/rho", lambda: dt / rho) * (dyy_syy + dyy_txx + dxx_tyy + dzz_tyy + dyy_tzz)
+    ezz = ezz + once(invariants, "dt/rho", lambda: dt / rho) * (dzz_szz + dzz_txx + dxx_tzz + dzz_tyy + dyy_tzz)
 
     div_e = exx + eyy + ezz
-    sxx = sxx + dt * (lame_lambda * div_e + 2 * lame_mu * exx)
-    syy = syy + dt * (lame_lambda * div_e + 2 * lame_mu * eyy)
-    szz = szz + dt * (lame_lambda * div_e + 2 * lame_mu * ezz)
-    txx = txx + dt * lame_mu * exx
-    tyy = tyy + dt * lame_mu * eyy
-    tzz = tzz + dt * lame_mu * ezz
+    sxx = sxx + dt * (lame_lambda * div_e + once(invariants, "2*mu", lambda: 2 * lame_mu) * exx)
+    syy = syy + dt * (lame_lambda * div_e + once(invariants, "2*mu", lambda: 2 * lame_mu) * eyy)
+    szz = szz + dt * (lame_lambda * div_e + once(invariants, "2*mu", lambda: 2 * lame_mu) * ezz)
+    txx = txx + once(invariants, "dt*mu", lambda: dt * lame_mu) * exx
+    tyy = tyy + once(invariants, "dt*mu", lambda: dt * lame_mu) * eyy
+    tzz = tzz + once(invariants, "dt*mu", lambda: dt * lame_mu) * ezz
 
     das35_t = helical_das_response(exx, ezz, eyy, angle=35.3)
     das54x_t = helical_das_response(exx, ezz, eyy, angle=54.7, core_axis="x")
@@ -910,6 +916,7 @@ class DASZhao(FirstOrderEquation):
     )
 
     default_pml_type = "cpmls"  # staggered-grid CPML: step_das_zhao_2d unpacks 8 profiles
+    takes_invariants = True
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch"):
         """Build the 2-D Zhao DAS equation operator.
@@ -1053,6 +1060,7 @@ class DASZhao3D(FirstOrderEquation):
     )
 
     default_pml_type = "cpmls"  # staggered-grid CPML: step_das_zhao_3d unpacks 12 profiles
+    takes_invariants = True
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch"):
         """Build the 3-D Zhao DAS equation operator.
@@ -1179,6 +1187,7 @@ class DASMu(FirstOrderEquation):
     )
 
     default_pml_type = "cpmls"  # staggered-grid CPML: step_das_mu_2d unpacks 8 profiles
+    takes_invariants = True
     supports_bs_free_surface = True  # interior_substeps keep the free-surface rows
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch"):
@@ -1356,6 +1365,7 @@ class DASMu3D(FirstOrderEquation):
     )
 
     default_pml_type = "cpmls"  # staggered-grid CPML: step_das_mu_3d unpacks 12 profiles
+    takes_invariants = True
     supports_bs_free_surface = True  # interior_substeps keep the free-surface rows
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch"):
