@@ -19,7 +19,7 @@ import torch
 from .._compile import is_compiling
 
 
-def contract(spec: str, D: torch.Tensor, F: torch.Tensor) -> torch.Tensor:
+def contract(spec: str, D: torch.Tensor, F: torch.Tensor, *, unroll: bool = True) -> torch.Tensor:
     """``torch.einsum(spec, D, F)`` for a GLL reference-derivative contraction.
 
     ``D`` is the ``(n, n)`` derivative matrix and ``spec`` contracts one of its
@@ -32,8 +32,17 @@ def contract(spec: str, D: torch.Tensor, F: torch.Tensor) -> torch.Tensor:
     compiled step runs 1.05-1.75x faster forward and 1.07-1.57x forward+backward
     (H100; most on 3-D and large 2-D meshes). Uncompiled the sum is slower (``n``
     kernels instead of one), and so it is compiled for the CPU.
+
+    ``unroll=False`` keeps the einsum on the GPU too. The 3-D deformed classes with
+    a C-PML take it (:func:`phys_grads3` and the divergences below,
+    ``AcousticSEM3DDeformed``): there the 3x3 inverse Jacobian makes every physical
+    derivative read all three reference directions, and Inductor inlines the
+    gathers into each multiply-add -- one kernel with ~100 indirect loads per GLL
+    node that spills its registers. The GEMM gathers each field once: the compiled
+    step is 1.4-6x faster with it (A100, RTX 6000 Ada; on the Ada the unrolled step
+    was slower than the uncompiled one).
     """
-    if F.is_cuda and is_compiling():
+    if unroll and F.is_cuda and is_compiling():
         out = _contract_unrolled(spec, D, F)
         if out is not None:
             return out
@@ -192,12 +201,14 @@ def phys_grads3(D, ibool, inv_J, *fields):
     physical derivative instead of the single constant scaling an axis-aligned
     mesh allows.
 
-    Returns a flat list ``[df0_dx, df0_dy, df0_dz, df1_dx, …]``.
+    Returns a flat list ``[df0_dx, df0_dy, df0_dz, df1_dx, …]``. The
+    contractions stay einsums when compiled (``contract(unroll=False)``), as in
+    the divergences below.
     """
     f_e = torch.stack(fields, dim=-1)[ibool]        # (E,ngll,ngll,ngll,K)
-    d_ref = (contract("xX,ezyXk->ezyxk", D, f_e),      # ∂/∂ξ  (x-axis)
-             contract("yY,ezYxk->ezyxk", D, f_e),      # ∂/∂η  (y-axis)
-             contract("zZ,eZyxk->ezyxk", D, f_e))      # ∂/∂γ  (z-axis)
+    d_ref = (contract("xX,ezyXk->ezyxk", D, f_e, unroll=False),      # ∂/∂ξ  (x-axis)
+             contract("yY,ezYxk->ezyxk", D, f_e, unroll=False),      # ∂/∂η  (y-axis)
+             contract("zZ,eZyxk->ezyxk", D, f_e, unroll=False))      # ∂/∂γ  (z-axis)
     out = []
     for k in range(len(fields)):
         for d in range(3):
@@ -220,7 +231,7 @@ def divergence_parts3(D, inv_J, w_jac, sig):
         j = k % 3
         acc = None
         for m, ein in enumerate(eins):
-            t = contract(ein, D, w_jac * s * inv_J[..., m, j])
+            t = contract(ein, D, w_jac * s * inv_J[..., m, j], unroll=False)
             acc = t if acc is None else acc + t
         out.append(acc)
     return out
@@ -251,7 +262,7 @@ def stress_divergence3(D, ibool, inv_J, w_jac, sig, like):
         for m, ein in enumerate(("Xx,ezyX->ezyx", "Yy,ezYx->ezyx",
                                  "Zz,eZyx->ezyx")):
             F = w_jac * sum(row[j] * inv_J[..., m, j] for j in range(3))
-            t = contract(ein, D, F)
+            t = contract(ein, D, F, unroll=False)
             acc = t if acc is None else acc + t
         R.append(acc)
     return assemble_each(R, ibool, like)
@@ -264,6 +275,6 @@ def vector_divergence3(D, ibool, inv_J, w_jac, vec, like):
     acc = None
     for m, ein in enumerate(("Xx,ezyX->ezyx", "Yy,ezYx->ezyx", "Zz,eZyx->ezyx")):
         F = w_jac * sum(vec[j] * inv_J[..., m, j] for j in range(3))
-        t = contract(ein, D, F)
+        t = contract(ein, D, F, unroll=False)
         acc = t if acc is None else acc + t
     return assemble(acc, ibool, like)

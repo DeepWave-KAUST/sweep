@@ -14,7 +14,8 @@ import torch
 
 from sweep.propagator import EagerOptions
 from sweep.sem import (PropSEM, AcousticSEM2DDeformed, ElasticVSSEM2DDeformed,
-                       BiotVSSEM2DDeformed, AcousticSEM3D, ElasticVSSEM3D)
+                       BiotVSSEM2DDeformed, AcousticSEM3D, ElasticVSSEM3D,
+                       AcousticSEM3DDeformed, ElasticVSSEM3DDeformed)
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="the compiled GPU step")
 
@@ -38,6 +39,9 @@ CASES = {
     "biot2d": (BiotVSSEM2DDeformed, (41, 81), 5e-4, None, ["sxx", "szz"], ["vx", "vz", "p"], False, None),
     "acoustic3d": (AcousticSEM3D, (17, 17, 17), 8e-4, (2500.0,), None, None, False, 8),
     "elastic_vs3d": (ElasticVSSEM3D, (17, 17, 17), 8e-4, EL, None, None, False, 8),
+    # the 3-D deformed C-PML classes keep their contractions as einsums when compiled
+    "acoustic3d_deformed": (AcousticSEM3DDeformed, (17, 17, 17), 8e-4, (2500.0,), None, None, True, 8),
+    "elastic_vs3d_deformed": (ElasticVSSEM3DDeformed, (17, 17, 17), 8e-4, EL, None, None, True, 8),
 }
 
 
@@ -51,8 +55,11 @@ def _run(name, compile, nt=80):
     if abcn:
         kw["abcn"] = abcn
     if topo:
-        x = np.arange(shape[-1])
-        kw["topography"] = 4.0 - 4.0 * np.exp(-((x - shape[-1] / 2) / (shape[-1] / 8)) ** 2)
+        hill = lambda n: np.exp(-((np.arange(n) - n / 2) / (n / 8)) ** 2)
+        if len(shape) == 2:
+            kw["topography"] = 4.0 - 4.0 * hill(shape[-1])
+        else:
+            kw["topography"] = 4.0 - 4.0 * hill(shape[1])[:, None] * hill(shape[2])[None, :]
     prop = PropSEM(eq, **kw)
     if len(shape) == 2:
         src = np.array([[shape[1] // 2, 8.0]])

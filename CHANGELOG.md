@@ -489,6 +489,20 @@ and this project adheres to
   curvilinear grid only.
 
 ### Fixed
+- **The compiled eager step of the 3-D deformed SEM classes with a C-PML is faster:
+  forward 4.3-6.4x on `AcousticSEM3DDeformed`, 1.9-3x on `ElasticVSSEM3DDeformed`,
+  `ElasticVTISEM3DDeformed`, `ElasticTTISEM3DDeformed` and
+  `ViscoElasticVSSEM3DDeformed`, 1.4-1.9x on `BiotVSSEM3DDeformed`; forward +
+  backward 3-4.4x, 1.5-2.2x and 1.1-1.3x (A100, RTX 6000 Ada).** Since the GLL
+  contractions were unrolled for the CUDA compile, the 3x3 inverse Jacobian made
+  every physical derivative read all three reference directions, and Inductor put
+  the gathers of every field into each multiply-add: one kernel with ~100 indirect
+  loads per GLL node that spilled its registers (93% of the acoustic step), on the
+  RTX 6000 Ada a compiled step slower than the uncompiled one. These classes keep
+  the batched einsum (`contract(..., unroll=False)`), which gathers each field once.
+  `AcousticSEM3DDeformed` at 97^3 on an A100: 12.6 -> 2.7 ms per step forward and
+  27.0 -> 8.6 forward + backward, from 24x the CUDA kernels to 5.5x. Records and
+  gradients unchanged to fp32 round-off; the other classes keep the unrolled form.
 - `PropSEM(impl=None, memory=BoundarySaving())` runs on eager where the CUDA
   kernels have no boundary saving (`ElasticVSSEM3D`, `ElasticSEM3D`,
   `ElasticSEM3DDeformed`, the 2-D paths without their C-PML) instead of
