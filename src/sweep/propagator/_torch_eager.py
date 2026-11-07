@@ -216,15 +216,15 @@ def _default_steps_per_call(ndim, dev, records):
 
 
 def _uses_cudagraphs(mode, dynamic):
-    """Whether torch.compile's ``mode`` replays the step as CUDA graphs, whose
-    trees want each call marked (reduce-overhead, max-autotune)."""
+    """Whether torch.compile's ``mode`` replays the step as CUDA graphs
+    (reduce-overhead, max-autotune)."""
     if mode in (None, "default"):
         return False
     try:
         from torch._inductor import list_mode_options
         return bool(list_mode_options(mode, dynamic).get("triton.cudagraphs", False))
-    except Exception:           # an unknown mode or torch: mark, as always before
-        return True
+    except Exception:           # an unknown mode (torch.compile says so), or no table
+        return mode in ("reduce-overhead", "max-autotune")
 
 
 def _raise_dynamo_recompile_limit(target=32):
@@ -276,6 +276,7 @@ class _PropTorchEager(
             kwargs.pop("steps_per_call", EAGER_DEFAULTS.steps_per_call), self.use_compile)
         torch.nn.Module.__init__(self)
         super().__init__(*args, **kwargs)
+        self._check_compile_mode()
         self._inductor_extras = self._resolve_inductor_extras()
 
         self.register_buffer("dt", torch.tensor(self._dt, device=self.dev, dtype=torch.float32))
@@ -297,8 +298,6 @@ class _PropTorchEager(
         self._plain_steps_func = self._build_steps_func(self._plain_step_func)
         self._steps_funcs = {}          # steps per call -> its compiled steps_func
         self._step_alone = None         # the compiled step alone (_step_alone_fn)
-        self._mark_steps = (self.use_compile and "cuda" in str(self.dev)
-                            and _uses_cudagraphs(self.compile_mode, self.compile_dynamic))
 
     def _strip_layout(self):
         """The eager state's layout: a ``StripLayout`` when the CPML memory fields
@@ -578,13 +577,23 @@ class _PropTorchEager(
             "eager_options=EagerOptions(use_compile=False) to skip the attempt.",
             RuntimeWarning, stacklevel=3)
 
-    def _mark_compile_step_begin(self):
-        """Mark a new call for CUDA-graph trees; only the compile modes that
-        replay CUDA graphs keep them (``_mark_steps``)."""
-        if self._mark_steps and self.use_compile:
-            compiler = getattr(torch, "compiler", None)
-            if compiler is not None and hasattr(compiler, "cudagraph_mark_step_begin"):
-                compiler.cudagraph_mark_step_begin()
+    def _check_compile_mode(self):
+        """Refuse the compile modes that replay the compiled step as CUDA graphs
+        (reduce-overhead, max-autotune) on a CUDA device.  A replay writes its
+        outputs to the buffers of the replay before, which the time loop still
+        holds: the record of every call until the rollout ends, and the fields
+        a call passes on (a second-order step's earlier level is its input).
+        Every rollout failed reading them back ("accessing tensor output of
+        CUDAGraphs that has been overwritten by a subsequent run")."""
+        if not (self.use_compile and "cuda" in str(self.dev)
+                and self.compile_backend in (None, "inductor")
+                and _uses_cudagraphs(self.compile_mode, self.compile_dynamic)):
+            return
+        raise ValueError(
+            f"EagerOptions(compile_mode={self.compile_mode!r}) replays the compiled step as CUDA "
+            "graphs, and each replay writes over the outputs of the one before, which the time "
+            "loop still holds (the records of earlier calls, the fields passed on). Use "
+            "compile_mode='default' or 'max-autotune-no-cudagraphs'.")
 
     def _resolved_steps_per_call(self, records=True):
         """Steps a compiled call advances: ``steps_per_call``, or when it is
@@ -674,7 +683,6 @@ class _PropTorchEager(
 
         def advance(fields, t, end):
             if settled.compiled(t, fields) and t % k == 0 and t + k <= end:
-                self._mark_compile_step_begin()
                 if alone:
                     fields = step(*fields, *models, self.dt, h, None, source=(sample(t), *source), **extra)
                     return list(fields), _record_column(fields, at, *receivers).unsqueeze(1), 1

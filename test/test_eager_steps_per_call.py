@@ -406,17 +406,6 @@ def test_by_default_only_gradient_rollouts_take_four_steps_a_call():
     assert (True, 4) in calls and impl._resolved_steps_per_call(records=True) == 4
 
 
-@requires_compile
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="a CUDA propagator")
-def test_the_default_mode_marks_no_cuda_graph_step(monkeypatch):
-    """cudagraph_mark_step_begin is for the CUDA-graph modes; the default mode
-    paid for it on every step."""
-    marks = []
-    monkeypatch.setattr(torch.compiler, "cudagraph_mark_step_begin", lambda: marks.append(1))
-    _gpu_run(Acoustic, 4, Full, nt=24)
-    assert marks == []
-
-
 # ---- boundary saving ---------------------------------------------------------------
 # A boundary-saving call of k steps (_BoundarySaveSteps) runs the k steps forward in
 # one compiled call; backward reconstructs their inputs in one call and differentiates

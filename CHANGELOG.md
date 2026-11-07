@@ -379,8 +379,7 @@ and this project adheres to
   after it as before: there the sampling inside made Inductor split the
   step's backward into more full-grid kernels (a 160³ acoustic gradient took
   2.95 instead of 2.62 ms a step on an RTX 6000 Ada). Records are the same
-  bit for bit either way. `torch.compiler.cudagraph_mark_step_begin()` is
-  called only in the compile modes that replay CUDA graphs. See
+  bit for bit either way. See
   [Several time steps per compiled call](docs/user-guide/propagators.md#steps-per-call).
 - **Eager boundary saving takes `steps_per_call` steps a call too.** A call of
   `k` steps (`_BoundarySaveSteps`) stores the `k` steps' boundary rings
@@ -644,6 +643,17 @@ and this project adheres to
   curvilinear grid only.
 
 ### Fixed
+- **`impl='eager'` refuses the compile modes that replay CUDA graphs on a CUDA
+  device.** With `EagerOptions(compile_mode='reduce-overhead')` or
+  `'max-autotune'`, a replay writes over the outputs of the one before, which the
+  time loop still holds (the records of the earlier calls, the fields a call
+  passes on), and every rollout failed reading them back ("accessing tensor
+  output of CUDAGraphs that has been overwritten by a subsequent run"): under
+  `Full()` and `Ckpt()` with and without gradients, and under boundary saving
+  without them (with them it ran, and the same propagator then failed on a
+  forward). They raise `ValueError` at construction now, whatever the memory;
+  `'max-autotune-no-cudagraphs'` keeps the autotuning. On a CPU, and with
+  `use_compile=False`, nothing changes.
 - **The compiled eager step of the 3-D deformed SEM classes with a C-PML is faster:
   forward 4.3-6.4x on `AcousticSEM3DDeformed`, 1.9-3x on `ElasticVSSEM3DDeformed`,
   `ElasticVTISEM3DDeformed`, `ElasticTTISEM3DDeformed` and
