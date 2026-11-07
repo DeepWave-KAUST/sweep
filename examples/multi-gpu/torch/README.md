@@ -230,6 +230,26 @@ It also shows the forward-only path: generating observed data under
 boundary ring, and the capture is promoted automatically at the first
 `.backward()`.
 
+### SEM — one 3-D shot across strips
+
+- `sem_dd_acoustic3d.py`
+
+The spectral-element solver has its own decomposition, `sweep.sem.dd`:
+`SEMModelParallel(prop, StripTopology(px, rank))` cuts the SEM mesh into x strips,
+one per rank, on the `impl='c'` kernels of `AcousticPotentialSEM2D`,
+`ElasticSEM2DDeformed`, `AcousticElasticSEM2D`, `AcousticSEM3D` and
+`AcousticSEM3DDeformed`. The script runs one `AcousticSEM3D` shot, the misfit and
+its gradient, and prints each rank's time and peak memory; `--check` compares it
+with the same shot on one GPU.
+
+```bash
+torchrun --standalone --nproc-per-node=4 \
+  examples/multi-gpu/torch/sem_dd_acoustic3d.py --check
+```
+
+The walkthrough and measured numbers are on the docs page
+[SEM · multi-GPU domain decomposition](../../../docs/examples/sem_dd.md).
+
 ### Across nodes
 
 Every script above runs unchanged on several machines. They read `LOCAL_RANK`

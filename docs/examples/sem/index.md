@@ -2,13 +2,15 @@
 
 The spectral-element solver, `sweep.sem.PropSEM`: `PropTorch`'s call on a
 Quad9 mesh that follows the free surface. Start with *Hello · SEM* for one
-forward and one gradient, then the eight short *SEM basics* notebooks, each on
+forward and one gradient, then eight short notebooks, each on
 one part of the API, from the mesh to 3-D and to anisotropic and porous rocks.
 The examples after them compare topography against the finite-difference
 solvers, run FWI on Marmousi (one model and every shot's window in one batched
 call), and then turn to marine receivers, illumination, attenuation and plane
-waves. The
-[SEM user guide](../../user-guide/sem.md) has the rest of the API.
+waves. A model larger than one GPU holds runs across several with
+`sweep.sem.dd`; the script page
+[SEM · multi-GPU domain decomposition](../sem_dd.md) runs one 3-D shot that way.
+The [SEM user guide](../../user-guide/sem.md) has the rest of the API.
 
 ## Basics
 
@@ -21,14 +23,13 @@ waves. The
     ---
 
     `PropSEM` on a two-layer model: one shot gather, then one `.backward()`
-    for the vp gradient on the grid, with the full tape and with
-    `memory=BoundarySaving()`.
+    for the vp gradient on the grid.
 
     [:material-notebook-outline: Open notebook](../../notebooks/43_sem_forward_backward.ipynb)
 
 -   ![SEM mesh and time step](../../figures/gallery/50_sem_mesh_and_time_step.png){ loading=lazy }
 
-    **Basics 1 · The mesh and the time step**
+    **Mesh and time step · tiling, topography, interfaces**
 
     ---
 
@@ -41,19 +42,18 @@ waves. The
 
 -   ![SEM equations](../../figures/gallery/51_sem_equations_and_models.png){ loading=lazy }
 
-    **Basics 2 · Choosing an equation**
+    **Equations · choosing one, and its models**
 
     ---
 
     The equation table, what each equation takes as `models=` and which run on
-    `impl='c'`, four 2-D equations on one model, record against record, and the
-    SH equation.
+    `impl='c'`, four 2-D equations on one model, and the SH equation.
 
     [:material-notebook-outline: Open notebook](../../notebooks/51_sem_equations_and_models.ipynb)
 
 -   ![SEM sources and receivers](../../figures/gallery/52_sem_sources_and_receivers.png){ loading=lazy }
 
-    **Basics 3 · Sources, receivers and records**
+    **Sources and receivers · positions, types, shots**
 
     ---
 
@@ -65,30 +65,31 @@ waves. The
 
 -   ![SEM boundaries](../../figures/gallery/53_sem_boundaries_and_snapshots.png){ loading=lazy }
 
-    **Basics 4 · Boundaries and snapshots**
+    **Boundaries · C-PML, free surfaces, snapshots**
 
     ---
 
     `abcn` from none to the default, `free_surface` by edge, an elastic surface
-    over a hill, wavefield snapshots, and the one refused C-PML layout.
+    over a hill, and wavefield snapshots.
 
     [:material-notebook-outline: Open notebook](../../notebooks/53_sem_boundaries_and_snapshots.ipynb)
 
 -   ![SEM gradients](../../figures/gallery/54_sem_gradients_and_memory.png){ loading=lazy }
 
-    **Basics 5 · Gradients and memory**
+    **Gradients · backends and memory**
 
     ---
 
     vp, vs and rho gradients from one multi-shot call, then `Full()`,
-    `BoundarySaving()` and `Ckpt()` on both backends: time, peak memory and the
-    gradient, and the smaller rim-mode boundary saving.
+    `BoundarySaving()` and `Ckpt()` on both backends: time and peak memory,
+    smaller rings (rim mode, bf16 and int8), and the same gradients on a
+    velocity-stress class.
 
     [:material-notebook-outline: Open notebook](../../notebooks/54_sem_gradients_and_memory.ipynb)
 
 -   ![SEM fluid-solid](../../figures/gallery/55_sem_fluid_solid.png){ loading=lazy }
 
-    **Basics 6 · Water over an elastic sea floor**
+    **Fluid-solid · water over an elastic sea floor**
 
     ---
 
@@ -100,7 +101,7 @@ waves. The
 
 -   ![SEM 3-D](../../figures/gallery/56_sem_3d.png){ loading=lazy }
 
-    **Basics 7 · A 3-D model**
+    **3-D · acoustic, elastic, topography, Biot**
 
     ---
 
@@ -112,7 +113,7 @@ waves. The
 
 -   ![SEM VTI and Biot](../../figures/gallery/57_sem_vti_and_biot.png){ loading=lazy }
 
-    **Basics 8 · Anisotropic and poroelastic rocks**
+    **Anisotropic and poroelastic · VTI, TTI, Biot**
 
     ---
 
@@ -172,7 +173,7 @@ waves. The
 
     One marine run records every sensor where it sits: a dual-sensor streamer
     in the water, nodes on the sea floor (velocity, pressure, rotation) and a
-    DAS fibre's strain rate, the gradient receivers checked against differences.
+    DAS fibre's strain rate.
 
     [:material-notebook-outline: Open notebook](../../notebooks/47_sem_receivers.ipynb)
 
@@ -190,13 +191,13 @@ waves. The
 
 -   ![SEM attenuation](../../figures/gallery/49_sem_attenuation.png){ loading=lazy }
 
-    **Attenuation · nonlinear Q fit, attenuating C-PML**
+    **Attenuation · records with and without Q, the constant-Q fit**
 
     ---
 
-    SPECFEM2D's nonlinear constant-Q fit (`fit="nonlinear"`) against the
-    linear one, in Q(f) and in a strongly attenuated P wave, and the absorbing
-    layer that now attenuates as the medium does.
+    An elastic and an acoustic record with and without attenuation
+    (`ViscoElasticVSSEM2DDeformed`, `ViscoAcousticPotentialSEM2D`), and the Q
+    that the default and the nonlinear (`fit="nonlinear"`) constant-Q fits realise.
 
     [:material-notebook-outline: Open notebook](../../notebooks/49_sem_attenuation.ipynb)
 
@@ -206,9 +207,9 @@ waves. The
 
     ---
 
-    SPECFEM2D's `initialfield` on the C-PML: a plane wave from below, past the
-    critical angle, or a Rayleigh wave, entering through a band around a box,
-    then a hill, a canyon and a soft basin inside it.
+    SPECFEM2D's `initialfield` on the C-PML: a plane SV wave from below, past
+    the critical angle, a Rayleigh wave, a P wave and an SH wave, entering
+    through a band around a box, then a hill, a canyon and a soft basin inside it.
 
     [:material-notebook-outline: Open notebook](../../notebooks/58_sem_plane_wave.ipynb)
 
@@ -218,9 +219,9 @@ waves. The
 
     ---
 
-    `ViscoElasticVSSEM3D` against the whole-space visco-elastic Green's
-    function of a point force, and `ViscoElasticVSSEM3DDeformed` under a hill:
-    attenuation, a topography and absorbing boundaries together.
+    `ViscoElasticVSSEM3D`: a point force in a whole space with and without
+    attenuation; `ViscoElasticVSSEM3DDeformed`: the same under a hill, with a
+    free surface.
 
     [:material-notebook-outline: Open notebook](../../notebooks/59_sem_visco_elastic3d.ipynb)
 
@@ -231,7 +232,8 @@ waves. The
     ---
 
     `ElasticVTISEM3D` and `ElasticTTISEM3D`: the wavefronts of a point force in a VTI
-    and a tilted medium, and a shear wave splitting across a horizontal symmetry axis.
+    and a tilted medium, a shear wave splitting across a horizontal symmetry axis,
+    and the tilted medium under a hill with a free surface.
 
     [:material-notebook-outline: Open notebook](../../notebooks/60_sem_tti3d.ipynb)
 
