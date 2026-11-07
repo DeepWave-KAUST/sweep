@@ -277,6 +277,14 @@ class _PropTorchEager(
             if compiler is not None and hasattr(compiler, "cudagraph_mark_step_begin"):
                 compiler.cudagraph_mark_step_begin()
 
+    @staticmethod
+    def _records(models, wavelet_steps):
+        """Whether autograd records a rollout of ``models`` and the wavelet:
+        grad mode on and one of them requires grad."""
+        return torch.is_grad_enabled() and (
+            any(m.requires_grad for m in models)
+            or any(w.requires_grad for w in wavelet_steps[:1]))
+
     def _compiled_step(self, wavefields, models, dt, h, b, source=None, compiled=True):
         """One step; ``source`` (``SourceTorch.step_args``) is injected into
         the source fields inside it.  ``compiled=False`` runs it uncompiled
@@ -627,7 +635,11 @@ class _PropTorchEager(
             wavefield, record = self._rollout_ckpt(
                 wavefield, models, wavelet_steps, src, rec, receivers, nt, adj
             )
-        elif getattr(self, "_eager_bs", False):
+        elif getattr(self, "_eager_bs", False) and (
+                return_wavefield or self._records(runtime_models, wavelet_steps)):
+            # A call autograd does not record has no backward to save a boundary
+            # for: under boundary saving it takes the plain steps below, as
+            # impl='c' skips its boundary (return_wavefield still raises).
             if return_wavefield:
                 raise ValueError("return_wavefield is not supported with eager boundary saving.")
             wavefield, record = self._rollout_eager_bs(

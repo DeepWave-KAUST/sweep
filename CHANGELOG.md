@@ -503,6 +503,17 @@ and this project adheres to
   `AcousticSEM3DDeformed` at 97^3 on an A100: 12.6 -> 2.7 ms per step forward and
   27.0 -> 8.6 forward + backward, from 24x the CUDA kernels to 5.5x. Records and
   gradients unchanged to fp32 round-off; the other classes keep the unrolled form.
+- **Eager boundary saving saves no boundary on a call without gradients.** A
+  call autograd does not record (grad mode off, or no model or wavelet
+  requiring grad: a line search, forward modelling) has no backward pass; under
+  `memory=BoundarySaving()` it now runs the plain forward steps, as `Full()`
+  and `Ckpt()` do and as `impl='c'` does, instead of saving every step's
+  boundary ring into storage sized for the whole rollout. Its record is
+  `Full()`'s bit for bit, and it runs as fast: on an A100 at 1000^2 cells and
+  1000 steps 1.1x (elastic, 8 shots: 0.94 to 0.82 ms a step) to 2.3x (elastic,
+  one shot: 0.65 to 0.28) faster than before, and the peak memory of an 8-shot
+  elastic call fell from 2.3 to 0.96 GB. `return_wavefield=True` still raises
+  under boundary saving.
 - `PropSEM(impl=None, memory=BoundarySaving())` runs on eager where the CUDA
   kernels have no boundary saving (`ElasticVSSEM3D`, `ElasticSEM3D`,
   `ElasticSEM3DDeformed`, the 2-D paths without their C-PML) instead of
