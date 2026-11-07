@@ -964,9 +964,12 @@ class _PropTorchEager(
         wavelet = self._as_device_tensor(wavelet, dtype=torch.float32)
         # One contiguous view per step: the compiled step takes a step's sample
         # as an input, and a strided one would specialize the compiled code on
-        # nt.  Unbinding once also gathers the wavelet's gradient in one stack,
-        # where a slice per step cost a full-wavelet backward per step.
-        wavelet_steps = wavelet.movedim(-1, 0).contiguous().unbind(0)
+        # nt.  A clone, not .contiguous(): for one shot the time-major (nt, 1)
+        # counts as contiguous already, .contiguous() kept its stride of nt,
+        # and every new nt compiled the step again.  Unbinding once also gathers
+        # the wavelet's gradient in one stack, where a slice per step cost a
+        # full-wavelet backward per step.
+        wavelet_steps = wavelet.movedim(-1, 0).clone(memory_format=torch.contiguous_format).unbind(0)
         sources = self._as_device_tensor(sources, dtype=torch.long) + self.coord_offset
         receivers = self._as_device_tensor(receivers, dtype=torch.long) + self.coord_offset
 

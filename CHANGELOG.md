@@ -654,6 +654,14 @@ and this project adheres to
   forward). They raise `ValueError` at construction now, whatever the memory;
   `'max-autotune-no-cudagraphs'` keeps the autotuning. On a CPU, and with
   `use_compile=False`, nothing changes.
+- **One shot no longer compiles the eager step again for every new `nt`.** The
+  time-major wavelet of one shot, `(nt, 1)`, counts as contiguous, so
+  `.contiguous()` kept each step's sample at a stride of `nt`, which Dynamo
+  guards on: a rollout with a new `nt` (a multiscale stage, another record
+  length) compiled its calls again, the boundary-saving backward included
+  (20-100 s each on a GPU), and past Dynamo's recompile limit the step ran
+  uncompiled. Each sample is a contiguous copy now; several shots compiled once
+  before as well.
 - **The compiled eager step of the 3-D deformed SEM classes with a C-PML is faster:
   forward 4.3-6.4x on `AcousticSEM3DDeformed`, 1.9-3x on `ElasticVSSEM3DDeformed`,
   `ElasticVTISEM3DDeformed`, `ElasticTTISEM3DDeformed` and

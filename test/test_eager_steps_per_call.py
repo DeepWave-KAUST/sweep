@@ -241,6 +241,33 @@ def test_a_rollout_compiles_one_graph_and_a_new_nt_none(monkeypatch):
 
 
 @requires_compile
+@pytest.mark.parametrize("memory, k", [(Full, 1), (Full, 4), (lambda: BoundarySaving(storage="gpu"), 4)],
+                         ids=["full", "full_k4", "bs_k4"])
+def test_one_shot_compiles_once_whatever_nt(memory, k):
+    """With one shot the time-major wavelet (nt, 1) counts as contiguous, and
+    .contiguous() kept each step's sample at a stride of nt, which Dynamo
+    guards on: every new nt compiled the calls (and the boundary-saving
+    backward) again."""
+    torch._dynamo.reset()
+    graphs = []
+
+    def backend(gm, example_inputs):
+        graphs.append(len(gm.graph.nodes))
+        return gm.forward
+
+    prop = PropTorch(Acoustic(spatial_order=4, device="cpu"), shape=SHAPE, dh=10.0, dt=1e-3, nt=NT, abcn=6,
+                     dev="cpu", impl="eager", memory=memory(),
+                     eager_options=EagerOptions(compile_backend=backend, steps_per_call=k))
+    counts = []
+    for nt in (NT, NT + 6, NT - 1):
+        wav = torch.tensor(_wavelet(nt)[:1])
+        vp = torch.full(SHAPE, 2500.0, requires_grad=True)
+        prop(wav, SRC[:1], REC_XZ[:1], models=[vp]).sum().backward()
+        counts.append(len(graphs))
+    assert counts[0] > 0 and counts == [counts[0]] * 3, f"graphs after each nt: {counts}"
+
+
+@requires_compile
 @pytest.mark.parametrize("strips", [False, True], ids=["full_grid", "strips"])
 @pytest.mark.parametrize("grad", [False, True], ids=["forward", "gradient"])
 def test_one_step_a_call_samples_the_receivers_outside_only_with_gradients_on_strips(grad, strips):
