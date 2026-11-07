@@ -41,13 +41,15 @@ from ..mesh.hex27 import Hex27Mesh
 from ..mesh.hex8 import boundary_element_faces
 
 
-# reference-derivative + transpose einsums on (E, kz, ky, kx) tensors
-def _dxi(D, f):   return contract("xX,ezyX->ezyx", D, f)   # ∂/∂ξ (x-axis)
-def _deta(D, f):  return contract("yY,ezYx->ezyx", D, f)   # ∂/∂η (y-axis)
-def _dgam(D, f):  return contract("zZ,eZyx->ezyx", D, f)   # ∂/∂γ (z-axis)
-def _DTxi(D, F):  return contract("Xx,ezyX->ezyx", D, F)
-def _DTeta(D, F): return contract("Yy,ezYx->ezyx", D, F)
-def _DTgam(D, F): return contract("Zz,eZyx->ezyx", D, F)
+# reference-derivative + transpose einsums on (E, kz, ky, kx) tensors; einsums when
+# compiled too (unroll=False): unrolled, the gathers of u and the a*psi fields went into
+# every multiply-add of the inv_J chain rule, a compiled step 4-6x slower (see contract)
+def _dxi(D, f):   return contract("xX,ezyX->ezyx", D, f, unroll=False)   # ∂/∂ξ (x-axis)
+def _deta(D, f):  return contract("yY,ezYx->ezyx", D, f, unroll=False)   # ∂/∂η (y-axis)
+def _dgam(D, f):  return contract("zZ,eZyx->ezyx", D, f, unroll=False)   # ∂/∂γ (z-axis)
+def _DTxi(D, F):  return contract("Xx,ezyX->ezyx", D, F, unroll=False)
+def _DTeta(D, F): return contract("Yy,ezYx->ezyx", D, F, unroll=False)
+def _DTgam(D, F): return contract("Zz,eZyx->ezyx", D, F, unroll=False)
 
 
 @dataclass
@@ -140,9 +142,9 @@ class AcousticSEM3DDeformed(DerivedInitState, DirichletNodes):
         D = self._D
         ibool = self.mesh.ibool
         wJ = self._w_J
-        ex = lambda F: contract("xX,ezyX->ezyx", D, F)
-        ey = lambda F: contract("yY,ezYx->ezyx", D, F)
-        ez = lambda F: contract("zZ,eZyx->ezyx", D, F)
+        ex = lambda F: _dxi(D, F)
+        ey = lambda F: _deta(D, F)
+        ez = lambda F: _dgam(D, F)
         u_e = u_global[ibool]
         du_dx, du_dy, du_dz = self._phys_grad_from_ref(ex(u_e), ey(u_e), ez(u_e))
         gx_e = wJ * du_dx; gy_e = wJ * du_dy; gz_e = wJ * du_dz

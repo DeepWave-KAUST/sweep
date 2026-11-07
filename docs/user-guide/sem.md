@@ -158,7 +158,11 @@ Three things speed it up, and they combine:
   is, and the other `compile_*` options of `EagerOptions` pass through. Inductor
   fuses the pointwise work, and when it compiles for CUDA the GLL
   reference-derivative contractions are written out as multiply-adds that it
-  fuses with the gather before them and the pointwise work after them. The first
+  fuses with the gather before them and the pointwise work after them. The 3-D
+  deformed classes with a C-PML keep them as batched matrix products: there the
+  inverse Jacobian makes every physical derivative read all three reference
+  directions, and the fused form, one large kernel, ran 1.4 to 6 times slower.
+  The first
   call compiles, and so does the first call with a new grid size, shot count,
   dtype or set of models that require grad; each says so on stderr before it
   starts, and later calls reuse it. With gradients, the first steps of a rollout
