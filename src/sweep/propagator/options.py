@@ -109,14 +109,17 @@ class EagerOptions:
     peak memory of a forward without gradients by about a third and of boundary
     saving by a fifth to a third (3-D, ``abcn=50``); with checkpointing, the
     eager default, by 3-9%. A 2-D step of ~1000^2 cells is launch-bound, and
-    strips make it slower. In 3-D with ``abcn=50`` (A100, V100, compiled) the
-    acoustic forward is faster from about 128^3 inner cells and its gradient
-    from about 160^3; smaller grids, and elastic gradients up to 160^3, run
-    5-50% slower, where ``cpml_strips=False`` is faster.
+    strips make it slower; a 2-D gradient call of about 3 million cells per
+    field or more (shots x padded grid cells: 3 shots of 1000^2) runs faster
+    with them (1.2-2x on an RTX 6000 Ada; see the user guide's *C-PML memory
+    fields on the absorbing strips*). In 3-D with ``abcn=50`` (A100, V100,
+    compiled) the acoustic forward is faster from about 128^3 inner cells and
+    its gradient from about 160^3; smaller grids, and elastic gradients up to
+    160^3, run 5-50% slower, where ``cpml_strips=False`` is faster.
 
     ``steps_per_call`` is how many time steps one call of the compiled step
-    advances on the full-tape and checkpointed rollouts, with the source
-    injection and the receiver sampling inside the call. A call costs the
+    advances on the full-tape, checkpointed and boundary-saving rollouts, with
+    the source injection and the receiver sampling inside the call. A call costs the
     host 0.2-0.5 ms (Dynamo's guards, the autograd wrappers, the kernel
     launches) whatever it computes; on a 2-D grid that is longer than the step
     takes the GPU, which then idles between steps. ``None`` (the default)
@@ -131,7 +134,10 @@ class EagerOptions:
     first one (until the inputs' ``requires_grad`` settles and a multiple is
     reached) and the last ``nt % steps_per_call`` run uncompiled, so no graph
     is compiled for a remainder, and a checkpoint chunk is rounded up to whole
-    calls. Boundary saving and ``return_wavefield=True`` advance one step a
+    calls. Under boundary saving the backward pass reconstructs the inputs of
+    a call's steps in one call and differentiates the steps in another, each
+    at its own reconstructed input, so the gradient is that of one step a call
+    up to float32 round-off. ``return_wavefield=True`` advances one step a
     call. A first compile takes longer the more steps a call holds.
     """
 
@@ -144,8 +150,8 @@ class EagerOptions:
     # CPML memory fields on the absorbing strips only; None decides by grid
     # (see the class docstring).
     cpml_strips: bool | None = EAGER_DEFAULTS.cpml_strips
-    # Time steps one call of the compiled step advances (full tape and
-    # checkpointing; boundary saving and return_wavefield take one at a time).
+    # Time steps one call of the compiled step advances (full tape,
+    # checkpointing and boundary saving; return_wavefield takes one at a time).
     # None: 4 for a rollout with gradients on a 2-D grid on a GPU, where each
     # call's host overhead outlasts the step itself, else 1. See
     # _PropTorchEager._stepper and _default_steps_per_call.

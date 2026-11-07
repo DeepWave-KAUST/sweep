@@ -46,18 +46,18 @@ def _models(eq, grad):
 
 def _counting(monkeypatch):
     """Count what boundary saving does: forward calls of its autograd
-    Function, ring rows saved, ring storages allocated."""
+    Functions (one step or several a call), ring rows saved, ring storages
+    allocated."""
     counts = {"calls": 0, "saved": 0, "rings": 0}
-    step = EBS._BoundarySaveStep.forward
+    for fn in (EBS._BoundarySaveStep, EBS._BoundarySaveSteps):
+        def counted(*args, _forward=fn.forward):
+            counts["calls"] += 1
+            return _forward(*args)
 
-    def step_counted(*args):
-        counts["calls"] += 1
-        return step(*args)
-
-    monkeypatch.setattr(EBS._BoundarySaveStep, "forward", staticmethod(step_counted))
-    save = EBS.save_step
-    monkeypatch.setattr(EBS, "save_step",
-                        lambda *a, **kw: counts.__setitem__("saved", counts["saved"] + 1) or save(*a, **kw))
+        monkeypatch.setattr(fn, "forward", staticmethod(counted))
+    for name in ("save_step", "save_steps"):
+        monkeypatch.setattr(EBS, name, lambda *a, _save=getattr(EBS, name), **kw:
+                            counts.__setitem__("saved", counts["saved"] + 1) or _save(*a, **kw))
     state = EBS.ReconState
     monkeypatch.setattr(EBS, "ReconState",
                         lambda *a, **kw: counts.__setitem__("rings", counts["rings"] + 1) or state(*a, **kw))
@@ -76,7 +76,7 @@ CALLS = {
 
 def _compile_options(compiled):
     if compiled:
-        return dict(use_compile=True, compile_backend="aot_eager")
+        return dict(use_compile=True, compile_backend="aot_eager", steps_per_call=4)
     return dict(use_compile=False)
 
 

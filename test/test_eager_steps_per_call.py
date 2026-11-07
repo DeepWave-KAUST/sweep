@@ -163,10 +163,9 @@ def test_a_rollout_records_when_grad_mode_is_on_and_an_input_requires_grad():
         assert not impl._records([m], w)
 
 
-def test_boundary_saving_refuses_more_than_one_step_a_call():
-    with pytest.raises(ValueError, match="one step a call"):
-        _prop(memory=lambda: BoundarySaving(storage="gpu"), steps_per_call=4)
-    _prop(memory=lambda: BoundarySaving(storage="gpu"))            # the default is fine
+def test_boundary_saving_takes_steps_per_call():
+    impl = _prop(memory=lambda: BoundarySaving(storage="gpu"), steps_per_call=4)._backend_impl
+    assert impl._eager_bs and impl._resolved_steps_per_call() == 4
 
 
 def test_only_cuda_graph_modes_mark_each_call():
@@ -390,3 +389,166 @@ def test_the_default_mode_marks_no_cuda_graph_step(monkeypatch):
     monkeypatch.setattr(torch.compiler, "cudagraph_mark_step_begin", lambda: marks.append(1))
     _gpu_run(Acoustic, 4, Full, nt=24)
     assert marks == []
+
+
+# ---- boundary saving ---------------------------------------------------------------
+# A boundary-saving call of k steps (_BoundarySaveSteps) runs the k steps forward in
+# one compiled call; backward reconstructs their inputs in one call and differentiates
+# them in another, each step at its own reconstructed input.  Its gradient has to be
+# that of k one-step calls (_BoundarySaveStep): the same states, the same autograd,
+# summed in a different order.
+
+def _bs(**options):
+    return lambda: BoundarySaving(**{"storage": "gpu", **options})
+
+
+def _counting_bs(monkeypatch):
+    """Record the steps of each boundary-saving forward call, in order."""
+    import sweep.propagator._eager_boundary_saving as EBS
+    calls = []
+    one, many = EBS._BoundarySaveStep.forward, EBS._BoundarySaveSteps.forward
+
+    def one_counted(ctx, cfg, step, *rest):
+        calls.append(1)
+        return one(ctx, cfg, step, *rest)
+
+    def many_counted(ctx, cfg, step, times, *rest):
+        calls.append(len(times))
+        return many(ctx, cfg, step, times, *rest)
+
+    monkeypatch.setattr(EBS._BoundarySaveStep, "forward", staticmethod(one_counted))
+    monkeypatch.setattr(EBS._BoundarySaveSteps, "forward", staticmethod(many_counted))
+    return calls
+
+
+@requires_compile
+@pytest.mark.parametrize("k", [3, 4])
+def test_boundary_saving_calls_start_on_multiples_of_k_once_the_inputs_settle(monkeypatch, k):
+    """The boundary-saving steps' outputs all require grad once a model does,
+    so the inputs settle at step 2; the calls of k steps start at the next
+    multiple of k and stop before the last nt % k steps, which take one step
+    each."""
+    calls = _counting_bs(monkeypatch)
+    _run(_prop(memory=_bs(), use_compile=True, compile_backend="aot_eager", steps_per_call=k), grad=True)
+    first = -(-2 // k) * k
+    last = NT - NT % k
+    assert calls == [1] * first + [k] * ((last - first) // k) + [1] * (NT - last)
+
+
+@requires_compile
+@pytest.mark.usefixtures("traced_everywhere")
+@pytest.mark.parametrize("eq, strips", [(Acoustic, False), (Elastic, False), (Elastic, True)],
+                         ids=["acoustic", "elastic", "elastic_strips"])
+@pytest.mark.parametrize("adj", [False, True], ids=["forward", "adjoint"])
+def test_boundary_saving_k_steps_a_call_give_the_one_step_gradient(eq, strips, adj):
+    """The record bitwise, the gradients of every model and of the wavelet to
+    float32 round-off."""
+    ref, ref_grads = _run(_prop(eq, _bs(), use_compile=True, compile_backend="aot_eager", steps_per_call=1,
+                                cpml_strips=strips), eq, adj=adj)
+    for k in (3, 4):
+        out, grads = _run(_prop(eq, _bs(), use_compile=True, compile_backend="aot_eager", steps_per_call=k,
+                                cpml_strips=strips), eq, adj=adj)
+        _assert_bitwise(out, ref)
+        _assert_close(grads, ref_grads)
+
+
+@requires_compile
+@pytest.mark.usefixtures("traced_everywhere")
+@pytest.mark.parametrize("eq, options", [(Acoustic, dict(storage_dtype="int8")),
+                                         (Acoustic, dict(storage_dtype="fp16")),
+                                         (Acoustic, dict(storage_dtype="bf16")),
+                                         (Elastic, dict(storage_dtype="int8")),
+                                         (Acoustic, dict(storage="cpu")),
+                                         (Elastic, dict(storage="cpu"))],
+                         ids=["acoustic_int8", "acoustic_fp16", "acoustic_bf16", "elastic_int8",
+                              "acoustic_cpu", "elastic_cpu"])
+def test_boundary_saving_k_steps_store_the_ring_as_one_step_does(eq, options):
+    """A row's stride is a whole number of quantization blocks, so k rows
+    encode together as they do one by one: the same rings come back."""
+    ref, ref_grads = _run(_prop(eq, _bs(**options), use_compile=True, compile_backend="aot_eager",
+                                steps_per_call=1), eq)
+    out, grads = _run(_prop(eq, _bs(**options), use_compile=True, compile_backend="aot_eager",
+                            steps_per_call=4), eq)
+    _assert_bitwise(out, ref)
+    _assert_close(grads, ref_grads)
+
+
+@requires_compile
+@pytest.mark.usefixtures("traced_everywhere")
+@pytest.mark.parametrize("eq", [Acoustic, Elastic], ids=["acoustic", "elastic"])
+def test_boundary_saving_k_steps_differ_from_the_full_tape_as_one_step_does(eq):
+    """Boundary saving reconstructs with the CPML zeroed, so its gradient
+    differs from the full tape's near the absorbing boundary.  A call of k
+    steps evaluates each step at its own reconstructed input and adds nothing
+    to that difference (chained from the first input instead, the difference
+    would grow a stencil per step into the grid)."""
+    full, full_grads = _run(_prop(eq, Full, use_compile=True, compile_backend="aot_eager", steps_per_call=1), eq)
+    one, one_grads = _run(_prop(eq, _bs(), use_compile=True, compile_backend="aot_eager", steps_per_call=1), eq)
+    four, four_grads = _run(_prop(eq, _bs(), use_compile=True, compile_backend="aot_eager", steps_per_call=4), eq)
+    _assert_bitwise(four, full)
+    for g4, g1, gf in zip(four_grads, one_grads, full_grads):
+        scale = float(gf.abs().max())
+        d1 = (g1 - gf).abs()
+        d4 = (g4 - gf).abs()
+        assert float((d4 - d1).abs().max()) <= 2e-6 * scale
+        assert float(d4.max()) <= 0.02 * scale, float(d4.max()) / scale
+
+
+@requires_compile
+def test_boundary_saving_k_steps_check_their_reconstruction(monkeypatch):
+    """The one-time self-check runs on the first backward call, here a call of
+    k steps, and a reconstruction that does not invert the steps raises."""
+    import sweep.propagator._eager_boundary_saving as EBS
+    seen = []
+    check = EBS._check_reconstruction
+
+    def spy(cfg, recomputed, frame):
+        seen.append(len(recomputed))
+        return check(cfg, recomputed, frame)
+
+    monkeypatch.setattr(EBS, "_check_reconstruction", spy)
+    nt = 40
+    _run(_prop(memory=_bs(), nt=nt, use_compile=True, compile_backend="aot_eager", steps_per_call=4), nt=nt)
+    assert seen == [len(_prop()._backend_impl.wavefield_names)]
+    monkeypatch.setattr(EBS, "_put_ring", lambda field, row, pos, stride, specs: torch.zeros_like(field))
+    with pytest.raises(RuntimeError, match="does not invert"):
+        _run(_prop(memory=_bs(), nt=nt, use_compile=True, compile_backend="aot_eager", steps_per_call=4), nt=nt)
+
+
+@requires_compile
+def test_boundary_saving_k_steps_compile_once_per_geometry():
+    """The calls are built once per geometry and kept on the propagator: a
+    rollout compiles its forward and its backward (two graphs, the backward
+    fused), a second rollout nothing.  Dynamo's caches are per code object and
+    shared by every test of the session (and capped), so they start empty."""
+    torch._dynamo.reset()
+    graphs = []
+
+    def backend(gm, example_inputs):
+        graphs.append(len(gm.graph.nodes))
+        return gm.forward
+
+    prop = _prop(memory=_bs(), use_compile=True, compile_backend=backend, steps_per_call=4)
+    _run(prop)
+    first = len(graphs)
+    assert first >= 2
+    _run(prop)
+    assert len(graphs) == first, "a second rollout compiled again"
+
+
+
+@requires_compile
+@pytest.mark.usefixtures("traced_everywhere")
+@pytest.mark.parametrize("eq, strips", [(Acoustic, False), (Elastic, True)], ids=["acoustic", "elastic_strips"])
+def test_boundary_saving_fused_backward_matches_two_calls(monkeypatch, eq, strips):
+    """FUSED_BS_BACKWARD: reconstruction and re-run in one graph give what
+    they give as two (records bitwise, gradients to round-off)."""
+    import sweep.propagator._eager_boundary_saving as EBS
+    runs = {}
+    for fused in (False, True):
+        monkeypatch.setattr(EBS, "FUSED_BS_BACKWARD", fused)
+        runs[fused] = _run(_prop(eq, _bs(), use_compile=True, compile_backend="aot_eager", steps_per_call=4,
+                                 cpml_strips=strips), eq)
+    (o0, g0), (o1, g1) = runs[False], runs[True]
+    _assert_bitwise(o1, o0)
+    _assert_close(g1, g0)

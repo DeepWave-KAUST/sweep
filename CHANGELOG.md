@@ -346,10 +346,10 @@ and this project adheres to
   on multiples of `steps_per_call`; the steps before
   (until the inputs' `requires_grad` settles) and the last
   `nt % steps_per_call` run uncompiled, so no graph is compiled for a
-  remainder, and a checkpoint chunk is rounded up to whole calls. Boundary
-  saving and `return_wavefield=True` advance one step a call; an explicit
-  `steps_per_call > 1` is refused with boundary saving, without
-  `use_compile`, and on PropSEM. Records and gradients move by float32
+  remainder, and a checkpoint chunk is rounded up to whole calls (boundary
+  saving: see the next entry). `return_wavefield=True` advances one step a
+  call; an explicit `steps_per_call > 1` is refused without `use_compile` and
+  on PropSEM. Records and gradients move by float32
   round-off (~1e-6 relative). On an A100 and an RTX 6000 Ada a 2-D gradient
   (acoustic, elastic) runs 1.8-3.1x faster at 1000² and 1.1-1.5x at 2000²;
   its first compile takes 2-3x as long (11-19 s) and its peak memory grows
@@ -358,6 +358,29 @@ and this project adheres to
   and `torch.compiler.cudagraph_mark_step_begin()` is called only in the
   compile modes that replay CUDA graphs. See
   [Several time steps per compiled call](docs/user-guide/propagators.md#steps-per-call).
+- **Eager boundary saving takes `steps_per_call` steps a call too.** A call of
+  `k` steps (`_BoundarySaveSteps`) stores the `k` steps' boundary rings
+  together; its backward reconstructs the `k` inputs backwards in time and
+  differentiates the `k` steps in one compiled call, each step at its own
+  reconstructed input, so the gradient is autograd's and that of one step a
+  call up to float32 round-off (records bitwise and gradients within 9e-7
+  relative across Acoustic, Acoustic3D, Acoustic1st, Elastic, Elastic3D,
+  DASMu, DASMu3D and ElasticVRR when both run the same ops). The forward runs
+  the `k` steps as one graph, whatever the grid size. The default
+  `steps_per_call=None` gives 4 for 2-D gradient rollouts on
+  a GPU, as on the other rollouts. Peak memory grows with `k` (1000^2
+  acoustic, 8 shots: 1.5 GB at `k = 1`, 2.5 GB at `k = 4`, 1.3 GB at `k = 4`
+  with `cpml_strips=True`). On a 2-D grid the backward's reconstruction and
+  re-run are one compiled call (2-10% faster there; on a 160^3 elastic grid
+  one call ran 2-3x slower, so 3-D keeps two). On an RTX 6000 Ada at 1000^2,
+  boundary saving on both sides and the stencil change below included, a 2-D
+  gradient ran 3.6x faster at one shot (acoustic 1.83 to 0.50 ms a step,
+  elastic 3.34 to 0.92) and 1.2-1.4x at 4-8 shots; with `cpml_strips=True`
+  from 4 shots, 2.4-2.5x (acoustic) and 1.65x (elastic), within 1.71x and
+  1.21x of `impl='c'` at 8 shots. A 160^3 gradient with `steps_per_call=2`
+  ran 1.45x (acoustic) and 1.56x (elastic) faster than before. The first
+  compile of a gradient takes 45-150 s. Previously an explicit
+  `steps_per_call > 1` was refused with boundary saving.
 - **The compiled slice stencils differentiate as their transpose.** The
   zero-padded correlation that `torch.compile`d eager steps evaluate
   (`sweep.operators.torch._apply_taps`) is an `autograd.Function` whose
@@ -382,7 +405,9 @@ and this project adheres to
   and its gradient from about 160^3 (0.88-0.96x), while smaller grids and the
   elastic gradients run 5-50% slower; pass `cpml_strips=False` there. In 2-D,
   where a step of 1000^2 cells is launch-bound, the strips cost more than they
-  save and stay off.
+  save and stay off by default; a 2-D gradient of about 3 million cells a call
+  (shots x padded grid cells) or more runs faster with `cpml_strips=True`
+  (measured in the user guide, *C-PML memory fields on the absorbing strips*).
 - Snapshots (`return_wavefield=True`) and `last_wavefields` hold full-grid
   fields under CPML strips too: the strips are put back in place, and
   uncompiled the fields equal the full-grid layout's bit for bit.

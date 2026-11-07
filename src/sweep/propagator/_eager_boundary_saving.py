@@ -52,6 +52,20 @@ from sweep.propagator._ring_geometry import (  # noqa: F401
 _STORE_DTYPE = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
 _INT8_BLOCK = 256   # cells per FP32 scale (matches CUDA BOUNDARY_INT8_BLOCK)
 
+# How a k-step backward runs its reconstruction and its re-run for autograd:
+# True, one compiled call (``steps_back``); False, two (``steps_rev``,
+# ``steps_bwd``); None (the default), one on a 2-D grid and two on a 3-D one.
+# One call saves a host call per k steps, and was faster on 1000^2 2-D grids
+# (RTX 6000 Ada, k = 4: acoustic and elastic 7-10% at one shot, 2% at 8), and
+# 2% on a 160^3 acoustic grid; on a 160^3 elastic grid Inductor's one graph ran
+# 2-3x slower than the two (22-32 vs 10.6 ms a step).
+FUSED_BS_BACKWARD = None
+
+
+def _fused_backward(ndim):
+    """Whether a k-step backward takes one compiled call (``FUSED_BS_BACKWARD``)."""
+    return ndim == 2 if FUSED_BS_BACKWARD is None else bool(FUSED_BS_BACKWARD)
+
 
 def _quantize_int8(flat):
     """DeepWave-style symmetric per-block INT8 on a 1-D tensor: one FP32 scale
@@ -298,41 +312,88 @@ def _ring_rows(storage, T, parts, device, pinned_memory=None, disk_dir=None,
     return _DeviceRows(device, [torch.empty((T, n), dtype=d, device=where) for n, d in parts])
 
 
+def _ring_row(fields, rings, pad):
+    """One step's ring: the ``rings`` of each of ``fields`` back to back, each
+    field padded to the row's stride with ``pad`` (None: no padding)."""
+    runs = []
+    for field in fields:
+        runs += [field[idx].reshape(-1) for idx in rings]
+        if pad is not None:
+            runs.append(pad)
+    return torch.cat(runs)
+
+
+def _encode(state, flat):
+    """A row (or rows back to back) as stored: down-cast or quantized to
+    ``state.store_dtype``, one tensor per part."""
+    if state.store_dtype == "int8":
+        return _quantize_int8(flat)
+    if state.store_dtype == "fp16":
+        return _quantize_fp16(flat)
+    return (flat.to(_STORE_DTYPE[state.store_dtype]),)
+
+
+def _decode(state, parts):
+    """The rows ``parts`` holds, back to back, in the compute dtype (bf16 rows
+    stay bf16; the restore casts)."""
+    if state.store_dtype == "int8":
+        return _dequantize_int8(*parts, parts[0].numel())
+    if state.store_dtype == "fp16":
+        return _dequantize_fp16(*parts, parts[0].numel())
+    return parts[0]
+
+
 def save_step(state, step, fields):
     """Save step ``step``'s ring of ``fields`` as one row, down-cast or
     quantized to ``state.store_dtype``."""
-    runs = []
-    for field in fields:
-        runs += [field[idx].reshape(-1) for idx in state.rings]
-        if state.pad is not None:
-            runs.append(state.pad)
-    flat = torch.cat(runs)
-    if state.store_dtype == "int8":
-        parts = _quantize_int8(flat)
-    elif state.store_dtype == "fp16":
-        parts = _quantize_fp16(flat)
-    else:
-        parts = (flat.to(_STORE_DTYPE[state.store_dtype]),)
-    state.rows.save(step, parts)
+    state.rows.save(step, _encode(state, _ring_row(fields, state.rings, state.pad)))
+
+
+def save_steps(state, step, rows):
+    """Save the rings of steps ``step`` to ``step + len(rows) - 1``, ``rows``
+    one ``_ring_row`` per step.  A row's stride is a whole number of
+    quantization blocks, so the rows encode together as they would one by one."""
+    k = rows.shape[0]
+    parts = [p.view(k, -1) for p in _encode(state, rows.reshape(-1))]
+    for j in range(k):
+        state.rows.save(step + j, [p[j] for p in parts])
+
+
+def load_steps(state, steps):
+    """The saved rings of ``steps`` (a list; repeats allowed), decoded and
+    stacked, ``(len(steps), row)``.  Rows are fetched highest step first, the
+    order the reverse pass reads them in (the 'cpu' and 'disk' stores fetch
+    ahead in that order)."""
+    got = {}
+    for j in sorted(set(steps), reverse=True):
+        got[j] = state.rows.load(j)
+    parts = [torch.stack([got[j][p] for j in steps]).reshape(-1) for p in range(len(got[steps[0]]))]
+    return _decode(state, parts).view(len(steps), -1)
 
 
 def restore_step(state, step, pos, field):
     """Put field ``pos``'s saved ring at step ``step`` back into ``field``."""
     flat = state.decoded.get(step)
     if flat is None:
-        parts = state.rows.load(step)
-        if state.store_dtype == "int8":
-            flat = _dequantize_int8(*parts, parts[0].numel())
-        elif state.store_dtype == "fp16":
-            flat = _dequantize_fp16(*parts, parts[0].numel())
-        else:
-            flat = parts[0]
+        flat = _decode(state, state.rows.load(step))
         # The reverse pass walks down in time and reads this step and the one above.
         state.decoded = {k: v for k, v in state.decoded.items() if k == step + 1}
         state.decoded[step] = flat
     off = pos * state.stride
     for idx, shp, sz in zip(state.rings, state.ring_shapes, state.ring_sizes):
         field[idx] = flat[off:off + sz].view(shp).to(field.dtype)
+        off += sz
+    return field
+
+
+def _put_ring(field, row, pos, stride, specs):
+    """``field`` with field ``pos``'s ring from ``row`` put back, out of place
+    (the k-step reconstruction is traced); ``specs`` lists each ring slab's
+    (index, shape, size)."""
+    field = field.clone()
+    off = pos * stride
+    for idx, shp, sz in specs:
+        field[idx] = row[off:off + sz].view(shp).to(field.dtype)
         off += sz
     return field
 
@@ -589,21 +650,7 @@ class _BoundarySaveStep(torch.autograd.Function):
                 wl = cfg["wavelet"][time_index]
                 for sidx in cfg["source_indices"]:
                     check[sidx] = src_op(check[sidx], wl)
-            err, assessed = _interior_consistency_error(
-                check, frame, cfg["phys_indices"], cfg["interior_idx"]
-            )
-            tol = cfg.get("check_tol", 1e-2)
-            if assessed and not (err <= tol):
-                raise RuntimeError(
-                    f"Eager boundary saving: the '{cfg['reverse']}' reverse driver "
-                    f"does not invert one step of {type(cfg['equation']).__name__} "
-                    f"(interior forward-consistency rel-L2 = {err:.3g} > tol {tol:g}) "
-                    "— the reconstructed wavefield would yield a WRONG gradient. "
-                    "This equation is not supported by eager boundary saving; use "
-                    "impl='c' or chunk checkpointing (use_ckpt=True). If you have "
-                    "independently validated the gradient, skip this probe via "
-                    "enable_eager_boundary_saving(self_check=False)."
-                )
+            _check_reconstruction(cfg, check, frame)
 
         diff_inputs = list(S_i_rg) + [m for m, f in zip(models_rg, model_flags) if f]
         grads = torch.autograd.grad(
@@ -620,6 +667,149 @@ class _BoundarySaveStep(torch.autograd.Function):
             grad_sample = sum(cfg["src"].value_grad(grad_out[k], ctx.sample_shape)
                               for k in cfg["source_indices"])
         return tuple([None, None, None, grad_sample] + grad_S + grad_M)
+
+
+def _check_reconstruction(cfg, recomputed, frame):
+    """The one-time self-check of the reverse driver: ``recomputed`` -- the
+    step re-run from its reconstructed input, the source in -- must reproduce
+    ``frame``, the state it was reconstructed from, across the lossless
+    interior.  If not, the reconstructed wavefield and the gradient are wrong:
+    refuse loudly instead of returning a bad gradient.  Forward-consistency
+    (not a state round-trip) is the right criterion: it tolerates fields the
+    driver drops but the step regenerates."""
+    err, assessed = _interior_consistency_error(
+        recomputed, frame, cfg["phys_indices"], cfg["interior_idx"]
+    )
+    tol = cfg.get("check_tol", 1e-2)
+    if assessed and not (err <= tol):
+        raise RuntimeError(
+            f"Eager boundary saving: the '{cfg['reverse']}' reverse driver "
+            f"does not invert one step of {type(cfg['equation']).__name__} "
+            f"(interior forward-consistency rel-L2 = {err:.3g} > tol {tol:g}) "
+            "— the reconstructed wavefield would yield a WRONG gradient. "
+            "This equation is not supported by eager boundary saving; use "
+            "impl='c' or chunk checkpointing (use_ckpt=True). If you have "
+            "independently validated the gradient, skip this probe via "
+            "enable_eager_boundary_saving(self_check=False)."
+        )
+
+
+class _AtState(torch.autograd.Function):
+    """``s``'s value on ``z``'s gradient path: forward returns a copy of ``s``,
+    backward hands the gradient to ``z`` unchanged.
+
+    The backward of a call of k steps (``_BoundarySaveSteps``) differentiates
+    the k steps in one graph.  Chained from the first step's reconstructed
+    input, the later steps would run from states that differ from the
+    forward's near the CPML (the reconstruction zeroes the CPML fields), the
+    difference reaching one stencil further into the grid per step.  Instead
+    each step runs from its own reconstructed input ``s`` -- the state a
+    ``_BoundarySaveStep`` linearises its step at -- while the gradient passes
+    from step to step through ``z``: k steps give the gradient of k one-step
+    calls."""
+
+    @staticmethod
+    def forward(ctx, z, s):
+        return s.clone()
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad, None
+
+
+class _BoundarySaveSteps(torch.autograd.Function):
+    """``len(times)`` consecutive steps of the boundary-saving rollout.
+
+    Forward runs the steps (each step's ring taken before its source goes in,
+    as ``_BoundarySaveStep`` takes it, then the source injected and the
+    receivers sampled) as one compiled graph (``steps_fwd``) and stores the k
+    rings together; it returns the fields after the last step and the steps'
+    record columns, ``(B, k, nrec, len(receiver_type))``.  One graph whatever
+    the grid: with the C-PML memory fields on the full grid Inductor fuses the
+    steps of the graph into one another, which made an acoustic gradient of 4
+    or more shots at 1000^2 9% slower than one call a step (an elastic one
+    took as long), while at 1 and 2 shots the graph was 12-25% faster (elastic
+    18% at one shot); on the CPML strips it was faster throughout (RTX 6000
+    Ada).  Backward reconstructs the
+    steps' inputs backwards in time (``steps_rev``: the reverse driver of
+    ``_BoundarySaveStep``, k times) and differentiates the k steps, each at its
+    own reconstructed input (``_AtState``), in one compiled call
+    (``steps_back``) or two (``steps_rev`` and ``steps_bwd``), as
+    ``_fused_backward`` picks.  The gradient is autograd's, as in ``_BoundarySaveStep``,
+    and k steps give what k one-step calls do, up to float32 round-off.
+
+    The backward runs k steps a call because the per-step host cost was
+    there (reconstruction, re-run and autograd.grad each a call per step).
+    """
+
+    @staticmethod
+    def forward(ctx, cfg, step, times, *tensors):
+        k, nwf, nm = len(times), cfg["nwf"], cfg["nm"]
+        samples = tensors[:k]
+        fields = tensors[k:k + nwf]
+        models = tensors[k + nwf:k + nwf + nm]
+        out, block, rows, _ = cfg["steps_fwd"](tuple(fields), tuple(models), cfg["dt"], cfg["h"],
+                                               tuple(samples), cfg["source_args"],
+                                               cfg["receiver_args"], cfg["state"].pad)
+        save_steps(cfg["state"], step + 1, rows)
+        ctx.cfg, ctx.step, ctx.times = cfg, step, times
+        return (*out, block)
+
+    @staticmethod
+    def backward(ctx, *grad_out):
+        cfg = ctx.cfg
+        if cfg is None:
+            raise RuntimeError(
+                "Eager boundary saving supports one backward pass per forward: the "
+                "reconstruction has already consumed this rollout's boundary state.")
+        ctx.cfg = None                         # see _BoundarySaveStep.backward
+        st = cfg["state"]
+        step, times = ctx.step, ctx.times
+        k, nwf = len(times), cfg["nwf"]
+        models = cfg["models"]
+        samples = [cfg["wavelet"][t] for t in times]
+        frame = st.frame
+
+        # The saved rings of the steps' inputs, row j + 1 for step + j's field
+        # and row j for the level before it (a second-order pair's other half).
+        rows = load_steps(st, [max(step + j - 1, 0) for j in range(k + 1)])
+        model_flags = [bool(m.requires_grad) for m in models]
+        models_rg = [m.detach().requires_grad_(f) for m, f in zip(models, model_flags)]
+        sample_flags = [bool(f) for f in ctx.needs_input_grad[3:3 + k]]
+        samples_rg = [s.detach().requires_grad_(f) for s, f in zip(samples, sample_flags)]
+        if _fused_backward(cfg["ndim"]):
+            # z carries the gradient of the call's input; its values are the
+            # frame, which the call reconstructs from (see steps_back).
+            z0 = [t.detach().requires_grad_(True) for t in frame]
+            with torch.enable_grad():
+                recon, out, block = cfg["steps_back"](tuple(z0), tuple(models_rg), cfg["dt"], cfg["h"],
+                                                      tuple(samples_rg), cfg["source_args"],
+                                                      cfg["receiver_args"], rows, tuple(st.zero))
+            st.frame = list(recon[0])
+        else:
+            with torch.no_grad():
+                recon = cfg["steps_rev"](tuple(frame), tuple(models), cfg["dt"], cfg["h"],
+                                         tuple(s.detach() for s in samples), cfg["source_args"],
+                                         rows, tuple(st.zero))
+            st.frame = list(recon[0])
+            z0 = [t.detach().requires_grad_(True) for t in recon[0]]
+            with torch.enable_grad():
+                out, block = cfg["steps_bwd"](tuple(z0), tuple(recon[1:]), tuple(models_rg), cfg["dt"],
+                                              cfg["h"], tuple(samples_rg), cfg["source_args"],
+                                              cfg["receiver_args"])
+        if cfg.get("self_check") and not st.checked:
+            st.checked = True
+            # the last step re-run from its reconstructed input, its source in
+            _check_reconstruction(cfg, [o.detach() for o in out], frame)
+
+        diff_inputs = (z0 + [m for m, f in zip(models_rg, model_flags) if f]
+                       + [s for s, f in zip(samples_rg, sample_flags) if f])
+        grads = torch.autograd.grad((*out, block), diff_inputs, grad_outputs=grad_out,
+                                    allow_unused=True, retain_graph=False)
+        rest = iter(grads[nwf:])
+        grad_M = [next(rest) if f else None for f in model_flags]
+        grad_W = [next(rest) if f else None for f in sample_flags]
+        return (None, None, None, *grad_W, *grads[:nwf], *grad_M)
 
 
 # ---- Propagator integration -------------------------------------------
@@ -661,14 +851,10 @@ class _EagerBoundarySavingMixin:
         tolerance that clears the storage quantization floor while still
         catching a broken reverse (O(0.1-1) error).
 
-        Boundary saving takes one step a call: its step is an autograd.Function
-        that reconstructs and differentiates step by step, so an explicit
-        ``EagerOptions(steps_per_call=...)`` above 1 is refused."""
-        steps = getattr(self, "steps_per_call", None)
-        if flag and steps not in (None, 1):
-            raise ValueError(
-                f"EagerOptions(steps_per_call={steps}) applies to the full-tape and checkpointed "
-                "rollouts; eager boundary saving advances one step a call. Leave steps_per_call unset.")
+        ``EagerOptions(steps_per_call=...)`` applies here as on the other
+        rollouts: a compiled call advances that many steps forward, and backward
+        reconstructs and differentiates as many per call
+        (``_BoundarySaveSteps``), with the gradient of one step a call."""
         self._eager_bs = bool(flag)
         self._eager_bs_mode = mode
         self._eager_bs_self_check = bool(self_check)
@@ -760,6 +946,10 @@ class _EagerBoundarySavingMixin:
             [self._maybe_compile(self._grouped(ss)) for ss in self.equation.interior_substeps()]
             if reverse_mode == "substep" else None
         )
+        substeps_plain = (
+            [self._grouped(ss) for ss in self.equation.interior_substeps()]
+            if reverse_mode == "substep" else None
+        )
 
         # Constant per-step config; step/time_index pass to apply() as args.
         base_cfg = {
@@ -775,9 +965,148 @@ class _EagerBoundarySavingMixin:
             "func": bs_func, "substeps": bs_substeps,
             # The forward's first steps run uncompiled (see _SettledSteps); the
             # reverse pass passes the same flags every step and compiles once.
-            "func_plain": bs_plain, "settled": _SettledSteps(),
+            "func_plain": bs_plain, "substeps_plain": substeps_plain, "settled": _SettledSteps(),
         }
         return state, base_cfg
+
+    def _bs_steps_calls(self, state, cfg):
+        """The compiled calls of ``_BoundarySaveSteps`` for this rollout's
+        geometry: ``steps_fwd``, ``steps_back`` (or ``steps_rev`` and
+        ``steps_bwd``, see ``FUSED_BS_BACKWARD``).
+        Built once per geometry and kept: a closure built per rollout would be
+        a new object for Dynamo to guard on, and compile again."""
+        cache = getattr(self, "_bs_steps_cache", None)
+        if cache is None:
+            cache = self._bs_steps_cache = {}
+        key = (cfg["reverse"], tuple(tuple(z.shape) for z in state.zero), state.stride,
+               state.pad is not None)
+        calls = cache.get(key)
+        if calls is not None:
+            return calls
+        from sweep.sources.torch import scatter_source
+        from ._torch_eager import _record_column
+
+        step = self._plain_step_func
+        at = tuple(self.receiver_indices)
+        src_fields = tuple(cfg["source_indices"])
+        ring_fields = tuple(cfg["ring_fields"])
+        rings = tuple(state.rings)
+        specs = tuple(zip(rings, (tuple(s) for s in state.ring_shapes), state.ring_sizes))
+        stride = state.stride
+
+        def steps_fwd(fields, models, dt, h, samples, source, receivers, pad):
+            """A step from ``fields`` per sample, in one graph, each step's ring
+            row taken before its source goes in (as ``_BoundarySaveStep`` takes
+            it): the fields after the last step, the record columns and the
+            ring rows.  The fields of
+            the steps before the last are returned too, and dropped: without
+            gradients nothing else makes Inductor write them, and it would
+            recompute each where the next step reads it (the CPML fields from
+            their derivatives)."""
+            rows, columns, kept = [], [], []
+            for sample in samples:
+                out = list(step(*fields, *models, dt, h, None))
+                rows.append(_ring_row([out[f] for f in ring_fields], rings, pad))
+                for i in src_fields:
+                    out[i] = scatter_source(out[i], sample, *source)
+                columns.append(_record_column(out, at, *receivers))
+                kept += out
+                fields = out
+            return tuple(fields), torch.stack(columns, dim=1), torch.stack(rows), tuple(kept[:-len(fields)])
+
+        def steps_bwd(z0, recon, models, dt, h, samples, source, receivers):
+            """The steps again for autograd, step ``i > 0`` from its
+            reconstructed input ``recon[i - 1]`` (``_AtState``)."""
+            z, columns = tuple(z0), []
+            for i, sample in enumerate(samples):
+                if i:
+                    z = tuple(_AtState.apply(a, s) for a, s in zip(z, recon[i - 1]))
+                z = tuple(step(*z, *models, dt, h, None, source=(sample, *source)))
+                columns.append(_record_column(z, at, *receivers))
+            return z, torch.stack(columns, dim=1)
+
+        if cfg["reverse"] == "swap2nd":
+            func = self._grouped(self.equation.func)
+            pairs = tuple(tuple(p) for p in cfg["pairs"])
+
+            def steps_rev(frame, models, dt, h, samples, source, rows, zero):
+                """``_reconstruct_swap2nd`` ``len(samples)`` times from
+                ``frame``: the inputs of the steps, first step first.  ``rows[j
+                + 1]`` holds the ring of step j's input, ``rows[j]`` that of the
+                level before it."""
+                S, states = tuple(frame), [None] * len(samples)
+                for j in reversed(range(len(samples))):
+                    swapped = list(zero)
+                    for now, prev in pairs:
+                        swapped[now], swapped[prev] = S[prev], S[now]
+                    out = func(swapped, models, dt, h, None)
+                    S_i = list(zero)
+                    for p, (now, prev) in enumerate(pairs):
+                        earlier = out[now]
+                        if now in src_fields:
+                            earlier = scatter_source(earlier, samples[j], *source)
+                        S_i[now] = _put_ring(S[prev], rows[j + 1], p, stride, specs)
+                        S_i[prev] = _put_ring(earlier, rows[j], p, stride, specs)
+                    S = tuple(S_i)
+                    states[j] = S
+                return tuple(states)
+        else:
+            substeps = [self._grouped(ss) for ss in self.equation.interior_substeps()]
+            cpml = tuple(cfg["cpml_indices"])
+
+            def steps_rev(frame, models, dt, h, samples, source, rows, zero):
+                """``_reconstruct_substep`` ``len(samples)`` times from
+                ``frame``: the inputs of the steps, first step first.  ``rows[j
+                + 1]`` holds the ring of step j's input."""
+                S, states = tuple(frame), [None] * len(samples)
+                for j in reversed(range(len(samples))):
+                    x = list(S)
+                    for i in src_fields:
+                        x[i] = scatter_source(S[i], -samples[j], *source)
+                    for c in cpml:
+                        x[c] = zero[c]
+                    for ss in reversed(substeps):
+                        x = ss(x, models, -dt, h)
+                    S_i = list(x)
+                    for c in cpml:
+                        S_i[c] = zero[c]
+                    for p, f in enumerate(ring_fields):
+                        S_i[f] = _put_ring(S_i[f], rows[j + 1], p, stride, specs)
+                    S = tuple(S_i)
+                    states[j] = S
+                return tuple(states)
+
+        def steps_back(z, models, dt, h, samples, source, receivers, rows, zero):
+            """A call's backward in one graph: the inputs of its steps
+            reconstructed from ``z``'s values -- the fields after the last step
+            -- by ``steps_rev`` (forward physics, outside autograd), then the
+            steps again for autograd, each from its reconstructed input
+            (``_AtState``), the gradient chained through ``z``.  The schemes
+            are time-reversible, so reconstructing a step's input and stepping
+            from it evaluate the same spatial derivatives of the same field;
+            in one graph Inductor can compute them once.  Returns the steps'
+            reconstructed inputs (all of them: as outputs they are written
+            once, and the backward reads them instead of reconstructing again;
+            on a 160^3 elastic grid that took 32 to 22 ms a step), the fields
+            after the last step and the record columns."""
+            with torch.no_grad():
+                recon = steps_rev(tuple(t.detach() for t in z), models, dt, h,
+                                  tuple(s.detach() for s in samples), source, rows, zero)
+            x, columns = tuple(z), []
+            for i, sample in enumerate(samples):
+                x = tuple(_AtState.apply(a, s) for a, s in zip(x, recon[i]))
+                x = tuple(step(*x, *models, dt, h, None, source=(sample, *source)))
+                columns.append(_record_column(x, at, *receivers))
+            return recon, x, torch.stack(columns, dim=1)
+
+        name = type(self.equation).__name__
+        calls = cache[key] = {
+            "steps_fwd": self._maybe_compile(steps_fwd, what=f"the {name} boundary-saving steps"),
+            "steps_rev": self._maybe_compile(steps_rev, what=f"the {name} boundary-saving reconstruction"),
+            "steps_bwd": self._maybe_compile(steps_bwd, what=f"the {name} boundary-saving gradient"),
+            "steps_back": self._maybe_compile(steps_back, what=f"the {name} boundary-saving backward"),
+        }
+        return calls
 
     def _grouped(self, fn):
         """``fn(wavefields, *args)`` on the flat eager state, its strip-held
@@ -806,6 +1135,10 @@ class _EagerBoundarySavingMixin:
         state, base_cfg = self._init_eager_bs(
             wavefield, runtime_models, wavelet_steps, src, nt
         )
+        k = self._resolved_steps_per_call(self._records(runtime_models, wavelet_steps))
+        if k > 1:
+            return self._rollout_eager_bs_steps(state, base_cfg, k, wavefield, runtime_models,
+                                                wavelet_steps, src, rec, receivers, nt, adj)
         columns = []
         for i in range(nt):
             time = i if not adj else nt - i - 1
@@ -815,3 +1148,35 @@ class _EagerBoundarySavingMixin:
         # Seed the reconstruction with the final full frame (detached).
         state.frame = [w.detach() for w in wavefield]
         return wavefield, torch.stack(columns, dim=1)
+
+    def _rollout_eager_bs_steps(self, state, cfg, k, wavefield, runtime_models, wavelet_steps,
+                                src, rec, receivers, nt, adj):
+        """The boundary-saving time loop at ``k`` steps a call
+        (``_BoundarySaveSteps``), on ``_stepper``'s schedule: the calls start on
+        multiples of ``k`` once the fields' ``requires_grad`` settles; the steps
+        before them and the last ``nt % k`` take a ``_BoundarySaveStep`` each,
+        uncompiled, so no graph is compiled for one step.  Returns ``(wavefield,
+        record)`` as ``_rollout_eager_bs``."""
+        cfg.update(self._bs_steps_calls(state, cfg))
+        cfg["ndim"] = self.ndim
+        cfg["source_args"] = src.step_args(wavelet_steps[0])[1:] if nt else ()
+        cfg["receiver_args"] = (*rec.step_args(), rec.batch, rec.nreceivers)
+        one = dict(cfg, func=cfg["func_plain"], substeps=cfg["substeps_plain"])
+        settled = cfg["settled"]
+        columns, i = [], 0
+        while i < nt:
+            if i % k == 0 and i + k <= nt and settled.compiled(i, wavefield):
+                times = tuple(i + j if not adj else nt - i - j - 1 for j in range(k))
+                out = _BoundarySaveSteps.apply(cfg, i, times, *(wavelet_steps[t] for t in times),
+                                               *wavefield, *runtime_models)
+                wavefield = list(out[:-1])
+                columns.append(out[-1])
+                i += k
+                continue
+            time = i if not adj else nt - i - 1
+            wavefield = list(_BoundarySaveStep.apply(
+                one, i, time, wavelet_steps[time], *wavefield, *runtime_models))
+            columns.append(self._sample_receivers(rec, wavefield, receivers).unsqueeze(1))
+            i += 1
+        state.frame = [w.detach() for w in wavefield]
+        return wavefield, torch.cat(columns, dim=1)

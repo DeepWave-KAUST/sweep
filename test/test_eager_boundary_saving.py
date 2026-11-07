@@ -120,11 +120,11 @@ def _geometry(ndim):
 
 
 def _build(cfg, *, memory=None, mode=None, use_ckpt=False, nt=NT, free_surface=False,
-           use_compile=False, device="cuda"):
+           use_compile=False, device="cuda", steps_per_call=None):
     eq = cfg["cls"](spatial_order=SO, device=device, backend="torch")
     shape = _shape(cfg["ndim"])
     prop = PropTorch(
-        eq, impl="eager", eager_options=EagerOptions(use_compile=use_compile),
+        eq, impl="eager", eager_options=EagerOptions(use_compile=use_compile, steps_per_call=steps_per_call),
         memory=memory, use_ckpt=use_ckpt,
         shape=shape, dev=device, dh=DH, dt=DT,
         source_type=cfg["st"], receiver_type=cfg["rt"],
@@ -236,6 +236,81 @@ def test_free_surface_supported(name):
     g_full = _first_grad(_build(cfg, free_surface=True), cfg, init_m, obs, wavelet, src, rec)
     g_bs = _first_grad(_build(cfg, memory=BOUNDARY, free_surface=True), cfg, init_m, obs, wavelet, src, rec)
     assert _cosine(g_full, g_bs) > 0.999
+
+
+@pytest.fixture
+def traced_everywhere(monkeypatch):
+    """Run the traced forms (slice stencils, index_put scatter, tap gathers)
+    uncompiled too, so the uncompiled steps of a rollout execute the aten ops
+    of its compiled calls (see test_eager_steps_per_call.py)."""
+    import sweep.operators.torch as OPS
+    import sweep.receivers.torch as REC
+    import sweep.sources.torch as SRC_MOD
+    for mod in (OPS, SRC_MOD, REC):
+        monkeypatch.setattr(mod, "_is_compiling", lambda: True)
+
+
+def _all_grads(prop, init_m, observed, wavelet, src, rec):
+    """The record and the gradients of every model and of the wavelet."""
+    m = [torch.tensor(a, device="cuda", requires_grad=True) for a in init_m]
+    w = wavelet.clone().requires_grad_(True)
+    out = prop(w, src.copy(), rec.copy(), models=m)
+    (out - observed).pow(2).mean().backward()
+    return out.detach(), [x.grad for x in m] + [w.grad]
+
+
+K_STEP_CASES = ["acoustic2d", "acoustic3d", "acoustic1st", "elastic2d", "elastic3d", "dasmu2d", "dasmu3d",
+                "elastic_vrr"]
+
+
+@pytest.mark.usefixtures("traced_everywhere")
+@pytest.mark.parametrize("name", K_STEP_CASES)
+def test_k_steps_a_call_give_the_one_step_gradient(name):
+    """Boundary saving at 4 steps a call (_BoundarySaveSteps) against 1, every
+    reverse driver, with the same aten ops on both sides (aot_eager, traced
+    forms): the record bit for bit, every gradient to float32 round-off (the
+    graphs of 4 steps sum a field's gradient in another order)."""
+    cfg = CASES[name]
+    _, init_m, wavelet, src, rec, obs = _setup(cfg)
+    runs = {}
+    for k in (1, 4):
+        eq = cfg["cls"](spatial_order=SO, device="cuda", backend="torch")
+        prop = PropTorch(eq, impl="eager", memory=BOUNDARY, shape=_shape(cfg["ndim"]), dev="cuda", dh=DH, dt=DT,
+                         eager_options=EagerOptions(use_compile=True, compile_backend="aot_eager",
+                                                    steps_per_call=k),
+                         source_type=cfg["st"], receiver_type=cfg["rt"], abcn=ABCN,
+                         pml_type=eq.default_pml_type, nt=NT, B=1)
+        runs[k] = _all_grads(prop, init_m, obs, wavelet, src, rec)
+    (o1, g1), (o4, g4) = runs[1], runs[4]
+    assert torch.equal(o4, o1), float((o4 - o1).abs().max())
+    for i, (a, b) in enumerate(zip(g4, g1)):
+        scale = float(b.abs().max())
+        assert scale > 0
+        assert float((a - b).abs().max()) <= 2e-6 * scale, (name, i, float((a - b).abs().max()) / scale)
+
+
+@pytest.mark.parametrize("name", K_STEP_CASES)
+def test_k_steps_a_call_through_inductor(name):
+    """Through Inductor, 4 steps a call fuse differently from 1, and the
+    warm-up steps run uncompiled: the gradients may differ by Inductor's
+    round-off, which compiling the one-step path already shows against not
+    compiling it (1e-5 to 2e-5 on these grids).  4 steps a call stay within
+    3x that, and differ from the full tape as one step a call does."""
+    cfg = CASES[name]
+    _, init_m, wavelet, src, rec, obs = _setup(cfg)
+    full = _first_grad(_build(cfg), cfg, init_m, obs, wavelet, src, rec)
+    plain = _first_grad(_build(cfg, memory=BOUNDARY), cfg, init_m, obs, wavelet, src, rec)
+    grads = {k: _first_grad(_build(cfg, memory=BOUNDARY, use_compile=True, steps_per_call=k),
+                            cfg, init_m, obs, wavelet, src, rec) for k in (1, 4)}
+    scale = float(grads[1].abs().max())
+    assert scale > 0
+    compiling = float((grads[1] - plain).abs().max()) / scale
+    diff = float((grads[4] - grads[1]).abs().max()) / scale
+    assert diff <= max(1e-5, 3 * compiling), f"{name}: 4 vs 1 a call {diff:.2e}, compiled vs not {compiling:.2e}"
+    full = full.double()                     # DAS gradients overflow a float32 norm
+    rel1 = float((grads[1].double() - full).norm() / full.norm())
+    rel4 = float((grads[4].double() - full).norm() / full.norm())
+    assert abs(rel4 - rel1) < 1e-5, f"{name}: vs the full tape {rel4:.3e} (4 a call) / {rel1:.3e} (1)"
 
 
 def test_boundary_saving_composes_with_compile():
