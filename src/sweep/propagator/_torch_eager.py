@@ -297,6 +297,7 @@ class _PropTorchEager(
         self._plain_step_func = self._build_step_func()
         self._plain_steps_func = self._build_steps_func(self._plain_step_func)
         self._steps_funcs = {}          # steps per call -> its compiled steps_func
+        self._step_alone = None         # the compiled step alone (_step_alone_fn)
         self._mark_steps = (self.use_compile and "cuda" in str(self.dev)
                             and _uses_cudagraphs(self.compile_mode, self.compile_dynamic))
 
@@ -616,7 +617,15 @@ class _PropTorchEager(
             self._steps_funcs[k] = fn
         return fn
 
-    def _stepper(self, models, wavelet_steps, src, rec, nt, adj, settled, k, invariants=None):
+    def _step_alone_fn(self):
+        """The compiled step alone (``_build_step_func``, its source injected
+        inside), for the calls of one step of a rollout with gradients on CPML
+        strips, whose receivers are sampled after the call (``_stepper``)."""
+        if self._step_alone is None:
+            self._step_alone = self._maybe_compile(self._plain_step_func)
+        return self._step_alone
+
+    def _stepper(self, models, wavelet_steps, src, rec, nt, adj, settled, k, invariants=None, records=False):
         """``advance(fields, t, end) -> (fields, block, n)``: steps ``t`` to
         ``t + n - 1`` of the rollout, ``block`` their record columns
         ``(B, n, nrec, len(receiver_type))``.
@@ -632,7 +641,20 @@ class _PropTorchEager(
         same steps compiled as one that is not, and a checkpoint's recompute
         the same as its forward.  ``invariants`` is the rollout's (or the
         checkpoint chunk's) dict of time-invariant coefficients
-        (``_hoists_invariants``), None when compiled."""
+        (``_hoists_invariants``), None when compiled.
+
+        At one step a call, a rollout autograd records (``records``, decided
+        once for it) on CPML strips compiles the step alone and samples the
+        receivers after the call, outside the graph, as before
+        ``steps_per_call``.  With the sampling inside, the backward graph also
+        scatters the receivers' gradient into the field, and on the strips
+        Inductor then split the step's backward into more full-grid kernels:
+        a 160^3 acoustic gradient (strips are the 3-D default) took 2.95
+        instead of 2.62 ms a step on an RTX 6000 Ada, a 2-D one of 8 shots at
+        1000^2 1.8 instead of 1.6.  On the full grid the two ran alike; and
+        elsewhere the sampling stays inside the call, which spares the host
+        its ops (a one-shot 2-D forward at 1000^2: 0.15 instead of 0.21 ms a
+        step)."""
         h = self._equation_spacing
         models = tuple(models)
         source = src.step_args(wavelet_steps[0])[1:] if nt else ()
@@ -643,6 +665,10 @@ class _PropTorchEager(
         # Uncompiled only (``_hoists_invariants``), where ``compiled`` is the
         # plain function as well: a compiled call is handed no dict.
         extra = {} if invariants is None else {"invariants": invariants}
+        alone = k == 1 and records and self._strips is not None
+        if alone:
+            step = self._step_alone_fn()
+            at = tuple(self.receiver_indices)
 
         def sample(t):
             return wavelet_steps[nt - t - 1 if adj else t]
@@ -650,6 +676,9 @@ class _PropTorchEager(
         def advance(fields, t, end):
             if settled.compiled(t, fields) and t % k == 0 and t + k <= end:
                 self._mark_compile_step_begin()
+                if alone:
+                    fields = step(*fields, *models, self.dt, h, None, source=(sample(t), *source), **extra)
+                    return list(fields), _record_column(fields, at, *receivers).unsqueeze(1), 1
                 fields, block = compiled(tuple(fields), models, self.dt, h, None,
                                          tuple(sample(t + j) for j in range(k)), source, receivers, **extra)
                 return list(fields), block, k
@@ -798,7 +827,8 @@ class _PropTorchEager(
         ``(wavefield, record)``, the record concatenated from the chunks' own
         (see ``_rollout_full`` for why it is not written in place).
         """
-        k = self._resolved_steps_per_call(self._records(models, wavelet_steps))
+        records = self._records(models, wavelet_steps)
+        k = self._resolved_steps_per_call(records)
         chunk_size = -(-int(max(1, self.ckpt_chunks)) // k) * k
         num_wavefields = len(wavefield)
         num_models = len(models)
@@ -815,7 +845,7 @@ class _PropTorchEager(
             # _SettledSteps), so run the steps up to and including it on the
             # plain tape; it ends on a multiple of k, as the chunks then do.
             advance = self._stepper(self._prepare_runtime_models(models), wavelet_steps, src, rec,
-                                    nt, adj, settled, k)
+                                    nt, adj, settled, k, records=records)
             compiled = False
             while start < min(nt, 8 + 2 * k) and not compiled:
                 wavefield, block, n = advance(wavefield, start, nt)
@@ -829,7 +859,8 @@ class _PropTorchEager(
                 state = list(chunk_inputs[:num_wavefields])
                 chunk_models = list(chunk_inputs[num_wavefields : num_wavefields + num_models])
                 advance = self._stepper(self._prepare_runtime_models(chunk_models), wavelet_steps, src,
-                                        rec, nt, adj, settled, k, invariants={} if hoist else None)
+                                        rec, nt, adj, settled, k, invariants={} if hoist else None,
+                                        records=records)
                 end = min(start_t + chunk_size, nt)
                 blocks, t = [], start_t
                 while t < end:
@@ -852,14 +883,15 @@ class _PropTorchEager(
         state after its step.  Returns ``(wavefield, record)``; the snapshots,
         which are detached host copies, are still written in place.
         """
-        k = 1 if return_wavefield else self._resolved_steps_per_call(self._records(runtime_models, wavelet_steps))
+        records = self._records(runtime_models, wavelet_steps)
+        k = 1 if return_wavefield else self._resolved_steps_per_call(records)
         # Set up compiling the calls before deciding on the dict: a torch
         # without torch.compile (or torch 2.3 on a CPU) turns compiling off
         # right there, and the rollout then runs as an uncompiled one does.
         self._steps_fn(k)
         invariants = {} if self._hoists_invariants() else None
         advance = self._stepper(runtime_models, wavelet_steps, src, rec, nt, adj, _SettledSteps(), k,
-                                invariants=invariants)
+                                invariants=invariants, records=records)
         blocks, t = [], 0
         while t < nt:
             wavefield, block, n = advance(wavefield, t, nt)

@@ -433,6 +433,17 @@ that of `k = 1`. A 3-D step keeps the GPU busy on its own and was slower
 with `k > 1`, with and without gradients; on a CPU the arithmetic outweighs the
 host cost.
 
+At `k = 1` the receivers are sampled inside the call as well, except in a
+rollout with gradients on the [C-PML strips](#cpml-strips) (the 3-D default):
+there the step is compiled alone and the receivers are sampled after the call,
+outside the graph. With the sampling inside, the backward graph also scatters
+the receivers' gradient into the field, and on the strips Inductor then splits
+the step's backward into more full-grid kernels: a 160³ acoustic gradient took
+2.95 ms per step instead of 2.62 on an RTX 6000 Ada, and 8 shots of a 1000²
+acoustic gradient with `cpml_strips=True` 1.8 ms instead of 1.6. On the full
+grid both ran alike, and without gradients the sampling inside the call is the
+faster one (0.15 instead of 0.21 ms per step for one shot of a 1000² forward).
+
 Calls start at steps that are multiples of `k`. The first steps of a rollout,
 up to the first multiple of `k` after the fields' `requires_grad` flags have
 settled, and the last `nt % k` steps run one at a time, uncompiled, so no graph

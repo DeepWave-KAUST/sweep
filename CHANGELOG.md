@@ -373,9 +373,14 @@ and this project adheres to
   (acoustic, elastic) runs 1.8-3.1x faster at 1000² and 1.1-1.5x at 2000²;
   its first compile takes 2-3x as long (11-19 s) and its peak memory grows
   3-12% under checkpointing. The receivers are sampled inside the compiled
-  call at one step a call too, with records and gradients bitwise as before,
-  and `torch.compiler.cudagraph_mark_step_begin()` is called only in the
-  compile modes that replay CUDA graphs. See
+  call at one step a call too (a one-shot 2-D forward at 1000² took 0.15
+  instead of 0.21 ms a step), except in a rollout with gradients on CPML
+  strips, the 3-D default, which compiles the step alone and samples them
+  after it as before: there the sampling inside made Inductor split the
+  step's backward into more full-grid kernels (a 160³ acoustic gradient took
+  2.95 instead of 2.62 ms a step on an RTX 6000 Ada). Records are the same
+  bit for bit either way. `torch.compiler.cudagraph_mark_step_begin()` is
+  called only in the compile modes that replay CUDA graphs. See
   [Several time steps per compiled call](docs/user-guide/propagators.md#steps-per-call).
 - **Eager boundary saving takes `steps_per_call` steps a call too.** A call of
   `k` steps (`_BoundarySaveSteps`) stores the `k` steps' boundary rings

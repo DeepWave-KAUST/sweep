@@ -91,21 +91,27 @@ def _counting(prop):
         impl._steps_fn(k)              # compile the real steps, not the counter below
     plain = impl._plain_steps_func
     steps_fn = impl._steps_fn
+    alone = impl._step_alone_fn()      # the step alone, one step a call with gradients
 
-    def plain_counted(fields, models, dt, h, b, samples, *rest):
+    def plain_counted(fields, models, dt, h, b, samples, *rest, **kw):
         calls.append((False, len(samples)))
-        return plain(fields, models, dt, h, b, samples, *rest)
+        return plain(fields, models, dt, h, b, samples, *rest, **kw)
 
     def steps_fn_counted(k):
         fn = steps_fn(k)
 
-        def counted(fields, models, dt, h, b, samples, *rest):
+        def counted(fields, models, dt, h, b, samples, *rest, **kw):
             calls.append((True, len(samples)))
-            return fn(fields, models, dt, h, b, samples, *rest)
+            return fn(fields, models, dt, h, b, samples, *rest, **kw)
         return counted
+
+    def alone_counted(*args, **kw):
+        calls.append((True, 1))
+        return alone(*args, **kw)
 
     impl._plain_steps_func = plain_counted
     impl._steps_fn = steps_fn_counted
+    impl._step_alone_fn = lambda: alone_counted
     return calls
 
 
@@ -232,6 +238,26 @@ def test_a_rollout_compiles_one_graph_and_a_new_nt_none(monkeypatch):
     _run(prop, nt=NT + 6)
     _run(prop, nt=NT - 1)
     assert graphs == [4], "a new nt compiled again"
+
+
+@requires_compile
+@pytest.mark.parametrize("strips", [False, True], ids=["full_grid", "strips"])
+@pytest.mark.parametrize("grad", [False, True], ids=["forward", "gradient"])
+def test_one_step_a_call_samples_the_receivers_outside_only_with_gradients_on_strips(grad, strips):
+    """At one step a call a rollout with gradients on CPML strips compiles
+    the step alone and samples the receivers after it, outside the graph, as
+    before steps_per_call: inside, the backward graph scatters their gradient
+    into the field and Inductor splits the step's backward on the strips (a
+    160^3 acoustic gradient ran 13% slower).  Elsewhere the sampling stays
+    inside the call, which spares the host its ops."""
+    gathers = []
+
+    def backend(gm, example_inputs):
+        gathers.append(sum(1 for n in gm.graph.nodes if "index_select" in str(n.target)))
+        return gm.forward
+
+    _run(_prop(use_compile=True, compile_backend=backend, steps_per_call=1, cpml_strips=strips), grad=grad)
+    assert gathers == ([0] if grad and strips else [1])
 
 
 # ---- the numbers ---------------------------------------------------------------------
