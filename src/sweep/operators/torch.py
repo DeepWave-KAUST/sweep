@@ -119,7 +119,50 @@ def _compiled_taps(kernel):
 def _apply_taps(u, taps):
     """Zero-padded, shape-preserving cross-correlation of the trailing dims of
     ``u`` with ``taps`` -- ``F.conv{2,3}d(u, kernel, padding=k//2)`` as shifted
-    slices."""
+    slices -- with the transpose as its derivative (``_Taps``)."""
+    return _Taps.apply(u, taps)
+
+
+def _mirrored(taps):
+    """The taps of the transpose of ``_correlate(., taps)``: the offsets negated."""
+    return tuple((tuple(-o for o in off), c) for off, c in taps)
+
+
+class _Taps(torch.autograd.Function):
+    """``_correlate`` with ``_correlate`` as its derivative.
+
+    The zero-padded correlation ``out[x] = sum_o c_o u[x + o]`` (``u`` zero off
+    the grid) is linear, and its transpose is the same correlation with the
+    offsets negated: ``du[y] = sum_o c_o g[y - o]``, ``g`` zero off the grid.
+    Differentiating the slices instead gives the same sum, but as a
+    ``slice_backward`` per tap into a zero buffer of the padded shape, which
+    Inductor cannot fuse with the step's kernels (one extra full-grid write and
+    read per tap group).  The transpose computed as a correlation is gathered
+    on the field's own grid and fuses like the forward.  It is the exact
+    transpose, so the gradient moves by float32 round-off only (the sum runs
+    over the taps in another order), and it is itself a ``_Taps``: second
+    derivatives go through the same form.  torch.func's vmap is generated from
+    the forward.  There is no forward-mode rule: Dynamo breaks the graph on an
+    autograd.Function with a custom ``jvp``, and the op runs compiled only."""
+
+    generate_vmap_rule = True
+
+    @staticmethod
+    def forward(u, taps):
+        return _correlate(u, taps)
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        ctx.taps = inputs[1]
+
+    @staticmethod
+    def backward(ctx, grad):
+        return _Taps.apply(grad, _mirrored(ctx.taps)), None
+
+
+def _correlate(u, taps):
+    """The correlation of ``_apply_taps``, by shifted slices of ``u`` padded
+    with zeros."""
     nd = len(taps[0][0])
     pads = [max(abs(off[d]) for off, _ in taps) for d in range(nd)]
     pad_arg = []

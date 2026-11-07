@@ -358,6 +358,16 @@ and this project adheres to
   and `torch.compiler.cudagraph_mark_step_begin()` is called only in the
   compile modes that replay CUDA graphs. See
   [Several time steps per compiled call](docs/user-guide/propagators.md#steps-per-call).
+- **The compiled slice stencils differentiate as their transpose.** The
+  zero-padded correlation that `torch.compile`d eager steps evaluate
+  (`sweep.operators.torch._apply_taps`) is an `autograd.Function` whose
+  derivative is the same correlation with the offsets negated, gathered on the
+  field's own grid, instead of autograd's `slice_backward` per tap into a
+  padded zero buffer that Inductor could not fuse. The gradient moves by
+  float32 round-off; second derivatives go through the same form and
+  `torch.func.vmap` still applies (there is no forward-mode rule: Dynamo
+  cannot trace a custom `jvp`). An 8-shot 1000^2 boundary-saving gradient with
+  CPML strips ran 1.12x (acoustic) and 1.20x (elastic) faster (RTX 6000 Ada).
 - **3-D eager runs keep the CPML memory fields on the absorbing strips by
   default.** `EagerOptions(cpml_strips=None)`, the new default, picks the strips
   on a 3-D grid and the full grid on a 2-D one or with `topography=`;
