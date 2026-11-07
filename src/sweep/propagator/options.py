@@ -18,6 +18,23 @@ class EagerDefaults:
     # None: decided by grid -- strips in 3-D, the full grid in 2-D and with
     # topography (see EagerOptions).
     cpml_strips: bool | None = None
+    steps_per_call: int | None = None
+
+
+def _check_steps_per_call(steps, use_compile=True):
+    """``EagerOptions.steps_per_call`` as an int, or None (the default, chosen
+    per propagator); raises on anything else, and on more than one step a call
+    without ``use_compile``: uncompiled, the steps run one by one regardless."""
+    if steps is None:
+        return None
+    if isinstance(steps, bool) or not hasattr(steps, "__index__") or steps.__index__() < 1:
+        raise ValueError(f"steps_per_call must be a positive integer or None; got {steps!r}.")
+    steps = steps.__index__()
+    if steps > 1 and not use_compile:
+        raise ValueError(
+            f"steps_per_call={steps} needs use_compile=True: uncompiled, the eager "
+            "propagator runs one step at a time. Leave steps_per_call unset.")
+    return steps
 
 
 @dataclass(frozen=True)
@@ -77,7 +94,7 @@ PROP_DEFAULTS = PropagatorDefaults()
 
 @dataclass
 class EagerOptions:
-    """Options of the eager (pure PyTorch) step, for ``impl='eager'``.
+    """Options of ``impl='eager'``, passed as ``PropTorch(eager_options=...)``.
 
     ``cpml_strips`` keeps the CPML memory fields (those whose spec names a
     ``cpml_axis``) on the absorbing strips only; see ``sweep.equations._cpml``.
@@ -96,7 +113,28 @@ class EagerOptions:
     acoustic forward is faster from about 128^3 inner cells and its gradient
     from about 160^3; smaller grids, and elastic gradients up to 160^3, run
     5-50% slower, where ``cpml_strips=False`` is faster.
+
+    ``steps_per_call`` is how many time steps one call of the compiled step
+    advances on the full-tape and checkpointed rollouts, with the source
+    injection and the receiver sampling inside the call. A call costs the
+    host 0.2-0.5 ms (Dynamo's guards, the autograd wrappers, the kernel
+    launches) whatever it computes; on a 2-D grid that is longer than the step
+    takes the GPU, which then idles between steps. ``None`` (the default)
+    takes 4 for a rollout that autograd records on a 2-D grid on a GPU, and 1
+    otherwise: a 3-D step keeps the GPU busy on its own, on a CPU the compute
+    dwarfs the overhead, and without gradients Inductor fuses the steps of a
+    call into one another in ways that can cost more GPU time on a large grid
+    than the call saves the host (twice the step's time at 2000^2, acoustic).
+    An explicit value applies with and without gradients.
+
+    The calls start on multiples of ``steps_per_call``; the steps before the
+    first one (until the inputs' ``requires_grad`` settles and a multiple is
+    reached) and the last ``nt % steps_per_call`` run uncompiled, so no graph
+    is compiled for a remainder, and a checkpoint chunk is rounded up to whole
+    calls. Boundary saving and ``return_wavefield=True`` advance one step a
+    call. A first compile takes longer the more steps a call holds.
     """
+
     use_compile: bool = EAGER_DEFAULTS.use_compile
     compile_mode: str = EAGER_DEFAULTS.compile_mode
     compile_dynamic: bool = EAGER_DEFAULTS.compile_dynamic
@@ -106,6 +144,15 @@ class EagerOptions:
     # CPML memory fields on the absorbing strips only; None decides by grid
     # (see the class docstring).
     cpml_strips: bool | None = EAGER_DEFAULTS.cpml_strips
+    # Time steps one call of the compiled step advances (full tape and
+    # checkpointing; boundary saving and return_wavefield take one at a time).
+    # None: 4 for a rollout with gradients on a 2-D grid on a GPU, where each
+    # call's host overhead outlasts the step itself, else 1. See
+    # _PropTorchEager._stepper and _default_steps_per_call.
+    steps_per_call: int | None = EAGER_DEFAULTS.steps_per_call
+
+    def __post_init__(self):
+        self.steps_per_call = _check_steps_per_call(self.steps_per_call, self.use_compile)
 
 
 @dataclass

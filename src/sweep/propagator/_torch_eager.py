@@ -9,9 +9,9 @@ from torch.utils.checkpoint import checkpoint as ckpt_torch
 from sweep._compile import (SettledSteps as _SettledSteps, compile_notice,
                             compiler_failures as _compiler_failures, compiler_hint, failure_reason)
 from sweep.propagator.base import PropBase
-from sweep.propagator.options import EAGER_DEFAULTS
+from sweep.propagator.options import EAGER_DEFAULTS, _check_steps_per_call
 from sweep.equations._cpml import StripLayout
-from sweep.receivers.torch import ReceiverTorch
+from sweep.receivers.torch import ReceiverTorch, gather_flat
 from sweep.sources.torch import SourceTorch, scatter_source
 from sweep.utils.torch import EdgePadding
 from sweep.propagator._eager_boundary_saving import _EagerBoundarySavingMixin
@@ -69,6 +69,43 @@ def _no_buffer_reuse(mode, dynamic):
     return options
 
 
+def _record_column(fields, at, taps, footprint, batch, nrec):
+    """One record column, ``(batch, nrec, len(at))``: the receivers sampled in
+    ``fields[k]`` for each ``k`` in ``at`` (``ReceiverTorch.step_args`` gives
+    ``taps`` and ``footprint``)."""
+    if len(at) > 1:
+        return torch.stack([gather_flat(fields[k], taps, footprint) for k in at],
+                           dim=-1).view(batch, nrec, len(at))
+    return gather_flat(fields[at[0]], taps, footprint).view(batch, nrec).unsqueeze(-1)
+
+
+def _default_steps_per_call(ndim, dev, records):
+    """``EagerOptions(steps_per_call=None)``: 4 for a rollout autograd records
+    (``records``) on a 2-D grid on a GPU, else 1.  A compiled call costs the
+    host 0.2-0.5 ms (guards, wrappers, launches) whatever it computes, which on
+    a 2-D grid outlasts the step on the GPU.  Without gradients, though,
+    Inductor fuses the steps of a call into one another: rather than write a
+    step's fields (the CPML memory fields first) it stores derivatives and
+    recomputes the fields from them in the next step, which doubled the GPU
+    time of a 2000^2 acoustic step; with gradients the fields are saved for the
+    backward anyway, and the step runs as fast as one step a call.  A 3-D step
+    keeps the GPU busy on its own, and on a CPU the compute dwarfs the
+    overhead: there more steps a call would only lengthen the compile."""
+    return 4 if records and ndim == 2 and "cuda" in str(dev) else 1
+
+
+def _uses_cudagraphs(mode, dynamic):
+    """Whether torch.compile's ``mode`` replays the step as CUDA graphs, whose
+    trees want each call marked (reduce-overhead, max-autotune)."""
+    if mode in (None, "default"):
+        return False
+    try:
+        from torch._inductor import list_mode_options
+        return bool(list_mode_options(mode, dynamic).get("triton.cudagraphs", False))
+    except Exception:           # an unknown mode or torch: mark, as always before
+        return True
+
+
 def _raise_dynamo_recompile_limit(target=32):
     """Raise Dynamo's recompile cap, whatever the installed torch calls it.
 
@@ -112,6 +149,8 @@ class _PropTorchEager(
         self.compile_dynamic = kwargs.pop("compile_dynamic", EAGER_DEFAULTS.compile_dynamic)
         self.compile_fullgraph = kwargs.pop("compile_fullgraph", EAGER_DEFAULTS.compile_fullgraph)
         self.cpml_strips = kwargs.pop("cpml_strips", EAGER_DEFAULTS.cpml_strips)
+        self.steps_per_call = _check_steps_per_call(
+            kwargs.pop("steps_per_call", EAGER_DEFAULTS.steps_per_call), self.use_compile)
         torch.nn.Module.__init__(self)
         super().__init__(*args, **kwargs)
 
@@ -132,7 +171,10 @@ class _PropTorchEager(
         #   {param_name: (imaging_fn, mode)}  with mode in {"gradient", "imaging"}
         self._custom_gradients = {}
         self._plain_step_func = self._build_step_func()
-        self.step_func = self._maybe_compile(self._plain_step_func)
+        self._plain_steps_func = self._build_steps_func(self._plain_step_func)
+        self._steps_funcs = {}          # steps per call -> its compiled steps_func
+        self._mark_steps = (self.use_compile and "cuda" in str(self.dev)
+                            and _uses_cudagraphs(self.compile_mode, self.compile_dynamic))
 
     def _strip_layout(self):
         """The eager state's layout: a ``StripLayout`` when the CPML memory fields
@@ -205,7 +247,30 @@ class _PropTorchEager(
 
         return step_func
 
-    def _maybe_compile(self, fn):
+    def _build_steps_func(self, step):
+        """``steps_func(fields, models, dt, h, b, samples, source, receivers)``
+        runs one ``step`` (``_build_step_func``) per wavelet sample in
+        ``samples``, its source injected (``source`` is the rest of
+        ``SourceTorch.step_args``) and then the receivers sampled
+        (``receivers``: ``ReceiverTorch.step_args``, batch, nrec).  Returns the
+        fields after the last step and the record columns stacked,
+        ``(B, len(samples), nrec, len(receiver_type))``.
+
+        Compiled, one call advances ``len(samples)`` steps, the sampling
+        included: a call costs the host guards, wrappers and launches whatever
+        it computes, which on a 2-D grid outlasts the step on the GPU."""
+        at = tuple(self.receiver_indices)
+
+        def steps_func(fields, models, dt, h, b, samples, source, receivers):
+            columns = []
+            for sample in samples:
+                fields = step(*fields, *models, dt, h, b, source=(sample, *source))
+                columns.append(_record_column(fields, at, *receivers))
+            return tuple(fields), torch.stack(columns, dim=1)
+
+        return steps_func
+
+    def _maybe_compile(self, fn, what=None):
         """``torch.compile`` *fn* with the propagator's compile settings, after
         raising Dynamo's recompile limit.  Dynamo specializes the step on
         per-tensor metadata, ``requires_grad`` included, and the graphs of every
@@ -213,8 +278,9 @@ class _PropTorchEager(
         the default cap of 8 it silently falls back to eager.  (A rollout runs
         its first steps, while the wavefields' ``requires_grad`` still changes,
         uncompiled: see ``_SettledSteps``.)  Returns *fn* unchanged when
-        compilation is off.  Shared by the full-tape step and the eager
-        boundary-saving step.
+        compilation is off.  Shared by the full-tape and checkpointed steps
+        (``_steps_fn``) and the eager boundary-saving step; ``what`` names the
+        compile in its notice (default: "the <Equation> step").
 
         The compiled step is wrapped so that a compiler that cannot build it
         (Inductor's CPU backend needs g++ >= 10, for one) costs speed, not the
@@ -255,7 +321,7 @@ class _PropTorchEager(
         # models are arguments of the step, and _SettledSteps keeps one set of flags
         # per rollout, so the notice repeats a line only for a new compile.
         grid = "x".join(str(n) for n in self._shape_phys)
-        notice = compile_notice(f"the {type(self.equation).__name__} step",
+        notice = compile_notice(what or f"the {type(self.equation).__name__} step",
                                 lambda shape: f"{shape[0]} shots on a {grid} grid"
                                 if shape and shape[0] > 1 else f"a {grid} grid")
 
@@ -299,10 +365,22 @@ class _PropTorchEager(
             RuntimeWarning, stacklevel=3)
 
     def _mark_compile_step_begin(self):
-        if self.use_compile and self.dev is not None and "cuda" in str(self.dev):
+        """Mark a new call for CUDA-graph trees; only the compile modes that
+        replay CUDA graphs keep them (``_mark_steps``)."""
+        if self._mark_steps and self.use_compile:
             compiler = getattr(torch, "compiler", None)
             if compiler is not None and hasattr(compiler, "cudagraph_mark_step_begin"):
                 compiler.cudagraph_mark_step_begin()
+
+    def _resolved_steps_per_call(self, records=True):
+        """Steps a compiled call advances: ``steps_per_call``, or when it is
+        None, ``_default_steps_per_call`` (``records``: autograd records the
+        rollout).  Uncompiled, the steps run one by one."""
+        if not self.use_compile:
+            return 1
+        if self.steps_per_call is not None:
+            return self.steps_per_call
+        return _default_steps_per_call(self.ndim, self.dev, records)
 
     @staticmethod
     def _records(models, wavelet_steps):
@@ -312,20 +390,58 @@ class _PropTorchEager(
             any(m.requires_grad for m in models)
             or any(w.requires_grad for w in wavelet_steps[:1]))
 
-    def _compiled_step(self, wavefields, models, dt, h, b, source=None, compiled=True):
-        """One step; ``source`` (``SourceTorch.step_args``) is injected into
-        the source fields inside it.  ``compiled=False`` runs it uncompiled
-        (see ``_SettledSteps``)."""
-        if not compiled:
-            return self._plain_step_func(*wavefields, *models, dt, h, b, source=source)
-        self._mark_compile_step_begin()
-        return self.step_func(*wavefields, *models, dt, h, b, source=source)
+    def _steps_fn(self, k):
+        """The compiled ``steps_func`` for calls of ``k`` steps (one wrapper
+        per ``k``, for the compile notice; Dynamo keeps the graphs of every
+        ``k`` on the function's one code object)."""
+        fn = self._steps_funcs.get(k)
+        if fn is None:
+            name = type(self.equation).__name__
+            fn = self._maybe_compile(self._plain_steps_func,
+                                     what=f"the {name} step" if k == 1 else f"{k} {name} steps per call")
+            self._steps_funcs[k] = fn
+        return fn
+
+    def _stepper(self, models, wavelet_steps, src, rec, nt, adj, settled, k):
+        """``advance(fields, t, end) -> (fields, block, n)``: steps ``t`` to
+        ``t + n - 1`` of the rollout, ``block`` their record columns
+        ``(B, n, nrec, len(receiver_type))``.
+
+        Step ``t`` starts a compiled call of ``k`` steps when it is a multiple
+        of ``k``, its inputs' ``requires_grad`` has settled (``settled``, the
+        rollout's ``_SettledSteps``) and the call ends by ``end``; any other
+        step runs alone, uncompiled.  Uncompiled steps are therefore the first
+        ones, up to the first multiple of ``k`` after the inputs settle, and
+        the last ``nt % k`` -- with no graph compiled for a remainder.  The
+        calls sit on multiples of ``k`` whatever ``end`` is, so a rollout cut
+        at multiples of ``k`` (checkpoint chunks, the plain warm-up) takes the
+        same steps compiled as one that is not, and a checkpoint's recompute
+        the same as its forward."""
+        h = self._equation_spacing
+        models = tuple(models)
+        source = src.step_args(wavelet_steps[0])[1:] if nt else ()
+        receivers = (*rec.step_args(), rec.batch, rec.nreceivers)
+        compiled = self._steps_fn(k)
+        plain = self._plain_steps_func
+
+        def sample(t):
+            return wavelet_steps[nt - t - 1 if adj else t]
+
+        def advance(fields, t, end):
+            if settled.compiled(t, fields) and t % k == 0 and t + k <= end:
+                self._mark_compile_step_begin()
+                fields, block = compiled(tuple(fields), models, self.dt, h, None,
+                                         tuple(sample(t + j) for j in range(k)), source, receivers)
+                return list(fields), block, k
+            fields, block = plain(tuple(fields), models, self.dt, h, None, (sample(t),), source, receivers)
+            return list(fields), block, 1
+
+        return advance
 
     def _sample_receivers(self, rec, wavefield, receivers):
         """One record column, ``(B, nrec, len(receiver_type))``."""
-        if len(self.receiver_indices) > 1:
-            return rec.sample_fields([wavefield[idx] for idx in self.receiver_indices])
-        return rec(wavefield[self.receiver_indices[0]]).view(*receivers.shape[:-1]).unsqueeze(-1)
+        return _record_column(wavefield, tuple(self.receiver_indices), *rec.step_args(),
+                              rec.batch, rec.nreceivers)
 
     def _prepare_runtime_models(self, models):
         prepare = getattr(self.equation, "prepare_models", None)
@@ -412,17 +528,6 @@ class _PropTorchEager(
             cached.zero_()
         return cached
 
-    def _run_chunk(self, wavefield, models, dt, h, b, wavelet_steps, nt, start_t, chunk_size, src, rec, receivers,
-                   settled, adj=False):
-        columns = []
-        for t in range(start_t, min(start_t + chunk_size, nt)):
-            time = t if not adj else nt - t - 1
-            wavefield = list(self._compiled_step(wavefield, models, dt, h, b,
-                                                 source=src.step_args(wavelet_steps[time]),
-                                                 compiled=settled.compiled(t, wavefield)))
-            columns.append(self._sample_receivers(rec, wavefield, receivers))
-        return tuple(wavefield), torch.stack(columns, dim=1)
-
     def set_parameters(self, model):
         assert len(self.model_names) == len(model), (
             f"Model parameters must be the same length as the model names, got {len(model)} and {len(self.model_names)}"
@@ -458,11 +563,13 @@ class _PropTorchEager(
                       receivers, nt, adj):
         """Time loop under chunk gradient checkpointing: the nt steps are split
         into ``ckpt_chunks``-sized chunks, each wrapped in ``ckpt_torch`` so its
-        activations are recomputed in backward instead of stored.  Returns
+        activations are recomputed in backward instead of stored.  A chunk is
+        rounded up to whole compiled calls (``_stepper``).  Returns
         ``(wavefield, record)``, the record concatenated from the chunks' own
         (see ``_rollout_full`` for why it is not written in place).
         """
-        chunk_size = int(max(1, self.ckpt_chunks))
+        k = self._resolved_steps_per_call(self._records(models, wavelet_steps))
+        chunk_size = -(-int(max(1, self.ckpt_chunks)) // k) * k
         num_wavefields = len(wavefield)
         num_models = len(models)
 
@@ -472,40 +579,32 @@ class _PropTorchEager(
         if self.use_compile and CKPT_PLAIN_WARMUP:
             # Before torch 2.5, compiling inside a checkpointed forward saves
             # tensors its recompute does not, and backward raises a
-            # CheckpointError.  Only the first compiled step compiles (see
+            # CheckpointError.  Only the first compiled call compiles (see
             # _SettledSteps), so run the steps up to and including it on the
-            # plain tape.
-            runtime_models = self._prepare_runtime_models(models)
-            while start < min(nt, 8) and settled.first is None:
-                wavefield, column = self._run_chunk(
-                    wavefield, runtime_models, self.dt, self._equation_spacing, None,
-                    wavelet_steps, nt, start, 1, src, rec, receivers, settled, adj=adj)
-                wavefield = list(wavefield)
-                chunk_records.append(column)
-                start += 1
+            # plain tape; it ends on a multiple of k, as the chunks then do.
+            advance = self._stepper(self._prepare_runtime_models(models), wavelet_steps, src, rec,
+                                    nt, adj, settled, k)
+            compiled = False
+            while start < min(nt, 8 + 2 * k) and not compiled:
+                wavefield, block, n = advance(wavefield, start, nt)
+                compiled = n == k and settled.first is not None
+                chunk_records.append(block)
+                start += n
 
         for start_t in range(start, nt, chunk_size):
 
             def checkpoint_chunk(*chunk_inputs, start_t=start_t):
                 state = list(chunk_inputs[:num_wavefields])
                 chunk_models = list(chunk_inputs[num_wavefields : num_wavefields + num_models])
-                chunk_runtime_models = self._prepare_runtime_models(chunk_models)
-                return self._run_chunk(
-                    state,
-                    chunk_runtime_models,
-                    self.dt,
-                    self._equation_spacing,
-                    None,
-                    wavelet_steps,
-                    nt,
-                    start_t,
-                    chunk_size,
-                    src,
-                    rec,
-                    receivers,
-                    settled,
-                    adj=adj,
-                )
+                advance = self._stepper(self._prepare_runtime_models(chunk_models), wavelet_steps, src,
+                                        rec, nt, adj, settled, k)
+                end = min(start_t + chunk_size, nt)
+                blocks, t = [], start_t
+                while t < end:
+                    state, block, n = advance(state, t, end)
+                    blocks.append(block)
+                    t += n
+                return tuple(state), torch.cat(blocks, dim=1)
 
             wavefield, chunk_record = ckpt_torch(checkpoint_chunk, *wavefield, *models, use_reentrant=False)
             wavefield = list(wavefield)
@@ -517,28 +616,28 @@ class _PropTorchEager(
         """Plain time loop recording the full autograd tape (the default path):
         PyTorch retains every step's activations and backward differentiates the
         whole graph.  This is the only path that supports ``return_wavefield``
-        (wavefield snapshots).  Returns ``(wavefield, record)``; the snapshots,
+        (wavefield snapshots), which takes one step a call: a snapshot is the
+        state after its step.  Returns ``(wavefield, record)``; the snapshots,
         which are detached host copies, are still written in place.
         """
-        settled = _SettledSteps()
-        columns = []
-        for i in range(nt):
-            time = i if not adj else nt - i - 1
-            wavefield = list(self._compiled_step(wavefield, runtime_models, self.dt, self._equation_spacing, None,
-                                                 source=src.step_args(wavelet_steps[time]),
-                                                 compiled=settled.compiled(i, wavefield)))
-            if return_wavefield and i in snapshot_lookup:
+        k = 1 if return_wavefield else self._resolved_steps_per_call(self._records(runtime_models, wavelet_steps))
+        advance = self._stepper(runtime_models, wavelet_steps, src, rec, nt, adj, _SettledSteps(), k)
+        blocks, t = [], 0
+        while t < nt:
+            wavefield, block, n = advance(wavefield, t, nt)
+            t += n
+            if return_wavefield and t - 1 in snapshot_lookup:
                 fields = self._full_wavefields([w.detach() for w in wavefield])
-                snapshots[snapshot_lookup[i]] = torch.stack(
+                snapshots[snapshot_lookup[t - 1]] = torch.stack(
                     [self._crop_runtime_halo(f).cpu() for f in fields], 0)
-            columns.append(self._sample_receivers(rec, wavefield, receivers))
-        # One stack instead of nt in-place slice writes. Writing into a live
-        # autograd tensor builds a chain of nt CopySlices nodes, and EACH of
+            blocks.append(block)
+        # One concatenation instead of nt in-place slice writes. Writing into a
+        # live autograd tensor builds a chain of nt CopySlices nodes, and EACH of
         # them allocates a full-record buffer and copies the incoming gradient
         # through it, so the record alone cost O(nt^2) backward traffic:
         # 2*nt*|record|, which is 64 GB per shot at nt=4000 with 500 receivers.
-        # Stacking makes it 2*|record|.
-        return wavefield, torch.stack(columns, dim=1)
+        # Concatenating makes it 2*|record|.
+        return wavefield, torch.cat(blocks, dim=1)
 
     def forward(
         self,

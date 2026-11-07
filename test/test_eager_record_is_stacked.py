@@ -19,8 +19,9 @@ from sweep.propagator.torch import PropTorch
 
 NZ, NX, NT = 24, 28, 40
 MEMORY = {"full": Full, "ckpt": lambda: Ckpt(chunks=16), "bs": lambda: BoundarySaving(storage="gpu")}
-# The node the record's graph ends in: one stack, or one cat of the chunks' stacks.
-RECORD_NODE = {"full": "Stack", "ckpt": "Cat", "bs": "Stack"}
+# The node the record's graph ends in: one cat of the calls' (or the chunks')
+# blocks, or for boundary saving one stack of its columns.
+RECORD_NODE = {"full": "Cat", "ckpt": "Cat", "bs": "Stack"}
 
 
 def _prop(memory):

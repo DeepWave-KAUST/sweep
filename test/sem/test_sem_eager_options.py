@@ -92,11 +92,12 @@ def test_a_dict_reads_like_the_dataclass():
         _prop(eager_options={"use_compiled": False})
 
 
-@pytest.mark.parametrize("field, match", [("cpml_strips", "band_split"),
-                                          ("store_last_wavefield", "return_wavefield")])
-def test_proptorch_only_options_are_refused(field, match):
+@pytest.mark.parametrize("field, value, match", [("cpml_strips", True, "band_split"),
+                                                 ("store_last_wavefield", True, "return_wavefield"),
+                                                 ("steps_per_call", 4, "one step a call")])
+def test_proptorch_only_options_are_refused(field, value, match):
     with pytest.raises(NotImplementedError, match=match):
-        _prop(eager_options=EagerOptions(**{field: True}))
+        _prop(eager_options=EagerOptions(**{field: value}))
 
 
 def test_the_old_switch_names_its_replacement():

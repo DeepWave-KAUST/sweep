@@ -659,7 +659,16 @@ class _EagerBoundarySavingMixin:
         temporary files in ``disk_dir`` (default: the system temp directory)
         and reads back ahead of the reverse pass.  ``check_tol=None`` picks a
         tolerance that clears the storage quantization floor while still
-        catching a broken reverse (O(0.1-1) error)."""
+        catching a broken reverse (O(0.1-1) error).
+
+        Boundary saving takes one step a call: its step is an autograd.Function
+        that reconstructs and differentiates step by step, so an explicit
+        ``EagerOptions(steps_per_call=...)`` above 1 is refused."""
+        steps = getattr(self, "steps_per_call", None)
+        if flag and steps not in (None, 1):
+            raise ValueError(
+                f"EagerOptions(steps_per_call={steps}) applies to the full-tape and checkpointed "
+                "rollouts; eager boundary saving advances one step a call. Leave steps_per_call unset.")
         self._eager_bs = bool(flag)
         self._eager_bs_mode = mode
         self._eager_bs_self_check = bool(self_check)

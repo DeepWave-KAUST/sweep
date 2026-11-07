@@ -132,10 +132,11 @@ Rematerialise the forward wavefield from checkpoints.
 ```text
 EagerOptions(use_compile: 'bool' = True, compile_mode: 'str' = 'default', compile_dynamic: 'bool' =
     False, compile_backend: 'str | None' = None, compile_fullgraph: 'bool' = False,
-    store_last_wavefield: 'bool' = False, cpml_strips: 'bool | None' = None) -> None
+    store_last_wavefield: 'bool' = False, cpml_strips: 'bool | None' = None, steps_per_call: 'int | None'
+    = None) -> None
 ```
 
-Options of the eager (pure PyTorch) step, for ``impl='eager'``.
+Options of ``impl='eager'``, passed as ``PropTorch(eager_options=...)``.
 
 ### `CUDAOptions`
 

@@ -332,6 +332,32 @@ and this project adheres to
   3-D velocity-stress classes, the Biot classes), with `Ckpt(chunks=64)` as their default
   memory; they ran on eager. `return_wavefield=True` needs `impl='eager'` there, as on
   the other classes with kernels.
+- **One call of the compiled eager step advances several time steps
+  (`EagerOptions(steps_per_call=...)`).** A call costs the host its Dynamo
+  guards, autograd wrappers and kernel launches whatever it computes, and on a
+  2-D grid that took longer than the step on the GPU: at 1000² the GPU was busy
+  9-40% of the time. A call now runs `steps_per_call` steps with the source
+  injection and the receiver sampling inside, on the full-tape and checkpointed
+  rollouts; `None` (the default) takes 4 for rollouts with gradients on a 2-D
+  grid on a GPU and 1 otherwise. Without gradients Inductor fuses the steps of
+  a call into one another and, on a large grid, spends more GPU time than the
+  call saves the host (a 2000² acoustic forward ran twice as long per step),
+  so forwards keep one step a call unless `steps_per_call` is set. Calls start
+  on multiples of `steps_per_call`; the steps before
+  (until the inputs' `requires_grad` settles) and the last
+  `nt % steps_per_call` run uncompiled, so no graph is compiled for a
+  remainder, and a checkpoint chunk is rounded up to whole calls. Boundary
+  saving and `return_wavefield=True` advance one step a call; an explicit
+  `steps_per_call > 1` is refused with boundary saving, without
+  `use_compile`, and on PropSEM. Records and gradients move by float32
+  round-off (~1e-6 relative). On an A100 and an RTX 6000 Ada a 2-D gradient
+  (acoustic, elastic) runs 1.8-3.1x faster at 1000² and 1.1-1.5x at 2000²;
+  its first compile takes 2-3x as long (11-19 s) and its peak memory grows
+  3-12% under checkpointing. The receivers are sampled inside the compiled
+  call at one step a call too, with records and gradients bitwise as before,
+  and `torch.compiler.cudagraph_mark_step_begin()` is called only in the
+  compile modes that replay CUDA graphs. See
+  [Several time steps per compiled call](docs/user-guide/propagators.md#steps-per-call).
 - **3-D eager runs keep the CPML memory fields on the absorbing strips by
   default.** `EagerOptions(cpml_strips=None)`, the new default, picks the strips
   on a 3-D grid and the full grid on a 2-D one or with `topography=`;

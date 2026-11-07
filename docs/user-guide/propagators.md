@@ -156,7 +156,7 @@ quick reference:
 
 | Option block | Used with | Configures |
 | --- | --- | --- |
-| `EagerOptions` | `impl="eager"` | `torch.compile` flags, the CPML strip layout (`cpml_strips`, on by default in 3-D), debug knobs |
+| `EagerOptions` | `impl="eager"` | `torch.compile` flags, [time steps per compiled call](#steps-per-call), the CPML strip layout (`cpml_strips`, on by default in 3-D), debug knobs |
 | `CUDAOptions` | `impl="c"` | Container for `impl="c"`-only options; its `memory=` is equivalent to `PropTorch(memory=...)` |
 | `Full` | as `memory=` | Keep the whole forward wavefield. No parameters |
 | `BoundarySaving` | as `memory=` | Boundary saving with GPU / CPU / disk storage |
@@ -263,6 +263,7 @@ Tail truncation has a legacy dict spelling too — `boundary_saving_config=
 | Chunked checkpointing | both | `Ckpt(mode="chunk", chunks=...)` |
 | Recursive (fixed-budget) checkpointing | `impl="c"` | `Ckpt(mode="recursive", count=...)` |
 | `torch.compile` on the eager step | `impl="eager"` | `EagerOptions(use_compile=True, ...)` |
+| [Several time steps per compiled call](#steps-per-call) (default 4 for 2-D gradient rollouts on a GPU) | `impl="eager"`, full tape and checkpointing | `EagerOptions(steps_per_call=...)` |
 
 A runnable comparison of these options lives in the
 [Memory · strategies notebook](../notebooks/07_memory_strategies.ipynb), which
@@ -312,6 +313,105 @@ memory=BoundarySaving(storage="gpu", tail_steps=n_probe + margin)
   waiting in an exchange).  The truncated DD gradient is bit-exact against
   the truncated single-domain gradient on fp32 boundaries
   (`test/test_dd_tail_two_tile.py`, `test/dd_tail_nccl_check.py`).
+
+## Several time steps per compiled call {#steps-per-call}
+
+`impl="eager"` compiles its time step with `torch.compile`, and on a GPU every
+call of the compiled step costs the host 0.2–0.5 ms (Dynamo's guard checks, the
+autograd wrappers and the kernel launches), whatever the grid size. On a 2-D
+grid of 1000 × 1000 cells this is longer than the step takes on the GPU, which
+then waits for the host between steps. `EagerOptions(steps_per_call=k)`
+compiles `k` time steps into one call, together with their source injection
+and receiver sampling, so that this cost is paid once every `k` steps:
+
+```python
+from sweep.propagator.options import EagerOptions
+from sweep.propagator.torch import PropTorch
+
+solver = PropTorch(..., impl="eager",
+                   eager_options=EagerOptions(steps_per_call=4))
+```
+
+The default, `steps_per_call=None`, takes 4 for a rollout that autograd
+records (grad mode on, and a model or the wavelet requiring grad) on a 2-D grid
+on a GPU, and 1 otherwise. An explicit value applies with and without
+gradients. Forward modelling keeps one step per call by default because,
+without gradients, Inductor fuses the steps of a call into one another: rather
+than write out the fields of each step, the C-PML memory fields first, it
+stores the spatial derivatives they are computed from and recomputes the
+fields where the next step reads them. On a 2000 × 2000 acoustic grid this
+doubles the GPU time of a step (from 0.14 to 0.32 ms on an A100), more than
+the call saves on the host; on a 1000 × 1000 grid the fields stay in the L2
+cache, and the forward step with `k = 4` is still 1.7–2.0 times faster than
+with `k = 1`. With gradients, the fields of every step are saved for the
+backward pass and therefore written out, and the GPU time of a step stays about
+that of `k = 1`. A 3-D step keeps the GPU busy on its own and was slower
+with `k > 1`, with and without gradients; on a CPU the arithmetic outweighs the
+host cost.
+
+Calls start at steps that are multiples of `k`. The first steps of a rollout,
+up to the first multiple of `k` after the fields' `requires_grad` flags have
+settled, and the last `nt % k` steps run one at a time, uncompiled, so no graph
+is compiled for a remainder and a new `nt` does not recompile. Under
+`Ckpt(chunks=c)` the chunk length is rounded up to a multiple of `k`: no call
+crosses a checkpoint, and the backward pass recomputes each chunk with the same
+calls as the forward pass. Three cases keep one step per call:
+
+- `return_wavefield=True`, since each snapshot is the state after its step.
+- Boundary saving, whose step is a `torch.autograd.Function` that reconstructs
+  and differentiates one step at a time; an explicit `steps_per_call` above 1
+  with `memory=BoundarySaving(...)` raises `ValueError`.
+- `use_compile=False`, which runs the steps one at a time; an explicit
+  `steps_per_call` above 1 raises `ValueError`.
+
+`PropSEM` compiles one step per call and raises `NotImplementedError` for an
+explicit `steps_per_call`.
+
+**Accuracy.** With `k > 1` the records and gradients differ from those with
+`k = 1` at the level of float32 round-off: in the runs below, the relative
+maximum difference was 3e-7 to 9e-7 for the records and 1e-7 to 2e-6 for the
+gradients, the order of the difference between the compiled and the
+uncompiled step. It comes from the steps that run uncompiled and from the order
+in which Inductor fuses and accumulates the operations within a call, and it is
+the same from run to run. In a CPU test in which the uncompiled steps use the
+same operations as the compiled ones (`aot_eager` backend), the records for any
+`k` equal those for `k = 1` bit for bit. `steps_per_call=1` reproduces results
+computed one step per call.
+
+**Compile time and memory.** A call of more steps takes longer to compile: with
+a cold Inductor cache, a 2-D gradient rollout compiled in 11–19 s with `k = 4`
+against 5–7 s with `k = 1` (1–2 s with a warm cache). With `k = 4` the peak GPU
+memory of a forward + backward call grew by 2–12 % in 2-D and 11–13 % in 3-D
+under checkpointing, and by 0.3–2 % under `Full()`; the memory held between the
+forward and the backward pass did not change under checkpointing.
+
+**Measured.** One shot of a 10 Hz Ricker wavelet, `spatial_order=4`, float32,
+random models of 1000², 2000² and 160³ cells with a C-PML of 40 (2-D) or 20
+(3-D) cells outside them, `nt` = 1000, 600 and 300, and eager's default
+`Ckpt()` (chunks of 100 steps). Each entry is the median of four processes, in
+ms per time step, forward / forward + backward (gradients of all models of the
+sum of the squared records). The defaults are the `k = 1` forward times and, in
+2-D, the `k = 4` forward + backward times.
+
+| ms per step | A100, `k = 1` | A100, `k = 4` | RTX 6000 Ada, `k = 1` | RTX 6000 Ada, `k = 4` |
+| --- | --- | --- | --- | --- |
+| 2-D acoustic, 1000² | 0.221 / 1.343 | 0.109 / 0.437 | 0.228 / 1.227 | 0.124 / 0.464 |
+| 2-D acoustic, 2000² | 0.193 / 1.242 | 0.319 / 0.889 | 0.263 / 1.569 | 0.542 / 1.463 |
+| 2-D elastic, 1000² | 0.287 / 1.583 | 0.165 / 0.898 | 0.336 / 1.808 | 0.173 / 0.820 |
+| 2-D elastic, 2000² | 0.411 / 2.161 | 0.489 / 2.092 | 0.752 / 3.763 | 0.841 / 3.568 |
+| 3-D acoustic, 160³ | 0.548 / 2.359 | 0.732 / 2.445 | 0.686 / 3.294 | 1.053 / 3.778 |
+| 3-D elastic, 160³ | 1.494 / 7.521 | 2.045 / 8.320 | 2.797 / 13.833 | 3.379 / 14.769 |
+
+With `k = 4` a 2-D forward + backward step was 1.8–3.1 times faster at 1000²
+and 1.03–1.4 times faster at 2000²; a 2-D forward step was 1.7–2.0 times faster
+at 1000² and 1.1–2.1 times slower at 2000²; a 3-D step was 4–15 % slower with
+gradients and 1.2–1.5 times slower without. `k = 8` was faster than `k = 4` for
+the 2-D gradients at 1000² except the elastic one on the RTX 6000 Ada
+(acoustic: 3.6–3.8 times faster than `k = 1`), not at 2000² or in 3-D, and its
+first compile took about twice as long as with `k = 4` (20–34 s in 2-D). An
+explicit `steps_per_call=4` is therefore worth setting for forward modelling on
+2-D grids of about 1000² cells or fewer; `steps_per_call=1` halves the first
+compile, which matters for a run of a few rollouts.
 
 ## Environment toggles
 
