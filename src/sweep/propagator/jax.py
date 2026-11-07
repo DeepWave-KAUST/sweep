@@ -228,6 +228,7 @@ class PropJax(PropBase):
             shape=tuple(wavefields[0].shape),
             ndim=self.ndim,
             abcn=self.abcn,
+            pml_pad=tuple(self.pml_pad),
             halo=self._runtime_fd_halo(),
             nt=nt,
             S0=wavefields,

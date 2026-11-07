@@ -662,6 +662,22 @@ and this project adheres to
   (20-100 s each on a GPU), and past Dynamo's recompile limit the step ran
   uncompiled. Each sample is a contiguous copy now; several shots compiled once
   before as well.
+- **Eager and JAX boundary saving: a source on the boundary ring, and per-face
+  PML widths.** Each step's ring was saved before the source went in, and the
+  reverse pass puts the saved ring back after re-injecting the source, so a
+  source on a ring cell was dropped from the reconstruction. Under a free
+  surface the top face has no PML and its ring lies inside the model, at depth
+  `abcn - halo` .. `abcn - 1` cells: a source there gave a vp gradient 17-21%
+  off the full tape's (relative L2; 1e-3 a few cells away). The ring is now
+  saved after the source, as `impl='c'` saves it. With per-face PML widths (a
+  per-edge `abcn`) every face had its ring at `max(abcn) + halo`, inside the
+  model on a thinner face, and the strip between the ring and the thin PML
+  came back wrong (vp gradients 2-22% off, the error next to that face). A face
+  with a damping ramp now has its ring in the innermost cells of its own ramp;
+  a face without one (a free surface) keeps it at `abcn + halo`, where the band
+  also holds the gradient nearer the full tape's next to the surface. Records
+  are unchanged, and so are the gradients, bit for bit, unless a source sits on
+  the ring or a face is thinner than another.
 - **The compiled eager step of the 3-D deformed SEM classes with a C-PML is faster:
   forward 4.3-6.4x on `AcousticSEM3DDeformed`, 1.9-3x on `ElasticVSSEM3DDeformed`,
   `ElasticVTISEM3DDeformed`, `ElasticTTISEM3DDeformed` and

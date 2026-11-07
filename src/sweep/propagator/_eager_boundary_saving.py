@@ -41,6 +41,7 @@ import torch
 from sweep.propagator._ring_geometry import (  # noqa: F401
     _interior_index_tuple,
     _ring_index_tuples,
+    _ring_offsets,
     _ring_slice_shape,
 )
 
@@ -585,14 +586,17 @@ class _BoundarySaveStep(torch.autograd.Function):
         func = cfg["func"] if cfg["settled"].compiled(step, S_in) else cfg["func_plain"]
         with torch.no_grad():
             S_out = list(func(S_in, models, cfg["dt"], cfg["h"], None))
-        save_step(cfg["state"], step + 1, [S_out[f] for f in cfg["ring_fields"]])
-        # The ring is saved before the source goes in, as when the source was
-        # an op after this Function; the reverse drivers re-inject it.  Inside,
-        # it is a scatter onto the fresh outputs instead of a full-grid op.
+        # The source goes in first, a scatter onto the fresh outputs, and the
+        # ring is taken after it: the reverse drivers put the saved ring back
+        # last, over the source they re-inject, so a ring saved before the
+        # source dropped it wherever a source sits on the ring (a source at
+        # depth abcn - halo .. abcn - 1 under a free surface, where the ring
+        # lies inside the model).
         if sample is not None:
             for k in cfg["source_indices"]:
                 S_out[k] = _add_source(cfg["src"], S_out[k], sample, S_in)
             ctx.sample_shape = sample.shape
+        save_step(cfg["state"], step + 1, [S_out[f] for f in cfg["ring_fields"]])
         ctx.cfg = cfg
         ctx.step = step
         ctx.time_index = time_index
@@ -720,11 +724,11 @@ class _AtState(torch.autograd.Function):
 class _BoundarySaveSteps(torch.autograd.Function):
     """``len(times)`` consecutive steps of the boundary-saving rollout.
 
-    Forward runs the steps (each step's ring taken before its source goes in,
-    as ``_BoundarySaveStep`` takes it, then the source injected and the
-    receivers sampled) as one compiled graph (``steps_fwd``) and stores the k
-    rings together; it returns the fields after the last step and the steps'
-    record columns, ``(B, k, nrec, len(receiver_type))``.  One graph whatever
+    Forward runs the steps (each step's source injected, then its ring taken,
+    as ``_BoundarySaveStep`` takes it, and the receivers sampled) as one
+    compiled graph (``steps_fwd``) and stores the k rings together; it returns
+    the fields after the last step and the steps' record columns,
+    ``(B, k, nrec, len(receiver_type))``.  One graph whatever
     the grid: with the C-PML memory fields on the full grid Inductor fuses the
     steps of the graph into one another, which made an acoustic gradient of 4
     or more shots at 1000^2 9% slower than one call a step (an elastic one
@@ -895,7 +899,7 @@ class _EagerBoundarySavingMixin:
         from sweep.equations.base import SecondOrderEquation
 
         halo = self._runtime_fd_halo()
-        offsets = tuple(self.abcn + halo for _ in range(self.ndim))
+        offsets = _ring_offsets(self.pml_pad, self.abcn, halo)
         shape = tuple(wavefield[0].shape)
         rings = _ring_index_tuples(shape, self.ndim, offsets, halo)
         interior_idx = _interior_index_tuple(shape, self.ndim, offsets)
@@ -996,7 +1000,7 @@ class _EagerBoundarySavingMixin:
 
         def steps_fwd(fields, models, dt, h, samples, source, receivers, pad):
             """A step from ``fields`` per sample, in one graph, each step's ring
-            row taken before its source goes in (as ``_BoundarySaveStep`` takes
+            row taken after its source goes in (as ``_BoundarySaveStep`` takes
             it): the fields after the last step, the record columns and the
             ring rows.  The fields of
             the steps before the last are returned too, and dropped: without
@@ -1006,9 +1010,9 @@ class _EagerBoundarySavingMixin:
             rows, columns, kept = [], [], []
             for sample in samples:
                 out = list(step(*fields, *models, dt, h, None))
-                rows.append(_ring_row([out[f] for f in ring_fields], rings, pad))
                 for i in src_fields:
                     out[i] = scatter_source(out[i], sample, *source)
+                rows.append(_ring_row([out[f] for f in ring_fields], rings, pad))
                 columns.append(_record_column(out, at, *receivers))
                 kept += out
                 fields = out
