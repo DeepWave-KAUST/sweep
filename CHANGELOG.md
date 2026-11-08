@@ -678,6 +678,15 @@ and this project adheres to
   also holds the gradient nearer the full tape's next to the surface. Records
   are unchanged, and so are the gradients, bit for bit, unless a source sits on
   the ring or a face is thinner than another.
+- **`ElasticVRR` on `impl='eager'`: uncompiled steps compute the velocity gradients
+  of their own models.** `vp_x, vp_z, vs_x, vs_z` were cached on `id(vp), id(vs)`, and
+  an id is reused once its tensor is freed: boundary saving's backward makes new
+  model leaves every call, so a call could take an earlier call's gradients, whose
+  graph ends at that call's leaves. At 4 steps a call run uncompiled (what Dynamo
+  does when it falls back to eager) the vp and vs gradients were 19% and 55% off
+  the full tape. They are now made once per rollout through the time-invariant
+  dict, and in every uncompiled step that has none; compiled steps compute them
+  in place, as before.
 - **The compiled eager step of the 3-D deformed SEM classes with a C-PML is faster:
   forward 4.3-6.4x on `AcousticSEM3DDeformed`, 1.9-3x on `ElasticVSSEM3DDeformed`,
   `ElasticVTISEM3DDeformed`, `ElasticTTISEM3DDeformed` and
