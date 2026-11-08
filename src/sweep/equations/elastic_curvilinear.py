@@ -413,6 +413,13 @@ class ElasticCurvilinear(FirstOrderEquation):
                  source_spread=2, surface_mass_weight=1.0,
                  damp_velocity=True, hourglass_frequency=0.0,
                  hourglass_rows=None):
+        if backend != "torch":
+            # Its geometry (the GCL-consistent metric rebuild, the surface
+            # closure, damping and hourglass control) is torch code; on jax
+            # it failed inside the first traced step.
+            raise NotImplementedError(
+                "ElasticCurvilinear supports backend='torch' only (impl='eager'); "
+                f"got backend={backend!r}.")
         if spatial_order % 2:
             raise ValueError(
                 f"spatial_order must be even (it is 2L for an L-point "

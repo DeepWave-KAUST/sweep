@@ -2,6 +2,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from sweep.core.arguments import warn_deprecated_spelling
 from sweep.propagator.base import PropBase
 from sweep.propagator.options import (
@@ -341,8 +342,8 @@ class PropJax(PropBase):
         shape_wavefield = (batch_size, 1) + self._runtime_shape()
 
         coord_offset = jnp.asarray(self._runtime_coord_offset(), dtype=jnp.int32)
-        sources = jnp.array(sources, dtype=jnp.int32) + coord_offset
-        receivers = jnp.array(receivers, dtype=jnp.int32) + coord_offset
+        sources = jnp.array(self._curvilinear_coords(sources, "source"), dtype=jnp.int32) + coord_offset
+        receivers = jnp.array(self._curvilinear_coords(receivers, "receiver"), dtype=jnp.int32) + coord_offset
 
         # Same checkerboard-suppression stencil as the torch eager path (see
         # ``equation.source_receiver_stencil``); None keeps point behaviour.
@@ -559,6 +560,30 @@ class PropJax(PropBase):
             **kwargs,
         )
 
+    def _curvilinear_coords(self, coords, role):
+        """Physical source / receiver indices on a boundary-fitted grid's
+        rows (``PropBase._place_on_curvilinear``, as the eager path places
+        them); untouched on a Cartesian grid."""
+        if self.curvilinear_grid is None:
+            return coords
+        return np.asarray(self._place_on_curvilinear(np.asarray(coords), role).cpu())
+
+    def _curvilinear_models_jax(self, models):
+        """``PropBase._curvilinear_models`` on jax arrays: the physical-grid
+        models sampled on the boundary-fitted grid's rows, with the same
+        tables and the same linear weights (differentiable).  The identity on
+        a Cartesian or flat grid."""
+        grid = self.curvilinear_grid
+        if grid is None or self.topography is None:
+            return models
+        i0, i1, w, cols = (np.asarray(t) for t in self._curvilinear_model_tables(grid))
+        out = []
+        for m in models:
+            m = jnp.asarray(m)
+            a, b = m[..., i0, cols], m[..., i1, cols]
+            out.append(a + jnp.asarray(w, dtype=m.dtype) * (b - a))
+        return out
+
     def __call__(
         self,
         wavelet,
@@ -572,6 +597,7 @@ class PropJax(PropBase):
         **kwargs,
     ):
         models = models if models is not None else self.parameters()
+        models = self._curvilinear_models_jax(models)
         models = [self.pad_model(para, self._runtime_padding()) for para in models]
         return self.forward_base(
             wavelet,
@@ -590,5 +616,6 @@ class PropJax(PropBase):
         """
         models = kwargs.pop("models", None)
         models = models if models is not None else self.parameters()
+        models = self._curvilinear_models_jax(models)
         models = [self.jaxpad(para, self._runtime_padding()) for para in models]
         return self.forward_base(*args, models=models, **kwargs)
