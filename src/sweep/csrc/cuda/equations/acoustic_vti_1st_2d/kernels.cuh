@@ -323,13 +323,14 @@ SWEEP_BY_ORDER_DECL(stress_kernel_nopml_fn, stress_kernel_nopml_by_order);
 
 
 // ===========================================================================
-//                     ADJOINT (BACKWARD) KERNELS — Phase 1
+//                     ADJOINT (BACKWARD) KERNELS
 // ---------------------------------------------------------------------------
-// Implements the discrete adjoint of the Duveneck (2008) VTI step.  Phase 1
-// scope: full mode only (uses saved forward wavefield); adjoint PML memory
-// variables are NOT tracked — interior gradients are correct, gradients
-// inside the PML band are approximate.  FWI / RTM typically masks the PML
-// region in the gradient, so this is fine for production use.
+// Implements the discrete adjoint of the Duveneck (2008) VTI step, CPML
+// included: the two pre-multiply kernels below carry the transpose of the
+// forward memory-variable recursion in the adjoint wavefield's own m_* slots.
+// Without it the adjoint field crossed the absorbing band undamped and came
+// back off the outer edge of the grid (c vs eager 2e-2 at abcn = 30 with the
+// receivers 6 cells from the band).
 //
 // Derivation summary
 // ------------------
@@ -377,6 +378,21 @@ SWEEP_BY_ORDER_DECL(stress_kernel_nopml_fn, stress_kernel_nopml_by_order);
 // only for a homogeneous model; for a heterogeneous one the two differ by a
 // grad(c) term that accumulates once per step.  Materialise the products here
 // so the stencil differentiates the right field.
+//
+// In the absorbing band the forward stress update differentiates through a
+// memory variable,
+//
+//     m_vxx' = ax * m_vxx + bx * Db_x(v_x),   s += dt * c11 * (Db_x(v_x) + m_vxx'),
+//
+// so the field kernel A must differentiate is the transpose of that recursion
+// applied to p = c11*λsH + c13*λsV (the adjoint of the effective derivative,
+// dt taken out; the adjoint memory carries the same 1/dt scale):
+//
+//     tmp = λm_vxx + p;   p_out = p + bx * tmp;   λm_vxx' = ax * tmp
+//
+// (elastic2d's stress_adjoint_prepare).  It runs exactly where the forward
+// kernel updates its memory -- inside the band, off the stencil halo -- so
+// elsewhere p_out = p and the interior is bit-identical to the plain adjoint.
 template<int Dummy>
 __global__ void adjoint_premultiply_stress_kernel(
     VTIWavefieldPointer adj,
@@ -385,6 +401,7 @@ __global__ void adjoint_premultiply_stress_kernel(
     const float* __restrict__ c13,
     float* __restrict__ px,          // c11*λsH + c13*λsV   (feeds λvx)
     float* __restrict__ pz,          // c13*λsH + c33*λsV   (feeds λvz)
+    ElasticCPMLPointer cpml,
     SolverContext solver
 )
 {
@@ -402,20 +419,37 @@ __global__ void adjoint_premultiply_stress_kernel(
     auto a = adj.offset(b, spatial_size);
     const float lSH = a.sH[idx];
     const float lSV = a.sV[idx];
-    px[u_idx] = c11[u_idx] * lSH + c13[u_idx] * lSV;
-    pz[u_idx] = c13[u_idx] * lSH + c33[u_idx] * lSV;
+    float p_x = c11[u_idx] * lSH + c13[u_idx] * lSV;
+    float p_z = c13[u_idx] * lSH + c33[u_idx] * lSV;
+
+    const int halo = solver.M;
+    if (ix >= halo && ix < solver.nx - halo && iz >= halo && iz < solver.nz - halo &&
+        solver.in_pml_2d(ix, iz, halo)) {
+        const float tx = a.m_vxx[idx] + p_x;
+        const float tz = a.m_vzz[idx] + p_z;
+        p_x += cpml.bx[ix] * tx;
+        p_z += cpml.bz[iz] * tz;
+        a.m_vxx[idx] = cpml.ax[ix] * tx;
+        a.m_vzz[idx] = cpml.az[iz] * tz;
+    }
+    px[u_idx] = p_x;
+    pz[u_idx] = p_z;
 }
 
 
 // Pre-multiply for kernel B.  Forward: v += dt * inv_rho * Df_x(s), so the
 // adjoint w.r.t. s is -dt * Db_x( inv_rho * λv ) — inv_rho sits at the VELOCITY
-// location, inside the derivative.
+// location, inside the derivative.  In the band the velocity update reads
+// Df_x(s) + m_sHx' with m_sHx' = axh * m_sHx + bxh * Df_x(s); its transpose is
+// the same three lines as in the stress pre-multiply, on the half-step
+// coefficients.
 template<int Dummy>
 __global__ void adjoint_premultiply_vel_kernel(
     VTIWavefieldPointer adj,
     const float* __restrict__ inv_rho,
     float* __restrict__ qx,          // inv_rho * λvx   (feeds λsH)
     float* __restrict__ qz,          // inv_rho * λvz   (feeds λsV)
+    ElasticCPMLPointer cpml,
     SolverContext solver
 )
 {
@@ -429,8 +463,21 @@ __global__ void adjoint_premultiply_vel_kernel(
     long long u_idx = (long long)b * spatial_size + idx;
 
     auto a = adj.offset(b, spatial_size);
-    qx[u_idx] = inv_rho[u_idx] * a.vx[idx];
-    qz[u_idx] = inv_rho[u_idx] * a.vz[idx];
+    float q_x = inv_rho[u_idx] * a.vx[idx];
+    float q_z = inv_rho[u_idx] * a.vz[idx];
+
+    const int halo = solver.M;
+    if (ix >= halo && ix < solver.nx - halo && iz >= halo && iz < solver.nz - halo &&
+        solver.in_pml_2d(ix, iz, halo)) {
+        const float tx = a.m_sHx[idx] + q_x;
+        const float tz = a.m_sVz[idx] + q_z;
+        q_x += cpml.bxh[ix] * tx;
+        q_z += cpml.bzh[iz] * tz;
+        a.m_sHx[idx] = cpml.axh[ix] * tx;
+        a.m_sVz[idx] = cpml.azh[iz] * tz;
+    }
+    qx[u_idx] = q_x;
+    qz[u_idx] = q_z;
 }
 
 
@@ -607,7 +654,8 @@ __global__ void calculate_grad_kernel(
     float* gdlt_b       = grad_delta  + b * spatial_size;
     float* grho_b       = grad_rho    + b * spatial_size;
 
-    // Forward spatial derivatives at this point (NO PML — interior only).
+    // Forward spatial derivatives at this point.  No memory term: the cells
+    // imaged here are off the band, where the forward never adds one.
     // dvx_dx, dvz_dz : at the "stress" location, use vx,vz AT END of step
     //                   (= u_forward[it])
     // dsH_dx, dsV_dz : at the "velocity" location, use sH,sV AT START of step

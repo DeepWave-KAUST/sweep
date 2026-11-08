@@ -852,6 +852,17 @@ and this project adheres to
   compiler's error and names `torch._inductor.config.cpp.cxx` / `$CXX`; later
   calls skip the attempt. Results are the same; errors of the step itself
   still propagate.
+- **`AcousticVTI1st` / `AcousticVTI1st3D` impl='c' gradients are right near the absorbing
+  boundary.** The compiled adjoint carried no CPML: its memory slots were allocated and
+  zeroed but never updated, so the adjoint field crossed the absorbing band undamped,
+  reflected off the outer edge of the grid and came back into the physical box. With the
+  receivers near the band and a record long enough for that round trip the gradient was
+  off in every memory mode: c vs eager 2.1e-2 (vp, 2-D, abcn = 30, receivers 3 cells from
+  the band), 4.8e-2 at abcn = 15, and a finite difference of the compiled forward itself
+  put rho 64% off. The two pre-multiplication kernels now apply the transpose of the
+  forward memory recursion (elastic2d's form; in 3-D one field per axis), off the band
+  bit-identical to before: 8.7e-5 and 2.2e-4, the 3-D twin 7.8e-4 -> 4.5e-5.
+  (`test/test_acoustic_vti_1st_c_adjoint.py`)
 - **The velocity-stress SEMs' C-PML no longer grows at late times.** Its outer edge was left
   traction-free, and from about 2.5 s on a record rose 2 to 300 times every 1.25 s, in 2-D and
   3-D, with or without a free surface (`ElasticVSSEM2DDeformed` and the VTI class built on it,

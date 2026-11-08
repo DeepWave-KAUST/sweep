@@ -19,9 +19,8 @@
 //                                  allocated here when unbound)
 //   * backward_recursive_ckpt() — stub (SWEEP_CHECK)
 //
-// Adjoint PML memory variables are NOT tracked → interior gradients are
-// correct; gradients inside the PML band are approximate.  Standard FWI/RTM
-// masks the PML region in the gradient, so this is fine for production use.
+// The adjoint carries the transposed CPML recursion in its own m_* slots
+// (kernels.cuh, adjoint_premultiply_*_3d), in every mode.
 //
 // Gradient ordering follows AcousticVTI1st3D.MODEL_SPECS: [vp, ε, δ, ρ].
 //
@@ -192,15 +191,18 @@ void vti_adjoint_A_3d(
     const fdtd::LaunchConfig& lc,
     VTIWavefieldPointer3D adj_view,
     const Buf& c11, const Buf& c33, const Buf& c13,
-    Buf& sa, Buf& sb,
+    Buf& sa, Buf& sb, Buf& sc,
+    const ElasticCPMLPointer& cpml,
     const SGradParam& grad_ctx, const SolverContext& solver)
 {
     adjoint_premultiply_stress_kernel_3d<0><<<lc.grid, lc.block>>>(
         adj_view, c11.data_ptr<float>(), c33.data_ptr<float>(),
-        c13.data_ptr<float>(), sa.data_ptr<float>(), sb.data_ptr<float>(), solver);
+        c13.data_ptr<float>(), sa.data_ptr<float>(), sb.data_ptr<float>(),
+        sc.data_ptr<float>(), cpml, solver);
     LAUNCH_VTI_3D_ADJOINT_STRESS_TO_VEL(
         order, lc.grid, lc.block,
-        adj_view, sa.data_ptr<float>(), sb.data_ptr<float>(), grad_ctx, solver);
+        adj_view, sa.data_ptr<float>(), sb.data_ptr<float>(), sc.data_ptr<float>(),
+        grad_ctx, solver);
 }
 
 // Adjoint half-step B (velocity -> stress) with inv_rho multiplied in at the
@@ -211,11 +213,12 @@ void vti_adjoint_B_3d(
     VTIWavefieldPointer3D adj_view,
     const Buf& inv_rho,
     Buf& sa, Buf& sb, Buf& sc,
+    const ElasticCPMLPointer& cpml,
     const SGradParam& grad_ctx, const SolverContext& solver)
 {
     adjoint_premultiply_vel_kernel_3d<0><<<lc.grid, lc.block>>>(
         adj_view, inv_rho.data_ptr<float>(), sa.data_ptr<float>(),
-        sb.data_ptr<float>(), sc.data_ptr<float>(), solver);
+        sb.data_ptr<float>(), sc.data_ptr<float>(), cpml, solver);
     LAUNCH_VTI_3D_ADJOINT_VEL_TO_STRESS(
         order, lc.grid, lc.block,
         adj_view, sa.data_ptr<float>(), sb.data_ptr<float>(), sc.data_ptr<float>(),
@@ -302,6 +305,11 @@ BackwardOutputCore backward_core(const BackwardInputCore& in)
 
     auto launch_config = fdtd::Wave3D::make(nx, ny, nz, B);
 
+    // CPML coefficients (cpmls 12-tuple) for the adjoint's memory recursion.
+    ElasticCPMLTensor cpml;
+    cpml.bind(p.pml_vals, 3);
+    auto cpml_view = cpml.view();
+
     // Scratch for the adjoint pre-multiplications (see kernels.cuh).
     const auto& ws = workspace_slots(p);
     auto scratch_a = pool_required(ws, SCRATCH_A, vp_t, "adjoint_workspace");
@@ -360,8 +368,8 @@ BackwardOutputCore backward_core(const BackwardInputCore& in)
         // imaging between A and B leaves the stiffness operand untouched.
         if (it > 0) {
             vti_adjoint_A_3d(order, launch_config, adj_view,
-                             c11_t, c33_t, c13_t, scratch_a, scratch_b,
-                             grad_ctx, solver);
+                             c11_t, c33_t, c13_t, scratch_a, scratch_b, scratch_c,
+                             cpml_view, grad_ctx, solver);
         }
 
         LAUNCH_VTI_3D_CALC_GRAD(
@@ -385,7 +393,7 @@ BackwardOutputCore backward_core(const BackwardInputCore& in)
         if (it > 0) {
             vti_adjoint_B_3d(order, launch_config, adj_view, inv_rho_t,
                              scratch_a, scratch_b, scratch_c,
-                             grad_ctx, solver);
+                             cpml_view, grad_ctx, solver);
         }
     }
 
@@ -603,7 +611,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
         // (d) gradient accumulation
         // Half-step A first (see the full-mode comment), then image, then B.
         vti_adjoint_A_3d(order, launch_config, adj_view, c11_t, c33_t, c13_t,
-                         scratch_a, scratch_b, grad_ctx, solver);
+                         scratch_a, scratch_b, scratch_c, cpml_view, grad_ctx, solver);
 
         LAUNCH_VTI_3D_CALC_GRAD(
             order, launch_config.grid, launch_config.block,
@@ -621,7 +629,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
             grad_ctx, solver);
 
         vti_adjoint_B_3d(order, launch_config, adj_view, inv_rho_t,
-                         scratch_a, scratch_b, scratch_c, grad_ctx, solver);
+                         scratch_a, scratch_b, scratch_c, cpml_view, grad_ctx, solver);
 
         // (f) time-reverse the VELOCITY update
         LAUNCH_VTI_3D_VELOCITY_NOPML(
@@ -905,8 +913,8 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 
             if (it > 0) {
                 vti_adjoint_A_3d(order, launch_config, adj_view,
-                                 c11_t, c33_t, c13_t, scratch_a, scratch_b,
-                                 grad_ctx, solver);
+                                 c11_t, c33_t, c13_t, scratch_a, scratch_b, scratch_c,
+                                 cpml_view, grad_ctx, solver);
             }
 
             LAUNCH_VTI_3D_CALC_GRAD(
@@ -926,7 +934,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
             if (it > 0) {
                 vti_adjoint_B_3d(order, launch_config, adj_view, inv_rho_t,
                                  scratch_a, scratch_b, scratch_c,
-                                 grad_ctx, solver);
+                                 cpml_view, grad_ctx, solver);
             }
         }
     }

@@ -1,12 +1,10 @@
 // ---------------------------------------------------------------------------
 // AcousticVTI1st (Duveneck 2008) — 2D first-order CUDA backward.
 //
-// Phase 1 scope:
 //   - Implements `backward()` (full mode) using the saved forward wavefield
 //     (u_forward shape: (nt, 4, B, nz, nx) containing vx, vz, sH, sV).
-//   - Adjoint PML memory variables are NOT tracked → interior gradients are
-//     correct; gradients inside the PML band are approximate.  This matches
-//     standard FWI/RTM usage where the PML region is masked off.
+//   - The adjoint carries the transposed CPML recursion in its own m_* slots
+//     (kernels.cuh, adjoint_premultiply_*), in every mode.
 //   - backward_bs reconstructs the forward state from u_last_two with the
 //     NOPML kernels; its 4-tensor reconstruction list [vx, vz, sH, sV]
 //     (cuda_layout.bs_reconstruction_nvar) is bound from
@@ -180,11 +178,13 @@ void vti_adjoint_A_2d(
     VTIWavefieldPointer adj_view,
     const Buf& c11, const Buf& c33, const Buf& c13,
     Buf& sx, Buf& sz,
+    const ElasticCPMLPointer& cpml,
     const SGradParam& grad_ctx, const SolverContext& solver)
 {
     adjoint_premultiply_stress_kernel<0><<<lc.grid, lc.block>>>(
         adj_view, c11.data_ptr<float>(), c33.data_ptr<float>(),
-        c13.data_ptr<float>(), sx.data_ptr<float>(), sz.data_ptr<float>(), solver);
+        c13.data_ptr<float>(), sx.data_ptr<float>(), sz.data_ptr<float>(),
+        cpml, solver);
     LAUNCH_VTI_ADJOINT_STRESS_TO_VEL(
         order, lc.grid, lc.block,
         adj_view, sx.data_ptr<float>(), sz.data_ptr<float>(), grad_ctx, solver);
@@ -198,11 +198,12 @@ void vti_adjoint_B_2d(
     VTIWavefieldPointer adj_view,
     const Buf& inv_rho,
     Buf& sx, Buf& sz,
+    const ElasticCPMLPointer& cpml,
     const SGradParam& grad_ctx, const SolverContext& solver)
 {
     adjoint_premultiply_vel_kernel<0><<<lc.grid, lc.block>>>(
         adj_view, inv_rho.data_ptr<float>(),
-        sx.data_ptr<float>(), sz.data_ptr<float>(), solver);
+        sx.data_ptr<float>(), sz.data_ptr<float>(), cpml, solver);
     LAUNCH_VTI_ADJOINT_VEL_TO_STRESS(
         order, lc.grid, lc.block,
         adj_view, sx.data_ptr<float>(), sz.data_ptr<float>(), grad_ctx, solver);
@@ -292,6 +293,11 @@ BackwardOutputCore backward_core(const BackwardInputCore& in)
 
     auto launch_config = fdtd::Wave2D::make(nx, nz, B);
 
+    // CPML coefficients (cpmls 8-tuple) for the adjoint's memory recursion.
+    ElasticCPMLTensor cpml;
+    cpml.bind(p.pml_vals, 2);
+    auto cpml_view = cpml.view();
+
     // Scratch for the adjoint pre-multiplications (see kernels.cuh).  One
     // wavefield component each; half-steps A and B reuse the same pair.
     const auto& ws = workspace_slots(p);
@@ -360,7 +366,7 @@ BackwardOutputCore backward_core(const BackwardInputCore& in)
         // leaving the stiffness term's operand bit-identical.
         if (it > 0) {
             vti_adjoint_A_2d(order, launch_config, adj_view,
-                             c11_t, c33_t, c13_t, scratch_x, scratch_z,
+                             c11_t, c33_t, c13_t, scratch_x, scratch_z, cpml_view,
                              grad_ctx, solver);
         }
 
@@ -384,7 +390,7 @@ BackwardOutputCore backward_core(const BackwardInputCore& in)
 
         if (it > 0) {
             vti_adjoint_B_2d(order, launch_config, adj_view, inv_rho_t,
-                             scratch_x, scratch_z, grad_ctx, solver);
+                             scratch_x, scratch_z, cpml_view, grad_ctx, solver);
         }
     }
 
@@ -497,7 +503,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
     auto grad_delta = pool_required(gs, GRAD_DELTA, delta_t, "grads_out");
     auto grad_rho   = pool_required(gs, GRAD_RHO, rho_t, "grads_out");
 
-    // CPML coefficients (cpmls 8-tuple) for the adjoint propagation step.
+    // CPML coefficients (cpmls 8-tuple) for the adjoint's memory recursion.
     ElasticCPMLTensor cpml;
     cpml.bind(p.pml_vals, 2);
     auto cpml_view = cpml.view();
@@ -638,7 +644,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
         //     has been applied.  A writes lambda_v and only reads lambda_s, so
         //     imaging between A and B leaves the stiffness operand untouched.
         vti_adjoint_A_2d(order, launch_config, adj_view,
-                         c11_t, c33_t, c13_t, scratch_x, scratch_z,
+                         c11_t, c33_t, c13_t, scratch_x, scratch_z, cpml_view,
                          grad_ctx, solver);
 
         LAUNCH_VTI_CALC_GRAD(
@@ -656,7 +662,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
             grad_ctx, solver);
 
         vti_adjoint_B_2d(order, launch_config, adj_view, inv_rho_t,
-                         scratch_x, scratch_z, grad_ctx, solver);
+                         scratch_x, scratch_z, cpml_view, grad_ctx, solver);
 
         // (f) time-reverse the VELOCITY update — turns vx_new into vx_old
         LAUNCH_VTI_VELOCITY_NOPML(
@@ -950,7 +956,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 
             if (it > 0) {
                 vti_adjoint_A_2d(order, launch_config, adj_view,
-                                 c11_t, c33_t, c13_t, scratch_x, scratch_z,
+                                 c11_t, c33_t, c13_t, scratch_x, scratch_z, cpml_view,
                                  grad_ctx, solver);
             }
 
@@ -970,7 +976,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 
             if (it > 0) {
                 vti_adjoint_B_2d(order, launch_config, adj_view, inv_rho_t,
-                                 scratch_x, scratch_z, grad_ctx, solver);
+                                 scratch_x, scratch_z, cpml_view, grad_ctx, solver);
             }
         }
     }
