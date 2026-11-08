@@ -700,19 +700,23 @@ and this project adheres to
   the full tape. They are now made once per rollout through the time-invariant
   dict, and in every uncompiled step that has none; compiled steps compute them
   in place, as before.
-- **Boundary saving of the staggered equations (eager and JAX) is exact in
-  the interior again.**  The last physical cell on the high side of every axis
-  holds half-grid values that sit in the PML (nonzero `azh`/`axh`), which the
-  CPML-free reconstruction cannot rebuild, and the ring was restored only after
-  both sub-steps, so the inverted velocity half read wrong ring stresses.  Once
-  the wavefield reached the PML the error crept inward: interior gradients off
-  the full tape by 1.6e-5 (`Acoustic1st`) to 3.7e-4 (`Elastic`), fp64, on a
-  300-step record.  The 'substep' ring now takes in the outermost physical cell
-  on each side (as the CUDA `M + 1`-wide strips do, ~1/M more ring storage) and
-  each sub-step's fields are restored as soon as it is inverted; the interior
-  matches to round-off, the outermost one or two physical cells keep the
-  near-PML error of the design (`Acoustic1st`, `Elastic`, `Elastic3D`, `DASMu`,
-  `DASMu3D`, `ElasticVRR`).
+- **Boundary saving on `impl='eager'` and `PropJax` is exact in the interior
+  again.**  The reconstruction zeroes the CPML memory, so a physical cell whose
+  update reads it has to come back from the saved ring: on the high side of a
+  staggered axis the last cell holds half-grid values that sit in the PML, and
+  a second-order equation's `d(a psi)` reaches one cell into the box (the
+  acoustic family) or M (`AcousticVRZ`, `AcousticVRR`, `AcousticTariq`).  None
+  was restored, and the staggered ring came back only after both sub-steps;
+  once the wavefield reached the PML the error crept inward, and interior
+  gradients ended 1e-5 to 4e-4 off the full tape (fp64).  The ring now takes in
+  those cells (the second-order reach is measured on the equation) and each
+  sub-step's fields are restored as soon as it is inverted, on the k-steps-a-call
+  path too: the interior matches to round-off (fp64 1e-15 on the 15 2-D and
+  3-D equations checked).  The outermost cells next to an
+  absorbing layer keep the near-PML error of the design -- their update and
+  imaging read CPML memory that is not stored, up to 4e-3 of the gradient's
+  maximum on the first cell of `AcousticVRR` and `ElasticVRR` -- and a sigma=0
+  `boundary_buffer` of 2M+1 cells removes it.
 - **The compiled eager step of the 3-D deformed SEM classes with a C-PML is faster:
   forward 4.3-6.4x on `AcousticSEM3DDeformed`, 1.9-3x on `ElasticVSSEM3DDeformed`,
   `ElasticVTISEM3DDeformed`, `ElasticTTISEM3DDeformed` and

@@ -2,7 +2,10 @@
 eager one: taken after the source goes in (a source on the free-surface
 face's ring, which lies inside the model, was dropped: a vp gradient 18-21 %
 off plain autodiff's, against 1e-3 a few cells away), and in each face's own
-PML (with a face thinner than the others, 6 % off against 0.4 %)."""
+PML (with every ring at ``max(abcn) + halo``, a face thinner than the others
+was 6 % off).  Away from the outermost ``M + 1`` cells next to an absorbing
+face the gradient matches plain autodiff's to round-off, whatever each face's
+width."""
 import numpy as np
 import pytest
 
@@ -14,6 +17,7 @@ from sweep.propagator.jax import PropJax  # noqa: E402
 from sweep.propagator.options import BoundaryOptions, MemoryOptions  # noqa: E402
 
 SHAPE, NT, ABCN, HALO = (40, 44), 160, 8, 2
+EDGE = HALO + 1                # the cells next to an absorbing face that keep an error
 
 
 def _vp_gradient(boundary_saving, src, abcn=ABCN, free_surface=False):
@@ -31,8 +35,10 @@ def _vp_gradient(boundary_saving, src, abcn=ABCN, free_surface=False):
     return np.asarray(jax.grad(lambda m: jnp.sum(prop(wavelet, s, rec, models=[m]) ** 2))(jnp.asarray(vp)))
 
 
-def _bs_error(src, **kw):
+def _bs_error(src, inner=False, **kw):
     full, bs = _vp_gradient(False, src, **kw), _vp_gradient(True, src, **kw)
+    if inner:
+        full, bs = full[EDGE:-EDGE, EDGE:-EDGE], bs[EDGE:-EDGE, EDGE:-EDGE]
     return float(np.linalg.norm(bs - full) / np.linalg.norm(full))
 
 
@@ -45,4 +51,4 @@ def test_a_source_on_the_ring_of_a_free_surface_face():
 @pytest.mark.parametrize("abcn", [(8, 8, 4, 8), (12, 8, 8, 8)], ids=["thin_x_lo", "thick_z_lo"])
 def test_a_thinner_pml_face_keeps_its_ring_out_of_the_model(abcn):
     src = (6, 20)
-    assert _bs_error(src, abcn=abcn) < 3 * _bs_error(src, abcn=ABCN)
+    assert _bs_error(src, abcn=abcn, inner=True) < 2e-5

@@ -38,9 +38,11 @@ reconstruction + one linearisation + one VJP).
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from sweep.propagator._ring_geometry import (
-    _ring_index_tuples, _ring_layout, _ring_offsets, ring_inner_cells,
+    _ring_index_tuples, _ring_layout, _ring_offsets, axis_probe_index, memory_reach,
+    ring_inner_cells,
 )
 
 # NOTE: on this JAX path 'fp16' is still a BARE cast — values below 2^-24
@@ -165,6 +167,52 @@ def _substep_restore_plan(substeps, S0, models, dt, h, ring_fields):
     return [[j for j in sorted(first) if first[j] == k] for k in range(len(substeps))]
 
 
+def _concrete(x, fallback):
+    """``x`` as a numpy value, or ``fallback`` when it is traced."""
+    try:
+        return np.asarray(x)
+    except Exception:  # noqa: BLE001 -- a tracer (inside jit / grad)
+        return fallback
+
+
+def _memory_reach(func, S0, models, dt, h, cpml_indices, fields, ndim, offsets, halo):
+    """Physical cells per side (worst axis) at which one step of ``fields``
+    reads the CPML memory (see the eager twin,
+    ``_eager_boundary_saving._memory_reach``): seeded random state, stand-in
+    models (1 + U(0, 1); the real ones may be traced), the step again with the
+    memory redrawn, the changed cells located axis by axis.  Evaluated at
+    trace time (``ensure_compile_time_eval``) on concrete inputs -- a traced
+    ``dt`` / ``h`` gets a stand-in, which changes no cell's dependence."""
+    rng = np.random.default_rng(0)
+
+    def draw(x, uniform=False):
+        v = rng.random(np.shape(x)) if uniform else rng.standard_normal(np.shape(x))
+        return jnp.asarray(v, dtype=jnp.result_type(x))
+
+    with jax.ensure_compile_time_eval():
+        base = [draw(s) for s in S0]
+        redrawn = list(base)
+        for c in cpml_indices:
+            redrawn[c] = draw(S0[c])
+        stand_in = [1 + draw(m, uniform=True) for m in models]
+        dt_c = _concrete(dt, np.float32(1e-3))
+        h_c = jnp.asarray(_concrete(h, np.ones(ndim, np.float32)))
+        a = func(tuple(base), stand_in, dt_c, h_c, None)
+        b = func(tuple(redrawn), stand_in, dt_c, h_c, None)
+        changed = np.zeros(np.shape(a[fields[0]]), bool)
+        for f in fields:
+            changed |= np.asarray(a[f] != b[f])
+    shape = changed.shape
+    along = []
+    for ai in range(ndim):
+        idx = axis_probe_index(shape, ndim, offsets, ai, halo + 1)
+        if idx is None:
+            return halo
+        sub = np.moveaxis(changed[idx], len(shape) - ndim + ai, 0)
+        along.append(np.nonzero(sub.reshape(sub.shape[0], -1).any(axis=1))[0].tolist())
+    return memory_reach(along, shape, ndim, offsets)
+
+
 # ---- driver resolution ------------------------------------------------------
 
 def resolve_reverse_mode(equation, forced=None, free_surface=False):
@@ -197,12 +245,9 @@ def build_config(*, equation, wavefield_specs, wavefield_names, dt, h, shape,
     from sweep.equations.base import SecondOrderEquation
 
     reverse_mode = resolve_reverse_mode(equation, forced_mode, free_surface)
-    inner = ring_inner_cells(reverse_mode)
     # Each face's ring in its own damping ramp (``_ring_offsets``); without
     # ``pml_pad`` every face as thick as ``abcn``.
     offsets = _ring_offsets(pml_pad if pml_pad is not None else (abcn,) * (2 * ndim), abcn, halo)
-    rings = _ring_index_tuples(shape, ndim, offsets, halo, inner)
-    _, ring_shapes, ring_sizes, _ = _ring_layout(shape, ndim, offsets, halo, inner)
     nwf = len(wavefield_names)
 
     cpml_indices = [
@@ -216,6 +261,12 @@ def build_config(*, equation, wavefield_specs, wavefield_names, dt, h, shape,
         for k in range(0, len(phys_indices) - 1, 2)
     ]
     ring_fields = [now for now, _ in pairs] if is_2nd else phys_indices
+    reach = (_memory_reach(equation.func, S0, models, dt, h, cpml_indices, ring_fields,
+                           ndim, offsets, halo)
+             if reverse_mode == "swap2nd" else 0)
+    inner = ring_inner_cells(reverse_mode, reach)
+    rings = _ring_index_tuples(shape, ndim, offsets, halo, inner)
+    _, ring_shapes, ring_sizes, _ = _ring_layout(shape, ndim, offsets, halo, inner)
 
     substeps = list(equation.interior_substeps()) if reverse_mode == "substep" else None
     substep_restore = (_substep_restore_plan(substeps, S0, models, dt, h, ring_fields)

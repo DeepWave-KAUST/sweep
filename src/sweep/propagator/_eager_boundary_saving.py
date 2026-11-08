@@ -24,11 +24,14 @@ without per-equation adjoint code:
 
 Both zero the CPML memory variables during reconstruction (exact in the lossless
 interior, where the model gradient lives; small near-PML error — same design as
-the CUDA ``_bs`` path) and re-inject the saved boundary ring + the source.  For
-'substep' the ring also takes in the outermost physical cell (its half-grid
-values sit in the PML) and each sub-step's fields are restored as soon as it is
-inverted, so the gradient matches the full tape everywhere but the outermost one
-or two physical cells, whose recompute reads CPML memories that are not stored.
+the CUDA ``_bs`` path) and re-inject the saved boundary ring + the source.  The
+ring also takes in the physical cells whose update reads the CPML memory, which
+the reconstruction cannot rebuild: for 'substep' the outermost cell (its
+half-grid values sit in the PML), for 'swap2nd' the cells ``d(a psi)`` reaches
+(``_memory_reach``); and each sub-step's fields are restored as soon as it is
+inverted.  The gradient then matches the full tape everywhere but the outermost
+cells next to an absorbing layer, whose recompute and imaging read CPML memory
+that is not stored (a sigma=0 ``boundary_buffer`` of 2M+1 cells removes that).
 
 Memory: ``O(nt * halo * perimeter)`` instead of ``O(nt * Ncells * nfields)``.
 """
@@ -47,6 +50,8 @@ from sweep.propagator._ring_geometry import (  # noqa: F401
     _ring_index_tuples,
     _ring_offsets,
     _ring_slice_shape,
+    axis_probe_index,
+    memory_reach,
     ring_inner_cells,
 )
 
@@ -547,6 +552,46 @@ def _reconstruct_swap2nd(frame, cfg, st, step, time_index, zero):
     return S_i
 
 
+def _memory_reach(func, wavefield, models, dt, h, cpml_indices, fields, ndim, offsets, halo):
+    """Physical cells per side (worst axis) at which one step of ``fields``
+    reads the CPML memory, which the 'swap2nd' reconstruction zeroes: those
+    cells come back from the ring (``ring_inner_cells``).  The step runs on a
+    seeded random state with stand-in models (1 + U(0, 1), so no coefficient
+    vanishes), again with the memory fields redrawn, and the changed cells are
+    located axis by axis (``_ring_geometry.memory_reach``).  Found once per
+    rollout; a box too small to tell gets ``halo``, the stencil's reach."""
+    gen = {}
+
+    def draw(w, uniform=False):
+        g = gen.setdefault(w.device, torch.Generator(device=w.device).manual_seed(0))
+        f = torch.rand if uniform else torch.randn
+        return f(w.shape, dtype=w.dtype, device=w.device, generator=g)
+
+    base = [draw(w) for w in wavefield]
+    redrawn = list(base)
+    for c in cpml_indices:
+        redrawn[c] = draw(wavefield[c])
+    stand_in = [1 + draw(m, uniform=True) if torch.is_tensor(m) and m.is_floating_point() else m
+                for m in models]
+    with torch.no_grad():
+        a = func([w.clone() for w in base], stand_in, dt, h, None)
+        b = func([w.clone() for w in redrawn], stand_in, dt, h, None)
+    changed = None
+    for f in fields:
+        d = a[f] != b[f]
+        changed = d if changed is None else changed | d
+    shape = tuple(changed.shape)
+    along = []
+    for ai in range(ndim):
+        idx = axis_probe_index(shape, ndim, offsets, ai, halo + 1)
+        if idx is None:
+            return halo
+        ax = len(shape) - ndim + ai
+        sub = changed[idx].movedim(ax, 0)
+        along.append(sub.reshape(sub.shape[0], -1).any(dim=1).nonzero().flatten().tolist())
+    return memory_reach(along, shape, ndim, offsets)
+
+
 def _substep_restore_plan(substeps, wavefield, models, dt, h, ring_fields):
     """For each forward sub-step, the ring positions (into ``ring_fields``)
     the reverse pass restores right after inverting it: the fields that
@@ -938,9 +983,6 @@ class _EagerBoundarySavingMixin:
         offsets = _ring_offsets(self.pml_pad, self.abcn, halo)
         shape = tuple(wavefield[0].shape)
         reverse_mode = self._eager_bs_reverse_mode()
-        inner = ring_inner_cells(reverse_mode)
-        rings = _ring_index_tuples(shape, self.ndim, offsets, halo, inner)
-        interior_idx = _interior_index_tuple(shape, self.ndim, offsets, inner)
         nwf = len(wavefield)
         nm = len(runtime_models)
 
@@ -965,6 +1007,14 @@ class _EagerBoundarySavingMixin:
         ]
         ring_fields = [now for now, _ in second_order_pairs] if is_2nd else phys_indices
 
+        bs_plain = self._grouped(self.equation.func)
+        reach = (_memory_reach(bs_plain, wavefield, runtime_models, self.dt, self._equation_spacing,
+                               cpml_indices, ring_fields, self.ndim, offsets, halo)
+                 if reverse_mode == "swap2nd" else 0)
+        inner = ring_inner_cells(reverse_mode, reach)
+        rings = _ring_index_tuples(shape, self.ndim, offsets, halo, inner)
+        interior_idx = _interior_index_tuple(shape, self.ndim, offsets, inner)
+
         # Pre-allocate the whole ring storage as big contiguous buffers (CUDA-
         # style), then write each step into a slice — no per-step allocation.
         # Seed step 0 with the initial frame.
@@ -981,7 +1031,6 @@ class _EagerBoundarySavingMixin:
         # custom autograd.Function and the time loop stay eager (Dynamo treats the
         # Function as an opaque boundary), so only the per-step kernels are fused.
         from ._torch_eager import _SettledSteps
-        bs_plain = self._grouped(self.equation.func)
         bs_func = self._maybe_compile(bs_plain)
         bs_substeps = (
             [self._maybe_compile(self._grouped(ss)) for ss in self.equation.interior_substeps()]

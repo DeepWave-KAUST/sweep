@@ -6,9 +6,9 @@ inside the PML + stencil halo on both sides of every spatial axis: exactly the
 cells the interior stencil reads, so re-imposing the saved ring each reverse
 step keeps the time-reversed reconstruction exact across the lossless interior.
 
-A staggered scheme's ring also takes in the outermost physical cell of each
-side (``inner``, see :func:`ring_inner_cells`), as the CUDA saver's
-``M + 1``-wide strips do.
+The ring also takes in the outermost physical cells whose update reads the
+CPML memory (``inner``, see :func:`ring_inner_cells`): one for a staggered
+scheme, as the CUDA saver's ``M + 1``-wide strips do.
 """
 
 import math
@@ -42,17 +42,20 @@ def _ring_offsets(pml_pad, abcn, halo):
     return tuple(int(p) + halo if p > 0 else int(abcn) + halo for p in pml_pad)
 
 
-def ring_inner_cells(reverse_mode):
+def ring_inner_cells(reverse_mode, memory_reach=0):
     """Physical cells per side the ring takes in for a reverse driver.
 
-    A staggered field at index ``i`` lives at ``i + 1/2``, so on the high side
-    of every axis the last physical index holds half-grid values that sit in
-    the first half cell of the PML: their CPML profiles (``azh``/``axh``) are
-    nonzero there.  The 'substep' reconstruction zeroes CPML, so that cell
-    cannot be rebuilt and must be restored instead -- one more cell, kept on
-    both sides as in the CUDA strips.  The 2nd-order 'swap2nd' schemes use the
-    integer-grid CPML and keep the plain ring."""
-    return 1 if reverse_mode == "substep" else 0
+    The reconstruction zeroes the CPML memory, so a physical cell whose update
+    reads it cannot be rebuilt and must be restored from the ring instead.
+    'substep' (staggered): the memory enters pointwise, but a staggered field
+    at index ``i`` lives at ``i + 1/2``, so on the high side of every axis the
+    last physical index holds half-grid values that sit in the first half cell
+    of the PML (``azh``/``axh`` nonzero there) -- one cell, kept on both sides
+    as in the CUDA strips.  'swap2nd': the CPML term differentiates ``a * psi``
+    (and ``b``, through ``np.gradient``), which reaches ``memory_reach`` cells
+    into the box -- 1 for the acoustic family, M for VRZ, VRR and qP Tariq --
+    measured on the equation by the caller."""
+    return 1 if reverse_mode == "substep" else int(memory_reach)
 
 
 def _ring_index_tuples(shape, ndim, offsets, halo, inner=0):
@@ -103,3 +106,41 @@ def _ring_layout(shape, ndim, offsets, halo, inner=0):
     ring_shapes = [_ring_slice_shape(shape, idx) for idx in rings]
     ring_sizes = [math.prod(s) for s in ring_shapes]
     return rings, ring_shapes, ring_sizes, sum(ring_sizes)
+
+
+def axis_probe_index(shape, ndim, offsets, axis, margin):
+    """Index tuple holding every spatial axis but ``axis`` (a spatial-axis
+    number) to its deep interior, ``margin`` cells inside the ring offset, so
+    that cells changed along ``axis`` are told apart from the other axes'
+    absorbing layers; None when that interior is empty.  ``offsets`` as in
+    :func:`_ring_index_tuples`."""
+    face = _face_offsets(offsets, ndim)
+    spatial_axes = list(range(len(shape) - ndim, len(shape)))
+    idx = [slice(None)] * len(shape)
+    for ai, ax in enumerate(spatial_axes):
+        if ai == axis:
+            continue
+        lo, hi = face[2 * ai] + margin, shape[ax] - face[2 * ai + 1] - margin
+        if hi <= lo:
+            return None
+        idx[ax] = slice(lo, hi)
+    return tuple(idx)
+
+
+def memory_reach(changed_along, shape, ndim, offsets):
+    """Physical cells per side, worst axis, at which an update reads the CPML
+    memory, from ``changed_along[a]``: the indices along spatial axis ``a`` at
+    which it changed when the memory was redrawn (the other axes held to their
+    deep interior, :func:`axis_probe_index`).  Changes in the ring and the PML
+    do not count: the ring is restored and the PML is not reconstructed.
+    ``offsets`` as in :func:`_ring_index_tuples`."""
+    face = _face_offsets(offsets, ndim)
+    spatial_axes = list(range(len(shape) - ndim, len(shape)))
+    reach = 0
+    for ai, ax in enumerate(spatial_axes):
+        n, lo, hi = shape[ax], face[2 * ai], face[2 * ai + 1]
+        mid = (lo + n - hi) // 2
+        for i in changed_along[ai]:
+            if lo <= i < n - hi:
+                reach = max(reach, i - lo + 1 if i < mid else n - hi - i)
+    return reach
