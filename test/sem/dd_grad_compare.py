@@ -32,6 +32,7 @@ import torch.distributed as dist
 import sweep.sem as S
 from sweep.propagator import BoundarySaving
 from sweep.sem.dd import SEMModelParallel, StripTopology
+from sweep.sem.cdrive import apply_recorded
 from sweep.sem.equations import (AcousticElasticSEM2D,
                                  AcousticPotentialSEM2D, AcousticSEM3D)
 from sweep.sem.prop_c import (_SEMAcousticCpmlC,
@@ -125,7 +126,7 @@ def fused_fs_runner(prop, memory=None, store=None):
             eq, tuple(pats), rec)
         c = dict(parts[0].c)
         c["bs"] = memory == "boundary"
-        sc, sx, sz = _SEMFluidSolidC.apply(*mats, wav, c)
+        sc, sx, sz = apply_recorded(_SEMFluidSolidC, *mats, wav, c)
         return torch.stack([sc, sx, sz], -1).transpose(0, 1)
     return run
 
@@ -204,8 +205,8 @@ def fused_runner(prop, memory=None, store=None):
         c = dict(parts[0].c)
         c["bs"] = memory == "boundary"
         c["bs_kind"] = {None: 0, "bf16": 1, "int8": 2}[store]
-        return _SEMAcousticCpmlC.apply(mats[0], mats[1], mats[2], wav,
-                                       c).transpose(0, 1)
+        return apply_recorded(_SEMAcousticCpmlC, mats[0], mats[1], mats[2], wav,
+                              c).transpose(0, 1)
     return run
 
 

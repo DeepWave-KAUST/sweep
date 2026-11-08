@@ -669,6 +669,47 @@ and this project adheres to
   one shot: 0.65 to 0.28) faster than before, and the peak memory of an 8-shot
   elastic call fell from 2.3 to 0.96 GB. `return_wavefield=True` still raises
   under boundary saving.
+- **`impl='c'` runs under `torch.inference_mode()`.** Every call there failed
+  in the C adapter before the forward ran ("Inference tensors do not track
+  version counter"): the host copies of the source and receiver field indices
+  and of the checkpoint steps are cached while the tensor keeps its identity
+  and its `_version`, and a tensor made under inference mode has no version
+  counter. Those tensors are now copied on every call and never cached; the
+  record is the `torch.no_grad()` one bit for bit, with boundary saving, the
+  full history and checkpoints (`test/test_c_inference_mode.py`).
+  `ModelParallel` still takes its first call outside inference mode, as
+  before.
+- Eager `PropTorch` under chunk checkpointing (the eager default): two forwards
+  before one backward (`(loss1 + loss2).backward()`, or a `torch.no_grad()`
+  call between a forward and its backward) raised "modified by an inplace
+  operation". The initial wavefield was a workspace cached on the propagator
+  and zeroed in place by every call, and the first chunk's checkpoint saves
+  it. It is allocated per call now
+  (`test/test_eager_two_forwards_one_backward.py`).
+- Eager `register_gradient(mode="gradient")` raises `ValueError` on a
+  propagator built with `Ckpt()` (the eager default), which ignored the
+  registration and returned the autograd gradient, and with `BoundarySaving()`,
+  which kept the full tape anyway; and on a recording call with `adj=True` or
+  `return_wavefield=True`, which also ignored it. The hooked path runs only on
+  a call that records a registered model's gradient: under `torch.no_grad()`,
+  or with no registered model requiring grad, it kept per-step snapshots and
+  returned a record that required grad. On it the other models and the
+  wavelet lost their gradients (`Acoustic1st` with `vp` registered: no `rho`
+  gradient), and the source went into the first `source_type` field only
+  (`Elastic` with `['sxx', 'szz']`: the record off by its own size).
+  `imaging()` runs under `torch.no_grad()`.
+- `PropSEM(impl='eager', memory=BoundarySaving())`: a call that no backward
+  can run through (under `torch.no_grad()`, or nothing requiring grad) built
+  the reconstruction state and saved the band every step. It takes the
+  full-tape runner now, which keeps nothing then, and gives `Full()`'s record
+  exactly.
+- `PropSEM(impl='c')`: the CUDA drivers decided inside their autograd
+  Functions whether a backward would run, from `requires_grad`, which does not
+  see an outer `torch.no_grad()`. A wavelet that required grad, passed in under
+  `no_grad`, kept the save-all tape or the C-PML band ring: 2.9 to 160 MiB more
+  on the test cases. The call site decides now
+  (`sweep.sem.cdrive.apply_recorded`), for all 17 Functions
+  (`test/sem/test_sem_c_nograd_tapes.py`).
 - `PropSEM(impl=None, memory=BoundarySaving())` runs on eager where the CUDA
   kernels have no boundary saving (`ElasticVSSEM3D`, `ElasticSEM3D`,
   `ElasticSEM3DDeformed`, the 2-D paths without their C-PML) instead of
@@ -857,6 +898,48 @@ and this project adheres to
   it. Keep one face of the pair absorbing, or free all four. `Acoustic` and
   `ViscoAcoustic` accept every layout; an equation declares a solid with
   `free_plate_unstable`.
+- **`impl='c'` refuses a wavelet that requires grad where its backward
+  returns none**: `Elastic`, `Elastic3D`, `ElasticVRR`, `ElasticTTI2nd`,
+  `ElasticTTISG`, `ElasticTTISG3D`, `ViscoElastic`, the four DAS equations
+  and `AcousticVTI1st` / `AcousticVTI1st3D` raise `NotImplementedError`
+  before anything runs. They left `wavelet.grad` at None without a word, so
+  a wavelet inversion through them never moved.  Detach the wavelet, or use
+  `impl='eager'`.  `Acoustic`, `Acoustic3D`, `AcousticVTI`, `AcousticTTI` and
+  `ViscoAcoustic` return the wavelet gradient as before.
+- **`impl='c'`: several gradient forwards on one propagator before their
+  backwards give the right gradient.** The boundary strips, `last_two` and the
+  checkpoint snapshots a backward reads lived on the propagator, and the next
+  gradient forward rewrote them: `(loss(A) + loss(B)).backward()`, or any
+  second forward before the first one's backward, reconstructed the earlier
+  call from the later one's boundaries.  With `BoundarySaving()` on GPU or CPU,
+  in every `storage_dtype`, the gradient came out wrong without a warning
+  (relative L2 error 0.13-1.6 on two-shot test problems); disk storage and
+  `Ckpt()` raised "modified by an inplace operation".  That storage now belongs
+  to the forward whose backward is pending, and a forward that finds it taken
+  allocates storage of its own, freed with its graph.  A forward -> backward
+  loop allocates nothing extra; `Full()` was always right.
+- **`impl='c'` under `torch.no_grad()` prepares no backward**, whatever
+  `requires_grad` its inputs carry.  A per-shot wavelet `(nshots, nt)` that
+  requires grad reaches the compiled forward as a view, which keeps
+  `requires_grad=True` under no_grad, so such a call (a line search or a QC
+  forward during a wavelet inversion) saved the boundary ring and allocated the
+  adjoint fields, kept the whole `nt` history under `Full()`, and was refused
+  by `AcousticVRZ` and the Born equations ("does not return the wavelet
+  gradient") and by boundary saving under `topography=`.  Whether a call runs
+  a backward is now decided before the autograd Function, from grad mode.
+- **`impl='c'`, `BoundarySaving(storage="disk")`: a no_grad forward between a
+  gradient forward and its backward no longer breaks that backward.** It
+  zeroed the host staging and `last_two` the backward reads, which then raised
+  "modified by an inplace operation".  Only a call that saves boundaries
+  touches the boundary storage now -- which also ends the "batch growth"
+  failure: after a boundary-saving gradient call, a no_grad call with more
+  shots narrowed that call's boundary ring past its end and raised
+  `start (0) + length (n) exceeds dimension size (m)`.
+- **`ModelParallel` refuses a forward while a backward is pending.**  Its
+  backward reads the ring and geometry the instance keeps for its last
+  forward, so a second forward -- `torch.no_grad()` included -- gave the
+  pending backward a wrong gradient with no error.  It now raises
+  `RuntimeError`; call `backward()` after each forward.
 
 ## [0.3.6] - 2026-10-29
 

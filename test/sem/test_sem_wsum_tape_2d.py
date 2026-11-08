@@ -38,6 +38,7 @@ import torch
 import sweep.sem as S
 import sweep.sem.prop_c as PC
 import sweep.sem.dd as DD
+from sweep.sem.cdrive import apply_recorded
 from sweep.propagator import BoundarySaving
 from sweep.sem.drivers.acoustic2d import _AC2D_STATE_TAPES
 from sweep.sem.equations import AcousticPotentialSEM2D
@@ -268,7 +269,7 @@ def _grad(wtape, px=1, nt=120, fused=False):
                 eq, pattern, rec)
             c = dict(parts[0].c)
             c["bs"], c["bs_kind"] = False, 0
-            out = PC._SEMAcousticCpmlC.apply(mats[0], mats[1], mats[2], wav, c)
+            out = apply_recorded(PC._SEMAcousticCpmlC, mats[0], mats[1], mats[2], wav, c)
         finally:
             PC._WSUM_TAPE_2D = old
     else:

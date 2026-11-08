@@ -349,6 +349,21 @@ Tail truncation has a legacy dict spelling too — `boundary_saving_config=
 | [Several time steps per compiled call](#steps-per-call) (default 4 for 2-D gradient rollouts on a GPU) | `impl="eager"`, full tape, checkpointing and boundary saving | `EagerOptions(steps_per_call=...)` |
 | [Inductor's C++ wrapper and combo kernels](#inductor-options) (default on 2-D grids on a GPU) | `impl="eager"` | `EagerOptions(compile_cpp_wrapper=..., compile_combo_kernels=...)` |
 
+**Several forwards before one backward.** Summing the losses of several
+forwards on one propagator and calling `backward()` once gives the same
+gradient as a backward after each forward — on `impl="c"` in every memory
+mode, and on the eager backend with `Full()` or `BoundarySaving()` (eager
+`Ckpt()` still raises "modified by an inplace operation" when another forward
+runs before the backward).  On `impl="c"` the boundary / checkpoint storage the
+backward reads lives on the propagator: the first forward whose backward is
+still pending uses it, and each further forward allocates storage of its own,
+freed when its backward runs or its graph is dropped — so K pending forwards
+hold K copies of that storage.  A forward → backward loop never allocates more
+than one.  A call under `torch.no_grad()` saves nothing for a backward and
+touches none of this storage, whatever `requires_grad` its inputs carry.
+`ModelParallel` keeps one set per instance and refuses a second forward while
+a backward is pending (see [Parallel](parallel.md)).
+
 A runnable comparison of these options lives in the
 [Memory · strategies notebook](../notebooks/07_memory_strategies.ipynb), which
 exercises full-wavefield, boundary saving, and checkpointing on the same

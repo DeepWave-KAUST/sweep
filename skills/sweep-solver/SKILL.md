@@ -151,9 +151,11 @@ fastest backward), `BoundarySaving(storage="gpu"|"cpu"|"disk", storage_dtype=...
    `impl='eager'` with `memory=Full()` (or `use_ckpt=False`); eager's default checkpointing raises.
 6. **`impl='c'` needs CUDA float32 model tensors** (numpy arrays, CPU tensors and float64 are
    refused); eager converts. Gradients come back on the model's device.
-7. **Batch growth bug on `impl='c'`:** after a gradient call with `nshots=B`, a `no_grad` call
-   with more shots fails (`start (0) + length ... exceeds dimension size`). Pass
-   `B=<max shots per call>` to `PropTorch` or keep the batch size fixed.
+7. **Gradient calls still waiting for `backward()` each hold boundary storage on `impl='c'`:**
+   summing several calls' losses before one `backward()` is exact, but every pending call after
+   the first allocates its own boundary / checkpoint store (freed by its backward). Call
+   `backward()` per batch when memory is tight. `ModelParallel` refuses a forward (`no_grad`
+   included) while a backward is pending.
 8. **No second backward on `impl='c'`** (`retain_graph=True` then `backward()` again raises):
    run the forward again; for Hessian-vector products use eager with `memory=Full()`.
 9. **TF32 on Ampere+ with `impl='eager'`:** cuDNN TF32 moves eager gradients by 1e-2..1e-1
@@ -181,15 +183,16 @@ fastest backward), `BoundarySaving(storage="gpu"|"cpu"|"disk", storage_dtype=...
 17. **Unknown keyword arguments raise `TypeError`** (constructor and call). `dev=` is a deprecated
     alias of `device=`; `boundary_saving_config={...}` / `MemoryOptions` are deprecated: use
     `memory=`.
-18. **Wavelet / background gradients that `c` does not compute are refused:**
-    `AcousticBorn*` and `AcousticVRZ*` on `impl='c'` raise if the wavelet requires grad; detach it
-    or use eager.
+18. **Wavelet / background gradients that `c` does not compute are refused:** on `impl='c'`
+    only `Acoustic`, `Acoustic3D`, `AcousticVTI`, `AcousticTTI` and `ViscoAcoustic` return the
+    wavelet gradient; the others (Born, VRZ, elastic, DAS, first-order VTI) raise if the wavelet
+    requires grad. Detach it or use eager.
 19. **`ElasticTTI2nd` (second-order displacement) with plain CPML grows at late times**; keep
     the default `mpml_ratio=0.05` (multiaxial PML), do not set it to 0.
 20. **`theta`/`phi` are radians.** Degrees are accepted silently and model a different tilt.
-21. **`register_gradient(..., mode="gradient")` needs `memory=Full()`** (eager only). Under the
-    eager default checkpointing the registration is silently ignored and plain autograd
-    gradients come back.
+21. **`register_gradient(..., mode="gradient")` needs `memory=Full()`** (eager only). It raises
+    under the eager default checkpointing and under `BoundarySaving()`; older versions silently
+    ignored it under checkpointing and returned plain autograd gradients.
 22. **`ModelParallel` wants 3-D `sources` `(1, nsrc, ndim)`**, `impl='c'` and boundary saving;
     see `references/parallel.md`.
 

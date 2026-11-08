@@ -13,7 +13,7 @@ import torch
 
 from ..cdrive import (Alloc, check_filled, dd_grads, dims, fill, give,
                       grads_or_none, illum_alloc, illum_receiver, illum_source,
-                      memory_mode, put, roll, swap, take)
+                      memory_mode, need_backward, put, roll, swap, take)
 
 _AC2D_CONSTS = ("ibool", "D", "wJ", "w1d", "ixx", "ixz", "iex", "iez", "mask_e",
                 "inv_Mg", "a_x", "b_x", "dbx_dx", "a_z", "b_z", "dbz_dz",
@@ -161,7 +161,7 @@ class _SEMAcousticCpmlC(torch.autograd.Function):
     def forward(ctx, inv_rho, inv_M, kappa, wavelet, c):
         import sweep._C as _C
         B, Bm = int(c.get("B", 1)), int(c.get("Bm", 1))
-        need_bwd = any(t.requires_grad for t in (inv_rho, inv_M, kappa, wavelet))
+        need_bwd = need_backward(c)
         mode, wtape = _ac2d_mode(c, need_bwd)
         s, _ = _ac2d_forward_input(c, (inv_rho, inv_M, kappa), wavelet,
                                    mode, B, Bm, wtape)
@@ -202,7 +202,7 @@ class _SEMAcousticCpmlDDC(torch.autograd.Function):
     def forward(ctx, wavelet, parts, exchange, bs, *mats):
         import sweep._C as _C
         nt = parts[0].c["nt"]
-        need_bwd = wavelet.requires_grad or any(t.requires_grad for t in mats)
+        need_bwd = need_backward(parts[0].c)
         mode, wtape = _ac2d_mode(parts[0].c, need_bwd)
         built = [_ac2d_forward_input(p.c, mats[3 * i:3 * i + 3], wavelet, mode,
                                      wtape=wtape)

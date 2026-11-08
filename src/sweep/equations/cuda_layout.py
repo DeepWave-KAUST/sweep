@@ -187,6 +187,8 @@ class CUDALayoutSpec:
     #     (acoustic2d/backward.cu:101, acoustic3d:125, acoustic_vrz3d:329)
     #   vs grads_out.size() == models.size()
     #     (elastic2d/backward.cu:306, elastic3d:528)
+    # Without a written slot the compiled forward refuses a wavelet that
+    # requires grad (NotImplementedError) rather than leave its grad None.
     grads_out_has_wavelet: bool = False
     # A driver may declare the wavelet slot (it sizes grads_out) yet never write
     # it: acoustic_vrz2d/3d bind models+1 buffers and return only the model

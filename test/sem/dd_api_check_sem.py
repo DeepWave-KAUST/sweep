@@ -27,6 +27,7 @@ import torch.distributed as dist
 import sweep.sem as S
 from sweep.propagator import BoundarySaving
 from sweep.sem.dd import SEMModelParallel, StripTopology
+from sweep.sem.cdrive import apply_recorded
 from sweep.sem.equations import AcousticPotentialSEM2D, AcousticSEM3D
 from sweep.sem.prop_c import _SEMAcousticCpmlC
 
@@ -69,7 +70,7 @@ def _setup_2d(memory=None):
         c = dict(parts[0].c)
         c["bs"], c["bs_kind"] = memory == "boundary", 0
         with torch.no_grad():
-            return _SEMAcousticCpmlC.apply(
+            return apply_recorded(_SEMAcousticCpmlC,
                 mats[0], mats[1], mats[2], wav, c).transpose(0, 1).cpu()
 
     return prop, vp, _wavelet(NT, DT), src, rec, fused

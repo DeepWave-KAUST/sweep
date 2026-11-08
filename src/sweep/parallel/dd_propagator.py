@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import os
 import warnings
+import weakref
 from typing import List
 
 import numpy as np
@@ -54,7 +55,7 @@ import torch
 
 from sweep.equations.slot_table import slot_table_of
 from sweep.parallel.dd_spec import ACOUSTIC_DD, ELASTIC_DD, BORN_DD, VRZ_DD, VRZ_DD_TILED
-from sweep.propagator._c import (_canonical_to_cuda_record,
+from sweep.propagator._c import (_BufferLease, _canonical_to_cuda_record,
                                  _cuda_record_to_canonical)
 from sweep.parallel._topology import MeshTopology
 from sweep.parallel.mesh import ModelParallelMesh
@@ -145,6 +146,12 @@ class _DDForward(torch.autograd.Function):
         # read off the live buffer here rather than in backward because
         # _set_geometry may reallocate it in between.
         ctx.cuda_record_ndim = ddp.record.ndim
+        # backward() reads the ring, last_two and geometry ddp keeps for its
+        # LAST forward, so no forward may run before it does (see
+        # ModelParallel._refuse_while_backward_pending). Taken after the inner
+        # forward above, which must not see it.
+        ctx.lease = _BufferLease()
+        ddp._pending_lease = weakref.ref(ctx.lease)
         return rec.detach().clone()
 
     @staticmethod
@@ -167,6 +174,9 @@ class _DDForward(torch.autograd.Function):
                 out.append(full)
             else:                              # per-tile model
                 out.append(g.reshape(shp))
+        # Released here, not with the graph: a caller who keeps the record
+        # (or the loss) keeps this node -- and anything left on ctx -- alive.
+        del ctx.lease
         # grads align to (ddp, wavelet, sources, receivers, *models)
         return (None, None, None, None) + tuple(out)
 
@@ -414,6 +424,9 @@ class ModelParallel:
         # AcousticBorn binds the scattered field only for vp's RWI gradient).
         self._grad_mask = None
         self._capture_grad_mask = None
+        # Weak reference to the lease of the differentiable forward whose
+        # backward has not run yet, or None (see _refuse_while_backward_pending).
+        self._pending_lease = None
         self._model_dtype = None  # pinned by the first capture; see _capture
         self._geom_key = None     # (src,rec,wavelet) bytes of the live geometry
         # Wavefield-list geometry, derived from the equation's declared slot
@@ -1038,7 +1051,14 @@ class ModelParallel:
         use. An instance promoted to gradient-capable keeps that machinery for
         its lifetime (``use_boundary_saving`` is frozen at capture), so build a
         separate ``ModelParallel`` for pure-forward work if you want it to stay
-        light."""
+        light.
+
+        ONE PENDING BACKWARD: the backward of a differentiable forward reads the
+        boundary ring and geometry the instance keeps for its last forward, so a
+        forward -- under ``torch.no_grad()`` too -- before that backward has run
+        raises ``RuntimeError``. Call ``backward()`` after each forward
+        (gradients accumulate), or drop the earlier output."""
+        self._refuse_while_backward_pending()
         # The domain-decomposed backward returns the model gradients only, for
         # every equation (_DDForward.backward hands autograd None for the
         # wavelet), so a wavelet that asks for its gradient is refused here,
@@ -1118,6 +1138,31 @@ class ModelParallel:
         if rec.data_ptr() == self.record.data_ptr():
             rec = rec.clone()
         return rec
+
+    def _refuse_while_backward_pending(self):
+        """Raise if a differentiable forward's backward has not run yet.
+
+        The DD backward reconstructs the forward from the boundary ring,
+        ``last_two`` and geometry this instance keeps for its LAST forward --
+        one set, rewritten by every forward, ``no_grad`` ones included (the
+        capture froze boundary saving on). A forward in between handed the
+        pending backward this call's ring and source: ``u0 = ddp(...); u1 =
+        ddp(...); (L0 + L1).backward()`` gave a wrong gradient with no error,
+        and so did one ``no_grad`` forward before ``L0.backward()``. Unlike the
+        single-domain impl='c' propagator, which gives such a call storage of
+        its own, the DD capture binds one set of buffers into its compiled
+        params and runners, so this refuses instead."""
+        ref = self._pending_lease
+        if ref is not None and ref() is not None:
+            raise RuntimeError(
+                "ModelParallel: the backward of an earlier differentiable forward on "
+                "this instance has not run yet. Its gradient is reconstructed from the "
+                "boundary ring and geometry the instance keeps for its LAST forward, so "
+                "another forward now -- with or without torch.no_grad() -- would make "
+                "that backward use this call's data instead. Run backward() on each "
+                "forward's loss before the next forward (gradients accumulate in "
+                ".grad), free the earlier output if you no longer need its gradient, "
+                "or use a separate ModelParallel instance.")
 
     def _prepare_call(self, wavelet, sources_global, receivers_global, models):
         """Per-call forward setup shared by every step loop: slice the model (or

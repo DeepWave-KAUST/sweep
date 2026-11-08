@@ -21,6 +21,7 @@ import pytest
 import torch
 
 import sweep.sem as S
+from sweep.sem.cdrive import apply_recorded
 from sweep.propagator import BoundarySaving
 from sweep.sem.dd import (SEMModelParallel, StripTopology,
                           _SEMFluidSolidDDC)
@@ -90,7 +91,7 @@ def _fused_reference(prop, models, wav, src, rec):
     parts, mats = d1._parts(eq, tuple(pats), rec)
     c = dict(parts[0].c)
     c["bs"] = False
-    sc, sx, sz = _SEMFluidSolidC.apply(*mats, wav, c)
+    sc, sx, sz = apply_recorded(_SEMFluidSolidC, *mats, wav, c)
     return torch.stack([sc, sx, sz], -1).transpose(0, 1)   # (nt, nrec, 3)
 
 
@@ -204,7 +205,7 @@ def _fused_bs(prop, models, wav, src, rec, memory):
         eq, tuple(pats), rec)
     c = dict(parts[0].c)
     c["bs"] = memory == "boundary"
-    sc, sx, sz = _SEMFluidSolidC.apply(*mats, wav, c)
+    sc, sx, sz = apply_recorded(_SEMFluidSolidC, *mats, wav, c)
     return torch.stack([sc, sx, sz], -1).transpose(0, 1)
 
 

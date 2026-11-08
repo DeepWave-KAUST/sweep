@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 import torch
 from .drivers.acoustic3d import (_SEMAcoustic3DCpmlDDC, _AC3D_RINGS,  # noqa: F401
                                  _AC3D_TAPES)
-from .cdrive import EL_CPML_FIELDS, EL_CPML_TRIPLES
+from .cdrive import EL_CPML_FIELDS, EL_CPML_TRIPLES, backward_will_run
 from .drivers.acoustic2d import _SEMAcousticCpmlDDC
 from .drivers.elastic2d import _SEMElasticCpmlDDC
 from .drivers.fluid_solid import _SEMFluidSolidDDC
@@ -1957,8 +1957,11 @@ class SEMModelParallel:
         rec, nrec = self._receiver_ids(receivers, dev)
         parts, mats = (self._parts3d(eq_g, pats, rec) if self.fam.ndim == 3
                        else self._parts(eq_g, pats, rec))
+        # the strip Function keeps its tapes or rings only when need_bwd is
+        # set: decided here, as its forward cannot see an outer no_grad
+        need_bwd = backward_will_run(wav, mats)
         for pp in parts:
-            pp.c.update(bs=bs, bs_kind=kind, bs_kind_e=kind_e)
+            pp.c.update(bs=bs, bs_kind=kind, bs_kind_e=kind_e, need_bwd=need_bwd)
         self._assert_cuts_are_pml_free(eq_g, parts)
         seis = self.fam.fn.apply(wav, parts, _DDExchange(parts, self._dist),
                                  bs, *mats)

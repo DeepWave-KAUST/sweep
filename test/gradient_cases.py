@@ -195,31 +195,26 @@ CASES = (
 # gradient ever shows up, the run FAILS with "prune the stale entry", so an
 # entry cannot outlive the gap it documents.
 #
-# Every one of these is a real hole, not a tolerance question: the candidate
-# returns exactly 0.0 while eager returns a finite gradient.  Only acoustic2d /
-# acoustic3d implement the source-wavelet gradient on the C side
-# (``accumulate_source_gradient_2d/3d``); every other equation's backward
-# returns model gradients only, and ``_c.py`` picks up a wavelet gradient only
-# when ``len(returned_grads) == len(models) + 1``, so the rest silently get None
-# -> zero, with no warning.
-KNOWN_MISSING_GRADIENTS = {
-    ("elastic", "wavelet"): "impl='c' elastic backward returns no source-wavelet gradient",
-    ("das", "wavelet"): "impl='c' DAS backward returns no source-wavelet gradient",
-    ("das_mu", "wavelet"): "impl='c' DAS-mu backward returns no source-wavelet gradient",
-    # Verified by construction, not inferred from a mismatch: on impl='c'
-    # ``wavelet.grad`` comes back as None for both, while eager returns a real
-    # one (|g|max 1.07e-1 on the cuda-suite grid). The MODEL gradients (vp,
-    # epsilon, delta, rho) do match eager -- it is only the source-wavelet slot
-    # that the compiled backward never fills.
-    ("acoustic_vti_1st", "wavelet"): "impl='c' VTI-1st backward returns no source-wavelet gradient",
-}
+# Every one of these would be a real hole, not a tolerance question: the
+# candidate returning exactly 0.0 while eager returns a finite gradient.  The
+# source-wavelet gradients the compiled backwards never compute (elastic, DAS,
+# first-order VTI: no wavelet slot in grads_out) used to sit here, silently None;
+# impl='c' now refuses them, so they are KNOWN_REFUSED_GRADIENTS below.
+KNOWN_MISSING_GRADIENTS = {}
 
-# Gradients impl='c' REFUSES: the equation's ``c_refuse_grads`` raises
+# Gradients impl='c' REFUSES: the equation's ``c_refuse_grads`` (or, for a
+# wavelet without a grads_out slot, the compiled forward itself) raises
 # NotImplementedError before anything runs when one of them requires grad.  The
 # matrix never asks the compiled backend for them (``run_case(refuse=...)``
 # creates those tensors without requires_grad) and reports them as declared
 # gaps, like the entries above.  Keep this table in step with the refusals.
 KNOWN_REFUSED_GRADIENTS = {
+    ("elastic", "wavelet"): "impl='c' elastic refuses the source-wavelet gradient",
+    ("das", "wavelet"): "impl='c' DAS refuses the source-wavelet gradient",
+    ("das_mu", "wavelet"): "impl='c' DAS-mu refuses the source-wavelet gradient",
+    # The MODEL gradients (vp, epsilon, delta, rho) do match eager -- it is only
+    # the source-wavelet slot that the compiled backward never fills.
+    ("acoustic_vti_1st", "wavelet"): "impl='c' VTI-1st refuses the source-wavelet gradient",
     ("acoustic_vrz", "wavelet"): "impl='c' VRZ refuses the source-wavelet gradient",
     ("acoustic_born", "wavelet"): "impl='c' LSRTM refuses the source-wavelet gradient",
     # the RWI tomographic vp gradient (terms II+III+IV, Wu & Alkhalifah 2015)

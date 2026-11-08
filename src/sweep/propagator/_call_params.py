@@ -111,6 +111,15 @@ class CompiledCallParams:
     # storage, which never stages.
     boundary_staging: tuple = ()
     boundary_disk_files: tuple = ()
+    # Whether this call runs a backward, decided by the caller before
+    # Wrapper.apply from grad mode and the inputs' requires_grad: inside the
+    # Function neither sees an outer torch.no_grad().
+    requires_backward: bool = False
+    # The _BufferLease this call holds on the storage above while its backward
+    # is pending (None when it saves nothing for a backward). Never read: it is
+    # here so that ctx.cp keeps it alive exactly as long as that backward can
+    # still run -- the propagator watches it through a weak reference.
+    buffer_lease: Any = None
     source_illumination_buffer: torch.Tensor = None
     receiver_illumination_buffer: torch.Tensor = None
     illumination_padding: tuple = ()

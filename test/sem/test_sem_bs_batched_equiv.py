@@ -148,7 +148,8 @@ def test_the_batched_rollout_is_the_one_a_shared_model_takes(monkeypatch):
     monkeypatch.setattr(BS, "SEMReconState", Spy)
     D = torch.float32
     w, src, rec = _shot(D)
-    vp = torch.full((NZ, NX), 2500.0, dtype=D)
+    # a call that records: one that does not keeps no ring, batched or not
+    vp = torch.full((NZ, NX), 2500.0, dtype=D, requires_grad=True)
     _prop(AcousticPotentialSEM2D, D,
           memory=BoundarySaving(storage_dtype="int8"))(w, src, rec, models=[vp])
     assert seen == [src.shape[0]], (

@@ -2,7 +2,8 @@ import os
 import warnings
 import shutil
 import tempfile
-from dataclasses import replace
+import weakref
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -219,6 +220,56 @@ def _gradient_buffers(has_wavelet, forward_source, models):
     return grads
 
 
+class _BufferLease:
+    """A pending backward's claim on the propagator's persistent boundary-saving
+    and checkpoint storage.
+
+    The compiled forward writes the boundary strips, ``last_two`` and the
+    checkpoint snapshots into storage that lives on the propagator, and the
+    backward reads them back through the views ``ctx.cp`` holds. A second
+    gradient forward that reused that storage before the first one's backward
+    ran rewrote what that backward reads -- through raw pointers, so autograd's
+    version counter never saw it: ``u0 = s(...); u1 = s(...);
+    (L0 + L1).backward()`` reconstructed shot 0 from shot 1's boundary and gave
+    a wrong gradient with no error.
+
+    The lease rides on ``ctx.cp``; the propagator keeps only a weak reference.
+    The claim therefore ends exactly when ``Wrapper.backward`` drops ``ctx.cp``
+    or the graph is freed without a backward, and a forward that finds it still
+    held gets storage of its own for that call (see
+    ``_CompiledPropagator.forward``).
+    """
+    __slots__ = ("__weakref__",)
+
+
+@dataclass
+class _BoundaryStore:
+    """One allocation of boundary-saving storage: everything a boundary-saving
+    backward reads back, plus the allocators that own it (the disk path zeroes
+    through them per call)."""
+    cpu_allocator: Allocator
+    gpu_allocator: Allocator
+    boundary_cpu: tuple = ()
+    boundary_gpu: tuple = ()
+    boundary_gpu_full: tuple = ()
+    boundary_staging: tuple = ()
+    last_two: torch.Tensor = None
+    disk_root: str = None
+    disk_files: tuple = ()
+
+
+def _create_disk_files(disk_dir, specs):
+    """Sparse files ``(name, nbytes)`` under a fresh temp dir; returns (root, paths)."""
+    root = tempfile.mkdtemp(prefix="sweep_boundary_", dir=disk_dir)
+    files = []
+    for name, nbytes in specs:
+        path = os.path.join(root, name)
+        with open(path, "wb") as handle:
+            handle.truncate(nbytes)
+        files.append(path)
+    return root, tuple(files)
+
+
 class Wrapper(torch.autograd.Function):
 
     @staticmethod
@@ -247,10 +298,13 @@ class Wrapper(torch.autograd.Function):
         spacing = [float(s) for s in spacing]
         dt = float(dt)
         
-        # only forward modeling, no need to save wavefield for backward
-        requires_model_grad = any(m.requires_grad for m in models)
-        requires_wavelet_grad = wavelet.requires_grad
-        requires_backward = bool(requires_model_grad or requires_wavelet_grad)
+        # Whether this call runs a backward was decided by the caller, before
+        # .apply (_CompiledPropagator.forward): in here grad mode is off, and
+        # neither the inputs' requires_grad nor ctx.needs_input_grad sees an
+        # outer torch.no_grad() -- a per-shot wavelet arrives as a view, which
+        # keeps requires_grad=True under no_grad. Read off the inputs, such a
+        # call saved the forward for a backward that could never run.
+        requires_backward = bool(cp.requires_backward)
         use_recursive_checkpoint = bool(use_recursive_checkpoint and cp.backward_recursive_ckpt_func is not None)
         use_checkpoint = bool(use_checkpoint and (cp.backward_ckpt_func is not None or use_recursive_checkpoint))
         save_all_wavefields = requires_backward
@@ -268,7 +322,10 @@ class Wrapper(torch.autograd.Function):
         params.forward_workspace = list(cp.forward_workspace)
         params.last_two = cp.last_two
         if cp.boundary_on_disk:
-            params.boundary_cpu = [b.zero_() for b in cp.boundary_cpu]
+            # Zeroed only by a call that saves into them: a call that saves
+            # nothing must leave alone the storage a backward still pending on
+            # it reads back.
+            params.boundary_cpu = [b.zero_() for b in cp.boundary_cpu] if use_boundary_saving else []
             params.boundary_gpu = [b.zero_() for b in cp.boundary_gpu] if use_boundary_saving else []
         elif cp.boundary_on_cpu:
             params.boundary_cpu = list(cp.boundary_cpu)
@@ -669,7 +726,7 @@ class Wrapper(torch.autograd.Function):
         # (cuda_layout.grads_out_has_wavelet), the same rule _gradient_buffers
         # bound it by.  A driver that declares the slot but never writes it
         # (acoustic_vrz*, grads_out_wavelet_written=False) leaves the wavelet
-        # gradient None, as before.
+        # gradient None, as before; forward() refused a wavelet that asked for it.
         if split_iii:
             global _LAST_GRAD_SPLIT_III
             # Undo exactly what autograd undoes for vp.grad: _model_to_cuda_batch
@@ -781,6 +838,9 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self.checkpoints = ()
         self.checkpoint_replay = ()
         self.last_two = torch.empty(0, device=self.dev)
+        # Weak reference to the _BufferLease of the forward whose backward has
+        # still to read the persistent boundary / checkpoint storage, or None.
+        self._store_lease = None
         self._buffer_capacity_batch = None
         self._boundary_cache_mode = None
         self._boundary_cache_interval = None
@@ -983,17 +1043,25 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self.__dict__["_boundary_disk_root"] = None
         self.__dict__["_boundary_disk_files"] = ()
 
+    @staticmethod
+    def _boundary_disk_specs(shapes, element_size=4):
+        """``(name, nbytes)`` of the boundary files, one per face, full-nt sized."""
+        return [(f"boundary_{idx}.bin", int(torch.Size(shape).numel()) * element_size)
+                for idx, shape in enumerate(shapes)]
+
+    @classmethod
+    def _boundary_disk_specs_int8(cls, main_shapes, scale_shapes, main_element_size=1):
+        """Disk files for staged scaled storage (int8/fp16): N payload main
+        files (es=1 for uint8, 2 for fp16) followed by N FP32 per-block scale
+        files (es=4), full-nt sized.  The order (main..., scale...) matches
+        the concatenation the C++ saver expects in ``boundary_disk_files``."""
+        return (cls._boundary_disk_specs(main_shapes, main_element_size)
+                + [(f"boundary_scale_{idx}.bin", int(torch.Size(shape).numel()) * 4)
+                   for idx, shape in enumerate(scale_shapes)])
+
     def _allocate_boundary_disk_files(self, shapes, disk_dir, element_size=4):
-        root = tempfile.mkdtemp(prefix="sweep_boundary_", dir=disk_dir)
-        files = []
-        for idx, shape in enumerate(shapes):
-            path = os.path.join(root, f"boundary_{idx}.bin")
-            numel = int(torch.Size(shape).numel())
-            with open(path, "wb") as handle:
-                handle.truncate(numel * element_size)
-            files.append(path)
-        self._boundary_disk_root = root
-        self._boundary_disk_files = tuple(files)
+        self._boundary_disk_root, self._boundary_disk_files = _create_disk_files(
+            disk_dir, self._boundary_disk_specs(shapes, element_size))
 
     def _int8_scale_shapes(self, main_shapes, block=256):
         """Per-face FP32 scale-buffer shapes for INT8 boundary storage.
@@ -1020,41 +1088,17 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             scale_shapes.append(tuple(outer) + (n_blocks,))
         return tuple(scale_shapes)
 
-    def _allocate_boundary_disk_files_int8(self, main_shapes, scale_shapes, disk_dir,
-                                           main_element_size=1):
-        """Disk files for staged scaled storage (int8/fp16): N payload main
-        files (es=1 for uint8, 2 for fp16) followed by N FP32 per-block scale
-        files (es=4), full-nt sized.  The order (main..., scale...) matches
-        the concatenation the C++ saver expects in ``boundary_disk_files``."""
-        root = tempfile.mkdtemp(prefix="sweep_boundary_", dir=disk_dir)
-        files = []
-        for idx, shape in enumerate(main_shapes):
-            path = os.path.join(root, f"boundary_{idx}.bin")
-            numel = int(torch.Size(shape).numel())
-            with open(path, "wb") as handle:
-                handle.truncate(numel * main_element_size)
-            files.append(path)
-        for idx, shape in enumerate(scale_shapes):
-            path = os.path.join(root, f"boundary_scale_{idx}.bin")
-            numel = int(torch.Size(shape).numel())
-            with open(path, "wb") as handle:
-                handle.truncate(numel * 4)  # fp32 scale
-            files.append(path)
-        self._boundary_disk_root = root
-        self._boundary_disk_files = tuple(files)
-
     def _ensure_boundary_buffers(self, boundary_storage, transfer_interval, use_pinned_memory, disk_dir=None, ring_buffers=1, boundary_dtype=None, nt_saved=None):
         # nt_saved < self.nt when boundary tail truncation is active: buffers
         # only hold the last nt_saved steps (the C++ side indexes them in
         # shifted saved-step coordinates).
-        boundary_on_cpu = boundary_storage in {"cpu", "disk"}
         staging_pinned = use_pinned_memory or boundary_storage == "disk"
-        staging_interval = transfer_interval * ring_buffers
         boundary_dtype = _resolve_boundary_dtype(boundary_dtype)
         # All storage locations (gpu/cpu/disk) support every storage_dtype
         # (fp32/fp16/bf16/int8).  Staged int8 uses a uint8 main + FP32 per-block
         # scale ring (and, for disk, parallel uint8 + scale files); see the
-        # int8 allocation branch below and saver.cuh / runtime.cuh.
+        # int8 allocation branch of _allocate_boundary_store and saver.cuh /
+        # runtime.cuh.
         if (
             self._boundary_cache_batch == self.B
             and
@@ -1071,6 +1115,40 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         ):
             return
 
+        store = self._allocate_boundary_store(
+            self.B, boundary_storage, transfer_interval, use_pinned_memory, disk_dir,
+            ring_buffers, boundary_dtype, nt_saved)
+        self._remove_boundary_disk_cache()
+        self.boundary_cpu_allocator = store.cpu_allocator
+        self.boundary_gpu_allocator = store.gpu_allocator
+        self.boundary_cpu = store.boundary_cpu
+        self.boundary_gpu = store.boundary_gpu
+        self.boundary_gpu_full = store.boundary_gpu_full
+        self.boundary_staging = store.boundary_staging
+        self.last_two = store.last_two
+        self._boundary_disk_root = store.disk_root
+        self._boundary_disk_files = store.disk_files
+
+        self._boundary_cache_dtype = boundary_dtype
+        self._boundary_cache_nvar = self._boundary_nvar_key()
+        self._boundary_cache_mode = boundary_storage
+        self._boundary_cache_interval = transfer_interval
+        self._boundary_cache_ring_buffers = ring_buffers
+        self._boundary_cache_pinned = staging_pinned
+        self._boundary_cache_disk_dir = disk_dir
+        self._boundary_cache_nt = self.nt if nt_saved is None else nt_saved
+        self._boundary_cache_batch = self.B
+
+    def _allocate_boundary_store(self, batch, boundary_storage, transfer_interval, use_pinned_memory,
+                                 disk_dir, ring_buffers, boundary_dtype, nt_saved):
+        """Allocate one boundary-saving store at ``batch`` without touching the
+        propagator: the persistent one (``_ensure_boundary_buffers``) and the
+        private one a forward takes while the persistent store is leased to a
+        pending backward (``forward``) come out of this same code."""
+        boundary_on_cpu = boundary_storage in {"cpu", "disk"}
+        staging_pinned = use_pinned_memory or boundary_storage == "disk"
+        staging_interval = transfer_interval * ring_buffers
+        boundary_dtype = _resolve_boundary_dtype(boundary_dtype)
         cuda_layout = self._cuda_layout()
         # A frame shell (cuda_layout.boundary_frame) also covers the whole
         # absorbing pad: abcn more cells across and abcn more tangentially.
@@ -1088,7 +1166,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             self.nt if nt_saved is None else nt_saved,
             self.abcn,
             self.equation.so // 2,
-            self.B,
+            batch,
             staging_interval if boundary_on_cpu else transfer_interval,
             self._image_method_active,
             self.equation.so // 2 * cuda_layout.boundary_save_reach + 1 + frame,
@@ -1097,13 +1175,12 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             cut_mask=getattr(self, "_dd_cut_mask", 0),
         )
 
-        self.boundary_cpu_allocator = Allocator('cpu')
-        self.boundary_gpu_allocator = Allocator(self.dev)
-        self._remove_boundary_disk_cache()
+        store = _BoundaryStore(cpu_allocator=Allocator('cpu'), gpu_allocator=Allocator(self.dev))
+        cpu_alloc, gpu_alloc = store.cpu_allocator, store.gpu_allocator
         last_two_shape = [
             cuda_layout.resolved_last_two_storage_nvar(),
             cuda_layout.last_two_nvar,
-            self.B,
+            batch,
             1,
             *self.shape_cuda,
         ]
@@ -1138,7 +1215,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         # cell that was quantized from 0 back to exactly 0.  (On the disk path
         # ``forward()`` calls ``boundary_gpu_allocator.zero_()`` per call, which
         # re-zeroes these too; a superset of "once", so still bit-exact.)
-        self.boundary_staging = ()
+        store.boundary_staging = ()
 
         if boundary_on_cpu and boundary_dtype in ('int8', 'fp16'):
             # Staged scaled storage (int8 / fp16): a persistent payload main
@@ -1159,25 +1236,25 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             cpu_scale_shapes = self._int8_scale_shapes(cpu_main_shapes, _BLOCK)
             ring_scale_shapes = self._int8_scale_shapes(ring_main_shapes, _BLOCK)
             if boundary_storage == "disk":
-                self._allocate_boundary_disk_files_int8(
-                    layout.cpu_shapes,
-                    self._int8_scale_shapes(layout.cpu_shapes, _BLOCK),
-                    disk_dir,
-                    main_element_size=torch.empty((), dtype=main_dtype).element_size())
-            cpu_main = self.boundary_cpu_allocator.zeros(
+                store.disk_root, store.disk_files = _create_disk_files(
+                    disk_dir, self._boundary_disk_specs_int8(
+                        layout.cpu_shapes,
+                        self._int8_scale_shapes(layout.cpu_shapes, _BLOCK),
+                        main_element_size=torch.empty((), dtype=main_dtype).element_size()))
+            cpu_main = cpu_alloc.zeros(
                 cpu_main_shapes, dtype=main_dtype, dev='cpu', pin_memory=staging_pinned)
-            cpu_scale = self.boundary_cpu_allocator.zeros(
+            cpu_scale = cpu_alloc.zeros(
                 cpu_scale_shapes, dtype=torch.float32, dev='cpu', pin_memory=staging_pinned)
-            self.boundary_cpu = tuple(cpu_main) + tuple(cpu_scale)
-            ring_main = self.boundary_gpu_allocator.zeros(
+            store.boundary_cpu = tuple(cpu_main) + tuple(cpu_scale)
+            ring_main = gpu_alloc.zeros(
                 ring_main_shapes, dtype=main_dtype)
-            ring_scale = self.boundary_gpu_allocator.zeros(
+            ring_scale = gpu_alloc.zeros(
                 ring_scale_shapes, dtype=torch.float32)
-            self.boundary_gpu = tuple(ring_main) + tuple(ring_scale)
-            self.boundary_staging = tuple(self.boundary_gpu_allocator.zeros(
+            store.boundary_gpu = tuple(ring_main) + tuple(ring_scale)
+            store.boundary_staging = tuple(gpu_alloc.zeros(
                 layout.staging_shapes, dtype=torch.float32))
-            self.boundary_gpu_full = ()
-            self.last_two = self.boundary_cpu_allocator.zeros(
+            store.boundary_gpu_full = ()
+            store.last_two = cpu_alloc.zeros(
                 [last_two_shape],
                 dtype=torch.float32,
                 dev='cpu',
@@ -1185,35 +1262,36 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             )[0]
         elif boundary_on_cpu:
             if boundary_storage == "disk":
-                self._allocate_boundary_disk_files(
-                    layout.cpu_shapes, disk_dir,
-                    element_size=torch.empty((), dtype=_bdry_dtype).element_size())
-                self.boundary_cpu = self.boundary_cpu_allocator.zeros(
+                store.disk_root, store.disk_files = _create_disk_files(
+                    disk_dir, self._boundary_disk_specs(
+                        layout.cpu_shapes,
+                        element_size=torch.empty((), dtype=_bdry_dtype).element_size()))
+                store.boundary_cpu = cpu_alloc.zeros(
                     layout.gpu_shapes,
                     dtype=_bdry_dtype,
                     dev='cpu',
                     pin_memory=staging_pinned,
                 )
             else:
-                self.boundary_cpu = self.boundary_cpu_allocator.zeros(
+                store.boundary_cpu = cpu_alloc.zeros(
                     layout.cpu_shapes,
                     dtype=_bdry_dtype,
                     dev='cpu',
                     pin_memory=staging_pinned,
                 )
             # Staging ring must match the persistent buffer dtype.
-            self.boundary_gpu = self.boundary_gpu_allocator.zeros(
+            store.boundary_gpu = gpu_alloc.zeros(
                 layout.gpu_shapes, dtype=_bdry_dtype)
-            self.boundary_gpu_full = ()
-            self.last_two = self.boundary_cpu_allocator.zeros(
+            store.boundary_gpu_full = ()
+            store.last_two = cpu_alloc.zeros(
                 [last_two_shape],
                 dtype=torch.float32,
                 dev='cpu',
                 pin_memory=staging_pinned,
             )[0]
         else:
-            self.boundary_cpu = ()
-            self.boundary_gpu = ()
+            store.boundary_cpu = ()
+            store.boundary_gpu = ()
             # Boundary storage dtype: FP32 (default) / FP16 / BF16 cast at
             # the storage boundary inside boundary_kernel*_{fp16,bf16}, or
             # INT8 with per-block symmetric quantization (DeepWave-style,
@@ -1241,27 +1319,21 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 #     scale  (nvar, nt, B, n_blocks_per_step)
                 main_dtype = torch.uint8 if boundary_dtype == 'int8' else torch.float16
                 main_shapes = layout.gpu_full_shapes
-                main_tensors = self.boundary_gpu_allocator.zeros(
+                main_tensors = gpu_alloc.zeros(
                     main_shapes, dtype=main_dtype)
-                scale_tensors = self.boundary_gpu_allocator.zeros(
+                scale_tensors = gpu_alloc.zeros(
                     self._int8_scale_shapes(main_shapes), dtype=torch.float32)
-                self.boundary_gpu_full = tuple(main_tensors) + tuple(scale_tensors)
-                self.boundary_staging = tuple(self.boundary_gpu_allocator.zeros(
+                store.boundary_gpu_full = tuple(main_tensors) + tuple(scale_tensors)
+                store.boundary_staging = tuple(gpu_alloc.zeros(
                     layout.staging_shapes, dtype=torch.float32))
             else:
-                self.boundary_gpu_full = self.boundary_gpu_allocator.zeros(
+                store.boundary_gpu_full = gpu_alloc.zeros(
                     layout.gpu_full_shapes, dtype=_bdry_dtype)
-            self.last_two = self.forward_allocator.zeros([last_two_shape])[0]
-
-        self._boundary_cache_dtype = boundary_dtype
-        self._boundary_cache_nvar = self._boundary_nvar_key()
-        self._boundary_cache_mode = boundary_storage
-        self._boundary_cache_interval = transfer_interval
-        self._boundary_cache_ring_buffers = ring_buffers
-        self._boundary_cache_pinned = staging_pinned
-        self._boundary_cache_disk_dir = disk_dir
-        self._boundary_cache_nt = self.nt if nt_saved is None else nt_saved
-        self._boundary_cache_batch = self.B
+            # In the store's own allocator, not forward_allocator: a full-mode
+            # forward zeroes forward_allocator on every call, which wiped the
+            # seed of a boundary-saving backward still pending on this store.
+            store.last_two = gpu_alloc.zeros([last_two_shape])[0]
+        return store
 
     def __del__(self):
         self._remove_boundary_disk_cache()
@@ -1535,9 +1607,19 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         return tuple(t.narrow(batch_dim, 0, batch_size) for t in tensors)
 
     def _ensure_checkpoint_buffers(self, checkpoint_interval=None, checkpoint_count=None, batch_size=None,
-                                  max_segment=None, mode=None):
+                                  max_segment=None, mode=None, private=False):
+        """Make sure this call's checkpoint snapshots and replay buffers exist;
+        return ``(checkpoints, checkpoint_replay)`` for the call.
+
+        ``private=True`` is a forward whose persistent snapshots are leased to a
+        backward still pending (see ``_BufferLease``): it gets snapshots of its
+        own, freed with its graph, and leaves the propagator untouched. The
+        replay buffers are backward-only scratch -- written before they are
+        read, never re-zeroed -- and backwards run one at a time, so a private
+        call shares the persistent ones whenever the shapes agree.
+        """
         if not self.use_ckpt or (self.backward_ckpt_func is None and self.backward_recursive_ckpt_func is None):
-            return
+            return (), ()
 
         if checkpoint_count is not None:
             n_checkpoints = int(checkpoint_count)
@@ -1557,7 +1639,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         checkpoint_pinned = self.ckpt_pinned_memory if checkpoint_storage == "cpu" else False
 
         if (
-            self._checkpoint_cache_batch == active_batch
+            not private
+            and self._checkpoint_cache_batch == active_batch
             and self._checkpoint_cache_interval == checkpoint_interval
             and self._checkpoint_cache_count == n_checkpoints
             and self._checkpoint_cache_nt == self.nt
@@ -1566,7 +1649,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             and self._checkpoint_cache_segment == max_segment
             and self._checkpoint_cache_mode == mode
         ):
-            return
+            return self._slice_checkpoint_buffers(active_batch), tuple(self.checkpoint_replay)
 
         cuda_layout = self._cuda_layout()
         num_checkpoint_tensors = int(cuda_layout.resolved_checkpoint_nvar())
@@ -1588,9 +1671,9 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 * [[n_checkpoints, active_batch, 1, *self.shape_cuda]]
             )
         checkpoint_device = "cpu" if checkpoint_storage == "cpu" else self.dev
-        self.checkpoint_allocator = Allocator(checkpoint_device)
-        self.checkpoints = tuple(
-            self.checkpoint_allocator.zeros(
+        allocator = Allocator(checkpoint_device)
+        checkpoints = tuple(
+            allocator.zeros(
                 checkpoint_shapes,
                 dtype=torch.float32,
                 dev=checkpoint_device,
@@ -1601,11 +1684,16 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         # holds both at its peak, so keeping them costs no more than the
         # per-call allocation they replace. Compute-side only; never re-zeroed.
         replay_shapes = cuda_layout.checkpoint_replay_shapes
-        if replay_shapes is not None:
-            self.checkpoint_replay = tuple(Allocator(self.dev).zeros(
-                [list(s) for s in replay_shapes(active_batch, self.nt, self.shape_cuda, int(max_segment), mode)]))
-        else:
-            self.checkpoint_replay = ()
+        replay_shapes = ([tuple(int(x) for x in s) for s in
+                          replay_shapes(active_batch, self.nt, self.shape_cuda, int(max_segment), mode)]
+                         if replay_shapes is not None else [])
+        if private:
+            if [tuple(t.shape) for t in self.checkpoint_replay] == replay_shapes:
+                return checkpoints, tuple(self.checkpoint_replay)
+            return checkpoints, tuple(Allocator(self.dev).zeros([list(s) for s in replay_shapes]))
+        self.checkpoint_allocator = allocator
+        self.checkpoints = checkpoints
+        self.checkpoint_replay = tuple(Allocator(self.dev).zeros([list(s) for s in replay_shapes]))
         self._checkpoint_cache_batch = active_batch
         self._checkpoint_cache_interval = checkpoint_interval
         self._checkpoint_cache_count = n_checkpoints
@@ -1614,6 +1702,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._checkpoint_cache_pinned = checkpoint_pinned
         self._checkpoint_cache_segment = max_segment
         self._checkpoint_cache_mode = mode
+        return self._slice_checkpoint_buffers(active_batch), tuple(self.checkpoint_replay)
 
     def _slice_checkpoint_buffers(self, batch_size):
         # Checkpoints are allocated at the active batch size in
@@ -1838,13 +1927,24 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     "but does not define prepare_models()."
                 )
             models = list(prepare(models))
-        requires_model_grad = any(m.requires_grad for m in models)
-        requires_wavelet_grad = wavelet.requires_grad
-        requires_backward = bool(requires_model_grad or requires_wavelet_grad)
+        # Will this call run a backward? Decided HERE, before Wrapper.apply, and
+        # handed to Wrapper.forward (CompiledCallParams.requires_backward):
+        # requires_grad is a tensor property, blind to grad mode, and a per-shot
+        # wavelet is a view of the caller's tensor (wavelet[:, None, :]), which
+        # keeps requires_grad=True under torch.no_grad(). Inside the Function
+        # neither that flag nor ctx.needs_input_grad sees the outer no_grad, so
+        # a no_grad call with such a wavelet saved the boundary ring or the whole
+        # history, allocated the adjoint fields, and was refused what only a
+        # backward needs. Autograd records the call exactly when grad mode is on
+        # and an input requires grad; so does this.
+        grad_enabled = torch.is_grad_enabled()
         # Which models need a gradient picks this call's layout for equations that
         # declare cuda_layout_for_grads (see _cuda_layout); set before the buffers
         # below are sized from it.
-        self._model_grad_mask = tuple(bool(m.requires_grad) for m in models)
+        self._model_grad_mask = tuple(grad_enabled and bool(m.requires_grad) for m in models)
+        requires_model_grad = any(self._model_grad_mask)
+        requires_wavelet_grad = bool(grad_enabled and wavelet.requires_grad)
+        requires_backward = bool(requires_model_grad or requires_wavelet_grad)
         # An equation whose compiled backward returns only some of the
         # gradients refuses the rest here, before anything runs (a silently
         # missing gradient is the failure mode this guards).
@@ -1855,6 +1955,16 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                    boundary_dtype=(_resolve_boundary_dtype(boundary_cfg.get('storage_dtype'))
                                    if use_boundary_saving else None),
                    checkpoint=bool(self.use_ckpt))
+        # So does every backward without a written wavelet slot (the elastic,
+        # DAS and first-order VTI families have none): the wavelet's grad would
+        # otherwise come back None without a word.
+        if requires_wavelet_grad:
+            layout = self._cuda_layout()
+            if not (layout.grads_out_has_wavelet and layout.grads_out_wavelet_written):
+                raise NotImplementedError(
+                    f"impl='c' {type(self.equation).__name__} does not return the wavelet gradient "
+                    "(its compiled backward returns the model gradients only). Detach the wavelet, "
+                    "or use impl='eager', whose autograd returns every gradient.")
         if requires_backward and self.compute_illumination:
             self.source_illumination = torch.zeros_like(unpadded_models[0])
             self.receiver_illumination = torch.zeros_like(unpadded_models[0])
@@ -1897,17 +2007,30 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                               else "bs" if use_boundary_saving else "full")
             self._ensure_adjoint_workspace_buffers(batch_size, workspace_mode)
             derived_model_nvar_backward = self._derived_model_count(workspace_mode)
+        # The boundary / checkpoint storage the backward reads back lives on the
+        # propagator. While a backward is still pending on it (its lease is
+        # alive, see _BufferLease) a call that saves for a backward must not
+        # write there: it gets storage of its own, freed with its graph, and
+        # leaves the persistent storage alone. Otherwise it takes the lease
+        # once its forward has run (below). A call that saves nothing binds no
+        # storage at all.
+        needs_store = bool(requires_backward and (use_boundary_saving or use_checkpoint))
+        lease = _BufferLease() if needs_store else None
+        private_store = needs_store and self._store_lease is not None and self._store_lease() is not None
         max_segment = None
+        checkpoint_buffers, checkpoint_replay = (), ()
         if use_checkpoint:
             if use_recursive_checkpoint:
                 checkpoint_steps = self._build_recursive_checkpoint_steps(self.nt, self.ckpt_num)
                 max_segment = self._longest_segment(checkpoint_steps)
-                self._ensure_checkpoint_buffers(checkpoint_count=int(checkpoint_steps.numel()), batch_size=batch_size,
-                                                max_segment=max_segment, mode="recursive")
+                checkpoint_buffers, checkpoint_replay = self._ensure_checkpoint_buffers(
+                    checkpoint_count=int(checkpoint_steps.numel()), batch_size=batch_size,
+                    max_segment=max_segment, mode="recursive", private=private_store)
             elif self.backward_ckpt_func is not None:
                 max_segment = self.ckpt_chunks
-                self._ensure_checkpoint_buffers(checkpoint_interval=self.ckpt_chunks, batch_size=batch_size,
-                                                max_segment=max_segment, mode="ckpt")
+                checkpoint_buffers, checkpoint_replay = self._ensure_checkpoint_buffers(
+                    checkpoint_interval=self.ckpt_chunks, batch_size=batch_size,
+                    max_segment=max_segment, mode="ckpt", private=private_store)
         if requires_backward:
             forward_state_shapes = self._forward_state_shapes(batch_size, workspace_mode, max_segment)
             if workspace_mode == "bs":
@@ -1917,8 +2040,6 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             forward_wavefields = self._transient_forward_wavefields(batch_size)
         forward_workspace = self._transient_forward_workspace(batch_size)
         adjoint_workspace = self._slice_adjoint_workspace_buffers(batch_size)
-        checkpoint_buffers = self._slice_checkpoint_buffers(batch_size) if use_checkpoint else ()
-        checkpoint_replay = tuple(self.checkpoint_replay) if use_checkpoint else ()
 
         if self.forward_wavefields:
             self.forward_allocator.zero_()
@@ -1926,28 +2047,45 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             self.adjoint_allocator.zero_()
         if adjoint_workspace:
             self.workspace_allocator.zero_()
-        if use_checkpoint and checkpoint_buffers:
+        if checkpoint_buffers and not private_store:
             self.checkpoint_allocator.zero_()
-        if boundary_on_cpu:
-            if use_boundary_saving:
-                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype'), nt_saved=nt_saved)
+        # The boundary store this call saves into: none when it saves nothing
+        # (what a fresh propagator's first no-grad call binds, so the driver
+        # never needs one), a fresh private one while the persistent store is
+        # leased, else the persistent one. Only a call that saves zeroes it --
+        # a no-grad call zeroing the disk path's host staging and last_two
+        # broke the backward still pending on them.
+        boundary_cpu, boundary_gpu, boundary_staging, boundary_disk_files = (), (), (), ()
+        last_two = torch.empty(0, device=self.dev)
+        if use_boundary_saving and private_store:
+            # Fresh zeros at exactly this batch: nothing to zero or narrow.
+            store = self._allocate_boundary_store(
+                batch_size, boundary_storage, transfer_interval, use_pinned_memory,
+                boundary_disk_dir, boundary_ring_buffers, boundary_cfg.get('storage_dtype'), nt_saved)
+            if store.disk_root is not None:
+                weakref.finalize(lease, shutil.rmtree, store.disk_root, True)
+            boundary_cpu = store.boundary_cpu
+            boundary_gpu = store.boundary_gpu if boundary_on_cpu else store.boundary_gpu_full
+            boundary_staging = store.boundary_staging
+            last_two = store.last_two
+            boundary_disk_files = store.disk_files
+        elif use_boundary_saving:
+            self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype'), nt_saved=nt_saved)
             if boundary_on_disk:
                 self.boundary_cpu_allocator.zero_()
                 self.boundary_gpu_allocator.zero_()
-            boundary_cpu = self._slice_boundary_buffers(self.boundary_cpu, batch_size)
-            boundary_gpu = self._slice_boundary_buffers(self.boundary_gpu, batch_size)
-        else:
-            if use_boundary_saving:
-                self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype'), nt_saved=nt_saved)
+            elif not boundary_on_cpu:
                 for t in self.boundary_gpu_full:
                     t.zero_()
-            boundary_cpu = ()
-            boundary_gpu = self._slice_boundary_buffers(self.boundary_gpu_full, batch_size)
-        # Narrowed on the same batch axis as the buffers it feeds; () unless the
-        # storage dtype is scaled (int8/fp16), which is the only path that
-        # quantizes through a staging band.
-        boundary_staging = self._slice_boundary_buffers(self.boundary_staging, batch_size)
-        last_two = self._slice_last_two(batch_size) if use_boundary_saving else self.last_two
+            boundary_cpu = self._slice_boundary_buffers(self.boundary_cpu, batch_size)
+            boundary_gpu = self._slice_boundary_buffers(
+                self.boundary_gpu if boundary_on_cpu else self.boundary_gpu_full, batch_size)
+            # Narrowed on the same batch axis as the buffers it feeds; () unless
+            # the storage dtype is scaled (int8/fp16), which is the only path
+            # that quantizes through a staging band.
+            boundary_staging = self._slice_boundary_buffers(self.boundary_staging, batch_size)
+            last_two = self._slice_last_two(batch_size)
+            boundary_disk_files = self._boundary_disk_files if boundary_on_disk else ()
 
         spacing = self._cuda_spacing()
 
@@ -2017,7 +2155,9 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     boundary_cpu=boundary_cpu,
                     boundary_gpu=boundary_gpu,
                     boundary_staging=boundary_staging,
-                    boundary_disk_files=self._boundary_disk_files if boundary_on_disk else (),
+                    boundary_disk_files=boundary_disk_files,
+                    requires_backward=requires_backward,
+                    buffer_lease=lease,
                     source_illumination_buffer=self.source_illumination if self.source_illumination is not None else torch.empty(0, device=self.dev),
                     receiver_illumination_buffer=self.receiver_illumination if self.receiver_illumination is not None else torch.empty(0, device=self.dev),
                     illumination_padding=tuple(padding),
@@ -2032,7 +2172,12 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                 wavelet,
                 *models,
             )
-        
+        if needs_store and not private_store:
+            # Claimed only now that the forward has run: one that raised leaves
+            # no backward behind, and its traceback -- which a notebook keeps,
+            # and with it this frame's ``lease`` -- must not hold the store, or
+            # every later call would pay for a private one on top of it.
+            self._store_lease = weakref.ref(lease)
         return syn
 
 

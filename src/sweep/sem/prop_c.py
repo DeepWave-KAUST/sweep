@@ -46,7 +46,7 @@ from .equations.biot_vs_deformed import BiotAnisoPermSEM2DDeformed, BiotVSSEM2DD
 from .equations.visco_biot_vs_deformed import ViscoBiotVSSEM2DDeformed
 from .equations.elastic2d_deformed import ElasticSEM2DDeformed
 from .cdrive import (AC_CPML_FIELDS, EL_CPML_FIELDS, EL_CPML_TRIPLES,
-                     METRIC_NAMES)
+                     METRIC_NAMES, apply_recorded)
 from .drivers.acoustic2d import _SEMAcousticCpmlC
 from .drivers.elastic2d import _SEMElasticCpmlC
 from .drivers.fluid_solid import _SEMFluidSolidC
@@ -148,8 +148,8 @@ def sem_c_forward_shot_batch(props, wavelet, materials=None, memory=None,
                 "(its kernels always share one model across the batch)")
         c = _stack_patterns(p0._elastic_cpml_consts(), props, ("pat_x", "pat_z"))
         c.update(B=B, illum=p0.illumination, **flags())
-        comps = _SEMElasticCpmlC.apply(
-            t(eq._lam), t(eq._mu), t(eq._lam2mu), t(eq._inv_M),
+        comps = apply_recorded(
+            _SEMElasticCpmlC, t(eq._lam), t(eq._mu), t(eq._lam2mu), t(eq._inv_M),
             t(eq._w_rho_J), wav, c)
         return _select_components(p0, comps)
     if isinstance(eq, AcousticElasticSEM2D):
@@ -159,8 +159,8 @@ def sem_c_forward_shot_batch(props, wavelet, materials=None, memory=None,
                 "(the coupled path always shares one model across the batch)")
         c = dict(_fs_batch_consts(props, memory), illum=p0.illumination)
         ac, el = eq.ac, eq.el
-        comps = _SEMFluidSolidC.apply(
-            t(ac._inv_rho), t(ac._inv_M), t(ac.kappa_node),
+        comps = apply_recorded(
+            _SEMFluidSolidC, t(ac._inv_rho), t(ac._inv_M), t(ac.kappa_node),
             t(el._lam), t(el._mu), t(el._lam2mu), t(el._inv_M),
             t(el._w_rho_J), wav, c)
         return _select_components(p0, comps)
@@ -172,7 +172,7 @@ def sem_c_forward_shot_batch(props, wavelet, materials=None, memory=None,
     else:
         c["Bm"] = B
         inv_rho, inv_M, kappa = (t(x) for x in materials)
-    return _SEMAcousticCpmlC.apply(inv_rho, inv_M, kappa, wav, c)
+    return apply_recorded(_SEMAcousticCpmlC, inv_rho, inv_M, kappa, wav, c)
 
 
 def _select_components(prop, comps):
@@ -834,9 +834,10 @@ class SEMCudaPropagator(SEMPropagator):
     def _forward_acoustic(self, wav):
         """Bare 2-D acoustic potential: no C-PML, so no memory fields."""
         eq, dev = self.eq, torch.device("cuda")
-        seis = _SEMAcousticC.apply(eq._inv_M.to(device=dev, dtype=torch.float32),
-                                   eq._inv_rho.to(device=dev, dtype=torch.float32),
-                                   wav, self._consts())
+        seis = apply_recorded(
+                              _SEMAcousticC, eq._inv_M.to(device=dev, dtype=torch.float32),
+                              eq._inv_rho.to(device=dev, dtype=torch.float32),
+                              wav, self._consts())
         return (seis,)
 
     def _check_forward(self, source_wavelet, memory, bs_store_dtype,
@@ -956,7 +957,7 @@ class SEMCudaPropagator(SEMPropagator):
         inv_rho = eq._inv_rho.to("cuda", torch.float32)
         inv_M = eq._inv_M.to("cuda", torch.float32)
         kappa = eq.kappa_node.to("cuda", torch.float32)
-        seis = _SEMAcousticCpmlC.apply(inv_rho, inv_M, kappa, wav, c)
+        seis = apply_recorded(_SEMAcousticCpmlC, inv_rho, inv_M, kappa, wav, c)
         return (seis,)
 
     # -- 2-D elastic ----------------------------------------------------- #
@@ -978,7 +979,7 @@ class SEMCudaPropagator(SEMPropagator):
         mu = eq._mu.to("cuda", torch.float32)
         lam2mu = eq._lam2mu.to("cuda", torch.float32)
         inv_M = eq._inv_M.to("cuda", torch.float32)
-        seis_x, seis_z = _SEMElasticC.apply(lam, mu, lam2mu, inv_M, wav, c)
+        seis_x, seis_z = apply_recorded(_SEMElasticC, lam, mu, lam2mu, inv_M, wav, c)
         return (seis_x, seis_z)
 
     @_memo_consts
@@ -1019,8 +1020,8 @@ class SEMCudaPropagator(SEMPropagator):
         lam2mu = eq._lam2mu.to("cuda", torch.float32)
         inv_M = eq._inv_M.to("cuda", torch.float32)
         w_rho_J = eq._w_rho_J.to("cuda", torch.float32)
-        seis_x, seis_z = _SEMElasticCpmlC.apply(
-            lam, mu, lam2mu, inv_M, w_rho_J, wav, c)
+        seis_x, seis_z = apply_recorded(
+            _SEMElasticCpmlC, lam, mu, lam2mu, inv_M, w_rho_J, wav, c)
         return (seis_x, seis_z)
 
     # -- 3-D acoustic ---------------------------------------------------- #
@@ -1055,8 +1056,8 @@ class SEMCudaPropagator(SEMPropagator):
 
     def _acoustic3d_bare(self, c, wav):
         eq = self.eq
-        return _SEMAcoustic3DC.apply(
-            eq.vp_squared_node.to("cuda", torch.float32),
+        return apply_recorded(
+            _SEMAcoustic3DC, eq.vp_squared_node.to("cuda", torch.float32),
             eq._inv_M.to("cuda", torch.float32), wav, c)
 
     def _forward_acoustic3d_cpml(self, wav):
@@ -1114,8 +1115,8 @@ class SEMCudaPropagator(SEMPropagator):
         eq = self.eq
         E, m = c["n_elements"], c["ngll"] ** 3
         t = lambda x: x.to("cuda", torch.float32).reshape(E, m)
-        sx, sy, sz = _SEMElastic3DC.apply(
-            t(eq._lam), t(eq._mu), t(eq._lam2mu),
+        sx, sy, sz = apply_recorded(
+            _SEMElastic3DC, t(eq._lam), t(eq._mu), t(eq._lam2mu),
             eq._inv_M.to("cuda", torch.float32), wav, c)
         return (sx, sy, sz)
 
@@ -1164,17 +1165,18 @@ class SEMCudaPropagator(SEMPropagator):
         if isinstance(eq, ElasticTTISEM3D):
             names = _VTI if isinstance(eq, ElasticVTISEM3D) else _CIJ
             cij = torch.stack([t(getattr(eq, a)) for a in names])
-            return tuple(_SEMElasticVS3DAnisoC.apply(cij, inv_M, wav, c))
+            return tuple(apply_recorded(_SEMElasticVS3DAnisoC, cij, inv_M, wav, c))
         if isinstance(eq, ViscoElasticVSSEM3D):
             a_l, c_l = gsls_weights(eq._tau_sigma, self.dt)
             c["gsls_w"] = torch.tensor(list(a_l) + list(c_l), dtype=torch.float32,
                                        device="cuda")
             ptau = torch.stack([t(x) for x in eq._p_tau])
             mtau = torch.stack([t(x) for x in eq._m_tau])
-            return tuple(_SEMViscoElasticVS3DC.apply(
-                t(eq._lam), t(eq._mu), t(eq._lam2mu), ptau, mtau, inv_M, wav, c))
-        sx, sy, sz = _SEMElasticVS3DC.apply(
-            t(eq._lam), t(eq._mu), t(eq._lam2mu), inv_M, wav, c)
+            return tuple(apply_recorded(
+                _SEMViscoElasticVS3DC, t(eq._lam), t(eq._mu), t(eq._lam2mu),
+                ptau, mtau, inv_M, wav, c))
+        sx, sy, sz = apply_recorded(
+            _SEMElasticVS3DC, t(eq._lam), t(eq._mu), t(eq._lam2mu), inv_M, wav, c)
         return (sx, sy, sz)
 
     # -- 2-D velocity-stress -------------------------------------------- #
@@ -1229,7 +1231,7 @@ class SEMCudaPropagator(SEMPropagator):
         else:
             c["mode"] = "iso"
             mats = (t(eq._lam), t(eq._mu), t(eq._lam2mu))
-        sx, sz = _SEMElasticVS2DC.apply(inv_M, wav, c, *mats)
+        sx, sz = apply_recorded(_SEMElasticVS2DC, inv_M, wav, c, *mats)
         return (sx, sz)
 
     # -- 2-D Biot -------------------------------------------------------- #
@@ -1315,7 +1317,7 @@ class SEMCudaPropagator(SEMPropagator):
         leaves = (n(eq._inv_M), n(eq._inv_Mp), n(eq._inv_M1), n(eq._inv_Mm),
                   t(eq._lam_d), t(eq.mu_e), t(eq._alpha), n(eq._wr), n(eq._share),
                   n(drag_E), n(drag_P), t(eq.b_e[0]), t(eq.b_e[1]), t(eq.b_e[2])) + gsls
-        return tuple(_SEMBiot2DC.apply(c, wav, *leaves).unbind(0))
+        return tuple(apply_recorded(_SEMBiot2DC, c, wav, *leaves).unbind(0))
 
     # -- 3-D Biot -------------------------------------------------------- #
     def _biot3d_consts(self):
@@ -1396,7 +1398,7 @@ class SEMCudaPropagator(SEMPropagator):
                   t(eq._lam_d), t(eq.mu_e), t(eq._alpha), t(eq.b_e),
                   flat([blk.wr for blk in eq._blocks]), flat([blk.share for blk in eq._blocks]),
                   flat(drag_E), flat(drag_P))
-        return tuple(_SEMBiot3DC.apply(c, wav, *leaves).unbind(0))
+        return tuple(apply_recorded(_SEMBiot3DC, c, wav, *leaves).unbind(0))
 
     # -- 2-D coupled fluid-solid ----------------------------------------- #
     def _fluid_solid_consts(self):
@@ -1507,8 +1509,8 @@ class SEMCudaPropagator(SEMPropagator):
             c.update(self._fluid_solid_bands())
         ac, el = eq.ac, eq.el
         t = lambda x: x.to("cuda", torch.float32)
-        seis_chi, seis_x, seis_z = _SEMFluidSolidC.apply(
-            t(ac._inv_rho), t(ac._inv_M), t(ac.kappa_node),
+        seis_chi, seis_x, seis_z = apply_recorded(
+            _SEMFluidSolidC, t(ac._inv_rho), t(ac._inv_M), t(ac.kappa_node),
             t(el._lam), t(el._mu), t(el._lam2mu), t(el._inv_M), t(el._w_rho_J),
             wav, c)
         return (seis_chi, seis_x, seis_z)

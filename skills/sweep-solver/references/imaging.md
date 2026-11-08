@@ -129,7 +129,7 @@ background models' and the wavelet's. No free surface.
 |---|---|---|
 | Source / receiver illumination | `solver.compute_illumination = True` before the backward; read `solver.source_illumination`, `solver.receiver_illumination` | `impl='c'` |
 | Space-lag ADCIG | `solver.compute_adcig = True`, `solver.adcig_max_lag = L`; read `solver.adcig` | `impl='c'`, boundary saving only, acoustic 2-D/3-D |
-| Custom imaging condition | `solver.register_gradient(..., mode="imaging")` + `solver.imaging(...)` | eager, needs `memory=Full()` (see `gradients.md`) |
+| Custom imaging condition | `solver.register_gradient(..., mode="imaging")` + `solver.imaging(...)` | eager; `imaging()` keeps its own tape, any `memory` (see `gradients.md`) |
 
 ## 6. Elastic Born (`ElasticBorn`)
 

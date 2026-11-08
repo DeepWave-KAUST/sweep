@@ -18,7 +18,8 @@ import torch
 
 from ..cdrive import (EL_CPML_FLAT, Alloc, check_filled, dd_grads, dims,
                       fill, give, grads_or_none, illum_alloc, illum_receiver,
-                      illum_source, memory_mode, put, roll, swap, take)
+                      illum_source, memory_mode, need_backward, put, roll,
+                      swap, take)
 
 _EL2D_CONSTS = ("ibool", "D", "wJ", "ixx", "ixz", "iex", "iez", "mask_e",
                 "outer_edge_idx", "pat_x", "pat_z", "rec_G", "rec_W",
@@ -162,7 +163,7 @@ class _SEMElasticCpmlC(torch.autograd.Function):
         import sweep._C as _C
         B = int(c.get("B", 1))
         mats = (lam, mu, lam2mu, inv_M, w_rho_J)
-        need_bwd = any(t.requires_grad for t in mats + (wavelet,))
+        need_bwd = need_backward(c)
         s, _ = _el2d_forward_input(c, mats, wavelet, memory_mode(c, need_bwd), B)
         seis_x, seis_z = _C.sem2d_elastic_cpml_forward(s)
         part = illum_source(c, s.illum, B, c["n_global"])
@@ -206,7 +207,7 @@ class _SEMElasticCpmlDDC(torch.autograd.Function):
     def forward(ctx, wavelet, parts, exchange, bs, *mats):
         import sweep._C as _C
         nt = parts[0].c["nt"]
-        need_bwd = wavelet.requires_grad or any(t.requires_grad for t in mats)
+        need_bwd = need_backward(parts[0].c)
         mode = memory_mode(parts[0].c, need_bwd)
         built = [_el2d_forward_input(p.c, mats[5 * i:5 * i + 5], wavelet, mode)
                  for i, p in enumerate(parts)]

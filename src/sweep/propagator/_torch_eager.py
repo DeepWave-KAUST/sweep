@@ -290,7 +290,6 @@ class _PropTorchEager(
             self.source_indices = [self._strips.slots(k)[0] for k in self.source_indices]
             self.receiver_indices = [self._strips.slots(k)[0] for k in self.receiver_indices]
         self._equation_spacing = self._normalize_equation_spacing(self._grid_spacing)
-        self._workspace_cache = {}
         # User-registered custom gradient / imaging conditions.
         #   {param_name: (imaging_fn, mode)}  with mode in {"gradient", "imaging"}
         self._custom_gradients = {}
@@ -776,17 +775,6 @@ class _PropTorchEager(
                 raise ValueError(f"Snapshot time {t} is outside valid range [0, {nt - 1}].")
         return times
 
-    def _get_cached_tensor(self, kind, shape, *, device, dtype):
-        key = (kind, tuple(shape), str(device), str(dtype))
-        cached = self._workspace_cache.get(key)
-        if cached is None:
-            cached = torch.zeros(shape, dtype=dtype, device=device)
-            self._workspace_cache[key] = cached
-        else:
-            cached.detach_()
-            cached.zero_()
-        return cached
-
     def set_parameters(self, model):
         assert len(self.model_names) == len(model), (
             f"Model parameters must be the same length as the model names, got {len(model)} and {len(self.model_names)}"
@@ -938,14 +926,17 @@ class _PropTorchEager(
         if models is not None and not isinstance(models, (list, tuple)):
             models = list(models)
 
-        # Custom-gradient routing: when any model has a registered
-        # gradient-mode imaging condition, replace the autograd path with the
-        # explicit adjoint-state backward (only for plain forward modelling —
-        # adj / return_wavefield / ckpt keep the standard path).
-        if (self._registered_indices("gradient")
-                and not adj and not return_wavefield and not self.use_ckpt):
+        # Custom-gradient routing: a call that records the gradient of a model
+        # with a gradient-mode imaging condition takes the hooked path, whose
+        # backward gives that model the registered gradient. It is plain
+        # forward modelling on the full tape only, and refuses the rest. A
+        # call that records no such gradient takes the standard path.
+        registered = self._registered_recording(models)
+        if registered:
+            self._refuse_custom_gradient_call(adj, return_wavefield)
             return self._custom_gradient_forward(
-                wavelet, sources, receivers, models, batch_size, source_encoding, **kwargs
+                wavelet, sources, receivers, models, batch_size, source_encoding,
+                registered, **kwargs
             )
 
         snapshot_times = kwargs.pop("snapshot_times", None)
@@ -985,14 +976,11 @@ class _PropTorchEager(
         if return_wavefield:
             has_aux = True
             snapshot_shape = (len(snapshot_indices), len(self.wavefield_names), batch_size, 1) + self.shape
-            # NOT through _get_cached_tensor: that cache has no eviction policy,
-            # so the snapshot buffer -- whose size grows linearly in the number
-            # of snapshot steps, and which defaults to EVERY step -- would be
-            # pinned to this propagator for its whole lifetime, long after the
-            # caller stopped holding the snapshots. It is also the one workspace
-            # that is handed to the caller, so a fresh allocation is what lets
-            # it be returned without the defensive clone below, halving the host
-            # memory this path costs.
+            # Fresh per call, never cached on the propagator: the buffer grows
+            # linearly in the number of snapshot steps (every step by default)
+            # and is handed to the caller, so a fresh allocation is what lets it
+            # be returned without a defensive clone, and what lets it go when
+            # the caller drops it.
             snapshots = torch.zeros(snapshot_shape, device=torch.device("cpu"),
                                     dtype=torch.float32)
         else:
@@ -1013,10 +1001,12 @@ class _PropTorchEager(
         runtime_models = self._prepare_runtime_models(models)
         shapes = ([shape_wavefield] * len(self.wavefield_names) if self._strips is None
                   else self._strips.shapes(shape_wavefield))
-        wavefield = [
-            self._get_cached_tensor(f"wavefield:{index}", shape, device=self.dev, dtype=torch.float32)
-            for index, shape in enumerate(shapes)
-        ]
+        # Fresh per call. These were a workspace cached on the propagator and
+        # zeroed in place by every call, but a chunk checkpoint saves its
+        # inputs, the first chunk's being these: a second forward before the
+        # first one's backward bumped their version, and that backward raised.
+        wavefield = [torch.zeros(shape, dtype=torch.float32, device=self.dev)
+                     for shape in shapes]
         if self.use_ckpt and self.ckpt_mode != "chunk":
             raise ValueError(f"Unsupported ckpt_mode '{self.ckpt_mode}' for PropTorch. Expected 'chunk'.")
         if self.use_ckpt and return_wavefield:

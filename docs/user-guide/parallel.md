@@ -157,6 +157,11 @@ against like — the example scripts' `--check` mode does exactly that.
 - Gradient memory: boundary saving only. Each tile reconstructs its forward
   wavefield from saved boundaries, so a wrapped prop built with
   `memory=Full()` or `memory=Ckpt(...)` is refused at construction.
+- One pending backward per instance. The DD backward reads the boundary ring
+  and geometry an instance keeps for its last forward, so a forward —
+  `torch.no_grad()` included — before the previous differentiable forward's
+  backward has run raises `RuntimeError`. Call `backward()` after each
+  forward (gradients accumulate), or free the earlier output.
 - Gradients: the models' only. A `wavelet` that requires grad is refused
   (`NotImplementedError`) before the forward runs, for every equation: the
   domain-decomposed backward returns no source-wavelet gradient. Take that
