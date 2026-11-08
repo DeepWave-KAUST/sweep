@@ -73,6 +73,11 @@ def step_visco_cpml(
     return u_next, u_prev, psixn, psizn, zetaxn, zetazn
 
 
+def _grad_enabled():
+    import torch
+    return torch.is_grad_enabled()
+
+
 def _zero_outer_halo(u, halo, backend):
     """Zero the ``halo``-wide band on all four edges of the trailing (z, x)
     axes.  Dispatch is on the equation's declared ``backend``, not on
@@ -140,8 +145,9 @@ class ViscoAcoustic(SecondOrderEquation):
     (both default on). Both off reduces bit-exactly to ``Acoustic``; both on
     gives the full visco-acoustic response.  Heterogeneous media follow the
     paper's freezing-unfreezing treatment: every coefficient map varies in
-    space, only the fractional EXPONENT is frozen at the average ``gbar``
-    (whose Q-derivative is also frozen, on every backend).
+    space, only the fractional EXPONENT is frozen at the average ``gbar``.
+    ``gbar`` is still a function of Q, and the Q gradient carries its share on
+    every backend.
 
     Because the decoupling is what makes the switches meaningful, note that the
     two effects are not physically independent -- causality ties dispersion and
@@ -222,9 +228,9 @@ class ViscoAcoustic(SecondOrderEquation):
     supports_boundary_saving_c = False
     supports_boundary_saving_eager = False   # same reason; the gradient came out ~5% off
 
-    # impl='c' consumes the PREPARED model pair (vp_step, A), not (vp, Q,
-    # omega); autograd chains the returned (grad_vp_step, grad_A) back through
-    # ``prepare_models`` to the user's three models.
+    # impl='c' consumes the PREPARED models (vp_step, B1, B2, A[, G]), not
+    # (vp, Q, omega); autograd chains the returned gradients back through
+    # ``prepare_models_c`` to the user's three models.
     prepare_models_for_c = True
 
     def __init__(self, spatial_order=4, device='cpu', backend='torch', dim=2,
@@ -331,11 +337,11 @@ class ViscoAcoustic(SecondOrderEquation):
         rows go through a safe branch so the pow's exponent-gradient stays
         finite (0**e backward emits nan*0 otherwise).
 
-        The exponent is DETACHED from autograd on every backend: the paper
-        already freezes the spatially varying exponent at its average, and
-        freezing its Q-derivative too keeps eager and impl='c' (where the
-        grids are data) gradient-identical.  Q sensitivity flows through the
-        coefficient maps (B1, B2, A), which carry the leading terms."""
+        The exponent stays on the autograd graph: frozen in SPACE (the paper's
+        average), not in Q.  ``gbar`` is the mean of ``gamma(Q)``, so a change
+        of Q moves every fractional power, and leaving that out cost the Q
+        gradient 40% against finite differences (a uniform Q change, 6x).
+        impl='c' takes the same term through its G model (prepare_models_c)."""
         gbar = self._gbar
         cache = getattr(self, '_D_cache', None)
         if cache is not None and cache[0] is gbar and cache[1].shape == k.shape:
@@ -348,16 +354,7 @@ class ViscoAcoustic(SecondOrderEquation):
         k_safe = op.where(mask, k, op.ones_like(k))
         zeros = op.zeros_like(k)
         D_k2 = k * k
-        # Type tests, not hasattr(gbar, 'detach'): this runs in the compiled
-        # step, and Dynamo before torch 2.5 breaks the graph on hasattr of a
-        # tensor.
-        if self.backend == 'jax':
-            import jax
-            e = jax.lax.stop_gradient(gbar)
-        elif isinstance(gbar, (np.ndarray, np.generic, float, int)):
-            e = gbar
-        else:
-            e = gbar.detach()
+        e = gbar
         D_frac = op.where(mask, k_safe ** (2.0 * e + 2.0), zeros)
         D_loss = op.where(mask, k_safe ** (2.0 * e + 1.0), zeros)
         grids = (D_k2, D_frac, D_loss)
@@ -367,15 +364,41 @@ class ViscoAcoustic(SecondOrderEquation):
             self._D_cache = (gbar, k, grids)
         return grids
 
+    def prepare_models_c(self, models):
+        """:meth:`prepare_models` for impl='c', plus ``G`` when the frozen
+        exponent needs a gradient.
+
+        The compiled kernels take the fractional grids as data (:meth:`c_eq_aux`),
+        so the exponent's share of the Q gradient cannot reach ``gbar`` through
+        them.  ``G`` -- ``gbar`` broadcast over the model -- is the fifth
+        prepared model that carries it: the forward ignores it, the backward
+        writes dJ/dG into its gradient slot (the grad_A / grad_B2 correlation
+        through the exponent-differentiated grids), and autograd sums that map
+        back through the broadcast to ``gbar`` and on to Q.  Only added when
+        autograd will want it (grad mode on, Q requiring grad, a spectral term
+        switched on), so a call that does not differentiate Q runs the
+        four-model kernels unchanged."""
+        prepared = self.prepare_models(models)
+        Q = models[1]
+        self._c_exp_grad = bool(
+            (self.amplitude_damping or self.phase_shift)
+            and getattr(Q, "requires_grad", False) and _grad_enabled())
+        if not self._c_exp_grad:
+            return prepared
+        vp_step = prepared[0]
+        G = self._gbar.expand(vp_step.shape).contiguous()
+        return (*prepared, G)
+
     def c_eq_aux(self, prop):
         """ForwardInput.eq_aux for the CUDA kernels: the spectral filter grids
         on the runtime grid.  The composition encodes the active terms (see
         ``visco_acoustic2d_spectral_grids``): ``(D_loss,)`` damping only,
         ``(D_k2, D_frac)`` dispersion only, all three for both, ``()`` for
         none.  |k| is raised to the frozen average exponent ``gbar`` from the
-        latest :meth:`prepare_models` call (the paper's freezing-unfreezing:
-        on impl='c' the exponent is DATA, matching the eager side where the
-        exponent's gradient path is detached too).  Built with the same
+        latest :meth:`prepare_models` call (the paper's freezing-unfreezing).
+        When the exponent needs a gradient (:meth:`prepare_models_c` added
+        ``G``), the exponent derivatives ``2 ln|k| D`` of the fractional grids
+        follow, D_loss' then D_frac'.  Built with the same
         :func:`~sweep.equations.base.init_wavenumbers` rule as the eager path
         and cached per (shape, h, device, gbar, switches)."""
         if not (self.amplitude_damping or self.phase_shift):
@@ -388,17 +411,22 @@ class ViscoAcoustic(SecondOrderEquation):
         # carry one per batch element, and the fractional grids become
         # (B, nz, nx) stacks (the CUDA filter strides them per batch index).
         gbars = [float(g) for g in self._gbar.detach().cpu().reshape(-1)]
+        exp_grad = bool(getattr(self, "_c_exp_grad", False))
         key = (shape, h, str(prop.dev), tuple(round(g, 9) for g in gbars),
-               self.phase_shift, self.amplitude_damping)
+               self.phase_shift, self.amplitude_damping, exp_grad)
         cached = getattr(self, "_c_kmul_cache", None)
         if cached is None or cached[0] != key:
             k_np, _, _ = init_wavenumbers(shape, h)
+            pos = k_np > 0
+            log_k = np.log(np.where(pos, k_np, 1.0))
             def t(a):
                 return torch.as_tensor(
                     a.astype(np.float32), device=prop.dev).contiguous()
-            def frac(p):
-                g = [np.where(k_np > 0, np.power(k_np, 2.0*gbar + p, where=k_np > 0), 0.0)
+            def frac(p, derivative=False):
+                g = [np.where(pos, np.power(k_np, 2.0*gbar + p, where=pos), 0.0)
                      for gbar in gbars]
+                if derivative:
+                    g = [2.0 * log_k * x for x in g]
                 return t(g[0] if len(g) == 1 else np.stack(g))
             grids = []
             if self.amplitude_damping:
@@ -406,6 +434,11 @@ class ViscoAcoustic(SecondOrderEquation):
             if self.phase_shift:
                 grids.append(t(k_np * k_np))
                 grids.append(frac(2.0))
+            if exp_grad:
+                if self.amplitude_damping:
+                    grids.append(frac(1.0, derivative=True))
+                if self.phase_shift:
+                    grids.append(frac(2.0, derivative=True))
             self._c_kmul_cache = (key, tuple(grids))
         return self._c_kmul_cache[1]
 

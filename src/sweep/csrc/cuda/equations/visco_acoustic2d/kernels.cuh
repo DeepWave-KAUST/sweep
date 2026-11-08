@@ -153,12 +153,21 @@ inline void visco_acoustic2d_zero_halo(const Buf& u, int M)
 //   (D_loss)                  damping only
 //   (D_k2, D_frac)            dispersion only
 //   (D_loss, D_k2, D_frac)    both
-// Prepared-model layout: (vp_step, B1, B2, A).
+// Prepared-model layout: (vp_step, B1, B2, A), or (vp_step, B1, B2, A, G)
+// when the frozen exponent's gradient is wanted.  G is gbar broadcast over the
+// model (ViscoAcoustic.prepare_models_c); its slot of grads_out takes the
+// exponent's share of the loss, and eq_aux then carries the exponent
+// derivatives of the fractional grids after the composition above,
+//   dD/dgbar = 2 ln|k| D   for D_loss (D_loss') and D_frac (D_frac'),
+// in the same order: (D_loss, D_loss'), (D_k2, D_frac, D_frac') or
+// (D_loss, D_k2, D_frac, D_loss', D_frac').
 struct ViscoSpectral {
     bool active = false;       // damping term present
     bool disp = false;         // dispersion term present
+    bool exp_grad = false;     // accumulate dJ/dG (the frozen exponent's gradient)
     Buf kmul;        // D_loss
     Buf Dk2, Dfrac;  // dispersion grids
+    Buf kmul_p, Dfrac_p;       // 2 ln|k| D_loss, 2 ln|k| D_frac (exp_grad only)
     Buf Gp;                    // dt   * A  (adjoint damping)
     Buf dt2A;                  // dt^2 * A  (forward damping)
     Buf Gd1, Gd2;              // dt^2 * B1, dt^2 * B2
@@ -181,23 +190,47 @@ inline void visco_acoustic2d_check_grid(
 }
 
 // The term switches and filter grids from the eq_aux composition (no tables).
+// ``exp_grad``: the prepared models carry G, so the exponent derivatives of
+// the fractional grids follow the base composition (see ViscoSpectral).
 inline ViscoSpectral visco_acoustic2d_spectral_grids(
-    const BufList& eq_aux, int64_t batch, int nz, int nx)
+    const BufList& eq_aux, int64_t batch, int nz, int nx, bool exp_grad = false)
 {
     ViscoSpectral s;
     const size_t n = eq_aux.size();
-    SWEEP_CHECK(n <= 3, "visco eq_aux takes at most 3 grids, got ", n);
-    s.active = (n == 1 || n == 3);
-    s.disp = (n >= 2);
+    size_t nb = n;   // the base grids
+    if (exp_grad) {
+        SWEEP_CHECK(n == 2 || n == 3 || n == 5,
+                    "visco eq_aux with the exponent gradient takes (D_loss, D_loss'), "
+                    "(D_k2, D_frac, D_frac') or all five grids, got ", n);
+        s.exp_grad = true;
+        s.active = (n == 2 || n == 5);
+        s.disp = (n == 3 || n == 5);
+        nb = (s.active ? 1 : 0) + (s.disp ? 2 : 0);
+    } else {
+        SWEEP_CHECK(n <= 3, "visco eq_aux takes at most 3 grids, got ", n);
+        s.active = (n == 1 || n == 3);
+        s.disp = (n >= 2);
+    }
     if (s.active) {
         s.kmul = eq_aux[0];
         visco_acoustic2d_check_grid(s.kmul, batch, nz, nx, "D_loss");
     }
     if (s.disp) {
-        s.Dk2 = eq_aux[n - 2];
-        s.Dfrac = eq_aux[n - 1];
+        s.Dk2 = eq_aux[nb - 2];
+        s.Dfrac = eq_aux[nb - 1];
         visco_acoustic2d_check_grid(s.Dk2, batch, nz, nx, "D_k2");
         visco_acoustic2d_check_grid(s.Dfrac, batch, nz, nx, "D_frac");
+    }
+    if (s.exp_grad) {
+        size_t i = nb;
+        if (s.active) {
+            s.kmul_p = eq_aux[i++];
+            visco_acoustic2d_check_grid(s.kmul_p, batch, nz, nx, "D_loss'");
+        }
+        if (s.disp) {
+            s.Dfrac_p = eq_aux[i++];
+            visco_acoustic2d_check_grid(s.Dfrac_p, batch, nz, nx, "D_frac'");
+        }
     }
     return s;
 }
@@ -216,9 +249,11 @@ inline ViscoSpectral visco_acoustic2d_make_spectral_from(
     const BufList& derived_models,
     derived::ViscoMode mode, float dt, int nz, int nx, const char* what)
 {
-    SWEEP_CHECK(models.size() == 4, what, ": visco_acoustic2d expects the prepared models "
-                "(vp_step, B1, B2, A); got ", models.size());
-    ViscoSpectral s = visco_acoustic2d_spectral_grids(eq_aux, models[0].size(0), nz, nx);
+    SWEEP_CHECK(models.size() == 4 || models.size() == 5, what,
+                ": visco_acoustic2d expects the prepared models (vp_step, B1, B2, A[, G]); got ",
+                models.size());
+    ViscoSpectral s = visco_acoustic2d_spectral_grids(eq_aux, models[0].size(0), nz, nx,
+                                                      /*exp_grad=*/models.size() == 5);
     const float dt2 = dt * dt;   // float on the host: the scalar of the replaced ``model * (dt * dt)`` products
     const auto c = derived::visco_coefficients(
         derived_models, models[1], models[2], models[3], s.active, s.disp, mode, dt, dt2, what);

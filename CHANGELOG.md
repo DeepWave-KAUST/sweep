@@ -911,6 +911,17 @@ and this project adheres to
   hill on a 1000 m model). Every grid line now takes its own coordinates, in 2-D and 3-D
   (`sweep.sem.cpml._axis.gradient_along`); flat meshes are unchanged bit for bit
   (`test/sem/test_sem_acoustic_cpml_profile.py`).
+- **`ViscoAcoustic`'s Q gradient carries the frozen exponent's share, on every backend.**
+  The spectral terms raise |k| to the model average `gbar = mean(arctan(1/Q)/pi)`, frozen
+  in space as in Zhu & Harris (2014), but `gbar` still moves with Q and every backend
+  dropped that path: eager and jax detached the exponent, impl='c' took the fractional
+  grids as data. Against finite differences the Q gradient was 42% off along a broad Q
+  perturbation, and with the reference frequency above the source band it had the wrong
+  sign. Eager and jax keep the exponent on the graph; impl='c' carries it on a fifth
+  prepared model `G` (`gbar` over the model, added only when Q needs a gradient), whose
+  gradient the backward accumulates through the exponent-differentiated grids
+  `2 ln|k| D` (one more spectral filter per step and term). Now within 2e-3 of finite
+  differences on all three, c vs eager 7e-5. (`test/test_visco_acoustic_exponent_gradient.py`)
 - **`AcousticElasticSEM2D`: a sea floor through a side C-PML band absorbs like the rock
   alone.** The coupling took its plain terms inside the bands, where each domain's C-PML
   carries its stretching into the interface: the solid's form is scaled by `s_x s_z`, so its
