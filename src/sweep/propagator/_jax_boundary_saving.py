@@ -25,10 +25,12 @@ covered by two generic drivers dispatched on the equation's time scheme:
   fallback).
 
 Both zero the CPML memory variables during reconstruction (exact in the
-lossless interior, where the model gradient lives; small near-PML error — same
-design as the CUDA ``_bs`` and eager paths) and re-inject the saved boundary
-ring + the source ('substep': widened ring and per-sub-step restore, as on the
-eager path).  Ring geometry comes from the shared backend-agnostic
+lossless interior) and re-inject the saved boundary ring + the source
+('substep': widened ring and per-sub-step restore, as on the eager path).  As on
+the eager path, the gradient matches plain autodiff everywhere but the
+outermost ``M`` to ``M + 1`` cells next to an absorbing face (see
+``_eager_boundary_saving``); a sigma=0 ``boundary_buffer`` of ``M + 1`` cells
+removes that.  Ring geometry comes from the shared backend-agnostic
 ``_ring_geometry`` module, so eager and JAX save byte-identical strips.
 
 Memory: ``O(nt * halo * perimeter)`` residuals instead of the ``O(nt * Ncells

@@ -23,15 +23,22 @@ without per-equation adjoint code:
   approximate fallback.
 
 Both zero the CPML memory variables during reconstruction (exact in the lossless
-interior, where the model gradient lives; small near-PML error — same design as
-the CUDA ``_bs`` path) and re-inject the saved boundary ring + the source.  The
-ring also takes in the physical cells whose update reads the CPML memory, which
-the reconstruction cannot rebuild: for 'substep' the outermost cell (its
-half-grid values sit in the PML), for 'swap2nd' the cells ``d(a psi)`` reaches
+interior) and re-inject the saved boundary ring + the source.  The ring also
+takes in the physical cells whose update reads the CPML memory, which the
+reconstruction cannot rebuild: for 'substep' the outermost cell (its half-grid
+values sit in the PML), for 'swap2nd' the cells ``d(a psi)`` reaches
 (``_memory_reach``); and each sub-step's fields are restored as soon as it is
-inverted.  The gradient then matches the full tape everywhere but the outermost
-cells next to an absorbing layer, whose recompute and imaging read CPML memory
-that is not stored (a sigma=0 ``boundary_buffer`` of 2M+1 cells removes that).
+inverted.  The reconstructed state is then exact across the physical box, and
+the gradient matches the full tape everywhere but the outermost ``M`` cells
+(``M + 1`` for ``Acoustic1st`` and ``ElasticVRR``) next to an absorbing face:
+the step is re-run under autograd from a state whose CPML memory is zero and
+whose PML cells beyond the ring are not rebuilt, so the model derivative of
+those cells reads wrong CPML memory, wrong sub-step values in the PML part of
+the ring and, for ``AcousticVRR``'s velocity-gradient term, cells beyond the
+ring.  The CUDA backward has no such error: it images from the saved full-step
+fields and never reads the CPML memory.  The default keeps the error; a sigma=0
+``boundary_buffer`` of ``M + 1`` cells moves it onto buffer cells, whose
+gradient is cropped (docs: "Boundary saving next to the PML").
 
 Memory: ``O(nt * halo * perimeter)`` instead of ``O(nt * Ncells * nfields)``.
 """

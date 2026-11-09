@@ -712,11 +712,13 @@ and this project adheres to
   those cells (the second-order reach is measured on the equation) and each
   sub-step's fields are restored as soon as it is inverted, on the k-steps-a-call
   path too: the interior matches to round-off (fp64 1e-15 on the 15 2-D and
-  3-D equations checked).  The outermost cells next to an
-  absorbing layer keep the near-PML error of the design -- their update and
-  imaging read CPML memory that is not stored, up to 4e-3 of the gradient's
-  maximum on the first cell of `AcousticVRR` and `ElasticVRR` -- and a sigma=0
-  `boundary_buffer` of 2M+1 cells removes it.
+  3-D equations checked).  The outermost M to M + 1 cells next to an absorbing
+  face keep an error (`impl='c'` has none): the backward re-runs the step from
+  a state without CPML memory, up to 4e-3 of the gradient's maximum on the
+  first cell of `AcousticVRR` and `ElasticVRR`.  The default keeps it; a
+  sigma=0 `boundary_buffer` of M + 1 cells removes it.  The propagators guide
+  (*Boundary saving next to the PML*) gives its size, its effect on an
+  inversion and the buffer's cost.
 - **The compiled eager step of the 3-D deformed SEM classes with a C-PML is faster:
   forward 4.3-6.4x on `AcousticSEM3DDeformed`, 1.9-3x on `ElasticVSSEM3DDeformed`,
   `ElasticVTISEM3DDeformed`, `ElasticTTISEM3DDeformed` and

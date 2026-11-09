@@ -157,6 +157,14 @@ gradient needs between the model and the CPML (e.g. `AcousticVRZ*`); shapes and 
 not change. An explicit smaller value is refused under boundary saving; non-zero buffers cannot
 be combined with `topography=`.
 
+On eager and `PropJax`, boundary saving leaves an error on the outermost M to M + 1 cells next
+to an absorbing face (M = `spatial_order // 2`): measured against the gradient on the outermost
+ring, 0.01-0.3% for most equations, 5-7% for `ElasticVRR`, 66% for `AcousticVRR`. The default
+keeps it. An explicit `boundary_buffer=M + 1` puts those cells in the buffer, whose gradient is
+cropped, and the gradient then matches `Full()` to rounding; the CPML starts M + 1 cells further
+out, which changes the records by up to ~2e-3 relative. `impl='c'` boundary saving needs no
+buffer, and the eager default `Ckpt()` is exact.
+
 ## 6. What is refused (raises rather than running the wrong physics)
 
 - Free surface on anisotropic equations, including via `topography=`.
