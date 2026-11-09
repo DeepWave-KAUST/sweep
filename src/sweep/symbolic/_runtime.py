@@ -6,13 +6,17 @@ source / receiver fields and the free surface. The second-order set-up mirrors
 (3-D), first-derivative kernels included: the fixed stencil on a 2-D CUDA
 device, ``torch.gradient`` otherwise. The first-order one is
 :class:`~sweep.equations.base.FirstOrderEquation`'s staggered-grid operator, as
-:class:`~sweep.equations.Acoustic1st` and :class:`~sweep.equations.Elastic` use.
+:class:`~sweep.equations.Acoustic1st` and :class:`~sweep.equations.Elastic` use,
+plus, for a dissipative term, the second-order equations' separable second
+derivatives.
 """
 from __future__ import annotations
 
 from sweep.equations._free_surface import zero_above_topo
 from sweep.equations.base import FirstOrderEquation, SecondOrderEquation
 from sweep.equations.utils import zero_top_halo_fields
+from sweep.operators.factory import LaplaceGradientOps
+from sweep.scalars import generate_convolution_kernel
 
 
 def _torch_only(cls, backend):
@@ -88,21 +92,53 @@ class SymbolicFirstOrderEquation(FirstOrderEquation):
     SYMBOLIC_PML = "cpml"
     DEFAULT_SOURCE_FIELDS = ()
     DEFAULT_RECEIVER_FIELDS = ()
+    # The dissipative (viscous, diffusive) terms of the PDE as text,
+    # ("nu*laplace(vx)", ...); empty for a lossless system.
+    DISSIPATIVE_TERMS = ()
     default_pml_type = "cpmls"
     # Appended by the propagator to its refusal of a topography.
     image_topography_hint = "A first-order PDE takes no free surface yet."
+
+    # A dissipative term's second derivatives: the separable stencil of the
+    # second-order equations.
+    init_separable_laplace = SecondOrderEquation.init_separable_laplace
+    _prepare_separable_laplace_kernels = SecondOrderEquation._prepare_separable_laplace_kernels
 
     def __init__(self, spatial_order=4, device="cpu", backend="torch"):
         """Build the equation operator.
 
         Args:
             spatial_order: FD accuracy order of the staggered first
-                derivatives; an even integer. Defaults to 4.
+                derivatives and of the second derivatives of the dissipative
+                terms; an even integer. Defaults to 4.
             device: device of the static stencils. Defaults to ``'cpu'``.
             backend: ``'torch'`` only. Defaults to ``'torch'``.
         """
         _torch_only(type(self), backend)
         super().__init__(spatial_order, device, backend, ndim=self.NDIM)
+        if self.DISSIPATIVE_TERMS:
+            LaplaceGradientOps.__init__(self, backend=backend)
+            self.kf = generate_convolution_kernel
+            self.init_separable_laplace()
+
+    # Eager boundary saving rebuilds the wavefield by running the step
+    # backwards in time. A property rather than the flag the shipped
+    # dissipative equations set to False: the propagator reads it when boundary
+    # saving is requested, and this refusal names the terms (the flag's shared
+    # refusal speaks of round-off and offers impl='c', which a generated class
+    # does not have).
+    @property
+    def supports_boundary_saving_eager(self):
+        if self.DISSIPATIVE_TERMS:
+            terms = ", ".join(self.DISSIPATIVE_TERMS)
+            raise NotImplementedError(
+                f"{type(self).__name__} cannot use boundary saving: it rebuilds the wavefield by "
+                f"stepping backwards in time, which the dissipative term"
+                f"{'s' if len(self.DISSIPATIVE_TERMS) > 1 else ''} {terms} do"
+                f"{'' if len(self.DISSIPATIVE_TERMS) > 1 else 'es'} not allow: stepped backwards, "
+                "a diffusion amplifies every round-off error instead of damping it, and the gradient "
+                "would be wrong. Use memory=Full() or memory=Ckpt().")
+        return True
 
     @property
     def default_source_fields(self):

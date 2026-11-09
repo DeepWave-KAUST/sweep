@@ -11,9 +11,11 @@ from __future__ import annotations
 import itertools
 
 import sympy
+from sympy.core.symbol import Str
 from sympy.printing.precedence import PRECEDENCE
 from sympy.printing.str import StrPrinter
 
+from ._expr import D2, Lap
 from ._lower import axes_of
 
 _TORCH_FUNCS = {"sqrt": "sqrt", "exp": "exp", "log": "log", "sin": "sin", "cos": "cos",
@@ -292,19 +294,42 @@ def _plain_sum(derivs):
     return names[0] if len(names) == 1 else f"({' + '.join(names)})"
 
 
+def _lap_name(field, ax):
+    return f"_lap{ax}_{field}"
+
+
+def _lap_sum(group):
+    names = [_lap_name(group.field, ax) for ax in group.axes]
+    return names[0] if len(names) == 1 else f"({' + '.join(names)})"
+
+
+def dissipative_terms(low):
+    """The dissipative terms of a lowered first-order system, as text:
+    ``nu*laplace(vx)`` for a group over every axis, ``kappa*T.dz2`` otherwise."""
+    axes = axes_of(low.ndim)
+    out = []
+    for field, g in low.dissipative:
+        op = Lap(field) if g.axes == axes else sympy.Add(*[D2(field, Str(ax)) for ax in g.axes])
+        out.append(str(g.coef * op))
+    return tuple(out)
+
+
 def _first_update(up, shared):
     """``f = f + dt * RHS``, its products associated as the shipped equations
     associate theirs: one coefficient goes with ``dt`` (``dt/rho * (...)``,
     ``rho*vp**2*dt * (...)``), several are summed inside ``dt * (...)``.
-    ``shared``: the sums of derivatives computed once for the sub-step."""
+    ``shared``: the sums of derivatives computed once for the sub-step. The
+    dissipative terms come last, each a coefficient times its second
+    derivatives (``nu*(_lapz_vx + _lapx_vx)``)."""
     f = str(up.field)
 
     def _sum(derivs):
         return shared.get(derivs) or _plain_sum(derivs)
 
-    if len(up.terms) == 1:
-        t = up.terms[0]
-        c, sign = t.coef, "+"
+    items = [(t.coef, _sum(t.derivs)) for t in up.terms] + [(g.coef, _lap_sum(g)) for g in up.d2]
+    if len(items) == 1:
+        c, s = items[0]
+        sign = "+"
         if c.could_extract_minus_sign():
             c, sign = -c, "-"
         num, den = sympy.fraction(c)
@@ -316,25 +341,29 @@ def _first_update(up, shared):
             dtc = f"dt/{_printer.parenthesize(den, PRECEDENCE['Mul'])}"
         else:
             dtc = f"{_printer.parenthesize(c, PRECEDENCE['Mul'], strict=True)}*dt"
-        return f"{f} = {f} {sign} {dtc} * {_sum(t.derivs)}"
+        return f"{f} = {f} {sign} {dtc} * {s}"
     parts = []
-    for k, t in enumerate(up.terms):
-        c, neg = t.coef, t.coef.could_extract_minus_sign()
+    for k, (c, s) in enumerate(items):
+        neg = c.could_extract_minus_sign()
         if neg:
             c = -c
-        term = (_sum(t.derivs) if c == 1
-                else f"{_printer.parenthesize(c, PRECEDENCE['Mul'], strict=True)}*{_sum(t.derivs)}")
+        term = s if c == 1 else f"{_printer.parenthesize(c, PRECEDENCE['Mul'], strict=True)}*{s}"
         parts.append(("-" if neg else "") + term if k == 0 else (" - " if neg else " + ") + term)
     return f"{f} = {f} + dt * ({''.join(parts)})"
 
 
-def _substep_lines(sub, use_cpml, counter):
+def _substep_lines(sub, use_cpml, counter, ndim, free=True):
     """One sub-step: its derivatives, then per update its CPML corrections and
     the update. A sum of derivatives that several updates read (the divergence
     of the 3-D stresses) is computed once, before the first of them: written
     out per update, autograd would keep a copy per update for the backward.
-    The temporaries are freed at the sub-step's end, as the shipped equations
-    free theirs on returning from a sub-step function."""
+    The temporaries are freed at the sub-step's end (``free``), as the shipped
+    equations free theirs on returning from a sub-step function. The second
+    derivatives of a dissipative term are taken just before their field's
+    update, with the second-order equations' separable stencil and no CPML
+    correction, and freed after it."""
+    axes = axes_of(ndim)
+    spacings = ", ".join(f"_h{ax}" for ax in axes)
     lines = [f"{_dname(d)} = pd.{d.axis}_{'forward' if d.forward else 'backward'}({d.field})"
              for d in sub.taken]
     sums = [t.derivs for up in sub.updates for t in up.terms if len(t.derivs) > 1]
@@ -356,8 +385,16 @@ def _substep_lines(sub, use_cpml, counter):
             if t.derivs in names and t.derivs not in shared:
                 shared[t.derivs] = names[t.derivs]
                 lines.append(f"{names[t.derivs]} = {' + '.join(_dname(d) for d in t.derivs)}")
+        laps = [_lap_name(up.field, ax) for ax in axes] if up.d2 else []
+        if laps:
+            lines.append(f"{', '.join(laps)} = self.separable_d2_{ndim}d({up.field}, self.laplace_kernels, "
+                         f"{spacings})")
         lines.append(_first_update(up, shared))
-    lines.append(f"del {', '.join([_dname(d) for d in sub.taken] + list(names.values()))}")
+        if laps:
+            lines.append(f"del {', '.join(laps)}")
+    temps = [_dname(d) for d in sub.taken] + list(names.values())
+    if free and temps:
+        lines.append(f"del {', '.join(temps)}")
     return lines
 
 
@@ -366,6 +403,7 @@ def generate_first_order(name, low, *, pml, doc):
     axes = axes_of(ndim)
     use_cpml = pml == "cpml"
     mem = low.derivs if use_cpml else ()
+    dissipative = dissipative_terms(low)
 
     specs = []
     for f in low.fields:
@@ -383,24 +421,42 @@ def generate_first_order(name, low, *, pml, doc):
 
     phys = [str(f) for f in low.fields]
     state = phys + [f"_{_mname(d)}" for d in mem]
-    body = [f"{', '.join(state)} = wavefields", *_model_lines(low), "pd = self.pd"]
+    # A single field (a diffusion) unpacks as ``(T,) = wavefields``; without a
+    # first derivative the step needs no ``pd``.
+    body = [f"{_unpack(state)} = wavefields", *_model_lines(low), *(["pd = self.pd"] if low.derivs else [])]
+    if dissipative:
+        body.append(f"{', '.join(f'_h{ax}' for ax in axes)} = self._spacings_{ndim}d(h)")
     if mem:
         body.append(f"{', '.join(f'_a{ax}, _b{ax}, _a{ax}h, _b{ax}h' for ax in axes)} = self.b")
     counter = itertools.count()
     for sub in low.substeps:
         body.append(f"# {', '.join(str(u.field) for u in sub.updates)}")
-        body += _substep_lines(sub, use_cpml, counter)
+        body += _substep_lines(sub, use_cpml, counter, ndim)
     body.append(f"return ({', '.join(state)},)")
 
-    subs = []
-    for k, sub in enumerate(low.substeps):
-        subs += [f"def _sub{k}(wavefields, models, dt, h):",
-                 f"    {_unpack(phys)} = wavefields[:{len(phys)}]",
-                 *[f"    {line}" for line in _model_lines(low)],
-                 *[f"    {line}" for line in _substep_lines(sub, False, itertools.count())[:-1]],
-                 f"    return [{', '.join(phys)}, *wavefields[{len(phys)}:]]",
-                 ""]
-    subs.append(f"return [{', '.join(f'_sub{k}' for k in range(len(low.substeps)))}]")
+    # A dissipative system has no lossless sub-steps to run backwards: the
+    # class refuses boundary saving instead (SymbolicFirstOrderEquation).
+    substeps = []
+    if not dissipative:
+        subs = []
+        for k, sub in enumerate(low.substeps):
+            subs += [f"def _sub{k}(wavefields, models, dt, h):",
+                     f"    {_unpack(phys)} = wavefields[:{len(phys)}]",
+                     *[f"    {line}" for line in _model_lines(low)],
+                     *[f"    {line}" for line in _substep_lines(sub, False, itertools.count(), ndim, free=False)],
+                     f"    return [{', '.join(phys)}, *wavefields[{len(phys)}:]]",
+                     ""]
+        subs.append(f"return [{', '.join(f'_sub{k}' for k in range(len(low.substeps)))}]")
+        substeps = [
+            "",
+            "    def interior_substeps(self):",
+            '        """The lossless leapfrog as sub-steps for eager boundary saving: each',
+            "        updates its fields from the others only, so the same code at -dt",
+            '        inverts it."""',
+            "        pd = self.pd",
+            "",
+            *[f"        {line}" if line else "" for line in subs],
+        ]
 
     src_fields = [str(f) for f in low.fields if f.source]
     rec_fields = [str(f) for f in low.fields if f.receiver]
@@ -421,6 +477,7 @@ def generate_first_order(name, low, *, pml, doc):
         f"    SYMBOLIC_PML = {pml!r}",
         f"    DEFAULT_SOURCE_FIELDS = {tuple(src_fields[:1])!r}",
         f"    DEFAULT_RECEIVER_FIELDS = {tuple(rec_fields[:1])!r}",
+        *([f"    DISSIPATIVE_TERMS = {dissipative!r}"] if dissipative else []),
         "",
         "    MODEL_SPECS = (",
         *[f"        {m}," for m in _model_specs(low)],
@@ -432,14 +489,7 @@ def generate_first_order(name, low, *, pml, doc):
         *_prepare_models(low),
         "    def func(self, wavefields, models, dt, h, b, **kwargs):",
         *[f"        {line}" for line in body],
-        "",
-        "    def interior_substeps(self):",
-        '        """The lossless leapfrog as sub-steps for eager boundary saving: each',
-        "        updates its fields from the others only, so the same code at -dt",
-        '        inverts it."""',
-        "        pd = self.pd",
-        "",
-        *[f"        {line}" if line else "" for line in subs],
+        *substeps,
         "",
     ]
     return "\n".join(lines)

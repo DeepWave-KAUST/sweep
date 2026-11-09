@@ -15,7 +15,11 @@ the order the equations are written (a leapfrog: later equations read the
 fields earlier ones updated), and RHS must be a model-only coefficient times
 first derivatives of other fields. Each derivative is a staggered difference
 from the field's position to the position of the field it updates (see
-``lower_first_order``).
+``lower_first_order``). RHS may also carry second derivatives of ``f`` itself
+(``nu * laplace(f)``, ``kappa * f.dz2``: viscous and diffusive terms), taken on
+``f``'s own position with the second-order equations' separable stencil, from
+``f`` before its update (forward Euler). Such a term is dissipative: the step
+can no longer be run backwards in time.
 
 Anything else is refused here, before code is written.
 """
@@ -279,10 +283,13 @@ class FirstUpdate:
     """``field = field + dt * RHS``. ``terms`` holds one Term per distinct
     coefficient: one Term is written ``field +- dt*coef * (derivs)``, several
     ``field + dt * (coef * (derivs) + ...)``. ``derivs``: every derivative the
-    update reads, in the order its CPML corrections run."""
+    update reads, in the order its CPML corrections run. ``d2``: the
+    dissipative terms, one :class:`Group` of second derivatives of ``field``
+    per distinct coefficient, after the terms in the sum."""
     field: Field
     terms: tuple
     derivs: tuple
+    d2: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -303,21 +310,68 @@ class LoweredFirst:
     substeps: tuple
     derivs: tuple         # every derivative taken, memory-field order
 
+    @property
+    def dissipative(self):
+        """The dissipative terms, ``((field, Group), ...)`` in the order written."""
+        return tuple((up.field, g) for sub in self.substeps for up in sub.updates for g in up.d2)
+
 
 def _axis_key(axes):
     """Sort key of a derivative: x, y, z (the order in which the sums are written)."""
     return lambda d: (-axes.index(d.axis), d.field._order)
 
 
-def _first_order_terms(eq, rhs):
-    """``[(coef, (D1, ...)), ...]`` with ``rhs == sum(coef * sum(D1s))``: each top-level
-    term of ``rhs`` as written (a coefficient times a derivative or a plain sum
-    of derivatives), or term by term when it is not of that form."""
+def _split_dissipative(eq, field, rhs, axes, ndim):
+    """``(rest, groups)``: the second derivatives of ``field`` itself split off
+    ``rhs`` as Groups of the axes that share a coefficient (z, y, x order), and
+    what remains of ``rhs``, its terms kept as written. A second derivative of
+    another field is refused: it would not land on ``field``'s position."""
     for op in rhs.atoms(Dt):
         raise NotImplementedError(f"{eq}: {op} on the right-hand side is not supported")
-    for op in rhs.atoms(D2, Lap):
-        raise NotImplementedError(
-            f"{eq}: {op} -- a first-order equation takes first derivatives only (f.dx, f.dz)")
+    laps = {}
+    for lap in rhs.atoms(Lap):
+        if not isinstance(lap.field, Field):
+            raise TypeError(f"{eq}: {lap} is not the Laplacian of a Field")
+        laps[lap] = sympy.Add(*[D2(lap.field, Str(ax)) for ax in axes])
+    rhs = rhs.xreplace(laps)
+    ops = sorted(rhs.atoms(D2), key=sympy.default_sort_key)
+    for op in ops:
+        if not isinstance(op.field, Field):
+            raise TypeError(f"{eq}: {op} is not a derivative of a Field")
+        if op.field != field:
+            raise NotImplementedError(
+                f"{eq}: {op} -- a first-order equation takes second derivatives of its own field "
+                f"only (a viscous or diffusive term such as nu*laplace({field}))")
+        if op.axis not in axes:
+            raise ValueError(f"{eq}: {op} is a {op.axis}-derivative in a {ndim}-D build")
+    if not ops:
+        return rhs, ()
+    holes = {op: sympy.Dummy(f"D2_{op.field}_{op.axis}") for op in ops}
+    e = rhs.xreplace(holes)
+    slots = set(holes.values())
+    coefs = {}
+    for op, s in holes.items():
+        c = sympy.diff(e, s)
+        if c.free_symbols & slots or _fields_and_ops(c):
+            raise ValueError(f"{eq}: not linear in the derivatives ({op} is multiplied by a field "
+                             "or a derivative)")
+        _check_coefficient(eq, op, c)
+        coefs[op.axis] = c
+    by_coef = {}
+    for ax in axes:
+        c = coefs.get(ax)
+        if c is not None and c != 0:
+            by_coef.setdefault(c, []).append(ax)
+    rest = e.xreplace({s: 0 for s in slots})
+    return rest, tuple(Group(c, field, tuple(a)) for c, a in by_coef.items())
+
+
+def _first_order_terms(eq, rhs, dissipative=False):
+    """``[(coef, (D1, ...)), ...]`` with ``rhs == sum(coef * sum(D1s))``: each top-level
+    term of ``rhs`` as written (a coefficient times a derivative or a plain sum
+    of derivatives), or term by term when it is not of that form. ``rhs`` is
+    what :func:`_split_dissipative` left; ``dissipative``: it split off terms,
+    so ``rhs`` may be empty (pure diffusion)."""
     ops = sorted(rhs.atoms(D1), key=sympy.default_sort_key)
     for op in ops:
         if not isinstance(op.field, Field):
@@ -340,6 +394,8 @@ def _first_order_terms(eq, rhs):
             f"{eq}: the term {rest} contains no field; a source term is not part of "
             "the PDE (sources are injected by the propagator)")
     if not ops:
+        if dissipative:
+            return []
         raise ValueError(f"{eq}: the right-hand side has no derivative")
 
     terms = []
@@ -393,6 +449,10 @@ def lower_first_order(solved, ndim, models=None):
       order, its derivatives by the declaration order of their fields;
     * then, per equation in the order written, the CPML corrections of its
       derivatives not corrected yet (along z, y, x), then its update.
+
+    The second derivatives of a dissipative term are taken just before the
+    update of their field, from its value at the start of the step (the one
+    update that changes it), and get no CPML correction.
     """
     axes = axes_of(ndim)
     updates = _by_field(solved)
@@ -404,8 +464,11 @@ def lower_first_order(solved, ndim, models=None):
 
     used, by_field = set(), {}
     for eq, field, _, rhs in solved:
+        rhs, d2 = _split_dissipative(eq, field, rhs, axes, ndim)
+        for g in d2:
+            used |= g.coef.free_symbols
         terms = []
-        for c, parts in _first_order_terms(eq, rhs):
+        for c, parts in _first_order_terms(eq, rhs, dissipative=bool(d2)):
             derivs = []
             for op in parts:
                 if op.field not in updates:
@@ -422,7 +485,7 @@ def lower_first_order(solved, ndim, models=None):
         terms = sorted((Term(c, d) for c, d in merged.items()), key=lambda t: _axis_key(axes)(t.derivs[0]))
         reads = sorted({d for t in terms for d in t.derivs},
                        key=lambda d: (axes.index(d.axis), d.field._order))
-        by_field[field] = (eq, FirstUpdate(field, tuple(terms), tuple(reads)))
+        by_field[field] = (eq, FirstUpdate(field, tuple(terms), tuple(reads), d2))
 
     # One derivative of a field along an axis: one difference, one CPML memory.
     seen = {}

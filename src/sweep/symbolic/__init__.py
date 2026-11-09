@@ -24,7 +24,10 @@ Supported so far:
 * first-order staggered-grid systems (``Field(time_order=1, stagger=...)``,
   ``Eq(vx.dt, ...)``): each right-hand side a model-only coefficient times
   first derivatives of the other fields, taken as staggered differences; CPML
-  on every derivative; no free surface;
+  on every derivative; no free surface; plus dissipative terms, a model-only
+  coefficient times second derivatives of the field itself
+  (``nu * laplace(vx)``, ``kappa * T.dz2``), stepped forward in time (Euler)
+  without CPML. A class with such a term refuses boundary saving;
 * ``Coefficient``: model-derived coefficients computed once per run.
 
 Anything else raises when the PDE is constructed.

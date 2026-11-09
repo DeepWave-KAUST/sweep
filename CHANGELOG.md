@@ -151,7 +151,13 @@ and this project adheres to
   fields, taken as forward or backward staggered differences from the fields'
   declared positions; C-PML (`cpmls`) on every derivative; the step's sub-steps
   double as the `interior_substeps` of eager boundary saving; no free surface
-  yet. `Coefficient("mu", rho * vs**2)` is computed once per run
+  yet. A first-order equation may add dissipative terms, a model-only
+  coefficient times second derivatives of its own field (`nu * laplace(vx)`,
+  `kappa * T.dz2`: unsteady Stokes flow, heat conduction), stepped explicitly
+  with the second-order stencil and no CPML (stable for
+  `dt <= h**2 / (2 * ndim * nu)` at spatial order 2, 0.62 times that at order
+  8); such a class refuses boundary saving, naming the terms, and runs with
+  `Full()` and `Ckpt()`. `Coefficient("mu", rho * vs**2)` is computed once per run
   (`prepare_models`). Anything else raises when the PDE is built. Restating
   `Acoustic` / `Acoustic3D` reproduces them bit for bit, record and gradient,
   with the same peak memory; restating `Acoustic1st` and the 2-D `Elastic` bit

@@ -39,7 +39,7 @@ with `Full()` or `BoundarySaving()`.
 | `Field("p", source=, receiver=, aliases=, description=)` | a second-order wavefield; its name is what `source_type` / `receiver_type` take |
 | `Field("vx", time_order=1, stagger="x", ...)` | a field of a first-order system, half a cell after the node along x (see below) |
 | `p.dt2`, `vx.dt` | second / first time derivative |
-| `p.dz2`, `p.dy2`, `p.dx2` | second derivative along one axis (second-order fields) |
+| `p.dz2`, `p.dy2`, `p.dx2` | second derivative along one axis (second-order fields; in a first-order system, of the field itself: a dissipative term) |
 | `laplace(p)` | sum of the second derivatives over every axis of the build |
 | `vx.dz`, `vx.dy`, `vx.dx` | first derivative along one axis (first-order systems) |
 | `Eq(lhs, rhs)` | one equation; each field has exactly one |
@@ -127,13 +127,71 @@ in reverse order at `-dt` to step back in time exactly. Every derivative gets a
 C-PML memory field (`cpmls`), shared by the equations that read it; the
 half-node damping profiles serve a derivative taken at a staggered position.
 
+### Dissipative terms
+
+A first-order equation may also carry second derivatives of its own field, a
+model-only coefficient times `laplace(f)`, `f.dz2`, `f.dx2` ...: viscosity,
+diffusion. Heat conduction is one such term, and the unsteady Stokes equations
+in Chorin's artificial-compressibility form add one to each velocity of the
+pressure-velocity system:
+
+```python
+kappa = Model("kappa", unit="m^2/s")
+T = Field("T", time_order=1, source=True, receiver=True)
+Heat = PDE([Eq(T.dt, kappa * laplace(T))], name="Heat").build(ndim=2)
+
+rho, nu, c = Model("rho", unit="kg/m^3"), Model("nu", unit="m^2/s"), Model("c", unit="m/s")
+vx = Field("vx", time_order=1, stagger="x", source=True, receiver=True)
+vz = Field("vz", time_order=1, stagger="z", receiver=True)
+p = Field("p", time_order=1, receiver=True)
+
+Stokes = PDE([
+    Eq(vx.dt, -p.dx / rho + nu * laplace(vx)),
+    Eq(vz.dt, -p.dz / rho + nu * laplace(vz)),
+    Eq(p.dt, -rho * c**2 * (vx.dx + vz.dz)),
+], name="Stokes").build(ndim=2)
+```
+
+The second derivatives are taken with the second-order fields' stencil
+(`separable_d2_2d/3d`), on the field's own position, from its value at the
+start of the step (the one update that changes it): the term steps forward in
+time (explicit Euler). It gets no CPML correction; in the absorbing layer the
+field diffuses on, and beyond the padded grid it is taken as zero. A second
+derivative of another field raises: it would not land on the position of the
+field it updates.
+
+The explicit step is stable only for
+
+```text
+dt <= 2 / (S * sum over the axes of coef / h_axis**2)
+   =  2 h^2 / (ndim * S * nu)          (equal spacings, one coefficient nu)
+```
+
+with `coef` the largest coefficient of the term along each axis and `S` the
+largest value of the stencil's symbol, reached at the Nyquist wavenumber:
+`S = 4` at spatial order 2, which gives `dt <= h^2 / (2 ndim nu)`, `16/3` at
+order 4, `6.04` at order 6 and `6.50` at order 8, so the bound is 0.75, 0.66
+and 0.62 times `h^2 / (2 ndim nu)`. Measured on the heat equation in 2-D, at
+orders 2, 4 and 8: 0.98 times the bound decays, 1.02 times grows to 1e30 within
+2000 steps. The wave terms keep their own CFL condition. Forward Euler is first
+order in time: an error that falls as `dt`.
+
+A dissipative term cannot be run backwards: stepped back in time, a diffusion
+amplifies every round-off error instead of damping it. Eager boundary saving
+rebuilds the wavefield exactly that way, so the class has no
+`interior_substeps` and refuses `BoundarySaving()`, naming the terms
+(`DISSIPATIVE_TERMS`), instead of returning a wrong gradient. `Full()` and
+`Ckpt()` run as usual.
+
 ### What is supported
 
 - Second-order-in-time fields; the right-hand side linear in the fields, each
   term a model-only coefficient times a second derivative along one axis or
   times a field.
 - First-order systems; each right-hand side a model-only coefficient times
-  first derivatives of the other fields, or a sum of such terms.
+  first derivatives of the other fields, or a sum of such terms, plus
+  dissipative terms: a model-only coefficient times second derivatives of the
+  field itself, explicit in time, without CPML, and no boundary saving.
 - 2-D and 3-D, any even `spatial_order`.
 - `pml="cpml"` (default): C-PML on every spatial derivative, the updates the
   shipped equations use (`cpmlr` for second-order fields, `cpmls` for
@@ -149,9 +207,10 @@ second-order fields, damping terms (`f.dt` next to `f.dt2`), terms nonlinear in
 the fields, terms without a field (sources are injected by the propagator),
 symbols that are neither models nor coefficients, a field used without its own
 equation; in a first-order system also a free surface, a field without a
-derivative on a right-hand side, a derivative between fields at the same
-position (collocated) or a whole cell apart, and a derivative read before and
-after its field is updated. A `y` derivative or a `y` stagger raises at
+derivative on a right-hand side (damping and coupling terms), a second
+derivative of another field, a derivative between fields at the same position
+(collocated) or a whole cell apart, and a derivative read before and after its
+field is updated. A `y` derivative or a `y` stagger raises at
 `build(ndim=2)`.
 
 ## The generated class
@@ -167,7 +226,8 @@ operators and the same order. For second-order fields, `separable_d2_2d/3d`,
 derivative, then the CPML update of each axis followed by its in-place sum.
 For a first-order system, the staggered differences and `cpml_update`: per
 sub-step, its derivatives, then per equation the CPML corrections of its
-derivatives (along z, y, x) and its update. Autograd accumulates gradients in
+derivatives (along z, y, x), the second derivatives of its dissipative terms
+(`separable_d2_2d/3d`) and its update. Autograd accumulates gradients in
 the order the graph was built, so another order of the same operations would
 move an uncompiled gradient by about 1e-7.
 
@@ -178,7 +238,8 @@ move an uncompiled gradient by about 1e-7.
 | `default_source_fields` / `default_receiver_fields` | the first field with `source=True` / `receiver=True` |
 | `prepare_models` | the coefficients, if any |
 | `func` | the time step |
-| `interior_substeps` | first order: the sub-steps without CPML, for eager boundary saving |
+| `interior_substeps` | first order: the sub-steps without CPML, for eager boundary saving; not for a system with dissipative terms |
+| `DISSIPATIVE_TERMS` | first order: the dissipative terms (`"nu*laplace(vx)"`, ...), which make the class refuse boundary saving |
 
 `build(ndim, register=True)` also registers the class under `name`, so
 `get_equation(name)` and `sweep list equations` find it. A rebuild under the
@@ -200,6 +261,10 @@ in [Extending](extending.md#part-2-adding-a-compiled-cuda-kernel-implc).
 | The same, compiled | `Acoustic1st` bit for bit; `Elastic` record bit for bit, gradients 8e-8 to 2.3e-7 |
 | Restated 3-D `Elastic` | record bit for bit, gradients 5e-8 to 8.4e-7 |
 | Elliptic anisotropic first-order acoustics, finite differences (canonical case, fp32) | error falls as h² down to the fp32 floor, 6e-5 to 2e-3 |
+| Heat conduction, an impulse vs the heat kernel (8th order, `kappa dt / h^2 = 0.05`) | 2-D 7.7e-4 at t = 40 h²/κ, falling as dt (orders 4 and 8); 3-D 2.4e-3 at t = 20 h²/κ; the heat conserved to 5e-6 |
+| Unsteady Stokes, a Gaussian vortex vs Lamb-Oseen (8th order, `nu dt / h^2 = 0.05`) | vorticity 3.6e-4 by the time the core area has quadrupled, half that at dt / 2; circulation to 1e-6; p stays at 1e-5 of rho v_max² |
+| Stokes and heat gradients, finite differences (fp32) | `nu` 3.3e-5, `c` 3.2e-5, `kappa` 5.3e-5; `rho` 2.5e-4, its weak data sensitivity at the fp32 floor |
+| Stokes and heat, `Ckpt()` and `cpml_strips` vs `Full()` | bit for bit, record and gradient; compiled 1.6e-7 to 5.5e-7 |
 | `torch.compile(fullgraph=True)` | one graph per step |
 
 The restated 3-D `Elastic` takes its derivatives and CPML corrections in an
