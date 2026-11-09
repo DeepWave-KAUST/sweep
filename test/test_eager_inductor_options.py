@@ -140,10 +140,7 @@ needs_toolkit = pytest.mark.skipif(not torch.cuda.is_available() or not TE._cuda
 @pytest.mark.parametrize("mode, extras", [
     ("default", {"cpp_wrapper": True, "combo_kernels": True}),
     ("max-autotune-no-cudagraphs", {"cpp_wrapper": True, "combo_kernels": True}),
-    # a C++ wrapper would turn the CUDA graphs of these modes off
-    ("reduce-overhead", {"combo_kernels": True}),
-    ("max-autotune", {"combo_kernels": True}),
-])
+])      # the modes that replay CUDA graphs are refused on a GPU (test_eager_cuda_graph_modes)
 def test_on_a_gpu_both_are_on_by_default(mode, extras):
     assert _solver("cuda", compile_mode=mode)._backend_impl._inductor_extras == extras
 

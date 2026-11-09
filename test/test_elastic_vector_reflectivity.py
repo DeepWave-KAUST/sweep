@@ -17,6 +17,9 @@ coverage tests:
    ``R = 1/2 grad(ln Z)`` to FD precision on a known density layer.
 6. The ``-2 gamma_S_zz`` (NOT ``-2 gamma_S_xx``) index in the
    sigma_xx update is enforced -- targeted unit test.
+7. The velocity gradients ``vp_x, vp_z, vs_x, vs_z`` belong to the call
+   that makes them: a second model through the same propagator, and
+   boundary saving at several steps a call run uncompiled.
 """
 
 from __future__ import annotations
@@ -265,9 +268,6 @@ def test_layer_impedance_step_pp_reflection():
         wavelet, sources, receivers,
         models=[vp, vs, zero, Rp_z_small, zero, zero],
     )
-    # Need a fresh propagator -- the cached velocity-gradient buffer is
-    # keyed on (id(vp), id(vs)), but the run-to-run state inside PropTorch
-    # is per-instance. Use a separate prop for clean state.
     prop2 = _make_evr_prop()
     syn_large = prop2(
         wavelet, sources, receivers,
@@ -431,3 +431,65 @@ def test_sigma_xx_index_swap_uses_gamma_S_zz_not_xx():
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# 7. The velocity gradients belong to the call that makes them
+# ---------------------------------------------------------------------------
+
+
+def _random_models(seed):
+    g = torch.Generator().manual_seed(seed)
+    vp = 2400.0 + 300.0 * torch.rand(NZ, NX, generator=g)
+    r = 0.02 * torch.rand(4, NZ, NX, generator=g) - 0.01
+    return [m.to(DEVICE) for m in (vp, vp / 1.8, *r)]
+
+
+def _records_and_gradients(prop, models):
+    sources, receivers = _geometry()
+    m = [x.clone().requires_grad_(True) for x in models]
+    out = prop(_wavelet(), sources, receivers, models=m)
+    weights = torch.randn(out.shape, generator=torch.Generator().manual_seed(1)).to(out)
+    (out * weights).sum().backward()
+    return [out.detach()] + [x.grad for x in m]
+
+
+def _assert_close(got, ref, rtol):
+    for i, (a, b) in enumerate(zip(got, ref)):
+        scale = float(b.abs().max())
+        assert scale > 0, i
+        err = float((a - b).abs().max()) / scale
+        assert err <= rtol, f"output {i} (record, vp, vs, Rp_x, Rp_z, Rs_x, Rs_z): {err:.3e}"
+
+
+def test_second_model_through_the_same_propagator():
+    """An FWI loop: the second model's record and gradients are those of a
+    fresh propagator, whatever the first call left behind."""
+    first, second = _random_models(0), _random_models(1)
+    prop = _make_evr_prop()
+    with torch.no_grad():
+        prop(_wavelet(), *_geometry(), models=first)
+    got = _records_and_gradients(prop, second)
+    _assert_close(got, _records_and_gradients(_make_evr_prop(), second), 1e-5)
+
+
+@pytest.mark.skipif(not hasattr(torch.compiler, "set_stance"), reason="needs torch.compiler.set_stance")
+def test_boundary_saving_k_steps_uncompiled_matches_the_full_tape():
+    """Boundary saving at 4 steps a call, run uncompiled -- what Dynamo does
+    when it falls back to eager.  Each call's backward makes new model leaves,
+    and the velocity gradients must come from them: cached on ``id(vp)``, a
+    call took an earlier call's, and the vp and vs gradients were 19 % and
+    55 % off.  Boundary saving's own round-off here: 1e-3 (vs), 2e-4 (others),
+    at 1 step a call as at 4."""
+    from sweep.propagator import BoundarySaving
+    from sweep.propagator.options import EagerOptions
+
+    models = _random_models(0)
+    ref = _records_and_gradients(_make_evr_prop(), models)
+    torch._dynamo.reset()
+    with torch.compiler.set_stance("force_eager"):
+        prop = PropTorch(ElasticVRR(spatial_order=SO, device=DEVICE, backend="torch"), shape=(NZ, NX),
+                         abcn=ABCN, dh=DH, dt=DT, impl="eager", memory=BoundarySaving(storage="gpu"),
+                         eager_options=EagerOptions(use_compile=True, steps_per_call=4))
+        got = _records_and_gradients(prop, models)
+    _assert_close(got, ref, 5e-3)

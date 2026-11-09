@@ -379,8 +379,7 @@ and this project adheres to
   after it as before: there the sampling inside made Inductor split the
   step's backward into more full-grid kernels (a 160³ acoustic gradient took
   2.95 instead of 2.62 ms a step on an RTX 6000 Ada). Records are the same
-  bit for bit either way. `torch.compiler.cudagraph_mark_step_begin()` is
-  called only in the compile modes that replay CUDA graphs. See
+  bit for bit either way. See
   [Several time steps per compiled call](docs/user-guide/propagators.md#steps-per-call).
 - **Eager boundary saving takes `steps_per_call` steps a call too.** A call of
   `k` steps (`_BoundarySaveSteps`) stores the `k` steps' boundary rings
@@ -644,6 +643,50 @@ and this project adheres to
   curvilinear grid only.
 
 ### Fixed
+- **`impl='eager'` refuses the compile modes that replay CUDA graphs on a CUDA
+  device.** With `EagerOptions(compile_mode='reduce-overhead')` or
+  `'max-autotune'`, a replay writes over the outputs of the one before, which the
+  time loop still holds (the records of the earlier calls, the fields a call
+  passes on), and every rollout failed reading them back ("accessing tensor
+  output of CUDAGraphs that has been overwritten by a subsequent run"): under
+  `Full()` and `Ckpt()` with and without gradients, and under boundary saving
+  without them (with them it ran, and the same propagator then failed on a
+  forward). They raise `ValueError` at construction now, whatever the memory;
+  `'max-autotune-no-cudagraphs'` keeps the autotuning. On a CPU, and with
+  `use_compile=False`, nothing changes.
+- **One shot no longer compiles the eager step again for every new `nt`.** The
+  time-major wavelet of one shot, `(nt, 1)`, counts as contiguous, so
+  `.contiguous()` kept each step's sample at a stride of `nt`, which Dynamo
+  guards on: a rollout with a new `nt` (a multiscale stage, another record
+  length) compiled its calls again, the boundary-saving backward included
+  (20-100 s each on a GPU), and past Dynamo's recompile limit the step ran
+  uncompiled. Each sample is a contiguous copy now; several shots compiled once
+  before as well.
+- **Eager and JAX boundary saving: a source on the boundary ring, and per-face
+  PML widths.** Each step's ring was saved before the source went in, and the
+  reverse pass puts the saved ring back after re-injecting the source, so a
+  source on a ring cell was dropped from the reconstruction. Under a free
+  surface the top face has no PML and its ring lies inside the model, at depth
+  `abcn - halo` .. `abcn - 1` cells: a source there gave a vp gradient 17-21%
+  off the full tape's (relative L2; 1e-3 a few cells away). The ring is now
+  saved after the source, as `impl='c'` saves it. With per-face PML widths (a
+  per-edge `abcn`) every face had its ring at `max(abcn) + halo`, inside the
+  model on a thinner face, and the strip between the ring and the thin PML
+  came back wrong (vp gradients 2-22% off, the error next to that face). A face
+  with a damping ramp now has its ring in the innermost cells of its own ramp;
+  a face without one (a free surface) keeps it at `abcn + halo`, where the band
+  also holds the gradient nearer the full tape's next to the surface. Records
+  are unchanged, and so are the gradients, bit for bit, unless a source sits on
+  the ring or a face is thinner than another.
+- **`ElasticVRR` on `impl='eager'`: uncompiled steps compute the velocity gradients
+  of their own models.** `vp_x, vp_z, vs_x, vs_z` were cached on `id(vp), id(vs)`, and
+  an id is reused once its tensor is freed: boundary saving's backward makes new
+  model leaves every call, so a call could take an earlier call's gradients, whose
+  graph ends at that call's leaves. At 4 steps a call run uncompiled (what Dynamo
+  does when it falls back to eager) the vp and vs gradients were 19% and 55% off
+  the full tape. They are now made once per rollout through the time-invariant
+  dict, and in every uncompiled step that has none; compiled steps compute them
+  in place, as before.
 - **The compiled eager step of the 3-D deformed SEM classes with a C-PML is faster:
   forward 4.3-6.4x on `AcousticSEM3DDeformed`, 1.9-3x on `ElasticVSSEM3DDeformed`,
   `ElasticVTISEM3DDeformed`, `ElasticTTISEM3DDeformed` and

@@ -388,7 +388,6 @@ class ElasticVRR(FirstOrderEquation):
     # The class default keeps the read safe for Dynamo before torch 2.5,
     # whose guard on it is a plain attribute access: on an instance without
     # the attribute it raises, once another instance has compiled the step.
-    _vgrad_cache = None
 
     C_NAME = "elastic_vr2d"
 
@@ -472,17 +471,10 @@ class ElasticVRR(FirstOrderEquation):
         return ["px", "pz"]
 
     def prepare_models(self, models):
-        """Precompute the spatial gradients of ``vp`` and ``vs`` once per
-        run.  These appear in every per-step gamma computation; doing them
-        once at setup saves 4 FD passes per timestep at the cost of 4
-        modelfield-sized tensors.
-        """
+        """The models as they are.  The spatial gradients of ``vp`` and ``vs``
+        need ``h``, which only the step gets: the step makes them
+        (:meth:`_precompute_velocity_gradients`)."""
         vp, vs, Rp_x, Rp_z, Rs_x, Rs_z = models
-        # The grid spacing here is unknown at prepare_models time (the
-        # propagator passes h at step time). We compute the gradients
-        # using a unit-h placeholder and rescale at step time via the
-        # propagator-passed h. Simpler: defer to first call of func()
-        # by caching a key on (id(vp), id(vs)).
         return [vp, vs, Rp_x, Rp_z, Rs_x, Rs_z]
 
     def _velocity_gradient_order(self):
@@ -493,10 +485,18 @@ class ElasticVRR(FirstOrderEquation):
         """
         return self.so if self.so in (2, 4, 6, 8) else 4
 
-    def _precompute_velocity_gradients(self, vp, vs, h):
-        """Per-run cache of ``(vp_x, vp_z, vs_x, vs_z)`` computed via the
-        canonical centered FD (order = :meth:`_velocity_gradient_order`).
-        Re-keys on ``id(vp), id(vs), h``.
+    def _precompute_velocity_gradients(self, vp, vs, h, invariants=None):
+        """``(vp_x, vp_z, vs_x, vs_z)`` by the canonical centered FD (order =
+        :meth:`_velocity_gradient_order`), made once per rollout when
+        ``invariants`` is the rollout's dict (``sweep.equations._invariants``,
+        new for each rollout and each checkpoint chunk) and every call
+        otherwise; traced, they fuse into the step for nearly nothing.
+
+        They were cached on ``id(vp), id(vs)``: an id is reused once its tensor
+        is freed, and the boundary-saving backward makes new model leaves every
+        call, so a call could take an earlier call's gradients, whose graph
+        ends at that call's leaves, and lose their share of the model gradient
+        (vp 19 %, vs 55 % off, 4 steps a call run uncompiled).
         """
         # A tuple test, not np.isscalar: inside the compiled step Dynamo
         # traces numpy calls, and that one returns a bool it cannot trace.
@@ -505,28 +505,20 @@ class ElasticVRR(FirstOrderEquation):
         else:
             hz = hx = float(h)
         order = self._velocity_gradient_order()
-        if _is_compiling():
-            # Traced, the gradients fuse into the step for nearly nothing, and
-            # the id()-keyed cache below cannot be traced at all.
+
+        def compute():
             return (_centered_first_derivative(vp, hx, axis=-1, order=order),
                     _centered_first_derivative(vp, hz, axis=-2, order=order),
                     _centered_first_derivative(vs, hx, axis=-1, order=order),
                     _centered_first_derivative(vs, hz, axis=-2, order=order))
-        key = (id(vp), id(vs), hz, hx, order)
-        cached = getattr(self, "_vgrad_cache", None)
-        if cached is not None and cached[0] == key:
-            return cached[1]
-        vp_x = _centered_first_derivative(vp, hx, axis=-1, order=order)
-        vp_z = _centered_first_derivative(vp, hz, axis=-2, order=order)
-        vs_x = _centered_first_derivative(vs, hx, axis=-1, order=order)
-        vs_z = _centered_first_derivative(vs, hz, axis=-2, order=order)
-        out = (vp_x, vp_z, vs_x, vs_z)
-        self._vgrad_cache = (key, out)
-        return out
+
+        if _is_compiling():
+            return compute()
+        return once(invariants, ("velocity gradients", hz, hx, order), compute)
 
     def func(self, wavefields, models, dt, h, b, invariants=None, **kwargs):
         vp, vs, Rp_x, Rp_z, Rs_x, Rs_z = models
-        vp_x, vp_z, vs_x, vs_z = self._precompute_velocity_gradients(vp, vs, h)
+        vp_x, vp_z, vs_x, vs_z = self._precompute_velocity_gradients(vp, vs, h, invariants)
         free_surface = getattr(self, "free_surface", False)
         out = elastic_vr_step_core(
             *wavefields,

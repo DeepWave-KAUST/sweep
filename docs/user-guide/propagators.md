@@ -195,9 +195,7 @@ per step, as it has on a 2-D grid:
 `EagerOptions(compile_cpp_wrapper=..., compile_combo_kernels=...)` sets them.
 The default, `None`, turns both on when Inductor compiles the step of a 2-D
 grid on a CUDA device with torch 2.9 or newer (the version they were measured
-on), and `cpp_wrapper` only where torch finds the CUDA toolkit (see below) and
-not in the `compile_mode`s that replay CUDA graphs (`"reduce-overhead"`,
-`"max-autotune"`), whose graphs Inductor turns off for a C++ wrapper. A 3-D
+on), and `cpp_wrapper` only where torch finds the CUDA toolkit (see below). A 3-D
 step keeps the GPU busy, the options gained nothing there (see below), and it
 compiles as it did before, as does any step elsewhere. The default depends on
 the dimension, the device, the backend, the mode, the torch version and the
@@ -207,7 +205,12 @@ without it bit for bit. `True` turns it on, also where the default does not
 (3-D, an older torch, no toolkit found, `cpp_wrapper` on a CPU). A value that
 cannot take effect raises `ValueError`: either option with `use_compile=False`
 or a `compile_backend` other than Inductor, `compile_cpp_wrapper=True` with a
-mode that replays CUDA graphs, and `compile_combo_kernels=True` on a CPU.
+mode that replays CUDA graphs, and `compile_combo_kernels=True` on a CPU. On a
+CUDA device the `compile_mode`s that replay CUDA graphs (`"reduce-overhead"`,
+`"max-autotune"`) raise `ValueError` themselves: a replay writes over the
+outputs of the replay before, which the time loop still holds (the records of
+the earlier calls, the fields a call passes on), and every rollout failed
+reading them back. `"max-autotune-no-cudagraphs"` keeps the autotuning.
 
 Inductor builds a C++ wrapper with a C++ compiler
 (`torch._inductor.config.cpp.cxx`, seeded from `$CXX` when torch is imported)

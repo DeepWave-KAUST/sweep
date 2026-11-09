@@ -38,7 +38,7 @@ reconstruction + one linearisation + one VJP).
 import jax
 import jax.numpy as jnp
 
-from sweep.propagator._ring_geometry import _ring_index_tuples, _ring_layout
+from sweep.propagator._ring_geometry import _ring_index_tuples, _ring_layout, _ring_offsets
 
 # NOTE: on this JAX path 'fp16' is still a BARE cast — values below 2^-24
 # flush to zero, so it is unsafe when the saved boundary values span a wide
@@ -156,7 +156,7 @@ def resolve_reverse_mode(equation, forced=None, free_surface=False):
 def build_config(*, equation, wavefield_specs, wavefield_names, dt, h, shape,
                  ndim, abcn, halo, nt, S0, src, rec, source_indices,
                  receiver_indices, batch_size, free_surface=False,
-                 forced_mode=None, storage_dtype="fp32", scan_unroll=1):
+                 forced_mode=None, storage_dtype="fp32", scan_unroll=1, pml_pad=None):
     """Assemble the static per-rollout config consumed by ``make_propagate``.
 
     Mirrors ``PropTorch._init_eager_bs``: ring geometry from the spatial order
@@ -169,7 +169,9 @@ def build_config(*, equation, wavefield_specs, wavefield_names, dt, h, shape,
         )
     from sweep.equations.base import SecondOrderEquation
 
-    offsets = tuple(abcn + halo for _ in range(ndim))
+    # Each face's ring in its own damping ramp (``_ring_offsets``); without
+    # ``pml_pad`` every face as thick as ``abcn``.
+    offsets = _ring_offsets(pml_pad if pml_pad is not None else (abcn,) * (2 * ndim), abcn, halo)
     rings = _ring_index_tuples(shape, ndim, offsets, halo)
     _, ring_shapes, ring_sizes, _ = _ring_layout(shape, ndim, offsets, halo)
     nwf = len(wavefield_names)
@@ -243,8 +245,9 @@ def make_propagate(cfg):
 
     Forward: one ``lax.scan`` whose per-step output is (receiver row, ring
     row) — the scan stacks the rings into the ``[nt+1, F, cells]`` storage for
-    free.  The ring is taken from the ``func`` output BEFORE source injection
-    (same convention as the eager/CUDA savers; the drivers re-inject).
+    free.  The ring is taken AFTER the source is injected, as the eager and
+    CUDA savers take it: the drivers re-inject the source and then write the
+    ring back, so a ring taken before the source dropped it on ring cells.
 
     Backward: a reverse-time ``lax.scan`` carrying ``(frame, adjoint state,
     model-grad accumulator)``.  Each step reconstructs ``S_t`` from
@@ -266,9 +269,8 @@ def make_propagate(cfg):
         def body(S, t):
             w_t = wavelet[..., t]
             S_mid = func(S, models, dt, h, None)
-            ring_row = _extract_ring_row(S_mid, cfg)
             S1 = _inject(list(S_mid), w_t, cfg)
-            return tuple(S1), (_sample(S1, cfg), ring_row)
+            return tuple(S1), (_sample(S1, cfg), _extract_ring_row(S1, cfg))
 
         S_final, (rec_seq, ring_rows) = jax.lax.scan(
             body, cfg["S0"], jnp.arange(nt), unroll=unroll
