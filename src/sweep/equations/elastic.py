@@ -287,7 +287,9 @@ class Elastic(FirstOrderEquation):
             # The chunked backward's replayed velocity histories (elastic2d
             # driver_traits seg_buffers): vx, vz of one chunk, (interval + 1, B, 1,
             # grid) each -- row 0 = v(start), row k = v(start + k).  The recursive
-            # mode replays per step into the carriers above and keeps none.
+            # mode keeps no history: it bisects each segment (sg_driver.cuh) with
+            # one replay state set per level (recursive_state_depth below).
+            recursive_state_depth=True,
             checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: (
                 [(seg + 1, B, 1, *grid)] * 2 if mode == "ckpt" else []),
             derived_model_nvar=2,   # mu, lambda (common/derived_models.h LameSlot)

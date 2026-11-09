@@ -1300,7 +1300,9 @@ class DASMu(FirstOrderEquation):
                 8 + (4 if mode in ("ckpt", "recursive") else 1 if mode == "full" else 0)),
             # ckpt: the per-segment vx, vz histories, one row per replayed step
             # plus the segment start (das_mu2d/driver_traits.cuh seg_buffers);
-            # the recursive mode replays per step and keeps none.
+            # the recursive mode keeps none: it bisects each segment
+            # (sg_driver.cuh) with one replay state set per level.
+            recursive_state_depth=True,
             checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: (
                 [(seg + 1, B, 1, *grid)] * 2 if mode == "ckpt" else []),
             bs_reconstruction_nvar=7,   # vx, vz, sxx, szz, sxz + fvx_prev, fvz_prev (the DAS strains are dead in the bs reverse loop)
@@ -1466,7 +1468,9 @@ class DASMu3D(FirstOrderEquation):
                 18 + (6 if mode in ("ckpt", "recursive") else 1 if mode == "full" else 0)),
             # ckpt: the per-segment vx, vy, vz histories, one row per replayed
             # step plus the segment start (das_mu3d/driver_traits.cuh
-            # seg_buffers); the recursive mode replays per step and keeps none.
+            # seg_buffers); the recursive mode keeps none: it bisects each
+            # segment (sg_driver.cuh) with one replay state set per level.
+            recursive_state_depth=True,
             checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: (
                 [(seg + 1, B, 1, *grid)] * 3 if mode == "ckpt" else []),
             bs_reconstruction_nvar=12,  # 9 elastic fields + fvx/fvy/fvz_prev (the DAS strains are dead in the bs reverse loop)

@@ -586,6 +586,9 @@ class ViscoElastic(FirstOrderEquation):
             backward_workspace_nvar=8,
             backward_workspace_shapes=backward_workspace_shapes,
             checkpoint_replay_shapes=checkpoint_replay_shapes,
+            # The recursive backward bisects each segment (sg_driver.cuh) with
+            # one replay state set per level; all of them share the strip scratch.
+            recursive_state_depth=True,
             pml_slot_axes=elastic,
             checkpoint_slot_axes=(None,) * (5 + n_mem) + elastic,
             adjoint_pml_slab=True,

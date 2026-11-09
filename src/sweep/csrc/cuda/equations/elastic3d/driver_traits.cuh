@@ -67,8 +67,9 @@ struct Driver {
         "[vx, vy, vz, sxx, syy, szz, sxy, sxz, syz, fvx_prev, fvy_prev, fvz_prev]";
     static constexpr int N_VEL = 3;
     static constexpr bool IMAGING_USES_NEXT_V = true;   // imaging consumes v(t+1) carriers
-    // Checkpoint modes: the replay state is one full base+pml struct
-    // (forward_wavefields set 0, cuda_layout.checkpoint_state_nvar); the
+    // Checkpoint modes: a replay state is one full base+pml struct
+    // (cuda_layout.checkpoint_state_nvar tensors: forward_wavefields set 0,
+    // and sets 1..depth for the recursive mode's bisection scratch); the
     // adjoint_workspace pool holds the 18 q*/p* scratch slots first and the
     // skeleton's velocity carriers after them (sg_driver.cuh SgCarrierSlots).
     static constexpr int CKPT_STATE_COUNT = CKPT_NVAR;   // 36
@@ -912,27 +913,28 @@ public:
     //   inject_residuals / vel_ptrs_from_seg / image_standalone /
     //   fix_rho_grad_at_receivers / (it > 0) plain_adjoint_step; after each chunk:
     //   export_seg_next_v.
-    // sg_generic_backward_recursive_ckpt, per reverse it: fix_rho_grad_at_sources /
-    //   inject_residuals; sg_replay_forward_to_time: velocity/stress
-    //   substeps + capture_velocities; vel_ptrs_from_carriers / image_standalone /
-    //   fix_rho_grad_at_receivers / (it > 0) plain_adjoint_step.
+    // sg_generic_backward_recursive_ckpt, a bisection per checkpoint segment;
+    //   per reverse it (a leaf): fix_rho_grad_at_sources / inject_residuals;
+    //   velocity/stress substeps + capture_velocities; vel_ptrs_from_carriers /
+    //   image_standalone / fix_rho_grad_at_receivers / (it > 0) plain_adjoint_step.
     // ===================================================================== //
 
     static void bind_or_alloc_recon_ckpt(Wavefield& forward,
                                          const BackwardInputCore& p,
-                                         const Buf& vp)
+                                         const Buf& vp, int set = 0)
     {
-        // Set 0 of the Python-bound replay state (one set: no bisection
-        // scratch here), the full bind -- the CPML aux slots are slab-shaped
-        // exactly like the forward's.  MANDATORY: _forward_state_shapes("ckpt"
-        // / "recursive") derives CKPT_STATE_COUNT slots from the forward slot
-        // table and Wrapper.backward binds them as forward_wavefields on both
-        // checkpoint entries.
+        // Set ``set`` of the Python-bound replay state (0 = the chunk or
+        // segment start state; 1..depth = the recursive mode's bisection
+        // scratch, sg_driver.cuh), the full bind -- the CPML aux slots are
+        // slab-shaped exactly like the forward's.  MANDATORY:
+        // _forward_state_shapes("ckpt" / "recursive") derives CKPT_STATE_COUNT
+        // slots per set from the forward slot table and Wrapper.backward binds
+        // them as forward_wavefields on both checkpoint entries.
         SWEEP_CHECK((int)p.forward_wavefields.size() >= CKPT_STATE_COUNT,
                     "elastic3d/ckpt requires the propagator-bound replay state "
                     "(cuda_layout.slots, the forward slot list: ", CKPT_STATE_COUNT,
                     " tensors per set), got ", p.forward_wavefields.size());
-        forward.bind(wavefield_set(p.forward_wavefields, 0, CKPT_STATE_COUNT,
+        forward.bind(wavefield_set(p.forward_wavefields, set, CKPT_STATE_COUNT,
                                    "elastic3d ckpt replay state"), true);
         backfill_syzx(forward, vp);
     }

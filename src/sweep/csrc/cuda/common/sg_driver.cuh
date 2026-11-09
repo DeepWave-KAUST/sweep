@@ -72,13 +72,16 @@
 //   after each chunk: export_seg_next_v hands v(start+1) to the older chunk.
 //
 // sg_generic_backward_recursive_ckpt — prologue: bind_or_alloc_recon_ckpt
-//   (replay state = forward_wavefields set 0), current_v / next_v from
-//   adjoint_workspace (SgCarrierSlots).  Per reverse it:
+//   (segment start state = forward_wavefields set 0; sets 1..depth = the
+//   bisection scratch, the same hook with set = level + 1), current_v / next_v
+//   from adjoint_workspace (SgCarrierSlots).  Per checkpoint segment, a
+//   bisection (sg_process_recursive_interval): a scratch state copies its
+//   parent and advances to the midpoint (velocity_substep / stress_substep /
+//   inject_forward_sources per step); per reverse it (a leaf):
 //   fix_rho_grad_at_sources / inject_residuals
-//   sg_replay_forward_to_time: velocity/stress substeps + capture_velocities
-//                              (IMAGING_USES_NEXT_V eqs also capture v at it+1)
-//   vel_ptrs_from_carriers / image_standalone / fix_rho_grad_at_receivers /
-//   (it > 0) plain_adjoint_step
+//   velocity_substep / stress_substep / capture_velocities   v(it)
+//   vel_ptrs_from_carriers (v(it), and v(it+1) from the previous leaf) /
+//   image_standalone / fix_rho_grad_at_receivers / (it > 0) plain_adjoint_step
 // ---------------------------------------------------------------------------
 #pragma once
 
@@ -1033,77 +1036,48 @@ BackwardOutputCore sg_generic_backward_ckpt_core(const BackwardInputCore& in)
     return out;
 }
 
-// ---- sg_generic_backward_recursive_ckpt (per-step replay) ----
-
-inline int sg_find_previous_checkpoint_idx(
-    const int* checkpoint_steps, int num_saved_checkpoints, int target_time)
+// ---- sg_generic_backward_recursive_ckpt (bisection per checkpoint segment) ----
+//
+// The recursive mode keeps only its ``count`` checkpoints and, per segment,
+// one scratch replay state per bisection level -- the acoustic skeleton's
+// scheme (eq_driver.cuh process_recursive_interval).  To reverse [start, end)
+// from the state at the start of ``start``: copy it into the level's scratch,
+// advance the copy to ``mid``, reverse [mid, end) from the copy, then
+// [start, mid) from the original.  A reverse step costs O(log segment) replayed
+// steps.  The per-step replay this replaces went back to the nearest
+// checkpoint for every reverse step, about nt^2 / (2 count) replayed steps in
+// all (168 forward passes for nt = 3000, count = 8, against about 5 here).
+// Both replay the same states from the same checkpoints with the same
+// kernels, so the gradients are bit-identical.
+//
+// Checkpoint k holds the state at the start of step checkpoint_steps[k]
+// (CheckpointRuntime saves it after step checkpoint_steps[k] - 1, source
+// injection included), so segment k is [steps[k-1], steps[k]) from checkpoint
+// k-1, segment 0 starts from zero and the last one ends at nt.
+template <class Eq, class Leaf, class Advance>
+void sg_process_recursive_interval(int start, int end,
+                                   typename Eq::Wavefield& start_state,
+                                   std::vector<typename Eq::Wavefield>& scratch_states,
+                                   int scratch_depth,
+                                   CheckpointRuntime& checkpoint_runtime,
+                                   Leaf& leaf, Advance& advance)
 {
-    int checkpoint_idx = -1;
-    for (int i = 0; i < num_saved_checkpoints; ++i) {
-        if (checkpoint_steps[i] < target_time)
-            checkpoint_idx = i;
-        else
-            break;
+    if (start >= end)
+        return;
+    if (end - start == 1) {
+        leaf(start, start_state);
+        return;
     }
-    return checkpoint_idx;
-}
-
-template <class Eq>
-void sg_replay_forward_to_time(
-    const BackwardInputCore& p,
-    typename Eq::State& state,
-    typename Eq::Wavefield& forward,
-    std::vector<Buf>& current_v,
-    std::vector<Buf>& next_v,
-    int target_index,
-    const int* checkpoint_steps,
-    int num_saved_checkpoints,
-    CheckpointRuntime& checkpoint_runtime,
-    decltype(std::declval<typename Eq::CPML>().view()) cpml_view,
-    SolverContext& solver,
-    IntSpan source_fields)
-{
-    // next_v must be zero when target_index + 1 == nt (never captured below).
-    // IMAGING_USES_NEXT_V == false equations skip both zeroings like their hand-written
-    // replay did: next_v is empty and current_v is always overwritten at the
-    // capture.
-    if (Eq::IMAGING_USES_NEXT_V) {
-        for (auto& t : current_v) zero_tensor_device_async(t);
-        for (auto& t : next_v) zero_tensor_device_async(t);
-    }
-
-    const int checkpoint_idx = sg_find_previous_checkpoint_idx(
-        checkpoint_steps, num_saved_checkpoints, target_index + 1);
-    int start_time = 0;
-    if (checkpoint_idx >= 0) {
-        checkpoint_runtime.load(checkpoint_idx, forward.checkpoint_tensors());
-        start_time = checkpoint_steps[checkpoint_idx];
-    } else {
-        checkpoint_runtime.zero_state(forward.state_tensors());
-    }
-
-    auto for_view = Eq::view(forward);
-    for (int it = start_time; it < p.nt; ++it) {
-        Eq::velocity_substep(state, for_view, cpml_view, solver);
-        Eq::stress_substep(state, for_view, cpml_view, solver, nullptr);
-
-        if (it == target_index) {
-            Eq::capture_velocities(current_v, forward);
-            // No velocity(t+1) imaging term: stop before this step's source
-            // injection, exactly like the hand-written replay.
-            if (!Eq::IMAGING_USES_NEXT_V)
-                break;
-        }
-        if (it == target_index + 1) {
-            Eq::capture_velocities(next_v, forward);
-            break;
-        }
-
-        Eq::inject_forward_sources(state, solver, for_view, p, source_fields, it);
-
-        if (it == target_index && target_index + 1 >= p.nt)
-            break;
-    }
+    const int mid = start + (end - start) / 2;
+    SWEEP_CHECK(scratch_depth < static_cast<int>(scratch_states.size()),
+                "Recursive checkpoint scratch depth exhausted.");
+    typename Eq::Wavefield& mid_state = scratch_states[scratch_depth];
+    checkpoint_runtime.copy_state(mid_state.checkpoint_tensors(), start_state.checkpoint_tensors());
+    advance(mid_state, start, mid);
+    sg_process_recursive_interval<Eq>(mid, end, mid_state, scratch_states, scratch_depth + 1,
+                                      checkpoint_runtime, leaf, advance);
+    sg_process_recursive_interval<Eq>(start, mid, start_state, scratch_states, scratch_depth + 1,
+                                      checkpoint_runtime, leaf, advance);
 }
 
 template <class Eq>
@@ -1162,39 +1136,91 @@ BackwardOutputCore sg_generic_backward_recursive_ckpt_core(const BackwardInputCo
                 "checkpoint buffer is smaller than checkpoint_steps");
 
     const int* checkpoint_steps = checkpoint_steps_cpu.data_ptr<int>();
-    // The replay state: forward_wavefields set 0 when Python bound it (zeroed
-    // per backward call), else today's allocation from the snapshot shapes.
-    typename Eq::Wavefield forward;
-    Eq::bind_or_alloc_recon_ckpt(forward, p, vp);
-    // The captured v(it) / v(it+1) the imaging reads (adjoint_workspace,
-    // SgCarrierSlots); sg_replay_forward_to_time zeroes or overwrites them in
-    // full before every imaging step, so their entry state is never read.
+    const int nt = static_cast<int>(p.nt);
+    auto segment_start = [&](int k) { return (k == 0) ? 0 : checkpoint_steps[k - 1]; };
+    auto segment_end = [&](int k) { return (k == num_saved_checkpoints) ? nt : checkpoint_steps[k]; };
+    int max_segment_length = 0;
+    for (int k = 0; k <= num_saved_checkpoints; ++k)
+        max_segment_length = std::max(max_segment_length, segment_end(k) - segment_start(k));
+
+    // Replay state sets of p.forward_wavefields: set 0 is the segment start
+    // state (zeroed or checkpoint-loaded per segment before any read), sets
+    // 1..depth the bisection's scratch states (copy_state-filled from their
+    // parent before any read).  The propagator hands 1 + depth sets
+    // (cuda_layout.recursive_state_depth; _c.py _recursive_scratch_depth on the
+    // same longest segment).
+    const int scratch_depth = recursive_checkpoint_scratch_depth(max_segment_length);
+    SWEEP_CHECK(static_cast<int>(p.forward_wavefields.size())
+                    == (1 + scratch_depth) * Eq::CKPT_STATE_COUNT,
+                Eq::NAME, "/recursive backward requires the propagator-bound "
+                "replay state sets (cuda_layout.recursive_state_depth): ",
+                1 + scratch_depth, " sets of ", Eq::CKPT_STATE_COUNT,
+                " forward_wavefields, got ", p.forward_wavefields.size());
+    typename Eq::Wavefield start_state;
+    Eq::bind_or_alloc_recon_ckpt(start_state, p, vp);
+    std::vector<typename Eq::Wavefield> scratch_states(scratch_depth);
+    for (int level = 0; level < scratch_depth; ++level)
+        Eq::bind_or_alloc_recon_ckpt(scratch_states[level], p, vp, /*set=*/level + 1);
+
+    // The v(it) / v(it+1) carriers the imaging reads (adjoint_workspace,
+    // SgCarrierSlots).  A leaf captures v(it) into current_v; equations whose
+    // imaging reads v(it+1) then swap the two, so the next leaf (it - 1, the
+    // leaves run in strictly decreasing order) finds v(it) in next_v.  next_v
+    // starts at zero: v(nt) does not exist.  Both start zeroed because a
+    // capture may fill only the head of a carrier (visco_elastic2d's strip
+    // rides a model-shaped slot); the per-step replay zeroed them every step.
     std::vector<Buf> current_v = sg_carriers<Eq>(p, SgCarrierSlots<Eq>::NOW, vp);
     std::vector<Buf> next_v;
     if (Eq::IMAGING_USES_NEXT_V)
         next_v = sg_carriers<Eq>(p, SgCarrierSlots<Eq>::NEXT, vp);
+    for (auto& t : current_v)
+        zero_tensor_device_async(t);
+    for (auto& t : next_v)
+        zero_tensor_device_async(t);
     const auto adj_source_signs = Eq::adjoint_source_signs(p, receiver_fields);
-
+    const int adjoint_nsrc = static_cast<int>(p.adjoint_sources_loc.size(1));
     auto adj_view = Eq::view(adjoint);
-    for (int it = p.nt - 1; it >= 0; --it) {
+
+    // ``forward`` holds the state at the start of ``start``; run the forward's
+    // steps up to ``end`` (velocity, stress, then the step's source injection).
+    auto advance = [&](typename Eq::Wavefield& forward, int start, int end) {
+        auto for_view = Eq::view(forward);
+        for (int it = start; it < end; ++it) {
+            Eq::velocity_substep(state, for_view, cpml_view, solver);
+            Eq::stress_substep(state, for_view, cpml_view, solver, nullptr);
+            Eq::inject_forward_sources(state, solver, for_view, p, source_fields, it);
+        }
+    };
+    // Reverse step ``it``, ``forward`` holding the state at the start of it.
+    // v(it) is read after the step's substeps and before its source injection,
+    // which the leaf does not need: nothing replays past it from this state.
+    auto leaf = [&](int it, typename Eq::Wavefield& forward) {
         Eq::fix_rho_grad_at_sources(state, solver, adj_view, p, source_fields, it, grads);
         Eq::inject_residuals(state, solver, adj_view, p, receiver_fields,
-                             adj_source_signs, it, (int)p.adjoint_sources_loc.size(1));
+                             adj_source_signs, it, adjoint_nsrc);
 
-        sg_replay_forward_to_time<Eq>(p, state, forward, current_v, next_v, it,
-                                      checkpoint_steps, num_saved_checkpoints,
-                                      checkpoint_runtime, cpml_view, solver,
-                                      source_fields);
+        auto for_view = Eq::view(forward);
+        Eq::velocity_substep(state, for_view, cpml_view, solver);
+        Eq::stress_substep(state, for_view, cpml_view, solver, nullptr);
+        Eq::capture_velocities(current_v, forward);
 
         typename Eq::VelPtrs vptrs = Eq::vel_ptrs_from_carriers(current_v, next_v);
         Eq::image_standalone(state, solver, adj_view, vptrs, grads);
         Eq::fix_rho_grad_at_receivers(state, solver, grads, vptrs, p, receiver_fields,
-                              it, (int)p.adjoint_sources_loc.size(1));
+                                      it, adjoint_nsrc);
+        if (it > 0)
+            Eq::plain_adjoint_step(state, solver, adjoint, workspace, cpml_view);
+        if (Eq::IMAGING_USES_NEXT_V)
+            std::swap(current_v, next_v);
+    };
 
-        if (it == 0)
-            continue;
-
-        Eq::plain_adjoint_step(state, solver, adjoint, workspace, cpml_view);
+    for (int k = num_saved_checkpoints; k >= 0; --k) {
+        if (k == 0)
+            checkpoint_runtime.zero_state(start_state.state_tensors());
+        else
+            checkpoint_runtime.load(k - 1, start_state.checkpoint_tensors());
+        sg_process_recursive_interval<Eq>(segment_start(k), segment_end(k), start_state,
+                                          scratch_states, 0, checkpoint_runtime, leaf, advance);
     }
 
     BackwardOutputCore out;
