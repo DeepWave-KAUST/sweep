@@ -4,8 +4,8 @@
 // drivers; physics kernels untouched.  Deltas from the elastic2d reference:
 //   * six raw models {vp, vs, Rp_x, Rp_z, Rs_x, Rs_z}, six gradients, and no
 //     rho — every rho hook (fix_rho_grad_at_sources / fix_rho_grad_at_receivers) is a no-op
-//     and the imaging has no velocity(t+1) term (IMAGING_USES_NEXT_V = false: the
-//     recursive replay breaks at the target step and no cross-segment
+//     and the imaging has no velocity(t+1) term (IMAGING_USES_NEXT_V = false: a
+//     recursive-mode leaf images from its own v(it) alone and no cross-segment
 //     velocity carriers exist);
 //   * the wavefield reuses ElasticWavefieldTensor (vx/vz slots hold the
 //     momentum px/pz), so the 15-tensor bind/checkpoint layout and the
@@ -26,10 +26,12 @@
 //     continues with the N_VEL captured-momentum carriers the skeleton takes
 //     behind them (WS_CARRIERS; ckpt takes none: no p(t+1) term, so no
 //     cross-chunk carriers either);
-//   * ckpt/recursive: the replay state is set 0 of the Python-bound
+//   * ckpt: the replay state is set 0 of the Python-bound
 //     forward_wavefields (CKPT_STATE_COUNT = 15, the full bind with CPML
 //     memory) and the per-segment px/pz histories are the two
-//     checkpoint_replay slots (seg_buffers);
+//     checkpoint_replay slots (seg_buffers); recursive binds sets 0..depth
+//     the same way (the segment start, then the bisection scratch) and
+//     keeps no histories;
 //   * bs: bind_or_alloc_recon binds the 5-tensor p.forward_wavefields list
 //     [px, pz, sxx, szz, sxz] with use_pml = false (no carriers: the imaging
 //     has no velocity(t+1) term); the list is MANDATORY, and the
@@ -80,7 +82,8 @@ struct Driver {
     // Checkpoint replay state (ckpt + recursive): one set of the Python-bound
     // forward_wavefields, in the forward's full bind order -- 5 fields + 10
     // CPML memory tensors, all full-grid (no aux slabs in this equation).
-    // One set only: the recursive backward keeps no per-level scratch here.
+    // The recursive backward binds 1 + depth such sets (the segment start,
+    // then one bisection scratch state per level).
     static constexpr int CKPT_STATE_COUNT = CKPT_NVAR;
     static constexpr int BS_NVAR = 5;   // px, pz, sxx, szz, sxz
     static constexpr int CUT_MASK_BITS = 0xF;
@@ -782,23 +785,25 @@ public:
     //   (it > 0) plain_adjoint_step.
     // ===================================================================== //
 
-    // Replay state: set 0 of the Python-bound forward_wavefields (zeroed by
-    // the propagator per backward call), bound in FULL -- the 5 fields and
-    // the 10 CPML memory tensors the replay steps through the PML -- exactly
-    // the layout the hand-written driver used to allocate.  Every slot is a
-    // full grid here, so the geometry is checked as well.  MANDATORY:
+    // Replay state: set ``set`` of the Python-bound forward_wavefields (zeroed
+    // by the propagator per backward call; 0 = the chunk or segment start
+    // state, 1..depth = the recursive mode's bisection scratch,
+    // sg_driver.cuh), bound in FULL -- the 5 fields and the 10 CPML memory
+    // tensors the replay steps through the PML -- exactly the layout the
+    // hand-written driver used to allocate.  Every slot is a full grid here,
+    // so the geometry is checked as well.  MANDATORY:
     // _forward_state_shapes("ckpt" / "recursive") derives CKPT_STATE_COUNT
-    // slots from the forward slot shapes and Wrapper.backward binds them as
-    // forward_wavefields on both checkpoint entries.
+    // slots per set from the forward slot shapes and Wrapper.backward binds
+    // them as forward_wavefields on both checkpoint entries.
     static void bind_or_alloc_recon_ckpt(Wavefield& forward,
                                          const BackwardInputCore& p,
-                                         const Buf& vp)
+                                         const Buf& vp, int set = 0)
     {
         SWEEP_CHECK((int)p.forward_wavefields.size() >= CKPT_STATE_COUNT,
                     "elastic_vr2d/ckpt requires the propagator-bound replay state "
                     "(cuda_layout.base_nvar + pml_nvar = ", CKPT_STATE_COUNT,
                     " tensors per set), got ", p.forward_wavefields.size());
-        auto state = wavefield_set(p.forward_wavefields, 0, CKPT_STATE_COUNT,
+        auto state = wavefield_set(p.forward_wavefields, set, CKPT_STATE_COUNT,
                                    "elastic_vr2d ckpt replay state");
         for (int i = 0; i < CKPT_STATE_COUNT; ++i)
             pool_slot_checked(state, i, vp, "elastic_vr2d ckpt replay state");

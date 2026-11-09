@@ -22,11 +22,12 @@
 //     receiver-rho correction, THEN the adjoint step;
 //   * checkpoints snapshot the full-domain state (full grids, not per-axis
 //     aux slabs), and there is no aux-layout check; the
-//     ckpt/recursive replay state is set 0 of the Python-bound
-//     forward_wavefields (CKPT_STATE_COUNT = 18, the full bind with CPML
-//     memory), the per-segment vx/vz histories are the two
-//     checkpoint_replay slots (seg_buffers) and the velocity carriers sit in
-//     the adjoint workspace pool behind the 8 struct slots (WS_CARRIERS);
+//     ckpt replay state is set 0 of the Python-bound forward_wavefields
+//     (CKPT_STATE_COUNT = 18, the full bind with CPML memory; recursive
+//     binds sets 0..depth the same way), the per-segment vx/vz histories
+//     are the two checkpoint_replay slots (seg_buffers) and the velocity
+//     carriers sit in the adjoint workspace pool behind the 8 struct slots
+//     (WS_CARRIERS);
 //   * no DD cut support (CUT_MASK_BITS = 0): the borrowed kernels are not
 //     cut-aware.
 // What the skeleton ADDS (dormant on legacy calls): the stepped range,
@@ -79,7 +80,8 @@ struct Driver {
     // Checkpoint replay state (ckpt + recursive): one set of the Python-bound
     // forward_wavefields, in the forward's full bind order -- 8 fields + 10
     // CPML memory tensors, all full-grid (no aux slabs in this equation).
-    // One set only: the recursive backward keeps no per-level scratch here.
+    // The recursive backward binds 1 + depth such sets (the segment start,
+    // then one bisection scratch state per level).
     static constexpr int CKPT_STATE_COUNT = CKPT_NVAR;
     static constexpr int BS_NVAR = 8;   // vx, vz, sxx, szz, sxz, exx, ezz, exz
     // The bs reconstruction carries the elastic five only (elastic2d's list):
@@ -810,23 +812,25 @@ public:
     //   fix_rho_grad_at_receivers / (it > 0) plain_adjoint_step.
     // =================================================================== //
 
-    // Replay state: set 0 of the Python-bound forward_wavefields (zeroed by
-    // the propagator per backward call), bound in FULL -- the 8 fields and
-    // the 10 CPML memory tensors the replay steps through the PML -- exactly
-    // the layout the hand-written driver used to allocate.  Every slot is a
-    // full grid here, so the geometry is checked as well.  MANDATORY:
+    // Replay state: set ``set`` of the Python-bound forward_wavefields (zeroed
+    // by the propagator per backward call; 0 = the chunk or segment start
+    // state, 1..depth = the recursive mode's bisection scratch,
+    // sg_driver.cuh), bound in FULL -- the 8 fields and the 10 CPML memory
+    // tensors the replay steps through the PML -- exactly the layout the
+    // hand-written driver used to allocate.  Every slot is a full grid here,
+    // so the geometry is checked as well.  MANDATORY:
     // _forward_state_shapes("ckpt" / "recursive") derives CKPT_STATE_COUNT
-    // slots from the forward slot shapes and Wrapper.backward binds them as
-    // forward_wavefields on both checkpoint entries.
+    // slots per set from the forward slot shapes and Wrapper.backward binds
+    // them as forward_wavefields on both checkpoint entries.
     static void bind_or_alloc_recon_ckpt(Wavefield& forward,
                                          const BackwardInputCore& p,
-                                         const Buf& vp)
+                                         const Buf& vp, int set = 0)
     {
         SWEEP_CHECK((int)p.forward_wavefields.size() >= CKPT_STATE_COUNT,
                     "das_mu2d/ckpt requires the propagator-bound replay state "
                     "(cuda_layout.base_nvar + pml_nvar = ", CKPT_STATE_COUNT,
                     " tensors per set), got ", p.forward_wavefields.size());
-        auto state = wavefield_set(p.forward_wavefields, 0, CKPT_STATE_COUNT,
+        auto state = wavefield_set(p.forward_wavefields, set, CKPT_STATE_COUNT,
                                    "das_mu2d ckpt replay state");
         for (int i = 0; i < CKPT_STATE_COUNT; ++i)
             pool_slot_checked(state, i, vp, "das_mu2d ckpt replay state");

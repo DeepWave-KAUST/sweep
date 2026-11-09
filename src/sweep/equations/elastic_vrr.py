@@ -581,7 +581,9 @@ class ElasticVRR(FirstOrderEquation):
                 14 + (2 if mode == "recursive" else 0)),
             # ckpt: the per-segment px, pz histories, one row per replayed step
             # plus the segment start (elastic_vr2d/driver_traits.cuh
-            # seg_buffers); the recursive mode replays per step and keeps none.
+            # seg_buffers); the recursive mode keeps none: it bisects each
+            # segment (sg_driver.cuh) with one replay state set per level.
+            recursive_state_depth=True,
             checkpoint_replay_shapes=lambda B, nt, grid, seg, mode: (
                 [(seg + 1, B, 1, *grid)] * 2 if mode == "ckpt" else []),
             bs_reconstruction_nvar=5,   # px, pz, sxx, szz, sxz

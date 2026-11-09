@@ -419,14 +419,18 @@ struct DriverL : elastic2d::Driver {
     // ===================================================================== //
     // [5] CKPT + RECURSIVE PLUMBING
     // ===================================================================== //
+    // ``set``: 0 = the chunk or segment start state, 1..depth = the recursive
+    // mode's bisection scratch (sg_driver.cuh).  Every set shares the one strip
+    // scratch: the stress substep writes it and capture_velocities reads it in
+    // the same step, so it carries nothing from one step to the next.
     static void bind_or_alloc_recon_ckpt(Wavefield& forward, const BackwardInputCore& p,
-                                         const Buf& vp)
+                                         const Buf& vp, int set = 0)
     {
         SWEEP_CHECK((int)p.forward_wavefields.size() >= CKPT_STATE_COUNT,
                     "visco_elastic2d/ckpt requires the propagator-bound replay state "
                     "(the forward slot list: ", CKPT_STATE_COUNT, " tensors), got ",
                     p.forward_wavefields.size());
-        forward.bind_visco(wavefield_set(p.forward_wavefields, 0, CKPT_STATE_COUNT,
+        forward.bind_visco(wavefield_set(p.forward_wavefields, set, CKPT_STATE_COUNT,
                                          "visco_elastic2d ckpt replay state"),
                            L, "visco_elastic2d ckpt replay state");
         forward.strip = pool_required(p.checkpoint_replay, REPLAY_STRIP_SCRATCH,

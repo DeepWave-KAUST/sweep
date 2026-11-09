@@ -9,6 +9,19 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Fixed
+- **Recursive checkpointing of the staggered family no longer costs O(nt²).**
+  `Ckpt(mode="recursive", count=...)` on `Elastic`, 3-D `Elastic`, `ElasticVRR`,
+  `ViscoElastic`, `DASMu` and `DASMu3D` (`impl="c"`) replayed from the nearest
+  checkpoint at every reverse step, about nt²/(2·count) forward steps in all:
+  a 1024², 3000-step `Elastic` gradient took 40× as long as `Ckpt(mode="chunk")`
+  on an H100, and the gap grew with nt.  The staggered skeleton now bisects each
+  checkpoint segment like the acoustic one (about log₂ of the segment length
+  replays per step), which brings it back to roughly twice the chunked mode.
+  Gradients are bit-identical to before; the price is one extra replay state
+  per bisection level (log₂ of the longest segment), handed over by the
+  propagator like the acoustic family's (`cuda_layout.recursive_state_depth`).
+
 ### Added
 - **Agent Skill for AI coding assistants** in `skills/sweep-solver/`
   ([agentskills.io](https://agentskills.io) format): a `SKILL.md` entry point
