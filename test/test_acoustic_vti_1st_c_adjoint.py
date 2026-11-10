@@ -31,11 +31,19 @@ to 20% off.  Three separate causes:
    ``start-1`` is exactly the checkpoint the chunk was replayed from.
 
 The equation's own docstring blamed the untracked adjoint CPML memory variables
-and advised masking the PML band.  That was wrong: with source and receivers
-80 cells from the absorbing layer and the run stopped before anything could
-reach it, the gap was fully present, and it is unchanged by abcn.  After these
-fixes the whole-grid agreement is cos = 1.0000000 to nt = 400, PML band
-included.
+and advised masking the PML band.  That was wrong for these three: with source
+and receivers 80 cells from the absorbing layer and the run stopped before
+anything could reach it, the gap was fully present, and it is unchanged by
+abcn.  After these fixes the whole-grid agreement is cos = 1.0000000 to
+nt = 400, PML band included.
+
+4. **The adjoint carried no CPML at all** -- the defect that docstring did
+   describe, only hidden by the three above.  The adjoint wavefield's memory
+   slots were allocated and zeroed but never updated, so the adjoint field
+   crossed the absorbing band undamped, reflected off the outer edge of the
+   grid and came back into the physical box.  The tests above never let it
+   come back (receivers 26 cells inside the band, nt = 120); the band tests
+   at the end put the receivers 3 cells from it and run long enough.
 """
 import numpy as np
 import pytest
@@ -97,7 +105,7 @@ def _geometry(shape, abcn):
     return src, rec
 
 
-def _solver(shape, abcn, mode, source_type, receiver_type):
+def _solver(shape, abcn, mode, source_type, receiver_type, nt=NT):
     from sweep.propagator.options import (CkptOptions, CUDAOptions, EagerOptions,
                                           MemoryOptions)
     from sweep.propagator.torch import PropTorch
@@ -109,7 +117,7 @@ def _solver(shape, abcn, mode, source_type, receiver_type):
     dev = torch.device("cuda")
     eq = EQ(spatial_order=SO, device=dev, backend="torch")
     kw = dict(backend="torch", shape=shape, abcn=abcn, dh=DH, dt=DT, dev=dev,
-              pml_type="cpmls", nt=NT, B=1, source_type=list(source_type),
+              pml_type="cpmls", nt=nt, B=1, source_type=list(source_type),
               receiver_type=list(receiver_type), free_surface=False)
     if mode == "eager":
         return PropTorch(eq, impl="eager", use_ckpt=False,
@@ -191,3 +199,49 @@ def test_heterogeneity_is_what_exposes_the_operator_adjoint():
     vp, eps, dlt, rho = _models(SHAPE2D)
     for name, m in (("vp", vp), ("epsilon", eps), ("delta", dlt), ("rho", rho)):
         assert float(m.max() - m.min()) > 0.0, f"{name} is homogeneous"
+
+
+# ---------------------------------------------------------------------------
+# Defect 4: the adjoint CPML.  Receivers 3 cells from the absorbing band and a
+# run long enough for the adjoint field to cross the band, reach the outer
+# edge of the grid and come back.  Before the fix c vs eager was 2e-2 (vp, 2-D,
+# abcn = 30) and 4.8e-2 at abcn = 15, the same in every mode; after it 1e-4,
+# the fp32 floor of this geometry (eager-fp32 vs eager-fp64 is 4e-5).
+# ---------------------------------------------------------------------------
+BAND = {2: dict(shape=(48, 56), abcn=30, nt=400),
+        3: dict(shape=(24, 20, 24), abcn=8, nt=300)}
+
+
+def _band_geometry(shape):
+    """Source a quarter of the way down, receivers 3 cells below the top band."""
+    if len(shape) == 2:
+        nz, nx = shape
+        src = np.array([[nx // 2, nz // 4]], np.int64)
+        xs = np.arange(3, nx - 3, 3, dtype=np.int64)
+        return src, np.stack([xs, np.full_like(xs, 3)], -1)[None]
+    nz, ny, nx = shape
+    src = np.array([[nx // 2, ny // 2, nz // 4]], np.int64)
+    gy, gx = np.meshgrid(np.arange(3, ny - 3, 4), np.arange(3, nx - 3, 4), indexing="ij")
+    return src, np.stack([gx.ravel(), gy.ravel(), np.full(gx.size, 3)], -1)[None].astype(np.int64)
+
+
+def _band_grads(dim, mode):
+    cfg = BAND[dim]
+    dev = torch.device("cuda")
+    solver = _solver(cfg["shape"], cfg["abcn"], mode, ["sH", "sV"], ["vz"], nt=cfg["nt"])
+    wavelet = torch.tensor(ricker(cfg["nt"], DT, FREQ, DELAY), device=dev)
+    src, rec = _band_geometry(cfg["shape"])
+    models = [torch.tensor(a, device=dev, requires_grad=True) for a in _models(cfg["shape"])]
+    solver(wavelet, src, rec, models=models).pow(2).mean().backward()
+    return [m.grad.detach().cpu() for m in models]
+
+
+@pytest.mark.parametrize("mode", ["full", "bs", "ckpt"])
+@pytest.mark.parametrize("dim", [2, 3])
+def test_adjoint_is_damped_in_the_absorbing_band(dim, mode):
+    ref = _band_grads(dim, "eager")
+    got = _band_grads(dim, mode)
+    for name, g, r in zip(NAMES, got, ref):
+        cos, rel = _metrics(g, r)
+        assert cos > COS_MIN and rel < REL_MAX, (
+            f"{name}: cos={cos:.8f} rel={rel:.3e} ({dim}-D, mode={mode})")

@@ -433,6 +433,12 @@ SWEEP_BY_ORDER_DECL(stress_kernel_3d_nopml_fn, stress_kernel_3d_nopml_by_order);
 // read/write race on velocity neighbours.  Kernel A reads λsH/λsV and
 // writes to λvx/λvy/λvz; kernel B reads the *new* λvx/λvy/λvz and writes
 // to λsH/λsV.
+//
+// CPML: the pre-multiply kernels carry the transpose of the forward memory
+// recursion (see the 2-D kernels.cuh), one memory slot per derivative, in the
+// adjoint wavefield's own m_* slots.  In the band the x and y derivatives of
+// the stress pre-multiply then differ (ax/bx vs ay/by), so kernel A takes one
+// field per axis.
 // ===========================================================================
 
 // Kernel A: λ_sH/λ_sV → contribute to λ_vx, λ_vy, λ_vz  (adjoint of stress update)
@@ -444,15 +450,21 @@ SWEEP_BY_ORDER_DECL(stress_kernel_3d_nopml_fn, stress_kernel_3d_nopml_by_order);
 // the stiffness multiplies the adjoint stress AT THE STRESS LOCATION and only
 // then is differentiated.  Applying it after the derivative is equivalent only
 // for a homogeneous model; otherwise the two differ by a grad(c) term that
-// accumulates once per step.  ph feeds the x and y derivatives, pv the z one.
+// accumulates once per step.  ph = c11*lSH + c13*lSV feeds the x and y
+// derivatives, pv = c13*lSH + c33*lSV the z one; in the band each goes through
+// its axis's transposed memory recursion (tmp = λm + p; p += b*tmp;
+// λm = a*tmp), exactly where the forward stress kernel updates m_vxx / m_vyy /
+// m_vzz, so off the band px = py = ph and pz = pv bit for bit.
 template<int Dummy>
 __global__ void adjoint_premultiply_stress_kernel_3d(
     VTIWavefieldPointer3D adj,
     const float* __restrict__ c11,
     const float* __restrict__ c33,
     const float* __restrict__ c13,
-    float* __restrict__ ph,          // c11*lSH + c13*lSV
-    float* __restrict__ pv,          // c13*lSH + c33*lSV
+    float* __restrict__ px,          // ph through the x memory   (feeds λvx)
+    float* __restrict__ py,          // ph through the y memory   (feeds λvy)
+    float* __restrict__ pz,          // pv through the z memory   (feeds λvz)
+    ElasticCPMLPointer cpml,
     SolverContext solver
 )
 {
@@ -472,13 +484,35 @@ __global__ void adjoint_premultiply_stress_kernel_3d(
     auto a = adj.offset(b, spatial_size);
     const float lSH = a.sH[idx];
     const float lSV = a.sV[idx];
-    ph[u_idx] = c11[u_idx] * lSH + c13[u_idx] * lSV;
-    pv[u_idx] = c13[u_idx] * lSH + c33[u_idx] * lSV;
+    const float ph = c11[u_idx] * lSH + c13[u_idx] * lSV;
+    const float pv = c13[u_idx] * lSH + c33[u_idx] * lSV;
+    float p_x = ph, p_y = ph, p_z = pv;
+
+    const int halo = solver.M;
+    if (ix >= halo && ix < solver.nx - halo &&
+        iy >= halo && iy < solver.ny - halo &&
+        iz >= halo && iz < solver.nz - halo &&
+        solver.in_pml_3d(ix, iy, iz, halo)) {
+        const float tx = a.m_vxx[idx] + p_x;
+        const float ty = a.m_vyy[idx] + p_y;
+        const float tz = a.m_vzz[idx] + p_z;
+        p_x += cpml.bx[ix] * tx;
+        p_y += cpml.by[iy] * ty;
+        p_z += cpml.bz[iz] * tz;
+        a.m_vxx[idx] = cpml.ax[ix] * tx;
+        a.m_vyy[idx] = cpml.ay[iy] * ty;
+        a.m_vzz[idx] = cpml.az[iz] * tz;
+    }
+    px[u_idx] = p_x;
+    py[u_idx] = p_y;
+    pz[u_idx] = p_z;
 }
 
 
 // Pre-multiply for kernel B: inv_rho sits at the VELOCITY location, inside the
-// derivative -- lambda_s += -dt * Db( inv_rho * lambda_v ).
+// derivative -- lambda_s += -dt * Db( inv_rho * lambda_v ) -- and in the band
+// each component goes through the transposed half-step memory recursion
+// (m_sHx / m_sHy / m_sVz on axh/bxh, ayh/byh, azh/bzh).
 template<int Dummy>
 __global__ void adjoint_premultiply_vel_kernel_3d(
     VTIWavefieldPointer3D adj,
@@ -486,6 +520,7 @@ __global__ void adjoint_premultiply_vel_kernel_3d(
     float* __restrict__ qx,
     float* __restrict__ qy,
     float* __restrict__ qz,
+    ElasticCPMLPointer cpml,
     SolverContext solver
 )
 {
@@ -503,17 +538,37 @@ __global__ void adjoint_premultiply_vel_kernel_3d(
 
     auto a = adj.offset(b, spatial_size);
     const float ir = inv_rho[u_idx];
-    qx[u_idx] = ir * a.vx[idx];
-    qy[u_idx] = ir * a.vy[idx];
-    qz[u_idx] = ir * a.vz[idx];
+    float q_x = ir * a.vx[idx];
+    float q_y = ir * a.vy[idx];
+    float q_z = ir * a.vz[idx];
+
+    const int halo = solver.M;
+    if (ix >= halo && ix < solver.nx - halo &&
+        iy >= halo && iy < solver.ny - halo &&
+        iz >= halo && iz < solver.nz - halo &&
+        solver.in_pml_3d(ix, iy, iz, halo)) {
+        const float tx = a.m_sHx[idx] + q_x;
+        const float ty = a.m_sHy[idx] + q_y;
+        const float tz = a.m_sVz[idx] + q_z;
+        q_x += cpml.bxh[ix] * tx;
+        q_y += cpml.byh[iy] * ty;
+        q_z += cpml.bzh[iz] * tz;
+        a.m_sHx[idx] = cpml.axh[ix] * tx;
+        a.m_sHy[idx] = cpml.ayh[iy] * ty;
+        a.m_sVz[idx] = cpml.azh[iz] * tz;
+    }
+    qx[u_idx] = q_x;
+    qy[u_idx] = q_y;
+    qz[u_idx] = q_z;
 }
 
 
 template<int Order>
 __global__ void adjoint_stress_to_vel_kernel_3d(
     VTIWavefieldPointer3D adj,
-    const float* __restrict__ ph,
-    const float* __restrict__ pv,
+    const float* __restrict__ px,
+    const float* __restrict__ py,
+    const float* __restrict__ pz,
     SGradParam grad_ctx,
     SolverContext solver
 )
@@ -541,20 +596,21 @@ __global__ void adjoint_stress_to_vel_kernel_3d(
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
 
     auto a = adj.offset(b, spatial_size);
-    const float* ph_b = ph + b * spatial_size;
-    const float* pv_b = pv + b * spatial_size;
+    const float* px_b = px + b * spatial_size;
+    const float* py_b = py + b * spatial_size;
+    const float* pz_b = pz + b * spatial_size;
 
-    float dph_dx = sgradient<3, Order, X, DIFF_FORWARD>(ph_b, ix, iy, iz, grad_ctx);
-    float dph_dy = sgradient<3, Order, Y, DIFF_FORWARD>(ph_b, ix, iy, iz, grad_ctx);
-    float dpv_dz = sgradient<3, Order, Z, DIFF_FORWARD>(pv_b, ix, iy, iz, grad_ctx);
+    float dpx_dx = sgradient<3, Order, X, DIFF_FORWARD>(px_b, ix, iy, iz, grad_ctx);
+    float dpy_dy = sgradient<3, Order, Y, DIFF_FORWARD>(py_b, ix, iy, iz, grad_ctx);
+    float dpz_dz = sgradient<3, Order, Z, DIFF_FORWARD>(pz_b, ix, iy, iz, grad_ctx);
 
-    a.vx[idx] += -solver.dt * dph_dx;
-    a.vy[idx] += -solver.dt * dph_dy;
-    a.vz[idx] += -solver.dt * dpv_dz;
+    a.vx[idx] += -solver.dt * dpx_dx;
+    a.vy[idx] += -solver.dt * dpy_dy;
+    a.vz[idx] += -solver.dt * dpz_dz;
 }
 
 using adjoint_stress_to_vel_kernel_3d_fn = void (*)(VTIWavefieldPointer3D, const float*,
-    const float*, SGradParam, SolverContext);
+    const float*, const float*, SGradParam, SolverContext);
 SWEEP_BY_ORDER_DECL(adjoint_stress_to_vel_kernel_3d_fn, adjoint_stress_to_vel_kernel_3d_by_order);
 
 
@@ -691,7 +747,8 @@ __global__ void calculate_grad_kernel_3d(
     float* gdlt_b       = grad_delta  + b * spatial_size;
     float* grho_b       = grad_rho    + b * spatial_size;
 
-    // Forward spatial derivatives (NO PML — interior only).
+    // Forward spatial derivatives.  No memory term: the cells imaged here are
+    // off the band, where the forward never adds one.
     // dvx_dx, dvy_dy, dvz_dz : at the stress location, use vx,vy,vz AT END
     //                          of step (= u_forward[it])
     // dsH_dx, dsH_dy, dsV_dz : at the velocity location, use sH,sV AT START
