@@ -43,6 +43,16 @@ def _to_nchw(u):
     raise ValueError(f"Expected 2D/3D/4D input for gradient kernel, got shape {u.shape}")
 
 
+def _to_ncdhw(u):
+    if u.ndim == 3:
+        return u[None, None, ...], lambda x: x[0, 0]
+    if u.ndim == 4:
+        return u[:, None, ...], lambda x: x[:, 0]
+    if u.ndim == 5:
+        return u, lambda x: x
+    raise ValueError(f"Expected 3D/4D/5D input for a 3-D gradient kernel, got shape {u.shape}")
+
+
 def _zero_halo(out, padding):
     if isinstance(padding, int):
         pad_z = pad_x = padding
@@ -211,8 +221,14 @@ def gradient(u, h, axis, kernels=None):
     if kernels is not None:
         if axis not in kernels:
             raise ValueError(f"No gradient kernel configured for axis={axis}.")
+        if kernels[axis].ndim == 5:
+            return _gradient_3d(u, h_axis, kernels[axis])
         u_nchw, restore = _to_nchw(u)
-        rhs = jnp.transpose(kernels[axis] / h_axis, (2, 3, 1, 0))[::-1, ::-1, :, :]
+        # Cross-correlation, as torch's conv2d: the kernel is NOT flipped.  A
+        # first-derivative kernel is antisymmetric, so flipping it negated the
+        # derivative (the VRR / VRZ / qP first-derivative terms ran with the
+        # wrong sign on JAX).
+        rhs = jnp.transpose(kernels[axis] / h_axis, (2, 3, 1, 0))
         out = lax.conv_general_dilated(
             u_nchw,
             rhs,
@@ -223,3 +239,26 @@ def gradient(u, h, axis, kernels=None):
         out = _zero_halo(out, (kernels[axis].shape[-2] // 2, kernels[axis].shape[-1] // 2))
         return restore(out)
     return jnp.gradient(u, h_axis, axis=axis)
+
+
+def _gradient_3d(u, h_axis, kernel):
+    """``gradient`` with a 3-D (1, 1, kD, kH, kW) kernel: cross-correlation,
+    stencil halo of every spatial axis zeroed (as torch's conv3d path)."""
+    u_ncdhw, restore = _to_ncdhw(u)
+    rhs = jnp.transpose(kernel / h_axis, (2, 3, 4, 1, 0))
+    out = lax.conv_general_dilated(
+        u_ncdhw,
+        rhs,
+        window_strides=(1, 1, 1),
+        padding='SAME',
+        dimension_numbers=('NCDHW', 'DHWIO', 'NCDHW'),
+    )
+    pd, ph, pw = (kernel.shape[-3] // 2, kernel.shape[-2] // 2, kernel.shape[-1] // 2)
+    for ax, p in ((-3, pd), (-2, ph), (-1, pw)):
+        if p > 0:
+            idx_lo = [slice(None)] * out.ndim
+            idx_hi = [slice(None)] * out.ndim
+            idx_lo[ax] = slice(0, p)
+            idx_hi[ax] = slice(out.shape[ax] - p, out.shape[ax])
+            out = out.at[tuple(idx_lo)].set(0).at[tuple(idx_hi)].set(0)
+    return restore(out)

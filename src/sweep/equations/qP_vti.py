@@ -61,18 +61,51 @@ def refuse_boundary_saving(equation, boundary_saving, boundary_dtype=None):
             "source. Use storage_dtype='fp32' (or memory=Full()).")
 
 
+_JAX_QUOTIENT = None
+
+
+def s_quotient(numerator, denominator):
+    """``numerator / (denominator + 1e-26)``, S_n's regularised quotient, with
+    a derivative that never forms ``(den + 1e-26) ** 2``.
+
+    NOT ``numerator * ((denominator + 1e-26) ** -1)``. That form is finite in
+    the forward, but autograd's pow backward evaluates ``x ** -2``, and in
+    fp32 ``(1e-26) ** -2`` overflows to +inf. Wherever the numerator is also
+    zero -- the whole grid at t=0, the quiet region ahead of the wavefront,
+    the PML corners -- the chain rule computes ``0 * inf = NaN``, and a single
+    NaN poisons the entire model gradient. torch's division backward is
+    ``-grad * result / denominator``; jax's forms ``x / y**2``, whose ``y**2``
+    underflows to 0 in fp32 (0 / 0 = NaN again), so on jax the quotient
+    carries the same rule as a custom JVP: ``(dn - S d) / (den + 1e-26)``."""
+    den = denominator + 1e-26
+    torch = sys.modules.get("torch")
+    if (torch is not None and isinstance(numerator, torch.Tensor)) \
+            or not type(numerator).__module__.startswith("jax"):
+        return numerator / den
+    global _JAX_QUOTIENT
+    if _JAX_QUOTIENT is None:
+        import jax
+
+        @jax.custom_jvp
+        def quotient(n, d):
+            return n / d
+
+        @quotient.defjvp
+        def _quotient_jvp(primals, tangents):
+            n, d = primals
+            dn, dd = tangents
+            q = n / d
+            return q, (dn - q * dd) / d
+
+        _JAX_QUOTIENT = quotient
+    return _JAX_QUOTIENT(numerator, den)
+
+
 def s_operator(px, pz, epsilon, delta):
     """S_n of a gradient pair (10.1190/geo2022-0292.1 eq. 19)."""
     numerator = -2 * (epsilon - delta) * px**2 * pz**2
     denominator = (1 + 2 * epsilon) * px**4 + pz**4 + 2 * (1 + delta) * px**2 * pz**2
-    # NOT ``numerator * ((denominator + 1e-26) ** -1)``. That form is finite in
-    # the forward, but autograd's pow backward evaluates ``x ** -2``, and in
-    # fp32 ``(1e-26) ** -2`` overflows to +inf. Wherever the numerator is also
-    # zero -- the whole grid at t=0, the quiet region ahead of the wavefront,
-    # the PML corners -- the chain rule computes ``0 * inf = NaN``, and a single
-    # NaN poisons the entire model gradient. Division's backward is
-    # ``-grad * result / denominator`` and never forms ``den ** -2``.
-    return numerator / (denominator + 1e-26)
+    return s_quotient(numerator, denominator)
 
 
 def qp_stability_ratio(vp, epsilon, delta, dt, spacing, spatial_order, tilted=False):

@@ -729,7 +729,11 @@ class PropBase:
         pad_runtime = (pad_x_left, pad_x_right, pad_z_top, pad_z_bot)
         padded = grid.padded_metrics(pad_runtime)
 
-        if device is not None:
+        if getattr(self.equation, "backend", "torch") == "jax":
+            # the grid builds torch tensors; a jax step cannot multiply them
+            import jax.numpy as jnp
+            padded = {k: jnp.asarray(v.detach().cpu().numpy()) for k, v in padded.items()}
+        elif device is not None:
             try:
                 padded = {k: v.to(device) for k, v in padded.items()}
             except (RuntimeError, TypeError):

@@ -110,6 +110,9 @@ def _pad_axis_zeros(c, axis, n, ref):
         pass
     widths = [(0, 0)] * ref.ndim
     widths[ax] = (n, n)
+    if type(c).__module__.startswith("jax"):
+        import jax.numpy as jnp
+        return jnp.pad(c, widths)
     return np.pad(c, widths)
 
 
@@ -498,13 +501,22 @@ class ElasticVRR(FirstOrderEquation):
         ends at that call's leaves, and lose their share of the model gradient
         (vp 19 %, vs 55 % off, 4 steps a call run uncompiled).
         """
+        order = self._velocity_gradient_order()
+        if self.backend == "jax":
+            # Traced: the spacing is an array of the scan's carry (no float()),
+            # and nothing is kept across traces; the gradients fuse into the
+            # step, as in a compiled torch step.
+            hz, hx = self._spacings_2d(h)
+            return (_centered_first_derivative(vp, hx, axis=-1, order=order),
+                    _centered_first_derivative(vp, hz, axis=-2, order=order),
+                    _centered_first_derivative(vs, hx, axis=-1, order=order),
+                    _centered_first_derivative(vs, hz, axis=-2, order=order))
         # A tuple test, not np.isscalar: inside the compiled step Dynamo
         # traces numpy calls, and that one returns a bool it cannot trace.
         if isinstance(h, (tuple, list)):
             hz, hx = float(h[0]), float(h[1])
         else:
             hz = hx = float(h)
-        order = self._velocity_gradient_order()
 
         def compute():
             return (_centered_first_derivative(vp, hx, axis=-1, order=order),

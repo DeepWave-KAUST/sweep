@@ -362,14 +362,17 @@ class AcousticVRZ3D(SecondOrderEquation):
         """
         super().__init__(spatial_order, device, backend, dim=dim)
         super().init_separable_laplace()
+        # The FD-order first derivatives on both backends: the VRZ terms
+        # (grad vp, grad 1/z, grad p) act in the interior, so jax's fallback
+        # (jnp.gradient, second order) changed the physics, not only the PML.
+        self.grad_kernels = {
+            ax: to_backend(_gradient_kernel3d(spatial_order, ax), backend=backend, device=device)
+            for ax in (-3, -2, -1)
+        }
         if backend == 'torch':
             from sweep.operators.torch import register_stencil
-            self.grad_kernels = {
-                ax: register_stencil(to_backend(_gradient_kernel3d(spatial_order, ax), backend=backend, device=device))
-                for ax in (-3, -2, -1)
-            }
-        else:
-            self.grad_kernels = None
+            for k in self.grad_kernels.values():
+                register_stencil(k)
 
     @property
     def default_source_fields(self):

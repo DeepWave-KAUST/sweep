@@ -7,7 +7,8 @@ except ImportError:  # pragma: no cover - optional dependency
 from .base import SecondOrderEquation
 from .fields import FieldSpec, ModelSpec
 from .qP_vti import (adjoint_mode_step, check_qp_stability, check_s_gradient, qp_cuda_layout,
-                     refuse_boundary_saving, s_gradient_aux, s_operator, stop_gradient)
+                     refuse_boundary_saving, s_gradient_aux, s_operator, s_quotient,
+                     stop_gradient)
 from ._registry import register_equation
 
 
@@ -19,8 +20,7 @@ def s_tilted(px, pz, epsilon, delta, cos0, sin0):
         + (px * sin0 + pz * cos0) ** 4
         + 2 * (1 + delta) * (px * cos0 - pz * sin0) ** 2 * (px * sin0 + pz * cos0) ** 2
     )
-    # Division, not ``* (den + 1e-26) ** -1``: see qP_vti.s_operator.
-    return numerator / (denominator + 1e-26)
+    return s_quotient(numerator, denominator)       # see qP_vti.s_quotient
 
 
 def rhs_cpml(

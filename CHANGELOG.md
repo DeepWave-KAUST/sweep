@@ -667,6 +667,24 @@ and this project adheres to
   forward). They raise `ValueError` at construction now, whatever the memory;
   `'max-autotune-no-cudagraphs'` keeps the autotuning. On a CPU, and with
   `use_compile=False`, nothing changes.
+- **`PropJax` solves the eager propagator's equations.**  `operators.jax.gradient`
+  flipped the first-derivative kernel before a cross-correlation, negating every
+  first derivative taken with an equation's FD kernels: where two multiply the
+  signs cancelled, but a lone one ran reversed -- `AcousticVRR`'s `r . grad p`
+  (records 3e-2 off eager, the `rx` / `rz` gradients of the wrong sign) and the
+  CPML `db/dz du/dz` term of `AcousticVRZ`, `AcousticTariq` and the qP pair
+  (1e-3).  `AcousticVRZ3D` had no first-derivative kernels on JAX, so its interior
+  VRZ terms were second-order `jnp.gradient` (gradients 13-37 % off at order 4).
+  `ElasticVRR` raised (`float()` of the traced spacing); `AcousticCurvilinear`
+  raised (torch metric tensors), and the JAX path neither sampled the models on
+  the boundary-fitted rows nor placed sources and receivers on them.  The qP
+  `S_n` quotient: JAX differentiates `x / y` through `x / y**2`, whose `y**2`
+  underflows in fp32, so the epsilon / delta / theta gradients were NaN; it now
+  carries torch's rule as a custom JVP.  All of these now match eager to ~1e-6 in
+  the records and 1e-5 to 1e-4 in the gradients (fp32), except the qP gradients:
+  1e-3 to 1e-1, about the spread between `impl='c'` and eager, since `S_n` is
+  ill-conditioned in fp32 where `|grad p|` is small.  `ElasticCurvilinear`,
+  whose geometry is torch code, refuses `backend='jax'` (`test/test_jax_eager_parity.py`).
 - **One shot no longer compiles the eager step again for every new `nt`.** The
   time-major wavelet of one shot, `(nt, 1)`, counts as contiguous, so
   `.contiguous()` kept each step's sample at a stride of `nt`, which Dynamo
