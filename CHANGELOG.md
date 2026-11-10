@@ -780,6 +780,23 @@ and this project adheres to
   one shot: 0.65 to 0.28) faster than before, and the peak memory of an 8-shot
   elastic call fell from 2.3 to 0.96 GB. `return_wavefield=True` still raises
   under boundary saving.
+- **`ElasticTTI` and `ElasticTTISG` rotate the stiffness with the 6x6 Bond
+  matrix** (`C' = M C M^T`), as `ElasticTTISG3D` already did, instead of a
+  five-operand `torch.einsum` over the rank-4 tensor. Torch contracts that
+  einsum left to right unless `opt_einsum` is installed, which sweep does not
+  require, so every cell held 3^8 intermediates: on a 2048 x 2048 grid with a
+  30-cell PML the rotation took 20 s and 124 GB of host memory (8 CPU
+  threads), and a 32 GB GPU ran out of memory from 1024 x 1024 on. With
+  `opt_einsum` its backward still took 12 s. The rotation runs in
+  `prepare_models`, once per call on `impl='c'` (on the models repeated for
+  every shot of the batch) and, on `impl='eager'` with checkpointing, once per
+  chunk and again in its recompute, so short runs spent most of their time
+  there and the time per cell and step seemed to grow with the grid. The Bond
+  matrix takes 0.7 s, or 1.9 s with the backward. Stiffnesses and their
+  gradients equal the tensor rotation to float64 round-off, and cells with
+  zero tilt are unchanged bit for bit; `test/test_elastic_tti.py` now checks
+  tilted cells against an explicit rank-4 rotation, runs `gradcheck` on it and
+  holds what its autograd graph saves to 36 values per cell.
 - **`impl='c'` runs under `torch.inference_mode()`.** Every call there failed
   in the C adapter before the forward ran ("Inference tensors do not track
   version counter"): the host copies of the source and receiver field indices

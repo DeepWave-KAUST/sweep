@@ -93,7 +93,7 @@ def thomsen_to_cij3d(vp, vs, epsilon, delta, gamma, rho, theta=None, phi=None):
     which the FD class's switch to the VTI entries there cuts.
     """
     from ..equations.elastic_tti import ElasticTTI
-    from ..equations.elastic_tti_sg3d import _KEY_TO_VOIGT, STIFFNESS_KEYS_3D, ElasticTTISG3D
+    from ..equations.elastic_tti_sg3d import _KEY_TO_VOIGT, STIFFNESS_KEYS_3D
 
     c33 = rho * vp * vp
     c44 = rho * vs * vs
@@ -108,7 +108,7 @@ def thomsen_to_cij3d(vp, vs, epsilon, delta, gamma, rho, theta=None, phi=None):
         return tuple(vti.get(k, zero) for k in STIFFNESS_KEYS_3D)
     if phi is None:
         phi = torch.zeros_like(theta)
-    rot = ElasticTTISG3D._bond_matrix_torch(ElasticTTI._bond_rotation_matrix_torch(theta, phi))
+    rot = ElasticTTI._bond_matrix_torch(ElasticTTI._bond_rotation_matrix_torch(theta, phi))
     C = rot @ ElasticTTI._vti_voigt_torch(c11, c13, c33, c44, c66) @ rot.transpose(-1, -2)
     flat = theta.detach().abs() < 1e-7
     out = []

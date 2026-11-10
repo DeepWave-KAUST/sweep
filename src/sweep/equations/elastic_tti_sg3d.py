@@ -280,44 +280,12 @@ class ElasticTTISG3D(FirstOrderEquation):
         return ElasticTTISG3D._bond_rotate_3d_jax(C11_0, C13_0, C33_0, C44_0, C66_0, theta, phi)
 
     @staticmethod
-    def _bond_matrix_torch(R):
-        """Voigt-space Bond stress-transformation matrix (…, 6, 6) of a
-        rotation R (…, 3, 3); rows/cols ordered xx, yy, zz, yz, xz, xy.
-
-        Equivalent to the rank-4 rotation ``R R R R : C`` but the autograd
-        graph only carries (…, 6, 6) intermediates — the einsum form
-        materialises (…, 3^8) tensors in its backward, which is ~16 GB on a
-        padded 3-D grid and OOMs the CUDA prepare_models path.
-        """
-        import torch
-
-        def r(i, j):
-            return R[..., i, j]
-
-        rows = []
-        for i in range(3):
-            rows.append(torch.stack((
-                r(i, 0) ** 2, r(i, 1) ** 2, r(i, 2) ** 2,
-                2.0 * r(i, 1) * r(i, 2),
-                2.0 * r(i, 0) * r(i, 2),
-                2.0 * r(i, 0) * r(i, 1),
-            ), dim=-1))
-        for a, b in ((1, 2), (0, 2), (0, 1)):
-            rows.append(torch.stack((
-                r(a, 0) * r(b, 0), r(a, 1) * r(b, 1), r(a, 2) * r(b, 2),
-                r(a, 1) * r(b, 2) + r(a, 2) * r(b, 1),
-                r(a, 0) * r(b, 2) + r(a, 2) * r(b, 0),
-                r(a, 0) * r(b, 1) + r(a, 1) * r(b, 0),
-            ), dim=-1))
-        return torch.stack(rows, dim=-2)
-
-    @staticmethod
     def _bond_rotate_3d_torch(C11_0, C13_0, C33_0, C44_0, C66_0, theta, phi):
         import torch
 
         C_vti = ElasticTTI._vti_voigt_torch(C11_0, C13_0, C33_0, C44_0, C66_0)
         R = ElasticTTI._bond_rotation_matrix_torch(theta, phi)
-        M = ElasticTTISG3D._bond_matrix_torch(R)
+        M = ElasticTTI._bond_matrix_torch(R)
         C_rot = M @ C_vti @ M.transpose(-1, -2)
 
         mask = torch.abs(theta) < 1e-7

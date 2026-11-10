@@ -379,54 +379,45 @@ class ElasticTTI(FirstOrderEquation):
         return C
 
     @staticmethod
-    def _voigt_to_tensor_torch(C):
+    def _bond_matrix_torch(R):
+        """Voigt-space Bond stress-transformation matrix (…, 6, 6) of a
+        rotation R (…, 3, 3); rows/cols ordered xx, yy, zz, yz, xz, xy.
+
+        Equivalent to the rank-4 rotation ``R R R R : C`` but carries only
+        (…, 6, 6) intermediates.  The five-operand einsum form holds 3^8
+        values per cell whenever torch contracts it left to right, which it
+        does without opt_einsum (108 GiB for a padded 2048^2 grid in 2-D;
+        ~16 GB in the backward of a padded 3-D grid).
+        """
         import torch
 
-        pairs = ((0, 0), (1, 1), (2, 2), (1, 2), (0, 2), (0, 1))
-        out = torch.zeros(C.shape[:-2] + (3, 3, 3, 3), dtype=C.dtype, device=C.device)
-        for i, (a, b) in enumerate(pairs):
-            for j, (c, d) in enumerate(pairs):
-                value = C[..., i, j]
-                out[..., a, b, c, d] = value
-                out[..., b, a, c, d] = value
-                out[..., a, b, d, c] = value
-                out[..., b, a, d, c] = value
-        return out
+        def r(i, j):
+            return R[..., i, j]
 
-    @staticmethod
-    def _tensor_to_entries_torch(C):
-        pairs = ((0, 0), (1, 1), (2, 2), (1, 2), (0, 2), (0, 1))
-        wanted = {
-            "C11": (0, 0),
-            "C13": (0, 2),
-            "C14": (0, 3),
-            "C15": (0, 4),
-            "C16": (0, 5),
-            "C33": (2, 2),
-            "C34": (2, 3),
-            "C35": (2, 4),
-            "C36": (2, 5),
-            "C44": (3, 3),
-            "C45": (3, 4),
-            "C46": (3, 5),
-            "C55": (4, 4),
-            "C56": (4, 5),
-            "C66": (5, 5),
-        }
-        return {
-            key: C[..., pairs[i][0], pairs[i][1], pairs[j][0], pairs[j][1]]
-            for key, (i, j) in wanted.items()
-        }
+        rows = []
+        for i in range(3):
+            rows.append(torch.stack((
+                r(i, 0) ** 2, r(i, 1) ** 2, r(i, 2) ** 2,
+                2.0 * r(i, 1) * r(i, 2),
+                2.0 * r(i, 0) * r(i, 2),
+                2.0 * r(i, 0) * r(i, 1),
+            ), dim=-1))
+        for a, b in ((1, 2), (0, 2), (0, 1)):
+            rows.append(torch.stack((
+                r(a, 0) * r(b, 0), r(a, 1) * r(b, 1), r(a, 2) * r(b, 2),
+                r(a, 1) * r(b, 2) + r(a, 2) * r(b, 1),
+                r(a, 0) * r(b, 2) + r(a, 2) * r(b, 0),
+                r(a, 0) * r(b, 1) + r(a, 1) * r(b, 0),
+            ), dim=-1))
+        return torch.stack(rows, dim=-2)
 
     @staticmethod
     def _bond_rotate_torch(C11_0, C13_0, C33_0, C44_0, C66_0, theta, phi):
         import torch
 
         C_vti = ElasticTTI._vti_voigt_torch(C11_0, C13_0, C33_0, C44_0, C66_0)
-        C_tensor = ElasticTTI._voigt_to_tensor_torch(C_vti)
-        R = ElasticTTI._bond_rotation_matrix_torch(theta, phi)
-        C_rot = torch.einsum("...ip,...jq,...kr,...ls,...pqrs->...ijkl", R, R, R, R, C_tensor)
-        entries = ElasticTTI._tensor_to_entries_torch(C_rot)
+        M = ElasticTTI._bond_matrix_torch(ElasticTTI._bond_rotation_matrix_torch(theta, phi))
+        C_rot = M @ C_vti @ M.transpose(-1, -2)
         mask = torch.abs(theta) < 1e-7
         zero = torch.zeros_like(C11_0)
         vti_entries = {
@@ -438,8 +429,8 @@ class ElasticTTI(FirstOrderEquation):
             "C66": C66_0,
         }
         return {
-            key: torch.where(mask, vti_entries.get(key, zero), value)
-            for key, value in entries.items()
+            key: torch.where(mask, vti_entries.get(key, zero), C_rot[..., int(key[1]) - 1, int(key[2]) - 1])
+            for key in STIFFNESS_KEYS
         }
 
     @staticmethod
