@@ -761,6 +761,14 @@ and this project adheres to
   `AcousticSEM3DDeformed` at 97^3 on an A100: 12.6 -> 2.7 ms per step forward and
   27.0 -> 8.6 forward + backward, from 24x the CUDA kernels to 5.5x. Records and
   gradients unchanged to fp32 round-off; the other classes keep the unrolled form.
+- **`ElasticVRR`'s free surface is now `Elastic`'s** (eager and `impl='c'`,
+  forward and adjoint).  It still mirrored `sxz` and `pz` about the integer
+  surface row and zeroed the surface-row `sxz`, the two things `Elastic` had
+  dropped (Kristek, Moczo & Archuleta 2002, Table 1): its Rayleigh wave came
+  out 2-7 % slow and did not converge monotonically with the grid.  Both now
+  use the half-cell mirror and leave `sxz` to its interior update, and with
+  zero reflectivity `ElasticVRR` records what constant-density `Elastic` does
+  under a free surface.
 - **Eager boundary saving saves no boundary on a call without gradients.** A
   call autograd does not record (grad mode off, or no model or wavelet
   requiring grad: a line search, forward modelling) has no backward pass; under

@@ -126,7 +126,7 @@ __global__ void evr_momentum_kernel(
     float dsxx_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.sxx, ix, 0, iz, grad_ctx);
     // z-derivatives of stress: image-method mirror at the top free surface
     // (odd parity), else plain staggered FD. Matches the eager step core.
-    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true);
+    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true, true);
     float dsxz_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
     float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.szz, ix, iz, grad_ctx, solver, true);
 
@@ -198,7 +198,7 @@ __global__ void evr_momentum_kernel_nopml(
     auto f = wf.offset(b, spatial_size);
 
     float dsxx_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.sxx, ix, 0, iz, grad_ctx);
-    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true);
+    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true, true);
     float dsxz_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
     float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.szz, ix, iz, grad_ctx, solver, true);
 
@@ -271,7 +271,7 @@ __global__ void evr_stress_kernel(
     // z-derivatives use the image-method mirror at the top free surface
     // (pz odd like vz, px even like vx), matching the eager step core.
     float dpx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.vx, ix, 0, iz, grad_ctx);
-    float dpz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true);
+    float dpz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true, true);
     float dpx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.vx, ix, iz, grad_ctx, solver, false);
     float dpz_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.vz, ix, 0, iz, grad_ctx);
 
@@ -333,14 +333,15 @@ __global__ void evr_stress_kernel(
     f.szz[idx] += solver.dt * (gamma_P_kk - 2.f * gamma_S_xx);
     f.sxz[idx] += solver.dt * (gamma_S_xz + gamma_S_zx);
 
-    // Free-surface BC: zero szz/sxz, and apply the Robertsson surface sigma_xx
-    // correction (matches eager fs_sxx_correction).  VR-native coefficient on
+    // Free-surface BC: zero szz and apply the Robertsson surface sigma_xx
+    // correction (matches eager fs_sxx_correction).  sxz is NOT zeroed: its
+    // surface-row node sits +h/2 inside the medium (Kristek, Moczo & Archuleta
+    // 2002, Table 1; the half-cell mirror above carries the traction-free sxz).  VR-native coefficient on
     // d px/dx: physical 4 mu (lam+mu)/(lam+2mu) * d vx/dx  ->  with px = rho*vx
     // becomes  4 vs^2 (vp^2 - vs^2)/vp^2 * d px/dx (rho cancels).
     if (elastic_is_top_free_surface_row(solver, iz)) {
         f.sxx[idx] = sxx_pre + solver.dt * (4.f * Vs2 * (Vp2 - Vs2) / Vp2) * dpx_dx;
         f.szz[idx] = 0.f;
-        f.sxz[idx] = 0.f;
     }
 
     if (u_this_b) {
@@ -399,7 +400,7 @@ __global__ void evr_stress_kernel_nopml(
     const float* Rsz_b  = Rs_z + b * spatial_size;
 
     float dpx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.vx, ix, 0, iz, grad_ctx);
-    float dpz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true);
+    float dpz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true, true);
     float dpx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.vx, ix, iz, grad_ctx, solver, false);
     float dpz_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.vz, ix, 0, iz, grad_ctx);
 
@@ -470,10 +471,10 @@ SWEEP_BY_ORDER_DECL(evr_stress_kernel_nopml_fn, evr_stress_kernel_nopml_by_order
 //   - no /rho in momentum_adjoint
 // ---------------------------------------------------------------------------
 
-// Adjoint of the forward free-surface BC (szz = sxz = 0 at the surface row).
+// Adjoint of the forward free-surface BC (szz = 0 at the surface row).
 // The zeroing is a self-adjoint projection, so its transpose is the SAME
 // zeroing applied to the ADJOINT stress at the START of each adjoint step
-// (before any kernel reads the adjoint szz/sxz). No-op when free_surface=false
+// (before any kernel reads the adjoint szz). No-op when free_surface=false
 // (elastic_is_top_free_surface_row returns false).
 template<int Order>
 __global__ void evr_adjoint_zero_top_fs(ElasticWavefieldPointer wf, SolverContext solver)
@@ -487,7 +488,6 @@ __global__ void evr_adjoint_zero_top_fs(ElasticWavefieldPointer wf, SolverContex
     auto f = wf.offset(b, spatial_size);
     int idx = iz * solver.nx + ix;
     f.szz[idx] = 0.f;
-    f.sxz[idx] = 0.f;
 }
 
 // The driver launches the <0> specialization; like the launch tables, its
@@ -568,13 +568,12 @@ __global__ void evr_stress_adjoint_prepare(
     float bar_szz = f.szz[idx];
     float bar_sxz = f.sxz[idx];
     if (is_fs) {
-        // Transpose of the forward FS projection (szz = sxz = 0): the adjoint
-        // szz/sxz vanish at the surface row.  (evr_adjoint_zero_top_fs already
-        // does this; repeated so the prepare is correct standalone.)
+        // Transpose of the forward FS projection (szz = 0): the adjoint szz
+        // vanishes at the surface row.  (evr_adjoint_zero_top_fs already does
+        // this; repeated so the prepare is correct standalone.)  sxz keeps its
+        // interior update there, so its adjoint does too.
         bar_szz = 0.f;
-        bar_sxz = 0.f;
         f.szz[idx] = 0.f;
-        f.sxz[idx] = 0.f;
     }
 
     // bar_d* = dt * (constitutive coeff * adj_sigma) -- mirrors elastic2d
@@ -584,13 +583,13 @@ __global__ void evr_stress_adjoint_prepare(
         // Transpose of the VR Robertsson FS sigma_xx fix.  Forward surface row:
         //   sxx = old + dt * C_surf * dpx_dx,  C_surf = 4 vs^2 (vp^2 - vs^2)/vp^2
         // (the VR-native form of elastic 4 mu(lam+mu)/(lam+2mu); px = rho*vx so
-        // rho cancels).  Only dpx_dx feeds sxx; the dpz_dz term cancels and
-        // szz/sxz are zeroed -> bar_dpz_dz = bar_dpx_dz = bar_dpz_dx = 0.
+        // rho cancels).  Only dpx_dx feeds sxx; the dpz_dz term cancels and szz
+        // is zeroed -> bar_dpz_dz = 0.  sxz keeps the interior update.
         float c_surf = 4.f * Vs2 * (Vp2 - Vs2) / Vp2;
         bar_dpx_dx = solver.dt * c_surf * bar_sxx;
         bar_dpz_dz = 0.f;
-        bar_dpx_dz = 0.f;
-        bar_dpz_dx = 0.f;
+        bar_dpx_dz = solver.dt * mu_ * bar_sxz;
+        bar_dpz_dx = solver.dt * mu_ * bar_sxz;
     } else {
         bar_dpx_dx = solver.dt * (lam_plus_2mu * bar_sxx + lam * bar_szz);
         bar_dpz_dz = solver.dt * (lam_plus_2mu * bar_szz + lam * bar_sxx);
@@ -614,6 +613,11 @@ __global__ void evr_stress_adjoint_prepare(
     float L_gS_zz = -2.f * solver.dt * bar_sxx;
     float L_gS_xz = solver.dt * bar_sxz;
     float L_gS_zx = solver.dt * bar_sxz;
+    if (is_fs) {
+        // The surface-row sxx/szz carry no gamma terms (Robertsson form / zero);
+        // only sxz keeps its interior gamma_S_xz + gamma_S_zx.
+        L_gP_xx = L_gP_zz = L_gS_xx = L_gS_zz = 0.f;
+    }
 
     // The pointwise momentum contribution involves centered velocity
     // gradients (neighbour reads of vp/vs). The forward stress kernel only
@@ -623,10 +627,9 @@ __global__ void evr_stress_adjoint_prepare(
     // in bounds at the grid edge.
     bool interior = (ix >= halo && ix < solver.nx - halo &&
                      iz >= halo && iz < solver.nz - halo);
-    // At the free surface the forward sigma_xx has NO gamma multiplicative
-    // terms (it is the pure C_surf * dpx_dx form), so its pointwise adjoint
-    // momentum contribution is zero.
-    if (interior && !is_fs) {
+    // At the free surface only sxz keeps gamma multiplicative terms (sxx is the
+    // pure C_surf * dpx_dx form, szz is zero); the L_g* above are zeroed to match.
+    if (interior) {
         float dvp_dx = evr_model_grad_x<Order>(vp_b, ix, iz, grad_ctx);
         float dvp_dz = evr_model_grad_z<Order>(vp_b, ix, iz, grad_ctx);
         float dvs_dx = evr_model_grad_x<Order>(vs_b, ix, iz, grad_ctx);
@@ -749,7 +752,7 @@ __global__ void evr_stress_adjoint_apply(
     // z-derivative transposes use the image-method ADJOINT at the free surface
     // (forward dpx_dz was FORWARD/even, dpz_dz was BACKWARD/odd).
     float dqxz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD>(qxz_b, ix, iz, grad_ctx, solver, false);
-    float dqzz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD>(qzz_b, ix, iz, grad_ctx, solver, true);
+    float dqzz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD>(qzz_b, ix, iz, grad_ctx, solver, true, true);
     float dqzx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(qzx_b, ix, 0, iz, grad_ctx);
 
     int idx = iz * solver.nx + ix;
@@ -883,7 +886,7 @@ __global__ void evr_momentum_adjoint_apply(
     // z-derivative transposes use the image-method ADJOINT at the free surface
     // (forward dszz_dz was FORWARD/odd, dsxz_dz was BACKWARD/odd).
     float dpzz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD>(pzz_b, ix, iz, grad_ctx, solver, true);  // (F-z)^T
-    float dpxz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD>(pxz_b, ix, iz, grad_ctx, solver, true); // (B-z)^T
+    float dpxz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD>(pxz_b, ix, iz, grad_ctx, solver, true, true); // (B-z)^T
     float dpzx_dx = sgradient<2, Order, X, DIFF_FORWARD>(pzx_b, ix, 0, iz, grad_ctx);   // (B-x)^T
 
     int idx = iz * solver.nx + ix;
@@ -987,7 +990,7 @@ __global__ void calculate_grad_evr_nobs(
     float fpx_x = sgradient<2, Order, X, DIFF_BACKWARD>(fpx_b, ix, 0, iz, grad_ctx);
     // forward momentum z-derivatives use the image-method mirror at the surface
     // (matches the forward stress kernel: pz BACKWARD/odd, px FORWARD/even).
-    float fpz_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(fpz_b, ix, iz, grad_ctx, solver, true);
+    float fpz_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(fpz_b, ix, iz, grad_ctx, solver, true, true);
     float fpx_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(fpx_b, ix, iz, grad_ctx, solver, false);
     float fpz_x = sgradient<2, Order, X, DIFF_FORWARD>(fpz_b, ix, 0, iz, grad_ctx);
 
@@ -1009,16 +1012,22 @@ __global__ void calculate_grad_evr_nobs(
         // Material derivative of the VR FS sigma_xx fix.  Forward surface row:
         //   sxx = old + dt * C_surf * dpx_dx,  C_surf = 4 vs^2 (vp^2 - vs^2)/vp^2.
         //   dC/dVp = 8 vs^4 / vp^3,   dC/dVs = 8 vs - 16 vs^3 / vp^2.
-        // No gamma terms, no R dependence, no chain rule through (dV/dx):
-        // grad_R* keep their prior accumulation (+0) and the chain-source
-        // tensors are zeroed so evr_grad_chain_apply adds nothing at this row.
+        // sxx carries no gamma terms and szz is zero; sxz keeps its interior
+        // gamma_S_xz + gamma_S_zx, whose (vs, Rs_x, Rs_z, dVs) dependence is
+        // the interior one below restricted to the shear pair.
         float a_sxx_fpx = a.sxx[idx] * fpx_x;
         gvp_b[idx] += a_sxx_fpx * solver.dt * (8.f * Vs2 * Vs2 / (Vp2 * Vp));
         gvs_b[idx] += a_sxx_fpx * solver.dt * (8.f * Vs - 16.f * Vs2 * Vs / Vp2);
+        float L_gS_xz = solver.dt * a.sxz[idx];
+        float L_gS_zx = L_gS_xz;
+        gvs_b[idx] += L_gS_xz * (dvs_dx * pz - 4.f * Vs * Rsx * pz + 2.f * Vs * fpz_x)
+                    + L_gS_zx * (dvs_dz * px - 4.f * Vs * Rsz * px + 2.f * Vs * fpx_z);
+        gRsx_b[idx] += L_gS_xz * (-2.f * Vs2 * pz);
+        gRsz_b[idx] += L_gS_zx * (-2.f * Vs2 * px);
         lvpx_b[idx] = 0.f;
         lvpz_b[idx] = 0.f;
-        lvsx_b[idx] = 0.f;
-        lvsz_b[idx] = 0.f;
+        lvsx_b[idx] = L_gS_xz * Vs * pz;
+        lvsz_b[idx] = L_gS_zx * Vs * px;
         return;
     }
 
