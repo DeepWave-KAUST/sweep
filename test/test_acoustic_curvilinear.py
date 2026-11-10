@@ -57,8 +57,8 @@ def _geometry(src_xz=None):
     return sources, receivers
 
 
-def _make_prop(topography, equation_cls=AcousticCurvilinear, *, free_surface=True):
-    eq = equation_cls(spatial_order=SO, device=DEVICE, backend="torch")
+def _make_prop(topography, equation_cls=AcousticCurvilinear, *, free_surface=True, device=DEVICE):
+    eq = equation_cls(spatial_order=SO, device=device, backend="torch")
     return PropTorch(
         eq, shape=(NZ, NX),
         free_surface=free_surface,
@@ -241,3 +241,51 @@ def test_registered_gradient_is_on_the_model_grid():
     assert cos > 0.999, cos
     air = torch.as_tensor(np.arange(NZ)[:, None] < np.ceil(topo - 1e-4)[None, :]).flatten().to(DEVICE)
     assert (reg[air] == 0).all() and (auto[air] == 0).all()
+
+
+# ---------------------------------------------------------------------------
+# 7. One scheme on every device
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("device", ["cpu"] + (["cuda"] if torch.cuda.is_available() else []))
+def test_first_derivatives_have_the_fd_order(device):
+    """``p_η`` and ``p_ξη`` enter the interior Laplacian, so they need the
+    equation's FD order on every device.  On CPU they fell back to
+    ``torch.gradient`` (second order) and the CPU and CUDA records of one run
+    differed by 7e-3.  A fourth-order first derivative is exact on a cubic;
+    ``torch.gradient`` is off by h**2 there."""
+    eq = AcousticCurvilinear(spatial_order=SO, device=device, backend="torch")
+    h = 0.05
+    z = torch.arange(20, dtype=torch.float32, device=device)[:, None] * h - 0.5
+    x = torch.arange(24, dtype=torch.float32, device=device)[None, :] * h - 0.6
+    u = (z ** 3 + x ** 3 + z * x ** 2)[None, None]
+    m = SO // 2
+    inner = (..., slice(m, -m), slice(m, -m))
+    for axis, exact in ((-2, 3 * z ** 2 + x ** 2), (-1, 3 * x ** 2 + 2 * z * x)):
+        d = eq.gradient(u, h, axis, kernels=eq.grad_kernels)
+        err = (d - exact.expand_as(u))[inner].abs().max().item()
+        assert err < 0.01 * h ** 2, (axis, err)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_cpu_and_cuda_records_agree():
+    """One run on both devices: the records agree to fp32 round-off
+    (~1e-6); they were 9e-3 apart while the CPU path took torch.gradient."""
+    x = np.arange(NX)
+    hill = np.round(6.0 * np.exp(-((x - NX / 2) / (NX / 6)) ** 2))
+    vp = (2000.0 * (1 + 0.1 * np.linspace(0, 1, NZ))[:, None] * np.ones((1, NX))).astype(np.float32)
+    src = np.array([[NX // 2, NZ // 3]])
+    rec_x = np.arange(4, NX - 4, 6)
+    rec = np.stack([rec_x, hill[rec_x] + 2], -1)[None].astype(np.int64)
+    t = np.arange(NT, dtype=np.float32) * DT - DELAY
+    w = (1.0e3 * ricker(t, f=FREQ)).astype(np.float32)
+    records = []
+    for device in ("cpu", "cuda"):
+        prop = _make_prop(topography=hill, device=device)
+        with torch.no_grad():
+            d = prop(torch.tensor(w, device=device), torch.tensor(src, device=device),
+                     torch.tensor(rec, device=device), models=[torch.tensor(vp, device=device)])
+        records.append(d.double().cpu())
+    rel = float((records[0] - records[1]).norm() / records[1].norm())
+    assert rel < 1e-5, rel

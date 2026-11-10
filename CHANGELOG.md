@@ -34,6 +34,15 @@ and this project adheres to
   Gradients are bit-identical to before; the price is one extra replay state
   per bisection level (log₂ of the longest segment), handed over by the
   propagator like the acoustic family's (`cuda_layout.recursive_state_depth`).
+- **`AcousticCurvilinear` runs the same scheme on a CPU as on a GPU.** Its
+  curvilinear Laplacian takes the first derivatives `p_η` and `p_ξη` in the
+  interior, and only a CUDA device built the FD-order first-derivative kernels:
+  elsewhere they fell back to `torch.gradient`, second order whatever
+  `spatial_order`.  A CPU run therefore solved a lower-order scheme (at
+  `spatial_order=4` its Laplacian of a plane wave was 2-20× less accurate) and
+  its record was 7e-3 off the same run on a GPU, against ~1e-6 of fp32
+  round-off.  The kernels are now built on every device and for `backend='jax'`
+  as well; GPU results are unchanged bit for bit.
 
 ### Added
 - **Agent Skill for AI coding assistants** in `skills/sweep-solver/`
