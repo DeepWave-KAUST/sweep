@@ -10,8 +10,9 @@ reads it has to come back from the saved ring instead of being rebuilt:
   each sub-step's fields have to be restored as soon as it is inverted (the
   inverted velocity half reads the ring's stresses).
 * second order ('swap2nd'): the CPML term differentiates ``a * psi``, which
-  reaches into the box -- one cell for the acoustic family, M for VRZ, VRR and
-  qP Tariq (``_memory_reach`` measures it on the equation).
+  reaches into the box -- M cells with the equation's FD-order kernels
+  (Acoustic, VRZ, VRR, qP Tariq), one with ``torch.gradient``
+  (``_memory_reach`` measures it on the equation).
 
 Neither was done: from the steps in which the wavefield reached the PML the
 error crept inward, and the interior gradients drifted off the full tape (fp64,
@@ -113,7 +114,7 @@ def _check_eager(name, eager=None):
     src, rec = _geometry()
     with torch.no_grad():
         obs = _eager_grads(cfg, None, true_m, None, w, src, rec)
-    full = _eager_grads(cfg, None, init_m, obs, w, src, rec)
+    full = _eager_grads(cfg, None, init_m, obs, w, src, rec, eager)
     bs = _eager_grads(cfg, BOUNDARY, init_m, obs, w, src, rec, eager)
     for k, (g_full, g_bs) in enumerate(zip(full, bs)):
         err = _interior_error(g_full, g_bs)
@@ -130,18 +131,21 @@ def test_eager_boundary_saving_interior_matches_full_tape(name):
 @pytest.mark.parametrize("fused", [False, True], ids=["two_calls", "fused"])
 def test_eager_boundary_saving_steps_per_call_interior_matches_full_tape(monkeypatch, name, fused):
     """The k-step backward (``_BoundarySaveSteps``: ``steps_rev``, alone or in
-    ``steps_back``) restores the ring the way the one-step driver does."""
+    ``steps_back``) restores the ring the way the one-step driver does.  The
+    full tape it is held to runs the same way: compiled, the CPML derivative
+    is tap slices instead of a conv2d, which alone moves the acoustic gradient
+    by 3e-6 here, against 1e-7 between the two compiled runs."""
     import sweep.propagator._eager_boundary_saving as EBS
     monkeypatch.setattr(EBS, "FUSED_BS_BACKWARD", fused)
     _check_eager(name, EagerOptions(use_compile=True, compile_backend="aot_eager", steps_per_call=4))
 
 
-@pytest.mark.parametrize("cls, so, reach", [(Acoustic, 4, 1), (Acoustic, 8, 1), (AcousticVRR, 2, 1),
+@pytest.mark.parametrize("cls, so, reach", [(Acoustic, 4, 2), (Acoustic, 8, 4), (AcousticVRR, 2, 1),
                                             (AcousticVRR, 4, 2), (AcousticVRR, 8, 4)])
 def test_swap2nd_ring_takes_in_the_cells_that_read_cpml_memory(cls, so, reach):
     """The 'swap2nd' ring takes in the physical cells whose update reads the
-    CPML memory: a*psi is differentiated, one cell deep for the acoustic family,
-    M for VRR (and VRZ, qP Tariq)."""
+    CPML memory: a*psi is differentiated with the equation's FD-order kernels,
+    M cells deep (Acoustic took torch.gradient on a CPU, one cell)."""
     import sweep.propagator._eager_boundary_saving as EBS
     eq = cls(spatial_order=so, device="cpu", backend="torch")
     prop = PropTorch(eq, impl="eager", eager_options=EagerOptions(use_compile=False), memory=BOUNDARY,

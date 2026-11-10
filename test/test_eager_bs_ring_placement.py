@@ -76,6 +76,7 @@ def _bs_error(eq, src, storage_dtype="fp32", inner=False, **kw):
 
 HALO = 2                       # spatial_order 4
 EDGE = HALO + 1                # the cells next to an absorbing face that keep an error
+FLOOR = 1e-6                   # float32 round-off of the relative gradient error here
 
 
 @pytest.mark.parametrize("eq, k, storage_dtype, adj", [
@@ -91,11 +92,14 @@ def test_a_source_on_the_ring_of_a_free_surface_face(eq, k, storage_dtype, adj):
     reconstructed as one a few cells deeper is.  int8 keeps one scale per 256
     ring cells, and a source on the ring sets its block's scale, which
     quantizes the cells next to it coarser: 8x the control's error (3.5e-3
-    against 4.4e-4), where a dropped source cost 17-21 %."""
+    against 4.4e-4), where a dropped source cost 17-21 %.  Below FLOOR both
+    errors are float32 round-off (1e-7 to 5e-7 in adjoint mode), and their
+    ratio says nothing."""
     factor = 20 if storage_dtype == "int8" else 3
     control = _bs_error(eq, (22, ABCN + 3), storage_dtype, free_surface=True, k=k, adj=adj)
     for z in (ABCN - HALO, ABCN - 1):
-        assert _bs_error(eq, (22, z), storage_dtype, free_surface=True, k=k, adj=adj) < factor * control
+        err = _bs_error(eq, (22, z), storage_dtype, free_surface=True, k=k, adj=adj)
+        assert err < max(factor * control, FLOOR), (z, err, control)
 
 
 @pytest.mark.parametrize("eq", [Acoustic, Elastic], ids=["acoustic", "elastic"])

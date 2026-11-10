@@ -293,7 +293,13 @@ def _assert_bitwise(a, b):
     assert torch.equal(a, b), float((a - b).abs().max())
 
 
-def _assert_close(grads, ref, rel=2e-6):
+# float32 round-off of the reassociated gradient sums: up to 1.7e-6 on these
+# grids, and 2.4e-6 since Acoustic's CPML derivatives are its 4-tap FD kernels
+# on a CPU too (more terms per field to sum); a logic error is orders larger.
+ROUND_OFF = 5e-6
+
+
+def _assert_close(grads, ref, rel=ROUND_OFF):
     for g, r in zip(grads, ref):
         scale = float(r.abs().max())
         assert scale > 0
@@ -532,7 +538,7 @@ def test_boundary_saving_k_steps_differ_from_the_full_tape_as_one_step_does(eq):
         scale = float(gf.abs().max())
         d1 = (g1 - gf).abs()
         d4 = (g4 - gf).abs()
-        assert float((d4 - d1).abs().max()) <= 2e-6 * scale
+        assert float((d4 - d1).abs().max()) <= ROUND_OFF * scale
         assert float(d4.max()) <= 0.02 * scale, float(d4.max()) / scale
 
 
