@@ -148,12 +148,13 @@ def test_gradients_match_eager(fs, tag):
         assert _rel(a, b) < 6e-3, (tag, name, _rel(a, b))
 
 
+@pytest.mark.parametrize("phase,amp", [(True, True), (False, True)])
 @pytest.mark.parametrize("mode", ["ckpt", "rec", "default"])
-def test_ckpt_modes_match_full(mode):
-    gf = _grads(True, "full")
-    gm = _grads(True, mode)
-    for name, a, b in zip(["wavelet", "vp", "Q"], gm[:3], gf[:3]):
-        assert _rel(a, b) < 1e-5, (mode, name, _rel(a, b))
+def test_ckpt_modes_match_full(mode, phase, amp):
+    gf = _grads(True, "full", phase, amp)
+    gm = _grads(True, mode, phase, amp)
+    for name, a, b in zip(["wavelet", "vp", "Q", "omega"], gm, gf):
+        assert _rel(a, b) < 1e-5, (mode, phase, amp, name, _rel(a, b))
 
 
 def test_default_strategy_is_full():
@@ -191,24 +192,36 @@ TOGGLES = [(True, True), (True, False), (False, True), (False, False)]
 def test_gradients_match_eager_toggles(phase, amp):
     """c-vs-eager gradient consistency for each attenuation-term combo.
 
-    Physical structure asserted too: with amp off, omega never enters the
-    equation (grad exactly zero on BOTH backends); with phase AND amp off it
-    degenerates to acoustic, so Q's grad is exactly zero as well.  With amp
-    on, omega's true gradient is ~0 by the constant-Q cancellation (module
-    docstring) — magnitude-checked, never compared pointwise."""
+    Every combo sits at float32 rounding (~1e-6); 1e-4 leaves room across
+    GPUs.  The bound used to be 6e-3, which hid a race in the damping-only
+    adjoint (phase off, amp on: up to ~1.5% off, different on every run).
+
+    Physical structure asserted too: with phase AND amp off it degenerates to
+    acoustic, so the Q and omega gradients are exactly zero on BOTH backends.
+    Otherwise both are compared like vp (omega is a real parameter, module
+    docstring)."""
     ge = _grads(True, "eager", phase, amp)
     gc = _grads(True, "full", phase, amp)
     for name, a, b in zip(["wavelet", "vp"], gc[:2], ge[:2]):
         assert _cos(a, b) > 0.9999, (phase, amp, name, _cos(a, b))
-        assert _rel(a, b) < 6e-3, (phase, amp, name, _rel(a, b))
+        assert _rel(a, b) < 1e-4, (phase, amp, name, _rel(a, b))
     if phase or amp:
-        assert _cos(gc[2], ge[2]) > 0.9999 and _rel(gc[2], ge[2]) < 6e-3
-        # NCQ: the reference frequency is a REAL parameter — (vp/omega)^(2g)
-        # gives omega a genuine gradient; compare it like the others.
-        assert _cos(gc[3], ge[3]) > 0.9999 and _rel(gc[3], ge[3]) < 6e-3
+        for name, a, b in zip(["Q", "omega"], gc[2:4], ge[2:4]):
+            assert _cos(a, b) > 0.9999, (phase, amp, name, _cos(a, b))
+            assert _rel(a, b) < 1e-4, (phase, amp, name, _rel(a, b))
     else:
         assert ge[2].norm() == 0 and gc[2].norm() == 0      # Q dead
         assert ge[3].norm() == 0 and gc[3].norm() == 0      # omega dead
+
+
+@pytest.mark.parametrize("phase,amp", TOGGLES)
+def test_c_gradients_repeat_bitwise(phase, amp):
+    """Two identical impl='c' backward passes give the same bits (the race
+    above made the damping-only gradients change from run to run)."""
+    g1 = _grads(True, "full", phase, amp)
+    g2 = _grads(True, "full", phase, amp)
+    for name, a, b in zip(["wavelet", "vp", "Q", "omega"], g1, g2):
+        assert torch.equal(a, b), (phase, amp, name, _rel(a, b))
 
 
 def test_toggles_discriminate_on_c():

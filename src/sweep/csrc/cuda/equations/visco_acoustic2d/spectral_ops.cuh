@@ -23,7 +23,9 @@
 // interleaved layout and what at::view_as_complex used to alias; a kernel
 // that reads "the real part" of one reads its floats at stride 2.  Every
 // launch goes on sweep::current_stream(), like every other launch in the
-// core.
+// core.  No output may share storage with an input (the kernels are
+// __restrict__; ``inplace``'s y is the one in/out operand): the launchers
+// check this and throw.
 //
 // The kernels and their launchers are compiled once, in spectral_ops.cu: this
 // header is included by four translation units, and a kernel defined in it is

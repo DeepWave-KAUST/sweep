@@ -97,9 +97,31 @@ static __global__ void zero_halo_kernel(float* __restrict__ u, int64_t slabs, in
 
 // ---- launchers ------------------------------------------------------------
 
+// The kernels take their pointers __restrict__ and grid-stride with no order
+// between blocks, so an output sharing storage with an input is a race (an
+// in-place real_copy reads float 2i while another thread writes it).  The
+// launchers refuse such a call on the host.  Extents in bytes; a strided
+// float operand spans (n - 1) * stride + 1 floats.
+inline int64_t float_span(int64_t n, int stride)
+{
+    return ((n - 1) * stride + 1) * static_cast<int64_t>(sizeof(float));
+}
+
+inline void check_disjoint(const char* what, const void* out, int64_t out_bytes,
+                           const void* in, int64_t in_bytes)
+{
+    const auto o = reinterpret_cast<std::uintptr_t>(out);
+    const auto i = reinterpret_cast<std::uintptr_t>(in);
+    SWEEP_CHECK(o + static_cast<std::uintptr_t>(out_bytes) <= i ||
+                    i + static_cast<std::uintptr_t>(in_bytes) <= o,
+                "visco_ops::", what, ": the output overlaps an input (the kernels are __restrict__); "
+                "stage the result in another slot");
+}
+
 void promote(float2* c, const float* x, int64_t n)
 {
     if (n == 0) return;
+    check_disjoint("promote", c, n * static_cast<int64_t>(sizeof(float2)), x, float_span(n, 1));
     promote_kernel<<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(c, x, n);
     SWEEP_KERNEL_LAUNCH_CHECK();
 }
@@ -107,6 +129,9 @@ void promote(float2* c, const float* x, int64_t n)
 void cmul_grid(float2* out, const float* g, const float2* in, int64_t n, int64_t ng)
 {
     if (n == 0) return;
+    const int64_t out_bytes = n * static_cast<int64_t>(sizeof(float2));
+    check_disjoint("cmul_grid", out, out_bytes, g, float_span(ng, 1));
+    check_disjoint("cmul_grid", out, out_bytes, in, out_bytes);
     cmul_grid_kernel<<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(out, g, in, n, ng);
     SWEEP_KERNEL_LAUNCH_CHECK();
 }
@@ -121,6 +146,7 @@ void cscale(float2* c, float s, int64_t n)
 void real_copy(float* out, const float2* c, int64_t n)
 {
     if (n == 0) return;
+    check_disjoint("real_copy", out, float_span(n, 1), c, n * static_cast<int64_t>(sizeof(float2)));
     real_copy_kernel<<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(out, c, n);
     SWEEP_KERNEL_LAUNCH_CHECK();
 }
@@ -129,6 +155,8 @@ template <class Op>
 void binary(float* out, const float* a, int sa, const float* b, int sb, int64_t n)
 {
     if (n == 0) return;
+    check_disjoint("binary", out, float_span(n, 1), a, float_span(n, sa));
+    check_disjoint("binary", out, float_span(n, 1), b, float_span(n, sb));
     binary_kernel<Op><<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(out, a, sa, b, sb, n);
     SWEEP_KERNEL_LAUNCH_CHECK();
 }
@@ -137,6 +165,7 @@ template <class Op>
 void inplace(float* y, const float* x, int sx, int64_t n)
 {
     if (n == 0) return;
+    check_disjoint("inplace", y, float_span(n, 1), x, float_span(n, sx));
     inplace_kernel<Op><<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(y, x, sx, n);
     SWEEP_KERNEL_LAUNCH_CHECK();
 }
@@ -144,6 +173,7 @@ void inplace(float* y, const float* x, int sx, int64_t n)
 void axpy(float* y, const float* x, int sx, float alpha, int64_t n)
 {
     if (n == 0) return;
+    check_disjoint("axpy", y, float_span(n, 1), x, float_span(n, sx));
     axpy_kernel<<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(y, x, sx, alpha, n);
     SWEEP_KERNEL_LAUNCH_CHECK();
 }
