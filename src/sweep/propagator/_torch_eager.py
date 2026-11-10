@@ -814,7 +814,7 @@ class _PropTorchEager(
         g = runtime_grid[tuple(crop)].reshape(model_shape)
         return self._curvilinear_model_grad(g)
 
-    def _rollout_ckpt(self, wavefield, models, wavelet_steps, src, rec,
+    def _rollout_ckpt(self, wavefield, runtime_models, wavelet_steps, src, rec,
                       receivers, nt, adj):
         """Time loop under chunk gradient checkpointing: the nt steps are split
         into ``ckpt_chunks``-sized chunks, each wrapped in ``ckpt_torch`` so its
@@ -822,7 +822,16 @@ class _PropTorchEager(
         rounded up to whole compiled calls (``_stepper``).  Returns
         ``(wavefield, record)``, the record concatenated from the chunks' own
         (see ``_rollout_full`` for why it is not written in place).
+
+        The chunks take the models as ``forward`` prepared them, once for the
+        rollout: autograd keeps the prepared models (as ``_rollout_full`` does)
+        and sums their gradient over the chunks before the one backward of the
+        preparation.  Each chunk used to prepare the models again, in its
+        forward and in its recompute -- for the tilted elastic equations,
+        whose preparation rotates the stiffness tensor, most of the gradient's
+        time (an ElasticTTI rollout 7x slower without gradients, too).
         """
+        models = runtime_models
         records = self._records(models, wavelet_steps)
         k = self._resolved_steps_per_call(records)
         chunk_size = -(-int(max(1, self.ckpt_chunks)) // k) * k
@@ -840,8 +849,7 @@ class _PropTorchEager(
             # CheckpointError.  Only the first compiled call compiles (see
             # _SettledSteps), so run the steps up to and including it on the
             # plain tape; it ends on a multiple of k, as the chunks then do.
-            advance = self._stepper(self._prepare_runtime_models(models), wavelet_steps, src, rec,
-                                    nt, adj, settled, k, records=records)
+            advance = self._stepper(models, wavelet_steps, src, rec, nt, adj, settled, k, records=records)
             compiled = False
             while start < min(nt, 8 + 2 * k) and not compiled:
                 wavefield, block, n = advance(wavefield, start, nt)
@@ -854,9 +862,8 @@ class _PropTorchEager(
             def checkpoint_chunk(*chunk_inputs, start_t=start_t):
                 state = list(chunk_inputs[:num_wavefields])
                 chunk_models = list(chunk_inputs[num_wavefields : num_wavefields + num_models])
-                advance = self._stepper(self._prepare_runtime_models(chunk_models), wavelet_steps, src,
-                                        rec, nt, adj, settled, k, invariants={} if hoist else None,
-                                        records=records)
+                advance = self._stepper(chunk_models, wavelet_steps, src, rec, nt, adj, settled, k,
+                                        invariants={} if hoist else None, records=records)
                 end = min(start_t + chunk_size, nt)
                 blocks, t = [], start_t
                 while t < end:
@@ -1025,9 +1032,12 @@ class _PropTorchEager(
 
         # Every rollout builds its record fresh (stacked, never a workspace
         # buffer), so it is returned without a defensive copy.
-        if self.use_ckpt:
+        if self.use_ckpt and self._records(runtime_models, wavelet_steps):
+            # A call autograd does not record has nothing to recompute: under
+            # checkpointing it takes the plain steps below, as under boundary
+            # saving (return_wavefield still raises, above).
             wavefield, record = self._rollout_ckpt(
-                wavefield, models, wavelet_steps, src, rec, receivers, nt, adj
+                wavefield, runtime_models, wavelet_steps, src, rec, receivers, nt, adj
             )
         elif getattr(self, "_eager_bs", False) and (
                 return_wavefield or self._records(runtime_models, wavelet_steps)):
