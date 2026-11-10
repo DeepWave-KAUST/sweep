@@ -78,7 +78,7 @@ faces on eager and c; `top` = top face only; `refused` = raises `NotImplementedE
 
 | Class (aliases) | Dim | rec default | Notes |
 |---|---|---|---|
-| `DASZhao` (`DASElastic`), `DASZhao3D` (`DASElastic3D`) | 2/3 | `exx_t, ezz_t` (strain rate) | also `das35_t`, `das54x_t`, `das54z_t` helical read-outs; `DASZhao3D` has no c boundary saving |
+| `DASZhao` (`DASElastic`), `DASZhao3D` (`DASElastic3D`) | 2/3 | `exx_t, ezz_t` (strain rate) | also `das35_t`, `das54x_t`, `das54z_t` helical read-outs; `DASZhao3D` has no c boundary saving; no free surface |
 | `DASMu`, `DASMu3D` | 2/3 | `exx, ezz, exz` (strain) | Mu & Hung 2022 |
 | `DAS` | 2/3 | | `nn.Module` facade: `DAS(shape=..., method="zhao"|"mu", gauge_length=..., ...)` builds the propagator itself |
 

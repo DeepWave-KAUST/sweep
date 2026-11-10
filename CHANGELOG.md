@@ -693,6 +693,11 @@ and this project adheres to
   (20-100 s each on a GPU), and past Dynamo's recompile limit the step ran
   uncompiled. Each sample is a contiguous copy now; several shots compiled once
   before as well.
+- **`DASZhao` / `DASElastic` (2-D and 3-D) refuse `free_surface=`.**  Their
+  step has no free-surface condition on either impl, yet a free surface was
+  accepted and only dropped the top PML: on eager the Rayleigh wave came out
+  8-17 % slow, on `impl='c'` the receivers near the surface recorded zeros.
+  The refusal names `DASMu` / `DASMu3D`, which have one.
 - **Eager and JAX boundary saving: a source on the boundary ring, and per-face
   PML widths.** Each step's ring was saved before the source went in, and the
   reverse pass puts the saved ring back after re-injecting the source, so a

@@ -129,6 +129,13 @@ def refuse_free_surface_if_anisotropic(equation, requested, how):
     """
     if not requested or getattr(equation, "supports_free_surface", True):
         return
+    reason = getattr(equation, "free_surface_unsupported_reason", None)
+    if reason:
+        raise NotImplementedError(
+            f"{type(equation).__name__} does not support a free surface ({how}): "
+            f"{reason}. Use free_surface=False (absorbing top) or an equation "
+            "with a free surface (e.g. Acoustic, Elastic)."
+        )
     raise NotImplementedError(
         f"{type(equation).__name__} does not support a free surface "
         f"({how}): the anisotropic stress-free boundary condition "

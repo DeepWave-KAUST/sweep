@@ -147,6 +147,9 @@ Support matrix:
   any free surface: the anisotropic stress-free condition couples through
   the stiffness tensor and is not the isotropic image method these solvers
   implement. Run with ``free_surface=False`` or use an isotropic equation.
+- **``DASZhao`` / ``DASElastic`` (2-D and 3-D)** raise ``NotImplementedError``
+  for any free surface: their step has no free-surface condition.  For DAS
+  under a free surface use ``DASMu`` / ``DASMu3D``.
 
 See the [per-edge free surface notebook](../notebooks/24_wavefield_per_edge_free_surface.ipynb) for
 snapshots of each configuration and a closed-box energy check.
