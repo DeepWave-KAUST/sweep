@@ -49,26 +49,34 @@ using derived::ViscoMode;
 // zeroed per backward on the Python side and accumulated here.  _c.py builds it
 // unconditionally for every backward (_gradient_buffers from
 // cuda_layout.grads_out_has_wavelet = true plus one slot per prepared model).
-enum GradSlot : int { GRAD_WAVELET = 0, GRAD_VP, GRAD_B1, GRAD_B2, GRAD_A, N_GRADS };
+// GRAD_G exists when the prepared models carry G (the frozen exponent
+// broadcast over the model, see kernels.cuh ViscoSpectral).
+enum GradSlot : int { GRAD_WAVELET = 0, GRAD_VP, GRAD_B1, GRAD_B2, GRAD_A, GRAD_G, N_GRADS = GRAD_G };
 
 struct ViscoGrads {
     Buf wavelet, vp, B1, B2, A;
+    Buf G;      // undefined without the exponent gradient
 };
 
 ViscoGrads bind_grads(const BackwardInputCore& p)
 {
     const auto& gs = p.grads_out;
-    SWEEP_CHECK(gs.size() == N_GRADS,
+    const bool with_g = p.models.size() == 5;
+    const size_t want = N_GRADS + (with_g ? 1 : 0);
+    SWEEP_CHECK(gs.size() == want,
                 "visco_acoustic2d/backward requires the propagator-bound grads_out "
                 "(cuda_layout.grads_out_has_wavelet + one slot per model = ",
-                static_cast<int>(N_GRADS), " tensors: "
-                "grad_wavelet, grad, grad_B1, grad_B2, grad_A), got ", gs.size());
+                want, " tensors: "
+                "grad_wavelet, grad, grad_B1, grad_B2, grad_A", (with_g ? ", grad_G" : ""),
+                "), got ", gs.size());
     ViscoGrads g;
     g.wavelet = pool_required(gs, GRAD_WAVELET, p.forward_source, "grads_out");
     g.vp = pool_required(gs, GRAD_VP, p.models[0], "grads_out");
     g.B1 = pool_required(gs, GRAD_B1, p.models[1], "grads_out");
     g.B2 = pool_required(gs, GRAD_B2, p.models[2], "grads_out");
     g.A = pool_required(gs, GRAD_A, p.models[3], "grads_out");
+    if (with_g)
+        g.G = pool_required(gs, GRAD_G, p.models[4], "grads_out");
     return g;
 }
 
@@ -100,6 +108,8 @@ RTMOutputCore bind_illumination(const BackwardInputCore& p, bool always)
 void pack_outputs(BackwardOutputCore& out, const ViscoGrads& g, const RTMOutputCore& illumination)
 {
     out.grads = {g.wavelet, g.vp, g.B1, g.B2, g.A};
+    if (g.G.defined())
+        out.grads.push_back(g.G);
     out.source_illumination = illumination.source_illumination;
     out.receiver_illumination = illumination.receiver_illumination;
     out.adcig = illumination.adcig;
@@ -304,6 +314,43 @@ void accumulate_grad_disp(float* grad_B1, float* grad_B2,
     visco_ops::axpy(grad_B2, P.data_ptr<float>(), 1, -dt2, n);
 }
 
+// The frozen exponent's share of the loss, on G (gbar broadcast over the
+// model, so autograd sums this map back to gbar and on to Q).  The fractional
+// grids are |k|^(2 gbar + p), so dD/dgbar = 2 ln|k| D: the gradient is the
+// grad_A / grad_B2 correlation through the primed grid, weighted by the
+// coefficient map it multiplies,
+//   grad_G += -dt   * A  (.) λ_it (.) L_{D_loss'}(u[it] - u[it-1])     (damping)
+//   grad_G += -dt^2 * B2 (.) λ_it (.) L_{D_frac'}(u[it])               (dispersion)
+// with dt * A = Gp and dt^2 * B2 = Gd2 (the derived tables).  ``u_a`` /
+// ``u_b`` are the two raw fields of du (stage_difference's operands; the
+// damping term is skipped where grad_A skips it, ``damping_step`` false) and
+// ``u_it`` the raw field of the dispersion term.
+void accumulate_grad_exponent(float* grad_G,
+                              const float* lam,
+                              const float* u_a, const float* u_b, bool damping_step,
+                              const float* u_it,
+                              const ViscoSpectral& d, ViscoScratch& ws)
+{
+    if (grad_G == nullptr || !d.exp_grad) return;
+    const int64_t n = ws.C1.numel() / 2;
+    const Buf P = visco_acoustic2d_real_alias(ws.C0);
+    if (d.active && damping_step) {
+        const Buf du = stage_difference(ws, u_a, u_b);
+        visco_acoustic2d_lop_into(du.data_ptr<float>(), d.kmul_p, ws);    // C1.re = L'(du)
+        visco_ops::binary<visco_ops::MulOp>(P.data_ptr<float>(), lam, 1,
+                                            visco_acoustic2d_real_ptr(ws.C1), VISCO_REAL_STRIDE, n);
+        visco_ops::inplace<visco_ops::MulOp>(P.data_ptr<float>(), d.Gp.data_ptr<float>(), 1, n);
+        visco_ops::axpy(grad_G, P.data_ptr<float>(), 1, -1.0f, n);
+    }
+    if (d.disp) {
+        visco_acoustic2d_lop_into(u_it, d.Dfrac_p, ws);                   // C1.re = L_{D_frac'}(u)
+        visco_ops::binary<visco_ops::MulOp>(P.data_ptr<float>(), lam, 1,
+                                            visco_acoustic2d_real_ptr(ws.C1), VISCO_REAL_STRIDE, n);
+        visco_ops::inplace<visco_ops::MulOp>(P.data_ptr<float>(), d.Gd2.data_ptr<float>(), 1, n);
+        visco_ops::axpy(grad_G, P.data_ptr<float>(), 1, -1.0f, n);
+    }
+}
+
 // One fused exact-adjoint launch (reused acoustic2d kernel; the damping term
 // is layered on top by adjoint_damping_extra).
 inline void run_visco2d_adjoint_step(
@@ -370,9 +417,9 @@ void image_step_from_raw(
 
 void check_visco_backward(const BackwardInputCore& p)
 {
-    SWEEP_CHECK(p.models.size() == 4,
+    SWEEP_CHECK(p.models.size() == 4 || p.models.size() == 5,
                 "visco_acoustic2d expects the prepared models "
-                "(vp_step, B1, B2, A); got ", p.models.size());
+                "(vp_step, B1, B2, A[, G]); got ", p.models.size());
     SWEEP_CHECK(!p.bw_stepped() && p.step_phase == 0,
                 "visco_acoustic2d does not support stepped backward segments");
     SWEEP_CHECK(p.cut_face_mask == 0,
@@ -393,7 +440,8 @@ void run_full_imaging_visco(
     Buf* grad_B1,
     Buf* grad_B2,
     Buf* grad_wavelet,
-    RTMOutputCore* rtm_out)
+    RTMOutputCore* rtm_out,
+    Buf* grad_G = nullptr)
 {
     auto vp = p.models[0];
 
@@ -508,6 +556,12 @@ void run_full_imaging_visco(
                              grad_B2 ? grad_B2->data_ptr<float>() : nullptr,
                              adjoint.u_now_t.template data_ptr<float>(),
                              p.u_forward.select(0, it).data_ptr<float>(), spectral, dt, ws);
+        accumulate_grad_exponent(grad_G && grad_G->defined() ? grad_G->data_ptr<float>() : nullptr,
+                                 adjoint.u_now_t.template data_ptr<float>(),
+                                 p.u_forward.select(0, it).data_ptr<float>(),
+                                 it >= 1 ? p.u_forward.select(0, it - 1).data_ptr<float>() : nullptr,
+                                 it >= 1,
+                                 p.u_forward.select(0, it).data_ptr<float>(), spectral, ws);
     }
 }
 
@@ -525,7 +579,8 @@ BackwardOutputCore backward_core(const BackwardInputCore& in)
     RTMOutputCore illumination = bind_illumination(in, /*always=*/false);
     run_full_imaging_visco(in, &grads.vp, &grads.A, &grads.B1, &grads.B2,
                            &grads.wavelet,
-                           in.compute_illumination ? &illumination : nullptr);
+                           in.compute_illumination ? &illumination : nullptr,
+                           &grads.G);
     pack_outputs(out, grads, illumination);
     return out;
 }
@@ -755,6 +810,14 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
             accumulate_grad_disp(grads.B1.data_ptr<float>(), grads.B2.data_ptr<float>(),
                                  adjoint.u_now_t.template data_ptr<float>(),
                                  chunk_raw.select(0, it - start).data_ptr<float>(), spectral, dt, ws);
+            accumulate_grad_exponent(
+                grads.G.defined() ? grads.G.data_ptr<float>() : nullptr,
+                adjoint.u_now_t.template data_ptr<float>(),
+                chunk_raw.select(0, it - start).data_ptr<float>(),
+                it > start ? chunk_raw.select(0, it - start - 1).data_ptr<float>()
+                           : (spectral.active ? ws.UPREV.data_ptr<float>() : nullptr),
+                it >= 1,
+                chunk_raw.select(0, it - start).data_ptr<float>(), spectral, ws);
         }
     }
 
@@ -850,6 +913,7 @@ void process_recursive_interval_visco_2d(
     Buf* grad_A,
     Buf* grad_B1,
     Buf* grad_B2,
+    Buf* grad_G,
     Buf* grad_wavelet,
     RTMOutputCore* rtm_out,
     int order,
@@ -986,6 +1050,9 @@ void process_recursive_interval_visco_2d(
                              grad_B2 ? grad_B2->data_ptr<float>() : nullptr,
                              adjoint.u_now_t.template data_ptr<float>(), u_start,
                              spectral, ctx.dt, ws);
+        accumulate_grad_exponent(grad_G && grad_G->defined() ? grad_G->data_ptr<float>() : nullptr,
+                                 adjoint.u_now_t.template data_ptr<float>(),
+                                 u_start, u_before, start >= 1, u_start, spectral, ws);
         return;
     }
 
@@ -1006,7 +1073,7 @@ void process_recursive_interval_visco_2d(
 
     process_recursive_interval_visco_2d(
         mid, end, mid_state, adjoint, p, vp,
-        grad, grad_A, grad_B1, grad_B2, grad_wavelet, rtm_out,
+        grad, grad_A, grad_B1, grad_B2, grad_G, grad_wavelet, rtm_out,
         order, wave_grid, wave_block,
         forward_source_grid, forward_source_block,
         adj_source_grid, adj_source_block,
@@ -1017,7 +1084,7 @@ void process_recursive_interval_visco_2d(
 
     process_recursive_interval_visco_2d(
         start, mid, start_state, adjoint, p, vp,
-        grad, grad_A, grad_B1, grad_B2, grad_wavelet, rtm_out,
+        grad, grad_A, grad_B1, grad_B2, grad_G, grad_wavelet, rtm_out,
         order, wave_grid, wave_block,
         forward_source_grid, forward_source_block,
         adj_source_grid, adj_source_block,
@@ -1160,7 +1227,7 @@ BackwardOutputCore backward_recursive_ckpt_core(const BackwardInputCore& in)
 
         process_recursive_interval_visco_2d(
             start, end, start_state, adjoint, p, vp,
-            &grads.vp, &grads.A, &grads.B1, &grads.B2,
+            &grads.vp, &grads.A, &grads.B1, &grads.B2, &grads.G,
             &grads.wavelet, rtm_out,
             order, launch_config.grid, launch_config.block,
             fwd_source_config.grid, fwd_source_config.block,

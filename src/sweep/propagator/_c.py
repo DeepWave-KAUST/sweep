@@ -1920,7 +1920,10 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
 
         models = [self._model_to_cuda_batch(m, batch_size) for m in self.models_padded]
         if getattr(self.equation, "prepare_models_for_c", False):
-            prepare = getattr(self.equation, "prepare_models", None)
+            # prepare_models_c: an equation whose compiled models differ from
+            # the eager ones (ViscoAcoustic adds G for the exponent gradient).
+            prepare = (getattr(self.equation, "prepare_models_c", None)
+                       or getattr(self.equation, "prepare_models", None))
             if not callable(prepare):
                 raise AttributeError(
                     f"{type(self.equation).__name__} sets prepare_models_for_c=True "

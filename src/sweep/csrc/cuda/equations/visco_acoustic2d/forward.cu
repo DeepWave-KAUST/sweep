@@ -40,9 +40,9 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
     const auto& p = in;
     ForwardOutputCore out;
 
-    SWEEP_CHECK(p.models.size() == 4,
+    SWEEP_CHECK(p.models.size() == 4 || p.models.size() == 5,
                 "visco_acoustic2d expects the prepared models "
-                "(vp_step, B1, B2, A); got ", p.models.size());
+                "(vp_step, B1, B2, A[, G]); got ", p.models.size());
     SWEEP_CHECK(p.models[0].is_cuda(),
                 "visco_acoustic2d impl='c' is CUDA-only; use impl='eager' on CPU");
     SWEEP_CHECK(p.cut_face_mask == 0 && p.step_phase == 0,
