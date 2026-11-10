@@ -678,6 +678,20 @@ and this project adheres to
   curvilinear grid only.
 
 ### Fixed
+- **The eager gradient of the qP equations in their default
+  `s_gradient='adjoint'` compiles.** Its backward re-ran the update under
+  `requires_grad_()` and `torch.autograd.grad`, which torch.compile cannot
+  trace: the graph broke there and the whole backward of `AcousticVTI`,
+  `AcousticTTI`, `AcousticVTIBorn` and `AcousticTTIBorn` ran uncompiled, 12-56x
+  the forward. S enters the update only as `v² dt² S (Lpx + Lpz)`, so the
+  backward is now autograd's at the forward field's S plus the term
+  `v² dt² (S_adj - S) λ` sent back into `Lpx` and `Lpz`, which compiles (the
+  gradients 7-12x faster on a V100 at 1024², nt 2000). Forward values are
+  unchanged (bitwise without compilation). The gradients equal the old ones
+  up to rounding, which the qP gradient amplifies: at 1024², nt 2000 they
+  differ by about what a 1e-6 change of the wavelet makes. Under full storage
+  the mode now keeps the update's intermediates, as `'frozen'` and `'exact'`
+  do, instead of re-running the update in the backward.
 - **`impl='eager'` refuses the compile modes that replay CUDA graphs on a CUDA
   device.** With `EagerOptions(compile_mode='reduce-overhead')` or
   `'max-autotune'`, a replay writes over the outputs of the one before, which the
