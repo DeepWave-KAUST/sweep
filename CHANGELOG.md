@@ -29,7 +29,7 @@ and this project adheres to
   `spatial_order=4` its Laplacian of a plane wave was 2-20× less accurate) and
   its record was 7e-3 off the same run on a GPU, against ~1e-6 of fp32
   round-off.  The kernels are now built on every device and for `backend='jax'`
-  as well; GPU results are unchanged bit for bit, and so is `Acoustic`.
+  as well; GPU results are unchanged bit for bit.
 
 ### Added
 - **Agent Skill for AI coding assistants** in `skills/sweep-solver/`

@@ -75,9 +75,7 @@ class AcousticCurvilinear(SecondOrderEquation):
         super().init_separable_laplace()
         # On every device and backend: p_η and p_ξη enter the interior
         # Laplacian, and without these kernels ``gradient`` falls back to
-        # torch.gradient / jnp.gradient, second order whatever spatial_order
-        # (``Acoustic`` can keep that off CUDA: its first derivatives only
-        # feed the CPML terms).
+        # torch.gradient / jnp.gradient, second order whatever spatial_order.
         super().init_grad_kernels()
         # Filled by Propagator at init time once topography is processed.
         self._curv_alpha = None
