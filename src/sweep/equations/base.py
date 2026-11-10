@@ -822,6 +822,12 @@ class SecondOrderEquation(LaplaceGradientOps, WaveEquation):
         ``conv2d`` per axis and is ~5-10x faster than the default
         ``torch.gradient`` fallback on CUDA.
 
+        The fallback is a different operator, not just a slower one:
+        ``torch.gradient`` is second order (one-sided at the edges) whatever
+        ``spatial_order``, these kernels have the equation's FD order.  An
+        equation whose interior terms take first derivatives must call this
+        on every device, or its CPU and CUDA runs solve different schemes.
+
         Call after :meth:`init_separable_laplace`. Only meaningful for 2-D
         equations — 3-D variants currently build their own
         ``self.grad_kernels`` dict from a custom 3-D stencil.
