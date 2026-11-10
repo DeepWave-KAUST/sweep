@@ -44,9 +44,11 @@ def rhs_cpml(
     grad_kernels=None,
     s_frozen=False,
     s_override=None,
+    parts=False,
 ):
     """The update of one TTI step and the next CPML memories (see
-    ``qP_vti.rhs_cpml``, also for ``s_frozen`` / ``s_override``)."""
+    ``qP_vti.rhs_cpml``, also for ``s_frozen`` / ``s_override`` / ``parts``:
+    S enters this update as ``v^2 dt^2 S (Lpx + Lpz)`` as well)."""
 
     az, bz, dbzdz, ax, bx, dbxdx = pml
 
@@ -93,6 +95,8 @@ def rhs_cpml(
     zetaxn = bx * tmpx + ax * zetax
     zetazn = bz * tmpz + az * zetaz
 
+    if parts:
+        return rhs, (psixn, psizn, zetaxn, zetazn), (sk, vp2dt2, lap_x_pml, lap_z_pml)
     return rhs, (psixn, psizn, zetaxn, zetazn)
 
 
@@ -229,11 +233,11 @@ class AcousticTTI(SecondOrderEquation):
         def lap_fn(u):
             return self.separable_d2_2d(u, self.laplace_kernels, hz, hx)
 
-        def rhs_fn(u, psix, psiz, zetax, zetaz, models, s_frozen, s_override):
+        def rhs_fn(u, psix, psiz, zetax, zetaz, models, s_frozen, s_override, parts=False):
             lap_z, lap_x = lap_fn(u)
             return rhs_cpml(u, psix, psiz, zetax, zetaz, *models, dt, h, b, self.b, lap_x, lap_z,
                             self.gradient, self.op, self.grad_kernels, s_frozen=s_frozen,
-                            s_override=s_override)
+                            s_override=s_override, parts=parts)
 
         def s_fn(field, models):
             _, epsilon, delta, theta = models

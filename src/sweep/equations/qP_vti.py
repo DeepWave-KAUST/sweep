@@ -160,74 +160,70 @@ def check_qp_stability(equation, models, dt, spacing):
             f"blow up. Use dt <= {float(dt) / ratio:.3g} s.", stacklevel=3)
 
 
-def cpml_memories(u_now, psix, psiz, zetax, zetaz, h, pml, lap_x, lap_z, grad_op, grad_kernels=None):
-    """The next CPML memories of a step, the expressions of ``rhs_cpml``."""
-    az, bz, dbzdz, ax, bx, dbxdx = pml
-    dudz = grad_op(u_now, h, -2, kernels=grad_kernels)
-    dudx = grad_op(u_now, h, -1, kernels=grad_kernels)
-    tmpz = ((1 + bz) * lap_z + dbzdz * dudz) + grad_op(az * psiz, h, -2, kernels=grad_kernels)
-    tmpx = ((1 + bx) * lap_x + dbxdx * dudx) + grad_op(ax * psix, h, -1, kernels=grad_kernels)
-    return (bx * dudx + ax * psix, bz * dudz + az * psiz, bx * tmpx + ax * zetax, bz * tmpz + az * zetaz)
-
-
 class _AdjointSRhs:
-    """``s_gradient='adjoint'``: the step's update with a backward that
+    """``s_gradient='adjoint'``: the step's update, with a backward that
     propagates the adjoint wavefield with S_n taken from ITS OWN gradient (the
     adjoint of the wavenumber-domain operator, eq. 14, is the same qP
     operator), and differentiates the models at the forward field's S_n.
 
-    ``rhs_fn(u, psix, psiz, zetax, zetaz, models, s_frozen, s_override)`` is the
-    equation's update (``(rhs, memories)``); ``s_fn(field, models)`` is S_n of a
-    field's plain gradient. The forward values are those of the other modes.
+    S_n enters the update only as ``vp^2 dt^2 S_n (Lpx + Lpz)`` (``Lpx``,
+    ``Lpz`` the PML-corrected second derivatives, linear in the wavefields), so
+    that backward is the plain autograd backward of the update at the forward
+    field's S_n -- which also gives the model gradient -- plus
+    ``vp^2 dt^2 (S_adj - S_fwd) grad`` sent into ``Lpx`` and into ``Lpz``. This
+    Function adds that term: its forward returns the update unchanged, its
+    backward passes the update's gradient through and returns the term for the
+    two second derivatives (none for the models, S_fwd or vp^2 dt^2).
+
+    It replaced a Function whose backward re-ran the update under
+    ``requires_grad_()`` + ``torch.autograd.grad``, which torch.compile cannot
+    trace: the graph broke there and the whole backward of a compiled step ran
+    uncompiled (the qP eager gradients took 12-32x their forward).
+    ``s_fn(field, models)`` is S_n of a field's plain gradient.
     """
 
     _fn = None
 
     @classmethod
-    def apply(cls, rhs_fn, s_fn, *tensors):
+    def apply(cls, s_fn, rhs, lap_x_pml, lap_z_pml, sk, vp2dt2, *models):
         if cls._fn is None:
             import torch
 
             class Fn(torch.autograd.Function):
                 @staticmethod
-                def forward(ctx, rhs_fn, s_fn, u, psix, psiz, zetax, zetaz, *models):
-                    ctx.rhs_fn, ctx.s_fn = rhs_fn, s_fn
-                    ctx.save_for_backward(u, psix, psiz, zetax, zetaz, *models)
-                    return rhs_fn(u, psix, psiz, zetax, zetaz, models, True, None)[0]
+                def forward(ctx, s_fn, rhs, lap_x_pml, lap_z_pml, sk, vp2dt2, *models):
+                    ctx.s_fn = s_fn
+                    ctx.save_for_backward(sk, vp2dt2, *models)
+                    return rhs.clone()
 
                 @staticmethod
                 def backward(ctx, grad):
-                    saved = ctx.saved_tensors
-                    wf, models = saved[:5], saved[5:]
-                    need = ctx.needs_input_grad[2:]
+                    sk, vp2dt2, *models = (t.detach() for t in ctx.saved_tensors)
+                    need = ctx.needs_input_grad
                     grad = grad.detach()
-                    det = [m.detach() for m in models]
-                    out = [None] * (5 + len(models))
-                    with torch.enable_grad():
-                        if any(need[:5]):
-                            s_adj = ctx.s_fn(grad, det).detach()
-                            w = [t.detach().requires_grad_(True) for t in wf]
-                            r = ctx.rhs_fn(*w, det, True, s_adj)[0]
-                            g = torch.autograd.grad(r, w, grad, allow_unused=True)
-                            out[:5] = g
-                        if any(need[5:]):
-                            ms = [m.detach().requires_grad_(True) for m in models]
-                            r = ctx.rhs_fn(*[t.detach() for t in wf], ms, True, None)[0]
-                            g = torch.autograd.grad(r, ms, grad, allow_unused=True)
-                            out[5:] = g
-                    out = [o if n else None for o, n in zip(out, need)]
-                    return (None, None, *out)
+                    term = None
+                    if need[2] or need[3]:
+                        s_adj = ctx.s_fn(grad, models).detach()
+                        term = vp2dt2 * (s_adj - sk) * grad
+                    return (None, grad if need[1] else None, term if need[2] else None,
+                            term if need[3] else None, None, None, *[None] * len(models))
 
             cls._fn = Fn
-        return cls._fn.apply(rhs_fn, s_fn, *tensors)
+        return cls._fn.apply(s_fn, rhs, lap_x_pml, lap_z_pml, sk, vp2dt2, *models)
 
 
 def adjoint_mode_step(rhs_fn, s_fn, lap_fn, wavefields, models, h, pml, grad_op, grad_kernels):
-    """One step of an equation in ``s_gradient='adjoint'`` mode (torch)."""
+    """One step of an equation in ``s_gradient='adjoint'`` mode (torch).
+
+    ``rhs_fn(u, psix, psiz, zetax, zetaz, models, s_frozen, s_override, parts)``
+    is the equation's update: ``(rhs, memories)``, with ``parts`` also
+    ``(S_n, vp^2 dt^2, Lpx, Lpz)``. ``lap_fn``, ``h``, ``pml``, ``grad_op`` and
+    ``grad_kernels`` are no longer used (the memories come from ``rhs_fn``).
+    """
     u_now, u_pre, psix, psiz, zetax, zetaz = wavefields
-    rhs = _AdjointSRhs.apply(rhs_fn, s_fn, u_now, psix, psiz, zetax, zetaz, *models)
-    lap_z, lap_x = lap_fn(u_now)
-    aux = cpml_memories(u_now, psix, psiz, zetax, zetaz, h, pml, lap_x, lap_z, grad_op, grad_kernels)
+    rhs, aux, (sk, vp2dt2, lap_x_pml, lap_z_pml) = rhs_fn(u_now, psix, psiz, zetax, zetaz, models, True, None,
+                                                          parts=True)
+    rhs = _AdjointSRhs.apply(s_fn, rhs, lap_x_pml, lap_z_pml, sk, vp2dt2, *models)
     return rhs, aux
 
 
@@ -250,6 +246,7 @@ def rhs_cpml(
     grad_kernels=None,
     s_frozen=False,
     s_override=None,
+    parts=False,
 ):
     """The update ``v^2 dt^2 [((1 + 2 eps) + S) Lpx + (1 + S) Lpz]`` of one step
     and the next CPML memories ``(psixn, psizn, zetaxn, zetazn)``.
@@ -258,7 +255,9 @@ def rhs_cpml(
     (``qP_born``) also scatters it into the perturbation field.
     ``s_frozen`` takes S's wavefield direction out of the gradient (see
     ``AcousticVTI(s_gradient=...)``); the values are the same either way.
-    ``s_override`` replaces S by a given field (the adjoint mode's backward).
+    ``s_override`` replaces S by a given field. ``parts`` also returns
+    ``(S, v^2 dt^2, Lpx, Lpz)``, the factors of the update's S term (the
+    adjoint mode, ``adjoint_mode_step``).
     """
 
     az, bz, dbzdz, ax, bx, dbxdx = pml
@@ -291,6 +290,8 @@ def rhs_cpml(
     zetaxn = bx * tmpx + ax * zetax
     zetazn = bz * tmpz + az * zetaz
 
+    if parts:
+        return rhs, (psixn, psizn, zetaxn, zetazn), (sk, vp2dt2, lap_x_pml, lap_z_pml)
     return rhs, (psixn, psizn, zetaxn, zetazn)
 
 
@@ -450,10 +451,11 @@ class AcousticVTI(SecondOrderEquation):
         def lap_fn(u):
             return self.separable_d2_2d(u, self.laplace_kernels, hz, hx)
 
-        def rhs_fn(u, psix, psiz, zetax, zetaz, models, s_frozen, s_override):
+        def rhs_fn(u, psix, psiz, zetax, zetaz, models, s_frozen, s_override, parts=False):
             lap_z, lap_x = lap_fn(u)
             return rhs_cpml(u, psix, psiz, zetax, zetaz, *models, dt, h, b, self.b, lap_x, lap_z,
-                            self.gradient, self.grad_kernels, s_frozen=s_frozen, s_override=s_override)
+                            self.gradient, self.grad_kernels, s_frozen=s_frozen, s_override=s_override,
+                            parts=parts)
 
         def s_fn(field, models):
             _, epsilon, delta = models
