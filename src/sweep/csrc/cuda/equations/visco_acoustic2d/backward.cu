@@ -219,8 +219,8 @@ Buf stage_difference(ViscoScratch& ws, const float* u_a, const float* u_b)
 // R1.copy_(real(L_Dk2)) (a copy, no arithmetic) then R1.sub_(real(L_Dfrac));
 // with both terms on, the damping Lop is formed AFTER the dispersion sum and
 // added into it, R1.add_(real(L_damp)) = e + m = m + e.  The result (R1, or
-// real(C1) with the damping alone) is halo-zeroed and added into u_next as
-// before.
+// real(C1) gathered into C0's alias with the damping alone) is halo-zeroed
+// and added into u_next as before.
 void adjoint_damping_extra(AcousticWavefieldTensor& adj, const ViscoSpectral& d,
                            ViscoScratch& ws, int M)
 {
@@ -255,14 +255,15 @@ void adjoint_damping_extra(AcousticWavefieldTensor& adj, const ViscoSpectral& d,
         }
     }
     // zero_halo(m) then u_next += m.  With the damping alone m is the strided
-    // real part of C1: the halo zeroing was on that view, so the add reads the
-    // zeroed cells -- here the halo cells of the ADD are masked instead, which
-    // adds 0 to exactly the cells the zeroed view added 0 to.
+    // real part of C1: it is gathered contiguous into the float alias of C0
+    // (dead after the inverse transform), halo-zeroed there and added.  Not
+    // into C1's own alias: in place, thread i reads float 2i while thread 2i
+    // writes it.
     if (m_stride == 1) {
         visco_acoustic2d_zero_halo(ws.R1, M);
         visco_ops::inplace<visco_ops::AddOp>(u_next, m, 1, n);
     } else {
-        const Buf Lr = visco_acoustic2d_real_alias(ws.C1);   // C1's real parts, gathered contiguous
+        const Buf Lr = visco_acoustic2d_real_alias(ws.C0);   // C1's real parts, gathered contiguous
         visco_ops::real_copy(Lr.data_ptr<float>(), visco_acoustic2d_complex_ptr(ws.C1), n);
         visco_acoustic2d_zero_halo(Lr, M);
         visco_ops::inplace<visco_ops::AddOp>(u_next, Lr.data_ptr<float>(), 1, n);

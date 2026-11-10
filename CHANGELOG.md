@@ -1005,6 +1005,15 @@ and this project adheres to
   gradient the backward accumulates through the exponent-differentiated grids
   `2 ln|k| D` (one more spectral filter per step and term). Now within 2e-3 of finite
   differences on all three, c vs eager 7e-5. (`test/test_visco_acoustic_exponent_gradient.py`)
+- **`ViscoAcoustic(phase_shift=False)` on `impl="c"`: the gradients are right and
+  repeatable.**  With the amplitude damping alone, the backward copied the real parts
+  of the filtered adjoint field into the buffer it was reading them from, a race
+  between CUDA thread blocks.  The wavelet, vp, Q and omega gradients were off by up
+  to 1.3% (against a float64 eager reference; the size depends on thread timing) and
+  changed from run to run, in every memory mode.  The copy now goes to a free buffer;
+  c matches eager to float32 rounding (~1e-6) and repeats bit for bit.  The default
+  (`phase_shift=True`) was not affected.  The spectral kernels' launchers now refuse
+  an output that overlaps an input.  (`test/test_visco_acoustic_cuda.py`)
 - **`AcousticElasticSEM2D`: a sea floor through a side C-PML band absorbs like the rock
   alone.** The coupling took its plain terms inside the bands, where each domain's C-PML
   carries its stretching into the interface: the solid's form is scaled by `s_x s_z`, so its
