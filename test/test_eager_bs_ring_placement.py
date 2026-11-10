@@ -15,10 +15,13 @@ gradient far off the full tape's:
   ring and the thin PML, outside the ring, came back wrong: 1.8-22 % off, the
   error in the columns next to that face.
 
-Eager boundary saving differs from the full tape near the absorbing boundary
-by design (it reconstructs with the C-PML zeroed), 1e-3 to 1e-2 relative on
-these small grids, so each case is held against a control: the same run with
-the source a few cells off the ring, or with every face as thick.
+Eager boundary saving matches the full tape to round-off except on the
+outermost ``M + 1`` cells next to an absorbing face, where it keeps an error by
+design (the step is re-run from a state without C-PML memory), 2e-5 to 1e-3
+relative on these small grids and larger next to a thinner, steeper ramp.  So
+a source on the ring is held against a control, the same run with the source a
+few cells deeper, and a thinner face is held to round-off away from those
+cells.
 """
 import numpy as np
 import pytest
@@ -59,14 +62,20 @@ def _vp_gradient(eq, memory, src, abcn=ABCN, free_surface=False, k=1, adj=False)
     return models[0].grad.detach()
 
 
-def _bs_error(eq, src, storage_dtype="fp32", **kw):
-    """Relative L2 of boundary saving's vp gradient against the full tape's."""
+def _bs_error(eq, src, storage_dtype="fp32", inner=False, **kw):
+    """Relative L2 of boundary saving's vp gradient against the full tape's,
+    over the box or, with ``inner``, without the outermost ``EDGE`` cells next
+    to an absorbing face."""
     full = _vp_gradient(eq, Full(), src, **kw)
     bs = _vp_gradient(eq, BoundarySaving(storage="gpu", storage_dtype=storage_dtype), src, **kw)
+    if inner:
+        top = 0 if kw.get("free_surface") else EDGE
+        full, bs = full[top:-EDGE, EDGE:-EDGE], bs[top:-EDGE, EDGE:-EDGE]
     return float((bs - full).norm() / full.norm())
 
 
 HALO = 2                       # spatial_order 4
+EDGE = HALO + 1                # the cells next to an absorbing face that keep an error
 
 
 @pytest.mark.parametrize("eq, k, storage_dtype, adj", [
@@ -79,19 +88,28 @@ HALO = 2                       # spatial_order 4
 ], ids=["acoustic", "acoustic_adj", "acoustic_int8", "acoustic_k4", "elastic", "elastic_k4"])
 def test_a_source_on_the_ring_of_a_free_surface_face(eq, k, storage_dtype, adj):
     """The free-surface face's ring lies inside the model: a source on it is
-    reconstructed as one a few cells deeper is."""
+    reconstructed as one a few cells deeper is.  int8 keeps one scale per 256
+    ring cells, and a source on the ring sets its block's scale, which
+    quantizes the cells next to it coarser: 8x the control's error (3.5e-3
+    against 4.4e-4), where a dropped source cost 17-21 %."""
+    factor = 20 if storage_dtype == "int8" else 3
     control = _bs_error(eq, (22, ABCN + 3), storage_dtype, free_surface=True, k=k, adj=adj)
     for z in (ABCN - HALO, ABCN - 1):
-        assert _bs_error(eq, (22, z), storage_dtype, free_surface=True, k=k, adj=adj) < 3 * control
+        assert _bs_error(eq, (22, z), storage_dtype, free_surface=True, k=k, adj=adj) < factor * control
 
 
 @pytest.mark.parametrize("eq", [Acoustic, Elastic], ids=["acoustic", "elastic"])
 @pytest.mark.parametrize("abcn", [(8, 8, 4, 8), (12, 8, 8, 8)], ids=["thin_x_lo", "thick_z_lo"])
 def test_a_thinner_pml_face_keeps_its_ring_out_of_the_model(eq, abcn):
     """Each face's ring sits in its own PML: with a face thinner than the
-    others the gradient is as near the full tape's as with all faces alike."""
+    others the gradient matches the full tape's to round-off away from the
+    outermost cells next to an absorbing face (3e-6 at most), as with all
+    faces alike.  With every ring at ``max(abcn) + halo`` the thinner face's
+    ring lay inside the model, and the cells next to it read the wrongly
+    rebuilt strip outside it: 5e-3 off there.  On the outermost cells the
+    error of the design is 3-4x larger next to the 4-cell face."""
     src = (6, 20)                                  # next to the x_lo face
-    assert _bs_error(eq, src, abcn=abcn) < 3 * _bs_error(eq, src, abcn=ABCN)
+    assert _bs_error(eq, src, abcn=abcn, inner=True) < 2e-5
 
 
 def test_ring_offsets_follow_each_faces_ramp():

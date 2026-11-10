@@ -119,7 +119,10 @@ saving solve the same grid; the buffer is cropped with the pad, so shapes and
 coordinates do not change.  Equations with pointwise imaging get no buffer.
 An explicit value is honoured, but boundary saving refuses one below the
 equation's need.  A non-zero buffer cannot be combined with ``topography=``
-yet (``NotImplementedError``).
+yet (``NotImplementedError``).  On the eager and JAX backends an explicit
+``boundary_buffer=M + 1`` also removes the error boundary saving leaves on the
+outermost cells next to the PML; see
+[Boundary saving next to the PML](#bs-near-pml).
 
 Support matrix:
 
@@ -371,6 +374,49 @@ A runnable comparison of these options lives in the
 [Memory · strategies notebook](../notebooks/07_memory_strategies.ipynb), which
 exercises full-wavefield, boundary saving, and checkpointing on the same
 Marmousi shot and prints the per-mode peak GPU / host memory.
+
+### Boundary saving next to the PML (eager and JAX) {#bs-near-pml}
+
+On `impl="c"` boundary saving matches `Full()` to rounding on every cell.  On
+the eager and JAX backends it matches to rounding everywhere except the cells
+next to an absorbing face: the outermost `M` cells (`M = spatial_order // 2`;
+`M + 1` for `Acoustic1st` and `ElasticVRR`).  The backward pass re-runs each
+step under autograd from the reconstructed state, which has no C-PML memory and
+no PML cells beyond the saved ring, so the model derivative of those cells reads
+slightly wrong values.  The CUDA backward images from the saved full-step fields
+and never reads the C-PML memory.
+
+The error is small for most equations and large for `AcousticVRR`.  Measured
+against the gradient on the outermost ring of cells itself (fp64, order 4):
+
+| Equation | Error on the outermost ring |
+| --- | --- |
+| `AcousticVRR` (`vp`) | 66 % |
+| `ElasticVRR` (`vp`, `vs`) | 5-7 % |
+| The other equations with eager boundary saving | 0.01-0.3 % |
+
+In a 300-iteration Adam FWI of a downsampled Marmousi with absorbing faces on
+all four sides, `Acoustic` with boundary saving ended at most 2.3 m/s from the
+`Full()` result, with the same model error.  `AcousticVRR` drove its outermost
+cells to the velocity bounds and ended with a model error about 4 % larger.
+
+The default keeps this error.  To make eager or JAX boundary saving exact, pass
+a sigma=0 buffer of `M + 1` cells:
+
+```python
+PropTorch(eq, ..., impl="eager", memory=BoundarySaving(),
+          boundary_buffer=3)                      # M + 1 at spatial_order=4
+```
+
+The cells with the error then fall in the buffer, whose gradient is cropped, and
+the gradient matches `Full()` to rounding on every physical cell (checked in
+fp64 for every equation with eager boundary saving).  The buffer moves the PML
+ramp out by `M + 1` cells, so the solution itself changes at the level of the
+PML's reflection (the records by 3e-6 to 2e-3 relative in our tests), and each
+absorbing axis grows by `2(M + 1)` cells.  It cannot be combined with
+`topography=` yet.  `impl="c"` needs no buffer, and the eager default `Ckpt()`
+is exact without one.  `AcousticVRR` has no compiled kernel: when its outermost
+cells matter, use the buffer or `Ckpt()`.
 
 ### Boundary tail truncation (`BoundarySaving.tail_steps`)
 

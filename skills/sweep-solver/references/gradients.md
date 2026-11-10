@@ -76,7 +76,10 @@ their step refuse boundary saving instead of returning a wrong gradient: `ViscoA
 `AcousticVTI/TTI` (eager; on c `int8` is refused). Boundary saving + `topography=` is refused on
 `impl='c'` (at the first backward). `solver.memory_strategy` tells you what was chosen.
 
-All strategies give the same gradient up to rounding (fp32 storage):
+All strategies give the same gradient up to rounding (fp32 storage), with one exception:
+boundary saving on eager / `PropJax` leaves an error on the outermost M to M + 1 cells next
+to an absorbing face (M = `spatial_order // 2`; large only for `AcousticVRR`), which the
+default keeps and `boundary_buffer=M + 1` removes (boundaries.md, section 5):
 
 ```python
 import numpy as np, torch

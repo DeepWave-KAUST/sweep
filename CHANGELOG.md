@@ -700,6 +700,25 @@ and this project adheres to
   the full tape. They are now made once per rollout through the time-invariant
   dict, and in every uncompiled step that has none; compiled steps compute them
   in place, as before.
+- **Boundary saving on `impl='eager'` and `PropJax` is exact in the interior
+  again.**  The reconstruction zeroes the CPML memory, so a physical cell whose
+  update reads it has to come back from the saved ring: on the high side of a
+  staggered axis the last cell holds half-grid values that sit in the PML, and
+  a second-order equation's `d(a psi)` reaches one cell into the box (the
+  acoustic family) or M (`AcousticVRZ`, `AcousticVRR`, `AcousticTariq`).  None
+  was restored, and the staggered ring came back only after both sub-steps;
+  once the wavefield reached the PML the error crept inward, and interior
+  gradients ended 1e-5 to 4e-4 off the full tape (fp64).  The ring now takes in
+  those cells (the second-order reach is measured on the equation) and each
+  sub-step's fields are restored as soon as it is inverted, on the k-steps-a-call
+  path too: the interior matches to round-off (fp64 1e-15 on the 15 2-D and
+  3-D equations checked).  The outermost M to M + 1 cells next to an absorbing
+  face keep an error (`impl='c'` has none): the backward re-runs the step from
+  a state without CPML memory, up to 4e-3 of the gradient's maximum on the
+  first cell of `AcousticVRR` and `ElasticVRR`.  The default keeps it; a
+  sigma=0 `boundary_buffer` of M + 1 cells removes it.  The propagators guide
+  (*Boundary saving next to the PML*) gives its size, its effect on an
+  inversion and the buffer's cost.
 - **The compiled eager step of the 3-D deformed SEM classes with a C-PML is faster:
   forward 4.3-6.4x on `AcousticSEM3DDeformed`, 1.9-3x on `ElasticVSSEM3DDeformed`,
   `ElasticVTISEM3DDeformed`, `ElasticTTISEM3DDeformed` and

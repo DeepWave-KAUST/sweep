@@ -472,7 +472,14 @@ class Full:
 
 @dataclass
 class BoundarySaving(BoundaryOptions):
-    """Reconstruct the forward wavefield from saved boundary values."""
+    """Reconstruct the forward wavefield from saved boundary values.
+
+    On impl='c' the gradient matches ``Full()`` to rounding.  On impl='eager'
+    and PropJax it does too, except on the outermost ``M`` to ``M + 1`` cells
+    next to an absorbing face (``M = spatial_order // 2``); pass
+    ``boundary_buffer=M + 1`` to the propagator to remove that error.  See
+    "Boundary saving next to the PML" in the propagators guide.
+    """
     strategy: ClassVar[str] = "boundary"
 
 

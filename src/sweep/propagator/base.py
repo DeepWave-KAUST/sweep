@@ -139,7 +139,14 @@ class PropBase:
                 memory strategy, so all of them solve the same grid. An explicit
                 value is honoured, but boundary saving refuses one below the
                 need, and a non-zero buffer cannot be combined with
-                ``topography=`` yet.
+                ``topography=`` yet.  On impl='eager' and PropJax, boundary
+                saving leaves an error on the outermost ``M`` to ``M + 1``
+                cells next to an absorbing face (``M = spatial_order // 2``;
+                large only for ``AcousticVRR``), which the default keeps;
+                ``boundary_buffer=M + 1`` moves it onto buffer cells, whose
+                gradient is cropped, at the cost of moving the PML ramp out
+                by ``M + 1`` cells.  See "Boundary saving next to the PML" in
+                the propagators guide.
         """
         
         self.equation = equation

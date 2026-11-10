@@ -300,8 +300,12 @@ def test_k_steps_a_call_through_inductor(name):
     """Through Inductor, 4 steps a call fuse differently from 1, and the
     warm-up steps run uncompiled: the gradients may differ by Inductor's
     round-off, which compiling the one-step path already shows against not
-    compiling it (1e-5 to 2e-5 on these grids).  4 steps a call stay within
-    3x that, and differ from the full tape as one step a call does."""
+    compiling it (up to 2e-5 on these grids).  4 steps a call stay within
+    3x that, and differ from the full tape as one step a call does.  The
+    floors are ElasticVRR's: since the ring is taken after the source, its
+    4-step graph comes out 2.3e-5 off one step a call through Inductor, and
+    1.6e-6 with aot_eager (no fusion), so the logic is the same and the rest
+    is fusion round-off."""
     cfg = CASES[name]
     _, init_m, wavelet, src, rec, obs = _setup(cfg)
     full = _first_grad(_build(cfg), cfg, init_m, obs, wavelet, src, rec)
@@ -312,11 +316,11 @@ def test_k_steps_a_call_through_inductor(name):
     assert scale > 0
     compiling = float((grads[1] - plain).abs().max()) / scale
     diff = float((grads[4] - grads[1]).abs().max()) / scale
-    assert diff <= max(1e-5, 3 * compiling), f"{name}: 4 vs 1 a call {diff:.2e}, compiled vs not {compiling:.2e}"
+    assert diff <= max(5e-5, 3 * compiling), f"{name}: 4 vs 1 a call {diff:.2e}, compiled vs not {compiling:.2e}"
     full = full.double()                     # DAS gradients overflow a float32 norm
     rel1 = float((grads[1].double() - full).norm() / full.norm())
     rel4 = float((grads[4].double() - full).norm() / full.norm())
-    assert abs(rel4 - rel1) < 1e-5, f"{name}: vs the full tape {rel4:.3e} (4 a call) / {rel1:.3e} (1)"
+    assert abs(rel4 - rel1) < 3e-5, f"{name}: vs the full tape {rel4:.3e} (4 a call) / {rel1:.3e} (1)"
 
 
 def test_boundary_saving_composes_with_compile():
