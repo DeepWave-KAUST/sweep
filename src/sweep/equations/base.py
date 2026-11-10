@@ -723,10 +723,10 @@ class SecondOrderEquation(LaplaceGradientOps, WaveEquation):
         self.kernel = to_backend(kernel_func(spatial_order), backend=backend, device=device)
 
         self.kf = kernel_func
-        # Subclasses that need the gradient fast path call
-        # ``self.init_grad_kernels()`` after ``__init__``; ``None`` means
-        # ``self.gradient(u, h, axis, kernels=None)`` falls back to
-        # ``torch.gradient`` (the slow general path).
+        # Subclasses that take first derivatives call
+        # ``self.init_grad_kernels()`` after ``__init__``, on every device;
+        # ``None`` means ``self.gradient(u, h, axis, kernels=None)`` falls
+        # back to ``torch.gradient``, second order whatever spatial_order.
         self.grad_kernels = None
 
     def _prepare_separable_laplace_kernels(self):

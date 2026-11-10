@@ -248,8 +248,8 @@ class ViscoAcoustic(SecondOrderEquation):
         super().__init__(spatial_order, device, backend, dim=dim)
         super().init_separable_laplace()
 
-        if backend == 'torch' and 'cuda' in str(device):
-            super().init_grad_kernels()
+        # On every device and backend, as Acoustic, whose CPML step this runs.
+        super().init_grad_kernels()
 
         self.backend = backend
         self.phase_shift = phase_shift

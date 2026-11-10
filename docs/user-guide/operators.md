@@ -103,16 +103,18 @@ dudz = self.gradient(u_now, h, axis=-2)
 dudx = self.gradient(u_now, h, axis=-1)
 ```
 
-`gradient()` has two modes. The default (`kernels=None`) falls back to
-`torch.gradient`. Passing the optional `kernels=` dict routes through a
-fixed-stencil convolution that is ~5–10× faster on CUDA:
+`gradient()` has two modes. Passing the optional `kernels=` dict routes
+through a fixed-stencil convolution of the equation's FD order. The default
+(`kernels=None`) falls back to `torch.gradient` (`jnp.gradient` on JAX),
+which is second order with one-sided edges whatever `spatial_order`. They
+are different operators, so build the kernels on every device and backend,
+or a CPU run solves a different scheme from a CUDA one:
 
 ```python
 # In __init__:
 super().__init__(spatial_order, device, backend, dim=dim)
 super().init_separable_laplace()
-if backend == "torch" and "cuda" in str(device):
-    super().init_grad_kernels()        # builds self.gkernel_x/z + dict
+super().init_grad_kernels()            # builds self.gkernel_x/z + dict
 
 # In func() / step_cpml:
 dudz = self.gradient(u_now, h, axis=-2, kernels=self.grad_kernels)
@@ -121,7 +123,7 @@ dudz = self.gradient(u_now, h, axis=-2, kernels=self.grad_kernels)
 `self.grad_kernels` defaults to ``None`` (set in
 ``SecondOrderEquation.__init__``); calling :meth:`init_grad_kernels`
 populates it with ``{-2: gkernel_z, -1: gkernel_x}`` and the
-``gradient(..., kernels=…)`` call automatically picks the fast path.
+``gradient(..., kernels=…)`` call picks the kernel path.
 
 `sweep.equations.acoustic.step_cpml` (the module-level function
 `Acoustic.func` calls) is the canonical reference.

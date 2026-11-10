@@ -10,6 +10,19 @@ and this project adheres to
 ## [Unreleased]
 
 ### Fixed
+- **`Acoustic` and `ViscoAcoustic` run the same CPML on a CPU and on JAX as on
+  a GPU.**  Only a CUDA device built their FD-order first-derivative kernels;
+  elsewhere the CPML terms fell back to `torch.gradient` / `jnp.gradient`,
+  second order (one-sided at the grid edges) whatever `spatial_order`.  The
+  interior scheme was the same, the absorbing layers were not: a CPU or JAX
+  record was 8.6e-5 (`Acoustic`) or 8.2e-5 (`ViscoAcoustic`) off the same run
+  on a GPU, against ~1e-6 of fp32 round-off, and at `abcn=30` the `Acoustic`
+  CPML reflected 3.7× as much.  The kernels are now built on every device and
+  backend; GPU results are unchanged bit for bit, CPU and JAX results move by
+  ~1e-4 onto them, and on a CPU the eager boundary-saving ring takes in M
+  cells, as on a GPU.  A compiled CPU forward+backward takes 10-15% longer, an
+  uncompiled one 1.5-1.9× as long: the kernels are 5×5 squares, applied as a
+  full `conv2d` when not compiled.
 - **Recursive checkpointing of the staggered family no longer costs O(nt²).**
   `Ckpt(mode="recursive", count=...)` on `Elastic`, 3-D `Elastic`, `ElasticVRR`,
   `ViscoElastic`, `DASMu` and `DASMu3D` (`impl="c"`) replayed from the nearest

@@ -210,12 +210,11 @@ def gradient(u, h, axis, kernels=None):
 
     With ``kernels`` (a per-axis 2-D conv-kernel dict, as built by
     ``init_grad_kernels``): an FD-order-matched convolution with the stencil
-    halo zeroed.  Without (the common JAX path — ``grad_kernels`` is only
-    initialized on torch+cuda): falls back to ``jnp.gradient``, i.e.
-    SECOND-order central differences with one-sided edges, regardless of the
-    equation's ``spatial_order``.  These derivatives feed the CPML auxiliary
-    terms, whose coefficients vanish in the interior, so the lower order only
-    affects the absorbing band.
+    halo zeroed.  Without: falls back to ``jnp.gradient``, i.e. SECOND-order
+    central differences with one-sided edges, regardless of the equation's
+    ``spatial_order``.  That is a different operator, not a cheaper form of
+    the same one, so an equation builds its kernels on every backend, or its
+    JAX run solves another scheme than its torch run on CUDA.
     """
     h_axis = _resolve_spacing_for_axis(h, axis, u.ndim)
     if kernels is not None:

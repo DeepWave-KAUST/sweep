@@ -24,7 +24,7 @@ def step_cpml(
 
     w_sum = 0.
     
-    # Use fixed stencil convolutions when available; this is much cheaper than torch.gradient.
+    # FD-order stencils (``grad_kernels``); ``None`` falls back to torch.gradient, second order.
     dudz = grad_op(u_now, h, -2, kernels=grad_kernels)
     dudx = grad_op(u_now, h, -1, kernels=grad_kernels)
     
@@ -122,8 +122,10 @@ class Acoustic(SecondOrderEquation):
         """
         super().__init__(spatial_order, device, backend, dim=dim)
         super().init_separable_laplace()
-        if backend == 'torch' and 'cuda' in str(device):
-            super().init_grad_kernels()
+        # On every device and backend: without these kernels ``gradient``
+        # falls back to torch.gradient / jnp.gradient, second order whatever
+        # spatial_order, and the CPML ran another scheme than on CUDA.
+        super().init_grad_kernels()
 
     @property
     def default_source_fields(self):

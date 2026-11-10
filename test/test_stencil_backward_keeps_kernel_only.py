@@ -259,10 +259,11 @@ def _saved_fields_per_step(cls, shape, values, device):
 
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("cls,values,kept,plain", [
-    # The two Laplacian components read one field; on CUDA Acoustic also takes
-    # its two CPML gradients by conv (on the CPU they are torch.gradient, which
-    # saves nothing).  Elastic: five staggered-derivative inputs.
-    pytest.param(Acoustic, [2500.0], 2, {"cpu": 3, "cuda": 5}, id="acoustic2d"),
+    # The two Laplacian components read one field; Acoustic also takes its two
+    # CPML gradients by conv, on every device (on the CPU they were
+    # torch.gradient, which saves nothing).  Elastic: five staggered-derivative
+    # inputs.
+    pytest.param(Acoustic, [2500.0], 2, {"cpu": 5, "cuda": 5}, id="acoustic2d"),
     pytest.param(Elastic, [2500.0, 1400.0, 2000.0], 8, {"cpu": 13, "cuda": 13}, id="elastic2d"),
 ])
 def test_a_rollout_keeps_fewer_fields_per_step(cls, values, kept, plain, device, monkeypatch):
