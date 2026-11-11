@@ -374,6 +374,21 @@ and this project adheres to
   `test/sem/test_sem_spatial_receivers.py`, notebook `47_sem_receivers`.
 
 ### Changed
+- **Smaller cores and wheel: the SEM kernels are compiled once.**  The
+  `impl='c'` kernels of `PropSEM` were `static` kernels defined in their
+  headers, so each was compiled into every translation unit that included its
+  header, on every arch of the fat binary: the 2-D ones seven times (every
+  `sem2d` and `sem3d` unit), the 3-D ones three times, the 2-D velocity-stress
+  ones three times and the 2-D Biot ones twice -- 16% of the machine code.
+  They are now defined once, in `sem2d/kernels.cu`, `sem2d/vs2d_kernels.cu`,
+  `sem2d/biot2d_kernels.cu` and `sem3d/kernels.cu`, behind declarations in the
+  headers, and the template kernels are launched through tables of their
+  specializations, as the finite-difference families have been since 0.3.4:
+  the cu12 core drops from 122.1 to 102.4 MB, the cu13 core from 146.2 to
+  122.8 MB and the wheel by 10.7 MB, to 61.8 MB.  The machine code and the
+  register, stack and shared-memory use of every kernel on every arch are
+  unchanged, and `test/test_core_capi.py` now fails when an arch of the core
+  lists a kernel twice.
 - **`impl="eager"` on a 2-D grid on a GPU compiles its step with Inductor's
   `cpp_wrapper` and `combo_kernels`.** The first generates the host code of each compiled call as
   C++ instead of Python, the second launches the independent small kernels of a

@@ -102,3 +102,40 @@ def test_call_with_a_bad_entry_returns_a_message_not_an_exception():
     h = ctypes.c_void_p()
     rc = lib.sweep_forward_runner_create(10_000, None, ctypes.byref(h), err, 256)
     assert rc != 0 and b"no stepped forward runner" in err.value
+
+
+def test_each_kernel_is_compiled_once():
+    """Each arch of the core holds one copy of each kernel.  A kernel defined in
+    a header -- or a template specialization a header names -- is compiled into
+    every translation unit that includes it, called or not, and the core then
+    carries a copy per includer: the SEM kernels came up to seven times (the
+    2-D ones, included by every 2-D and 3-D SEM unit).  A static kernel keeps
+    its mangled name in every unit; one in an anonymous namespace differs only
+    by the namespace's per-file hash, normalised away here."""
+    import collections
+    import os
+    import re
+    import shutil
+    import subprocess
+    from sweep.backend.c import jit
+    _lib()                                     # skips without a core at hand
+    home = jit._find_cuda_home()
+    tool = shutil.which("cuobjdump") or (os.path.join(home, "bin", "cuobjdump") if home else None)
+    if not tool or not os.path.isfile(tool):
+        pytest.skip("cuobjdump not found")
+    run = subprocess.run([tool, "-res-usage", str(jit.core_path())], capture_output=True, text=True)
+    if run.returncode != 0:
+        pytest.skip(f"{tool} cannot read this core: {run.stderr.strip()[:200]}")
+    copies = collections.defaultdict(collections.Counter)      # arch -> kernel -> copies
+    arch = None
+    for line in run.stdout.splitlines():
+        m = re.match(r"\s*arch = (sm_\w+)", line)
+        if m:
+            arch = m.group(1)
+            continue
+        m = re.match(r"\s*Function (\S+):", line)
+        if m:
+            copies[arch][re.sub(r"_GLOBAL__N__[0-9a-f]{8}_", "_GLOBAL__N__", m.group(1))] += 1
+    assert copies, run.stdout[:500]
+    twice = {a: sorted(k for k, n in c.items() if n > 1) for a, c in copies.items()}
+    assert not any(twice.values()), {a: (len(k), k[:3]) for a, k in twice.items() if k}
