@@ -266,7 +266,7 @@ class ViscoAcoustic(SecondOrderEquation):
         else:
             raise ValueError(f"Unknown backend: {backend}")
 
-    def prepare_models(self, models):
+    def prepare_models(self, models, spectral_grids=True):
         """Map the user models (vp, Q, omega) onto the step coefficients
         ``(vp_step, B1, B2, A)`` for Zhu & Harris (2014) eq. 10 with
         coefficients eq. 11 (gamma = arctan(1/Q)/pi):
@@ -286,7 +286,12 @@ class ViscoAcoustic(SecondOrderEquation):
         ``self`` for :meth:`_spectral_grids`), which is the paper's
         freezing-unfreezing treatment of heterogeneous media.  All ops are
         differentiable, so autograd routes the returned gradients back to
-        vp / Q / omega."""
+        vp / Q / omega.
+
+        On torch the fractional grids for the new ``gbar`` are built here as
+        well (``spectral_grids``), so the steps only read them from the cache.
+        impl='c' passes ``spectral_grids=False``: its kernels take the grids
+        from :meth:`c_eq_aux`."""
         vp, Q, omega = models
         op = self.op
         gamma = op.arctan(1.0 / Q) / np.pi
@@ -307,6 +312,13 @@ class ViscoAcoustic(SecondOrderEquation):
             A = vp_step ** 2 * tau_hat
         else:
             A = op.zeros_like(vp)
+        if spectral_grids and self.backend != 'jax' and getattr(self, 'k', None) is not None:
+            # Built here, once per call and outside the time loop.  Built in
+            # the first step, a checkpointed chunk built them in its forward
+            # but found them cached in its recompute, which then saved fewer
+            # tensors, and the backward raised (Q requiring grad: gbar is on
+            # the graph).
+            self._spectral_grids(self.k)
         return (vp_step, B1, B2, A)
 
     def _average_exponent(self, gamma):
@@ -331,9 +343,11 @@ class ViscoAcoustic(SecondOrderEquation):
         """(D_k2, D_frac, D_loss) fractional-power grids on the runtime |k|
         grid, using the average exponent ``self._gbar`` from the latest
         :meth:`prepare_models` call (one per batch element for per-shot
-        models, giving ``(B, 1, nz, nx)`` fractional grids).  Cached per (gbar tensor, k shape): one
-        rebuild per forward on torch (prepare runs once outside the loop), one
-        per step inside a jax trace (where it stays trace-local).  ``k = 0``
+        models, giving ``(B, 1, nz, nx)`` fractional grids).  Cached per (gbar tensor, k shape): on
+        torch :meth:`prepare_models` builds them, once per forward outside the
+        loop, and the steps only read the cache, so a checkpointed chunk saves
+        the same tensors in its forward and in its recompute; inside a jax
+        trace, one build per step (where it stays trace-local).  ``k = 0``
         rows go through a safe branch so the pow's exponent-gradient stays
         finite (0**e backward emits nan*0 otherwise).
 
@@ -378,7 +392,7 @@ class ViscoAcoustic(SecondOrderEquation):
         autograd will want it (grad mode on, Q requiring grad, a spectral term
         switched on), so a call that does not differentiate Q runs the
         four-model kernels unchanged."""
-        prepared = self.prepare_models(models)
+        prepared = self.prepare_models(models, spectral_grids=False)
         Q = models[1]
         self._c_exp_grad = bool(
             (self.amplitude_damping or self.phase_shift)

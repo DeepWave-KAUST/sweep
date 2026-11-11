@@ -10,6 +10,18 @@ and this project adheres to
 ## [Unreleased]
 
 ### Fixed
+- **Eager chunk checkpointing no longer slows calls down for nothing.** A
+  solver built with `Ckpt(mode="chunk")` cut every rollout into chunks, also
+  a call autograd does not record, and every chunk prepared the models again
+  (`Equation.prepare_models`), in its forward and in its recompute. For
+  `ElasticTTI` and `ElasticTTISG`, whose preparation rotates the stiffness
+  tensor, a call without gradients ran 3x slower than under `Full()`, and the
+  preparation took about 60% of a gradient's time. A call without gradients
+  now takes the plain rollout, as under boundary saving, and the chunks take
+  the models prepared once per call (autograd keeps them, as it does under
+  full storage): on a V100 at 1024², nt 2000 their checkpointed gradients are
+  2.6-2.8x faster, with the same peak memory. Gradients agree with full
+  storage to fp32 rounding.
 - **`Acoustic` and `ViscoAcoustic` run the same CPML on a CPU and on JAX as on
   a GPU.**  Only a CUDA device built their FD-order first-derivative kernels;
   elsewhere the CPML terms fell back to `torch.gradient` / `jnp.gradient`,
