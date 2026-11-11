@@ -6,19 +6,25 @@ into chunks, also without gradients; and each chunk prepared the models again,
 in its forward and in its recompute. For ElasticTTI, whose preparation rotates
 the stiffness tensor, a call without gradients ran 7x slower than under full
 storage, and most of a gradient's time went to the preparation.
+
+ViscoAcoustic caches its fractional grids per prepared exponent, which carries
+the Q gradient. Prepared once, the exponent stayed the same object for the
+whole call, so the grids, built in the first step, were built in the first
+chunk's forward but read from the cache in its recompute: the backward raised
+CheckpointError.
 """
 import numpy as np
 import pytest
 import torch
 
-from sweep.equations import Elastic, ElasticTTI
+from sweep.equations import Elastic, ElasticTTI, ViscoAcoustic
 from sweep.propagator import Full
 from sweep.propagator.options import Ckpt, EagerOptions
 from sweep.propagator.torch import PropTorch
 
 NZ, NX, NT, CHUNKS = 24, 28, 40, 8
 VALUES = {"vp": 2500.0, "vs": 1400.0, "rho": 2000.0, "vp0": 2500.0, "vs0": 1400.0, "epsilon": 0.12,
-          "delta": 0.05, "gamma": 0.06, "theta": 0.4, "phi": 0.0}
+          "delta": 0.05, "gamma": 0.06, "theta": 0.4, "phi": 0.0, "Q": 50.0, "omega": 2 * np.pi * 15.0}
 
 
 def _prop(cls, memory):
@@ -62,7 +68,7 @@ def test_a_call_without_gradients_takes_the_plain_rollout(cls, monkeypatch):
     assert chunked == [1]
 
 
-@pytest.mark.parametrize("cls", [Elastic, ElasticTTI])
+@pytest.mark.parametrize("cls", [Elastic, ElasticTTI, ViscoAcoustic])
 def test_the_chunks_take_the_models_prepared_once(cls):
     prop = _prop(cls, Ckpt(chunks=CHUNKS))
     eq = prop._backend_impl.equation
