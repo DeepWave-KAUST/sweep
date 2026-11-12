@@ -131,10 +131,10 @@ struct Buf {
     // end.  THE STRIDE IS COPIED FROM THE TENSOR, NEVER DERIVED FROM THE SIZES:
     // torch clamps the stride of a 0-size dimension to a nonzero value, and
     // this tree depends on it -- a DD cut face is allocated with its last axis
-    // 0 (Layout._cut_face_shape) and the saver still compares a staging
-    // numel() against such a face's stride(0) (Layout.staging_shapes, and the
-    // tangent_pad guard in EffectiveBoundarySaver::allocate_int8_staging).
-    // Recomputing would give 0 there and silently change both.
+    // 0 (Layout._cut_face_shape) and the saver still takes such a face's
+    // stride(0) / stride(1) as its step pitch (compute_time_strides), with only
+    // numel() marking the face as cut (BoundaryRuntime::face_is_cut).
+    // Recomputing would give 0 there and silently change the pitch.
     int64_t stride(int64_t d) const
     {
         const int64_t i = normalize_dim(d);

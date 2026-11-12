@@ -465,8 +465,8 @@ void Vrz3dBackwardBsRunner::setup()
     boundary_offset = -p.M;
     staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
     // Must match Python boundary_tangent_pad (= so//2 = M for VRZ) so the FP32
-    // staging matches the persistent int8 buffers' per-step stride; see the
-    // forward.cu note.  Restore reads top_t.stride(0) cells from staging.
+    // staging matches the persistent int8 buffers' cells per shot; see the
+    // forward.cu note.  Dequantize writes top_t.stride(1) cells per shot into it.
     const int boundary_tangent_pad = p.M;
     // ``bs.last_two`` is never read in the backward -- the reverse seeds come
     // straight from ``p.u_last_two``, bound here instead of letting

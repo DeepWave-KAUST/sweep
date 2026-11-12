@@ -282,8 +282,9 @@ struct EffectiveBoundarySaver {
     // boundary_staging).  Count + per-slot geometry/dtype/device checks in the
     // spirit of cudautils.h's pool_slot_checked: the save/restore kernels take
     // data_ptr<float>() and index it by ctx.B / width / n*_boundary, and
-    // quantize_step copies the persistent buffer's whole per-step stride out of
-    // it, so a slot of the wrong shape reads as garbage rather than failing.
+    // quantize_step copies the persistent buffer's cells per shot for each of
+    // the call's shots out of it, so a slot of the wrong shape reads as garbage
+    // rather than failing.
     inline void bind_int8_staging(
         const BufList& staging,
         const std::vector<std::vector<int64_t>>& shapes)
@@ -344,24 +345,64 @@ struct EffectiveBoundarySaver {
                     "boundary_staging (Layout.staging_shapes); the saver no longer "
                     "allocates it.");
         bind_int8_staging(staging, shapes);
-        // Defensive: quantize_step / dequantize_step copy the persistent buffer's
-        // full per-step stride (top_t.stride(0) in 3D) between the staging and the
-        // int8 ring.  If the caller's tangent_pad here disagrees with the pad the
-        // persistent buffers were allocated with (Python boundary_tangent_pad),
-        // the staging is undersized and the copy reads/writes out of bounds.  Turn
-        // that silent illegal access into a clear error at allocation time.
-        // (A DD cut face keeps its FULL staging band on both sides -- Python does
-        // NOT collapse these the way gpu_full_shapes collapses the persistent
-        // faces -- because PyTorch clamps a 0-size dim's stride to a nonzero
-        // value, so a numel-0 slot would trip this very check.)
-        if (dim == 3 && top_t.defined() && top_t.numel() > 0) {
-            SWEEP_CHECK(top_staging_t.numel() >= top_t.stride(0) &&
-                        left_staging_t.numel() >= left_t.stride(0) &&
-                        front_staging_t.numel() >= front_t.stride(0),
-                        "INT8 FP32 staging is smaller than the persistent boundary "
-                        "buffer per-step stride -- tangent_pad mismatch between the "
-                        "Python layout and the CUDA saver (top ", top_staging_t.numel(),
-                        " vs ", top_t.stride(0), ").");
+        // quantize_step / dequantize_step take each face's geometry from its
+        // persistent payload: the shots on the batch axis (the buffers are
+        // narrowed to this call's batch there) and the cells per shot as that
+        // axis' stride, with one FP32 scale per 256-cell block of each shot
+        // (runtime.cuh quantize_face).  They copy that many cells per shot
+        // between the staging and the payload, so a disagreement here would read
+        // or write out of bounds instead of failing: check it per face, and say
+        // which part disagrees.  On the staged paths the kernels write the GPU
+        // rings, which must share the persistent buffers' per-step layout
+        // (flush / load copy whole steps between them).
+        // A face whose persistent buffer is numel 0 is a DD cut face, skipped
+        // here as quantize_face skips it (its staging keeps the FULL band --
+        // Layout.staging_shapes does not collapse it, and bind_int8_staging
+        // checks the full band).
+        const int bd = (dim == 3) ? 1 : 2;   // batch axis of every buffer here
+        auto check_face = [&](const char* face, const Buf& stage, const Buf& main,
+                              const Buf& scale, const char* role) {
+            if (!main.defined() || main.numel() == 0)
+                return;
+            const int64_t shots = main.size(bd);
+            const int64_t cells = main.stride(bd);
+            const int64_t stage_cells = stage.numel() / ctx.B;
+            const int64_t blocks = (cells + BOUNDARY_INT8_BLOCK - 1) / BOUNDARY_INT8_BLOCK;
+            SWEEP_CHECK(shots == ctx.B,
+                        "scaled (int8/fp16) boundary ", role, " (", face, " face) holds ",
+                        shots, " shots per step but this call has ", ctx.B,
+                        " -- the propagator must narrow its boundary buffers to the "
+                        "call's batch on axis ", bd, ".");
+            SWEEP_CHECK(cells == stage_cells,
+                        "scaled (int8/fp16) boundary ", role, " (", face, " face) has ",
+                        cells, " cells per shot per step but its FP32 staging has ",
+                        stage_cells, " -- the Python layout and the CUDA saver disagree "
+                        "on save_width or tangent_pad.");
+            SWEEP_CHECK(scale.defined() && scale.dim() == bd + 2 &&
+                        scale.size(bd) == shots && scale.size(bd + 1) == blocks &&
+                        scale.stride(bd) == blocks && scale.stride(bd + 1) == 1,
+                        "scaled (int8/fp16) boundary ", role, " scale (", face,
+                        " face) has shape ", scale.sizes(), "; expected [..., ", shots,
+                        ", ", blocks, "] with the last two axes contiguous: one FP32 "
+                        "scale per ", BOUNDARY_INT8_BLOCK, "-cell block of each shot.");
+        };
+        check_face("top",    top_staging_t,    top_t,    top_scale_t,    "storage");
+        check_face("bottom", bottom_staging_t, bottom_t, bottom_scale_t, "storage");
+        check_face("left",   left_staging_t,   left_t,   left_scale_t,   "storage");
+        check_face("right",  right_staging_t,  right_t,  right_scale_t,  "storage");
+        if (dim == 3) {
+            check_face("front", front_staging_t, front_t, front_scale_t, "storage");
+            check_face("back",  back_staging_t,  back_t,  back_scale_t,  "storage");
+        }
+        if (top_gpu.defined()) {
+            check_face("top",    top_staging_t,    top_gpu,    top_scale_gpu,    "GPU ring");
+            check_face("bottom", bottom_staging_t, bottom_gpu, bottom_scale_gpu, "GPU ring");
+            check_face("left",   left_staging_t,   left_gpu,   left_scale_gpu,   "GPU ring");
+            check_face("right",  right_staging_t,  right_gpu,  right_scale_gpu,  "GPU ring");
+            if (dim == 3) {
+                check_face("front", front_staging_t, front_gpu, front_scale_gpu, "GPU ring");
+                check_face("back",  back_staging_t,  back_gpu,  back_scale_gpu,  "GPU ring");
+            }
         }
     }
 

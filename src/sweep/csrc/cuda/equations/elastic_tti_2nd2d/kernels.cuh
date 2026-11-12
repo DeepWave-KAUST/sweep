@@ -304,7 +304,12 @@ __global__ void tti2nd_stress_kernel_nopml(
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
     const int M = is_runtime ? solver.M : M_static;
     const int halo = solver.abcn + M + 1;
-    if (ix < halo - M || ix >= solver.nx - halo + M || iz < halo - M || iz >= solver.nz - halo + M)
+    // [halo - M, n - halo + M): the stresses the reversed displacement update
+    // reads -- but never the outer M-cell halo, where the forward stress kernel
+    // writes nothing (its stress stays zero) and where DIFF_FORWARD's taps
+    // (ix - (M-1) .. ix + M) would leave the array once abcn < M - 1.
+    if (ix < halo - M || ix >= solver.nx - halo + M || iz < halo - M || iz >= solver.nz - halo + M ||
+        ix < M || ix >= solver.nx - M || iz < M || iz >= solver.nz - M)
         return;
 
     const int spatial_size = solver.nx * solver.nz;

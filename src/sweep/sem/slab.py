@@ -29,8 +29,8 @@ and drop the +0.0 they would have written). ``planes_d`` is the inverse
 table, ``ring_slot_d`` re-expresses the boundary-saving ring index
 ``band_idx_d`` in slot coordinates, ``dir_slot_d`` the Dirichlet nodes that
 lie on the slab. The CUDA side mirrors these formulas in
-``sem3d/kernels.cuh`` (``SemSlabs``); ``slab_slot`` here is the reference
-the tests hold it to.
+``sem3d/kernels.cu`` (``sem3d_slot_*`` on ``SemSlabs``); ``slab_slot`` here is
+the reference the tests hold it to.
 """
 from __future__ import annotations
 

@@ -8,7 +8,7 @@
 // Deltas from acoustic2d (the acoustic-family REFERENCE EQUATION; anything
 // not listed here is the same as in acoustic2d/driver_traits.cuh):
 //   * two models, [vp, z] (make_state checks the count); State keeps z and the derived inv_z = 1/z alive as tensors beside their raw pointers;
-//   * TANGENT_PAD = 1: the boundary strips carry a tangential pad of M (matches the Python boundary_tangent_pad = so//2 and the persistent int8 buffers' per-step stride);
+//   * TANGENT_PAD = 1: the boundary strips carry a tangential pad of M (matches the Python boundary_tangent_pad = so//2 and the persistent int8 buffers' cells per shot);
 //   * ADJ_WF_COUNT = 11 (u triple + psi/zeta double-buffer): the exact CPML adjoint (launch_acoustic_vrz2d_adjoint, adjoint_split.cu) writes new adjoint psi AND zeta to separate buffers, rotated with swap_aux;
 //   * ADCIG_IN_FULL_MODES = false, HAS_FUSED_FULL_IMG = false, BS_HAS_IT0_ADJOINT_TAIL = false (no RTM/ADCIG kernels, per-step gradient with no lag fusion, bs floor is it == 1);
 //   * BwdWorkspace is non-empty: the time-invariant adjoint coefficients C0/Cx/Cz and the split-gradient scratch c_x/c_z/e_x/e_z; the seven grids come from the Python-bound p.adjoint_workspace (WorkspaceSlot: [0-3]=c_x,c_z,e_x,e_z, [4-6]=C0,Cx,Cz), which AcousticVRZ.cuda_layout.backward_workspace_shapes declares in every memory mode, so the binding is required; make_bwd_workspace zeroes the adjoint wavefield state and runs BUILD_VRZ_ADJOINT_COEFFS once;
@@ -75,8 +75,8 @@ struct Driver {
     static constexpr int BS_LAST_TWO_NVAR = 2;
     // Boundary strips carry a tangential pad of M (matches the Python
     // boundary_tangent_pad = so//2): without it the internal FP32 staging is
-    // smaller than the persistent int8 buffers' per-step stride and
-    // quantize_step reads past it.
+    // smaller than the persistent int8 buffers' cells per shot, which
+    // allocate_int8_staging rejects.
     static constexpr int TANGENT_PAD = 1;
     static constexpr int CUT_MASK_BITS = 0xF;
     static constexpr const char* CUT_MASK_DESC = "bits 0..3 (x_lo, x_hi, z_lo, z_hi)";
@@ -603,7 +603,7 @@ struct Driver {
     // acoustic2d seed does, harmless for its offset-0 band) wiped exactly those
     // cells: bs vs full rel 3.5e-4 to 2.6e-3 whenever the wavefield still
     // reached the pad at the last step, ~3e-6 once it had left.  Nothing reads
-    // past the band -- the NOPML step updates [phys0 + 1, phys1 - 1) only and
+    // past the band -- the NOPML step updates vrz2d_recon_box only and
     // the physical cells' imaging reach stays inside it (BOUNDARY_BUFFER_REACH)
     // -- so the untouched pad values beyond it are never used.  The 3-D
     // sibling (Vrz3dBackwardBsRunner) never zeroed.

@@ -357,7 +357,7 @@ void acoustic_cpml_backward(const SemAcousticCpmlBackwardInputCore& in) {
             if (wt) {
                 // the w_sum tape: the adjoint algebra alone (the assembly,
                 // zeta, w_sum_out and grad_inv_Mg are neither read nor written)
-                sem2d_acoustic_cpml_step_T<true><<<gN, TPB, 0, stream>>>(
+                SEM2D_LAUNCH_WT(true, sem2d_acoustic_cpml_step_T, gN, TPB, 0, stream,
                     gx, gz, kx, kz, gax, gaz, inv_Mg, ax, bx, dbxdx, az, bz, dbzdz,
                     nullptr, nullptr, gw, lpx, lpz, lzx, lzz,
                     gbx, gbz, gbkx, gbkz, gbax, gbaz, w_sum, gInvMg, ng, msn);
@@ -396,7 +396,7 @@ void acoustic_cpml_backward(const SemAcousticCpmlBackwardInputCore& in) {
                 sem2d_acoustic_cpml_grads_f<<<gE, m, sh_g, stream>>>(
                     chi_k, psx, psz, ax, az, ibool, D, inv_rho, w1d, ixx, ixz, iex, iez,
                     mask_e, gx, gz, kx, kz, gax, gaz, ngll, E, ng, msr);
-                sem2d_acoustic_cpml_step_T<false><<<gN, TPB, 0, stream>>>(
+                SEM2D_LAUNCH_WT(false, sem2d_acoustic_cpml_step_T, gN, TPB, 0, stream,
                     gx, gz, kx, kz, gax, gaz, inv_Mg, ax, bx, dbxdx, az, bz, dbzdz,
                     zex, zez, gw, lpx, lpz, lzx, lzz, gbx, gbz, gbkx, gbkz, gbax, gbaz,
                     w_sum, gInvMg, ng, msn);
@@ -1178,7 +1178,7 @@ void fluid_solid_dd_bwd_c(const SemFluidSolidBackwardInputCore& in, int64_t k) {
     const size_t ngb = static_cast<size_t>(ng) * sizeof(float);
     const size_t o = static_cast<size_t>(k - 1) * ng;
     const bool bs = in.bs != 0;
-    sem2d_acoustic_cpml_step_T<false><<<nb, TPB, 0, stream>>>(
+    SEM2D_LAUNCH_WT(false, sem2d_acoustic_cpml_step_T, nb, TPB, 0, stream,
         in.gx.data_ptr<float>(), in.gz.data_ptr<float>(),
         in.kx.data_ptr<float>(), in.kz.data_ptr<float>(),
         in.gax.data_ptr<float>(), in.gaz.data_ptr<float>(),
@@ -2260,7 +2260,7 @@ void fluid_solid_backward(const SemFluidSolidBackwardInputCore& in) {
                     chi_k, psx_k, psz_k, ax, az, ibool, D, ac_ir, w1d,
                     ixx, ixz, iex, iez, ac_me,
                     gxp, gzp, kxp, kzp, gaxp, gazp, ngll, E, ng, 0);
-                sem2d_acoustic_cpml_step_T<false><<<gN, TPB, 0, stream>>>(
+                SEM2D_LAUNCH_WT(false, sem2d_acoustic_cpml_step_T, gN, TPB, 0, stream,
                     gxp, gzp, kxp, kzp, gaxp, gazp, ac_iMg, ax, bx, dbxdx, az, bz, dbzdz,
                     zex_k, zez_k, gw, lpx, lpz, lzx, lzz,
                     gbxp, gbzp, gbkx, gbkz, gbax, gbaz, w_sum, gAcIMg, ng, 0);
