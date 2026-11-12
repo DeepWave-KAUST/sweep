@@ -76,7 +76,7 @@ import numbers
 import torch
 import torch.utils.checkpoint
 
-from .._compile import SettledSteps, compile_or_fallback
+from .._compile import SettledSteps, compile_or_fallback, init_cuda_before_checkpoint
 from .mesh import MESH_BUILDERS
 from .mesh.hex8 import hex8_layout
 from .cpml.acoustic import build_cpml
@@ -2603,6 +2603,10 @@ class PropSEM:
             d, sc = advance(n0, k, dyn_in)
             return (*d, sc)
 
+        if vstep is not vstep_plain:
+            # The first compile of the process initializes CUDA, which the
+            # checkpointed forward it runs in refuses (sweep._compile).
+            init_cuda_before_checkpoint()
         parts, n = [], 0
         while n < nt:
             k = min(chunk_size, nt - n)

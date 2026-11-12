@@ -10,6 +10,23 @@ and this project adheres to
 ## [Unreleased]
 
 ### Fixed
+- The eager default, `memory=Ckpt` with `torch.compile` on, no longer fails the
+  first forward of a CPU process in grad mode with "PyTorch's device state was
+  initialized in the forward pass of a Checkpoint" -- on
+  `PropTorch(impl='eager')` and on `PropSEM(impl='eager')`'s vmapped
+  multi-shot rollout. When a GPU is visible, Dynamo initializes CUDA on the
+  first trace of a process, of a step on CPU tensors too, and that trace ran
+  inside the first checkpointed chunk, whose forward refuses it. It showed
+  where nothing had asked for the GPU before, a tree without a shipped core and
+  with `TORCH_CUDA_ARCH_LIST` set; the second call passed. A compiled step now
+  brings CUDA up before the checkpoint, as the trace would have (no context, no
+  device memory).
+- The process-group timeout that `ModelParallel`'s sub-groups inherit is read
+  off the default group's CPU backend (the CUDA one only for an NCCL-only
+  group). It used to ask the CUDA backend whenever torch saw a GPU: under gloo
+  that initialised CUDA in every rank on a GPU host, and with
+  `init_process_group("cpu:gloo", timeout=...)` the lookup failed, so the DD
+  collectives ran on torch's 30-minute gloo default instead.
 - **Lossy boundary storage (`storage_dtype='int8'` / `'fp16'`) no longer mixes
   the shots of a batch.**  The saved boundary band is quantized in blocks of
   256 cells, one FP32 scale each, and the blocks were cut out of a timestep's
