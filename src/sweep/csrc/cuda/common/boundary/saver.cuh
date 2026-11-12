@@ -76,18 +76,25 @@ static inline cudaError_t boundary_memcpy_async(
 // cudaMemcpyAsync into a named, numbered failure.  A staged copy that walks
 // off one of its two buffers is invisible until the driver dereferences it,
 // and the stack then only says "cudaMemcpyAsync".
+// The bound is the extent of the view's outermost block, not its numel(): a
+// buffer allocated for a larger batch is narrowed to the call's shots and keeps
+// that batch's step pitch, and the transfers move whole pitches.  For a
+// contiguous buffer the two are the same.
 static inline void boundary_bounds_check(
     const char* what, const Buf& t, int64_t off_elems, size_t bytes) {
     static const bool on = std::getenv("SWEEP_BOUNDARY_BOUNDS") != nullptr;
     if (!on || !t.defined() || t.numel() == 0) return;
+    int64_t span = 0;
+    for (int64_t i = 0; i < t.dim(); ++i)
+        if (t.size(i) * t.stride(i) > span) span = t.size(i) * t.stride(i);
     const int64_t es = t.element_size();
-    const int64_t have = t.numel() * es;
+    const int64_t have = span * es;
     const int64_t want = off_elems * es + (int64_t)bytes;
     SWEEP_CHECK(off_elems >= 0 && want <= have,
                 "boundary staging out of range on ", what,
                 ": offset ", off_elems, " elems (", off_elems * es,
                 " B) + ", bytes, " B = ", want,
-                " B, buffer holds ", t.numel(), " elems (", have,
+                " B, buffer spans ", span, " elems (", have,
                 " B), sizes ", boundary_shape_str(t, false),
                 " strides ", boundary_shape_str(t, true));
 }
