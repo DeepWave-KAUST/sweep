@@ -479,8 +479,9 @@ def build_core(verbose: bool = True) -> Path:
     baton = _jit._FileBaton(str(d.parent / "sweep_core_cpu_lock"))
     built_elsewhere = False
     while not baton.try_acquire():
-        print(f"[sweep] another process is building the host core (lock {baton.lock_file_path}); "
-              "waiting -- if no build is running, that process died: delete the lock.",
+        print(f"[sweep] another process is building the host core ({baton.holder()}; lock "
+              f"{baton.lock_file_path}); waiting.  A holder on this machine that died is noticed "
+              "and its lock removed; on another machine, delete the lock if no build runs there.",
               file=sys.stderr, flush=True)
         baton.wait()
         # The holder may have failed, or built another tree's sources into
@@ -490,7 +491,7 @@ def build_core(verbose: bool = True) -> Path:
             break
     if not built_elsewhere:
         try:
-            r = subprocess.run(["ninja", "-C", str(d)], capture_output=not verbose, text=True)
+            r = subprocess.run(_jit._ninja_command(d), capture_output=not verbose, text=True)
             if r.returncode != 0:
                 what = f"sweep host core build (libsweep_core.so, {desc}) failed"
                 if verbose:

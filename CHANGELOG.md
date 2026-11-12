@@ -10,6 +10,18 @@ and this project adheres to
 ## [Unreleased]
 
 ### Fixed
+- A core build killed midway (SIGKILLed by a timeout, a restarted notebook
+  kernel, a cancelled job) no longer hangs every later build in the same
+  extension directory. Its lock file stayed behind, and the next process
+  waited on it until someone deleted it by hand; with `impl='auto'` building
+  the host core on a CPU device's first run, that could be any CPU run. The
+  lock (staging, CUDA core, host core) now names its holder, and a waiter on
+  the holder's machine removes it once that process has exited; the process
+  that takes the lock then checks the holder's work instead of assuming it was
+  done. On Linux ninja runs under a launcher that has it SIGTERMed when the
+  process that started it dies, so when that process alone is killed (a
+  subprocess timeout, `kill -9`) its compilers stop instead of running beside
+  the next build. A holder on another machine is still waited on.
 - The eager default, `memory=Ckpt` with `torch.compile` on, no longer fails the
   first forward of a CPU process in grad mode with "PyTorch's device state was
   initialized in the forward pass of a Checkpoint" -- on

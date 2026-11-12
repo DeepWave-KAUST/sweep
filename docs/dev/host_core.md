@@ -501,8 +501,17 @@ instead.  Processes that start together (torchrun ranks, pytest workers)
 build once: the others wait on the build lock and take the core when its
 source stamp is this tree's, and build it themselves when it is not (the
 holder failed, or built another worktree's sources into the shared drawer).
-A build killed outside Python (SIGKILL, `scancel`) leaves the lock behind, as
-the CUDA build does; the waiting process names the file to delete.
+A build killed outside Python (SIGKILL, a test timeout, a restarted kernel)
+leaves its lock file behind, as a CUDA build does.  The file names its holder
+(PID, machine, start time), and a waiter on that machine removes it once the
+holder has exited; for a holder on another machine it cannot tell, and waits.
+On Linux ninja runs under a launcher that has it SIGTERMed when the holder
+dies (`jit._ninja_command`): when the holder alone is killed, its compilers
+stop before the next build starts, which resumes from the objects already
+built (the files being compiled at the kill start over).  A kill of the
+whole process group (GNU `timeout`, for one) takes ninja down with it, and
+the compilers it had started then finish on their own, beside the next
+build.
 
 What would make an explicit `impl='c'` refuse the
 construction keeps `'auto'` on eager instead (`_cpu_request_needs_eager`, the
@@ -693,6 +702,7 @@ workstation cap it at 8.
 |---|---|
 | `test/test_host_core.py` | the host core is a `cpu` core at ABI 4 with the CUDA core's table; unavailable == unported; stubs throw by name; acoustic2d resolves to `c` on a CPU device, matches eager CPU and the CUDA core in all four memory modes, is run-to-run bit-exact; host staging is refused, `'auto'` takes the core explicit `c` runs on (bit-equal), builds it when none is at hand (output off the terminal) and stays eager with eager options, an unported equation falls back with the reason |
 | `test/test_impl_resolution.py` | the resolution table above, with and without a host core; through a fake compiler, the compiler probe, a failed first build (one warning, `build.log`) and the build lock's waiter |
+| `test/test_build_lock.py` | the build lock: a SIGKILLed holder's lock is removed and the next staging / CUDA core / host core build completes; a live holder, an unnamed one (older sweep) and one on another machine are waited on; waiters still take turns; the build stops when its holder dies |
 | `test/test_backend_c.py` | the two-core loader and the per-call core choice, against fakes; `sweep._C` answers dunder lookups (pytest's collection) without loading a core |
 | `test/backend_gradient_matrix.py --backends c-cpu ...` | gradients of every case vs eager and the CUDA core |
 | `gate/run_gate.sh A/B/C/T` | the CUDA core is byte-for-byte unaffected by the macro migration |

@@ -1109,7 +1109,7 @@ class TestCachedLocalCore:
         (core_dir / "sources.sha256").unlink()
 
         def fake_ninja(cmd, **kw):
-            assert list(cmd[:2]) == ["ninja", "-C"], cmd
+            assert list(cmd[-3:-1]) == ["ninja", "-C"], cmd
             (core_dir / "libsweep_core.so").write_bytes(b"\x7fELF built")
             return subprocess.CompletedProcess(cmd, 0, "", "")
         monkeypatch.setattr(subprocess, "run", fake_ninja)
