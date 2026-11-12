@@ -63,7 +63,10 @@
 #define __host__
 #define __forceinline__ inline __attribute__((always_inline))
 #define __launch_bounds__(...)
-#define __noinline__ __attribute__((noinline))
+// No __noinline__: no kernel uses it, and libstdc++ spells the attribute
+// itself (__attribute__((__noinline__)) in bits/shared_ptr_base.h since GCC
+// 12, in bits/basic_string.h since GCC 15), which a macro of that name breaks
+// in every TU this header is forced into.
 // __restrict__ is a GCC/Clang keyword already.  __shared__ and the warp
 // intrinsics are intentionally undefined (see the header comment);
 // __syncthreads is declared deleted so a kernel that reaches for it fails at
