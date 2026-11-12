@@ -242,12 +242,16 @@ __global__ void boundary_kernel3d_compact_bf16(
 // order — dequantize first, then run the FP32 restore kernel
 // (boundary_kernel2d / boundary_kernel3d, or boundary_kernel3d_compact_owned on
 // the 3-D compact path, where the per-face copies of an edge cell differ).
+// The step is ``n_shots`` shots of ``cells_per_shot`` cells back to back, and
+// each shot is blocked on its own: ceil(cells_per_shot / 256) scales per shot,
+// shot-major, and no block mixes two shots.
 void launch_quantize_int8(const float* src, uint8_t* dst, float* scale,
-                          int64_t total_cells, cudaStream_t stream);
+                          int64_t n_shots, int64_t cells_per_shot,
+                          cudaStream_t stream);
 
 void launch_dequantize_int8(const uint8_t* src, const float* scale,
-                            float* dst, int64_t total_cells,
-                            cudaStream_t stream);
+                            float* dst, int64_t n_shots,
+                            int64_t cells_per_shot, cudaStream_t stream);
 
 // FP16 path: same two-pass design with a per-block-normalized __half
 // payload.  A bare fp16 cast flushes everything below 2^-24 to zero,
@@ -255,8 +259,9 @@ void launch_dequantize_int8(const uint8_t* src, const float* scale,
 // ~rho·vp below the stresses); block normalization keeps the payload
 // in [-1, 1] where the full 10-bit mantissa applies.
 void launch_quantize_fp16(const float* src, __half* dst, float* scale,
-                          int64_t total_cells, cudaStream_t stream);
+                          int64_t n_shots, int64_t cells_per_shot,
+                          cudaStream_t stream);
 
 void launch_dequantize_fp16(const __half* src, const float* scale,
-                            float* dst, int64_t total_cells,
-                            cudaStream_t stream);
+                            float* dst, int64_t n_shots,
+                            int64_t cells_per_shot, cudaStream_t stream);

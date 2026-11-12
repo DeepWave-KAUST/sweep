@@ -34,7 +34,20 @@ Three things pinned here, all found on field-data int8 gradients:
    3.5e-4 to 1.1e-3 while the wavefield still reached the pad at the last step
    (this nt), ~3e-6 once it had left.  Fixed: seed as is, as the 3-D runner
    always did.  Guarded by REL_TOL_MODES below.
+6. DD cut faces (2-D).  The bs reverse step reconstructed the physical box
+   less its outer row on EVERY face.  A DD cut face carries no saved band
+   (common/boundary/strip.cuh drops it), so the row next to it, at
+   phys_*0() == M, was neither restored nor reconstructed and kept what the
+   triple buffer held three steps earlier: bs vs full rel 7e-3 to 0.24 with
+   one face or all four cut, at the fused tiled orders and the runtime orders
+   alike.  The DD propagator refuses 2-D VRZ, but the compiled bs path takes
+   cut_face_mask 0xF.  Fixed: vrz2d_recon_box keeps the row on a cut face, as
+   the 3-D twin always did.  Pinned on one domain with no absorbing pad, where
+   a cut face and an ordinary face are the same physics.
 """
+import functools
+from unittest import mock
+
 import numpy as np
 import pytest
 
@@ -186,6 +199,78 @@ def test_vrz2d_c_matches_eager():
         cos = float((gc * ge).sum() / (gc.norm() * ge.norm()).clamp_min(1e-30))
         print(f"2D {name}: c-vs-eager rel {rel:.3e} cos {cos:.5f}")
         assert rel < REL_TOL_EAGER and cos > 0.995, f"2D {name}: c vs eager rel {rel:.3e} cos {cos:.4f}"
+
+
+# ---------------------------------------------------------------------------
+# DD cut faces (2-D): the cells the bs reverse step reconstructs.
+# ---------------------------------------------------------------------------
+
+# sweep.parallel.pml cut-face bits: x_lo, x_hi, z_lo, z_hi, then all four
+CUT_MASKS = (1, 2, 4, 8, 15)
+
+
+def _cut2d_run(so, mode, cut_mask):
+    """2-D VRZ on one domain with no absorbing pad (abcn=0) and the faces in
+    ``cut_mask`` declared DD cuts.  Without a pad a cut face and an ordinary
+    one are the same physics -- no damping, a halo nothing writes -- so the
+    full-storage run without cuts is the reference, and only the bs strip and
+    reconstruction bookkeeping tell the two apart.  The mask goes where the DD
+    propagator puts it, PropBase._dd_cut_mask, which the boundary Layout and
+    both compiled calls read."""
+    from sweep.equations import AcousticVRZ
+    from sweep.propagator import base as prop_base
+    from sweep.propagator.options import BoundarySaving, Full
+    from sweep.propagator.torch import PropTorch
+
+    dev = "cuda"
+    shape, _, nt, src, rec, vp, z = _setup(2)
+    mem = Full() if mode == "full" else BoundarySaving(storage="gpu", storage_dtype="fp32")
+    eq = AcousticVRZ(spatial_order=so, device=dev, backend="torch")
+    with mock.patch.object(prop_base, "dd_cut_face_mask", lambda mesh, ndim: cut_mask):
+        prop = PropTorch(eq, backend="torch", impl="c", memory=mem,
+                         shape=shape, abcn=0, dh=DH, dt=DT, nt=nt)
+    assert prop._dd_cut_mask == cut_mask and prop.pad == (0, 0, 0, 0)
+    wav = torch.tensor(_ricker(nt, DT), device=dev)
+    m = [torch.tensor(vp, device=dev, requires_grad=True),
+         torch.tensor(z, device=dev, requires_grad=True)]
+    out = prop(wav, src.copy(), rec.copy(), models=m)
+    out.pow(2).sum().backward()
+    return out.detach(), m[0].grad.detach(), m[1].grad.detach()
+
+
+@functools.lru_cache(maxsize=None)
+def _cut2d_reference(so):
+    return _cut2d_run(so, "full", 0)
+
+
+def _cut_rows(d, cut_mask):
+    """The physical row(s) of a (nz, nx) field next to the cut face(s)."""
+    rows = [r for bit, r in ((1, d[:, 0]), (2, d[:, -1]), (4, d[0, :]), (8, d[-1, :]))
+            if cut_mask & bit]
+    return torch.cat(rows)
+
+
+@pytest.mark.skipif(not _binding_ready(), reason="CUDA + compiled sweep._C required")
+@pytest.mark.parametrize("cut_mask", CUT_MASKS)
+@pytest.mark.parametrize("so", [4, 10])   # 4: the fused tiled step; 10: acoustic_vrz2nd_nopml
+def test_vrz2d_bs_reconstructs_the_cut_adjacent_row(so, cut_mask):
+    rec_f, *g_f = _cut2d_reference(so)
+    rec_c, *g_c = _cut2d_run(so, "bs", cut_mask)
+    # the premise: declaring the faces cut changed no physics
+    assert _rel(rec_c, rec_f) < REL_TOL_MODES, f"record rel {_rel(rec_c, rec_f):.3e}"
+    for name, gf, gc in zip(("vp", "z"), g_f, g_c):
+        assert torch.isfinite(gc).all()
+        rel = _rel(gc, gf)
+        # the error on the cut-adjacent row(s), against the field's RMS: the
+        # row itself is where the invariant lives (the full gradient on a row
+        # next to the no-pad wall can be ~0, so not against its own RMS)
+        row = float(_cut_rows((gc - gf).double(), cut_mask).pow(2).mean().sqrt()
+                    / gf.double().pow(2).mean().sqrt())
+        print(f"so {so} cut {cut_mask:2d} {name}: bs-full rel {rel:.3e}  cut row / RMS {row:.3e}")
+        assert rel < REL_TOL_MODES, (
+            f"so {so} cut {cut_mask} {name}: bs vs full rel {rel:.3e} (a cut-adjacent "
+            f"row neither restored nor reconstructed?)")
+        assert row < REL_TOL_MODES, f"so {so} cut {cut_mask} {name}: cut row error {row:.3e}"
 
 
 # ---------------------------------------------------------------------------

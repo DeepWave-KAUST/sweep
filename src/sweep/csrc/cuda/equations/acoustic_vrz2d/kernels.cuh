@@ -265,6 +265,23 @@ __device__ __forceinline__ float vrz2d_split_grad_q_gradp(
     return dq * dp;
 }
 
+// The cells the boundary-saving reverse step reconstructs, [x0, x1) x [z0, z1):
+// the physical box less its first cell on every face that carries a saved
+// band, which the strip restore (offset -M, width M + 1) writes instead.  A DD
+// cut face carries no band (common/boundary/strip.cuh drops it), so the box
+// keeps its cell at phys_*0() == M there and reconstructs it from the
+// exchanged halo.  Inset on a cut face as well, that cell was neither restored
+// nor reconstructed: it kept what the triple buffer held three steps earlier.
+// One definition for acoustic_vrz2nd_nopml and the fused step of
+// grad_tiled.cu; the 3-D twin is acoustic_vrz3d/forward_split.cu launch_nopml.
+struct Vrz2dReconBox { int x0, x1, z0, z1; };
+
+__host__ __device__ __forceinline__ Vrz2dReconBox vrz2d_recon_box(const SolverContext& s)
+{
+    return {s.phys_x0() + (s.cut_x_lo() ? 0 : 1), s.phys_x1() - (s.cut_x_hi() ? 0 : 1),
+            s.phys_z0() + (s.cut_z_lo() ? 0 : 1), s.phys_z1() - (s.cut_z_hi() ? 0 : 1)};
+}
+
 template<int Order>
 __global__ void acoustic_vrz2nd_nopml(
     AcousticWavefieldPointer wf,
@@ -281,12 +298,8 @@ __global__ void acoustic_vrz2nd_nopml(
 
     if (ix >= solver.nx || iz >= solver.nz) return;
 
-    int x_start = solver.phys_x0() + 1;
-    int x_end = solver.phys_x1() - 1;
-    int z_start = solver.phys_z0() + 1;
-    int z_end = solver.phys_z1() - 1;
-
-    if (ix < x_start || ix >= x_end || iz < z_start || iz >= z_end)
+    const Vrz2dReconBox r = vrz2d_recon_box(solver);
+    if (ix < r.x0 || ix >= r.x1 || iz < r.z0 || iz >= r.z1)
         return;
 
     int spatial_size = solver.nx * solver.nz;

@@ -10,6 +10,57 @@ and this project adheres to
 ## [Unreleased]
 
 ### Fixed
+- **Lossy boundary storage (`storage_dtype='int8'` / `'fp16'`) no longer mixes
+  the shots of a batch.**  The saved boundary band is quantized in blocks of
+  256 cells, one FP32 scale each, and the blocks were cut out of a timestep's
+  band for the whole batch: where a shot's band on a face is not a multiple of
+  256 cells (most grids), one block held the end of one shot and the start of
+  the next, so a shot's gradient depended on the other shots in its batch,
+  most of all on a much louder one (2-D, int8: 2.5e-3 of the gradient's
+  maximum at equal amplitudes, about int8's own error, and 0.38 with the other
+  shot 1000x louder).  Each shot is now blocked on its own, on `impl='c'`
+  (2-D and 3-D, gpu / cpu / disk storage, DD tiles included) and on the eager
+  backend, and a shot's gradient is the same bit for bit alone or in any
+  batch.  Single-shot calls and grids whose bands are whole blocks give the
+  same bits as before.  `impl='c'` memory is unchanged (its scale buffers were
+  already sized per shot); the eager ring pads each shot to whole blocks, at
+  most 255 cells per shot and field per step.  JAX (where fp16 is a plain cast)
+  and SEM (one scale per field, step and shot) were not affected.
+- **A propagator runs a smaller batch after a larger one with lossy boundary
+  storage.**  Its boundary buffers keep the larger batch and are narrowed per
+  call, but the quantization took its cell count from the full, larger step:
+  3-D stopped with an error that blamed `tangent_pad`, and 2-D quantized the
+  staging of the shots the call no longer had, left over from the previous
+  call (up to 7.5e-3 of the gradient).  Only the call's own shots are
+  quantized now, and the saver checks each face's batch, cells per shot and
+  scale layout separately and names the one that disagrees.
+- The 2-D `AcousticVRZ` boundary-saving backward (`impl='c'`) reconstructs the
+  row next to a domain-decomposition cut face. The reverse step skipped the
+  outer row of the physical box on every face, but a cut face has no saved
+  strip to restore that row from, so it kept a stale value and the gradient
+  came out 0.7-24% off the full-storage one, at every spatial order.
+  `ModelParallel` refuses the 2-D VRZ, so only a compiled call given
+  `cut_face_mask` directly reached it. The reconstruction box now stops at the
+  cut face, as `AcousticVRZ3D`'s does.
+- **`ElasticTTI2nd` boundary saving no longer reads outside its
+  reconstruction buffers on a thin absorbing layer.**  The replay's stress
+  kernel (`tti2nd_stress_kernel_nopml`) covered `[abcn + 1, n - abcn - 1)`,
+  and its forward-difference taps reach `M - 1` cells back and `M` forward,
+  so for `abcn <= M - 2` (`M = spatial_order // 2`) it read before / after
+  the buffers in z and into the neighbouring row in x.  Below `abcn = M - 2`
+  those values reached the gradients: guard regions of NaN around the buffers
+  made every gradient NaN; on the host core two identical runs gave NaN
+  against ~1e25; on CUDA the result depended on what the allocator had put
+  next to the buffers -- zeros in an isolated run, but inside the test suite
+  the order-8 gradients came out with a relative L2 error of 60-370.  At
+  `abcn = M - 2` the value read was unused (one row past the end;
+  compute-sanitizer still flags it).  The kernel now also skips the outer
+  `M`-cell halo, which the forward stress kernel never writes: no
+  out-of-bounds read at any `abcn`, and with `abcn = 0` the reconstruction
+  retraces the forward exactly (gradients vs `Full()` ~1e-6 relative; they
+  were up to 4.5e-2 off at order 4 and 7.7e-2 at order 8 over 100 steps on
+  a 21x23 grid, even where the stray reads found zeros).  Results for
+  `abcn >= M - 1` are bit-identical.
 - **Eager chunk checkpointing no longer slows calls down for nothing.** A
   solver built with `Ckpt(mode="chunk")` cut every rollout into chunks, also
   a call autograd does not record, and every chunk prepared the models again

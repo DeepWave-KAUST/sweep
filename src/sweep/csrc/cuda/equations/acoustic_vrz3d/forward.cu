@@ -163,9 +163,10 @@ ForwardOutputCore forward_core(const ForwardInputCore& in)
     // sets boundary_tangent_pad = so // 2 = M for VRZ; acoustic leaves it 0).  The
     // Python-owned persistent int8 buffers are sized with this pad, so the FP32
     // staging (allocated internally by the saver) must use the same pad or its
-    // per-step size falls short of top_t.stride(0) and quantize_step reads past it
-    // => illegal memory access (surfaced under DD / large grids; harmless-looking
-    // over-read into adjacent allocations on small single-GPU runs).
+    // per-shot size falls short of top_t.stride(1), which allocate_int8_staging
+    // rejects (unchecked, quantize_step read past it => illegal memory access,
+    // surfaced under DD / large grids; harmless-looking over-read into adjacent
+    // allocations on small single-GPU runs).
     const int boundary_tangent_pad = p.M;
     if (staged_boundary) {
         boundary_saver.allocate(p.use_boundary_saving, 3, 1, ctx, vp, save_width, 2, true, false,

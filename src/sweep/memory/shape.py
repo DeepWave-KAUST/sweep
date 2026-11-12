@@ -266,15 +266,15 @@ class Layout:
         Derived from the SAME ``width`` / ``n*_boundary`` as ``cpu_shapes``
         and ``gpu_shapes``, so ``tangent_pad`` / ``pad`` / ``cut_mask`` can
         never drift between the staging and the buffer it feeds (the C++ saver
-        TORCH_CHECKs the staging against the persistent buffer's per-step
-        stride, which is precisely that drift).
+        checks each staging slot's cells per shot against the persistent
+        buffer's, which is precisely that drift, and its batch against the
+        call's).
 
-        Cut faces keep their FULL band here, unlike ``gpu_full_shapes``: that
-        same check compares ``numel()`` against a ``stride()``, and PyTorch
-        clamps a 0-size dim's stride to a nonzero value, so a collapsed slot
-        would trip it.  Nothing reads a cut face's staging anyway (the band
-        kernel and quantize/dequantize both gate on the cut), and the cost is
-        one transient band per face, not a ring.
+        Cut faces keep their FULL band here, unlike ``gpu_full_shapes``: the
+        saver checks every staging slot against the full band geometry
+        (``bind_int8_staging``).  Nothing reads a cut face's staging anyway
+        (the band kernel and quantize/dequantize both gate on the cut), and the
+        cost is one transient band per face, not a ring.
         """
         lead = 1 if self.dim == 3 else 2   # (nvar*nt,) in 3-D, (nvar, nt) in 2-D
         one = (1,) * lead
