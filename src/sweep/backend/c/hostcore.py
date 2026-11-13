@@ -389,9 +389,14 @@ def _host_ninja(core_dir: Path, sources: list[str], inc: list[str], cxx: str, st
                       + [f"-isystem {shlex.quote(str(shim))}",
                          f"-include {shlex.quote(str(shim / 'cuda_runtime.h'))}"]
                       + [f"-I{shlex.quote(d)}" for d in inc])
+    # -MD, not -MMD: -isystem makes the stand-ins system headers, and -MMD
+    # leaves those out of the depfile, so an edit to cuda.h rebuilt nothing
+    # while build_core still wrote the new source stamp (only the forced
+    # cuda_runtime.h was recorded).  -MD records every header the compiler
+    # opens, as nvcc's --generate-dependencies-with-compile does for the CUDA core.
     lines = [f"cxx = {cxx}", f"cflags = {cflags}", "",
              "rule cxx",
-             "  command = $cxx -MMD -MF $out.d $cflags -c $in -o $out",
+             "  command = $cxx -MD -MF $out.d $cflags -c $in -o $out",
              "  depfile = $out.d", "  deps = gcc", "",
              "rule link", f"  command = $cxx {' '.join(HOST_LDFLAGS)} -o $out $in", ""]
     pairs = [(Path(src).stem + ".o", src) for src in list(sources) + [str(stub_cpp)]]
