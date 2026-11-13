@@ -582,9 +582,11 @@ The CPU CI job (`.github/workflows/tests-cpu.yml`) runs `python -m sweep.build
 --cpu` in a step before the tests, in the shards whose tests use the core, and
 caches the `sweep_C` drawer (staged sources and objects).  The key
 (`.github/scripts/host_core_cache_key.py`) covers the source stamp,
-`hostcore.py`, `jit.py`, the compiler, ninja and the package version.  A
-restored drawer leaves ninja nothing to do; a change to any of these builds
-from scratch, so a compiler update on the runner image still gets a full build.
+`hostcore.py`, `jit.py`, the compiler, ninja, the package version and the
+runner image (the depfiles name system headers too, so newer headers on a
+later image would rebuild every object of a restored drawer).  A restored
+drawer leaves ninja nothing to do; a change to any of these builds from
+scratch, so a compiler update on the runner image still gets a full build.
 
 ### OpenMP threads
 
