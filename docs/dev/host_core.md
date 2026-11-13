@@ -578,6 +578,14 @@ time, with the compiler's output shown).  In a working tree keep to the cache:
 a core filed under `src/sweep/lib/cpu/` (`--cpu --core`) is not stamp-checked,
 so it keeps being taken after csrc changes, where the cache rebuilds.
 
+The CPU CI job (`.github/workflows/tests-cpu.yml`) runs `python -m sweep.build
+--cpu` in a step before the tests, in the shards whose tests use the core, and
+caches the `sweep_C` drawer (staged sources and objects).  The key
+(`.github/scripts/host_core_cache_key.py`) covers the source stamp,
+`hostcore.py`, `jit.py`, the compiler, ninja and the package version.  A
+restored drawer leaves ninja nothing to do; a change to any of these builds
+from scratch, so a compiler update on the runner image still gets a full build.
+
 ### OpenMP threads
 
 The core never calls `omp_set_num_threads`: it uses what the OpenMP runtime
