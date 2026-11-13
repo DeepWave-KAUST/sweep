@@ -22,6 +22,7 @@
 // ---------------------------------------------------------------------------
 
 #include <cuda_runtime.h>
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 
 #include "acoustic_vti_1st_2d.h"
@@ -169,6 +170,51 @@ struct AdjWavefieldTensor {
     }
 };
 
+#if defined(SWEEP_HOST_CORE)
+// Host row launchers of the two pre-multiply kernels (launch/cell_path.h), for
+// SWEEP_LAUNCH_ROWS below.  The kernels are launched here, outside the by-order
+// tables, so their launchers live next to the launch.  Pointwise with no guard
+// past the grid's own; the interior box is in_pml_2d's interior at halo M,
+// where the CPML transpose leaves p and q as they are (kernels.cuh).  The cell
+// lambdas capture BY VALUE (see acoustic2d).
+inline CellBox vti2d_premultiply_box(const SolverContext& s)
+{
+    return CellBox{s.phys_x0(s.M), s.phys_x1(s.M), s.phys_z0(s.M), s.phys_z1(s.M)}
+        .intersect({0, s.nx, 0, s.nz});
+}
+
+struct AdjointPremultiplyStressRows {
+    static void run(dim3 grid, dim3 block, VTIWavefieldPointer adj, const float* c11,
+                    const float* c33, const float* c13, float* px, float* pz,
+                    ElasticCPMLPointer cpml, SolverContext solver)
+    {
+        sweep::host::launch_rows(
+            grid, block, sweep::host::box_rows(vti2d_premultiply_box(solver)),
+            [=](int ix, int iz, int b) {
+                adjoint_premultiply_stress_cell<0, CellPath::Interior>(ix, iz, b, adj, c11, c33,
+                                                                       c13, px, pz, cpml, solver);
+            },
+            [&](auto&&... a) { adjoint_premultiply_stress_kernel<0>(a...); },
+            adj, c11, c33, c13, px, pz, cpml, solver);
+    }
+};
+
+struct AdjointPremultiplyVelRows {
+    static void run(dim3 grid, dim3 block, VTIWavefieldPointer adj, const float* inv_rho,
+                    float* qx, float* qz, ElasticCPMLPointer cpml, SolverContext solver)
+    {
+        sweep::host::launch_rows(
+            grid, block, sweep::host::box_rows(vti2d_premultiply_box(solver)),
+            [=](int ix, int iz, int b) {
+                adjoint_premultiply_vel_cell<0, CellPath::Interior>(ix, iz, b, adj, inv_rho, qx,
+                                                                    qz, cpml, solver);
+            },
+            [&](auto&&... a) { adjoint_premultiply_vel_kernel<0>(a...); },
+            adj, inv_rho, qx, qz, cpml, solver);
+    }
+};
+#endif
+
 // Adjoint half-step A (stress -> velocity), with the stiffness multiplied in at
 // the stress location before the derivative.  `sx` / `sz` are scratch buffers of
 // one wavefield component each; they are reused by half-step B.
@@ -181,7 +227,8 @@ void vti_adjoint_A_2d(
     const ElasticCPMLPointer& cpml,
     const SGradParam& grad_ctx, const SolverContext& solver)
 {
-    adjoint_premultiply_stress_kernel<0><<<lc.grid, lc.block>>>(
+    SWEEP_LAUNCH_ROWS((adjoint_premultiply_stress_kernel<0>), AdjointPremultiplyStressRows::run,
+        lc.grid, lc.block,
         adj_view, c11.data_ptr<float>(), c33.data_ptr<float>(),
         c13.data_ptr<float>(), sx.data_ptr<float>(), sz.data_ptr<float>(),
         cpml, solver);
@@ -201,7 +248,8 @@ void vti_adjoint_B_2d(
     const ElasticCPMLPointer& cpml,
     const SGradParam& grad_ctx, const SolverContext& solver)
 {
-    adjoint_premultiply_vel_kernel<0><<<lc.grid, lc.block>>>(
+    SWEEP_LAUNCH_ROWS((adjoint_premultiply_vel_kernel<0>), AdjointPremultiplyVelRows::run,
+        lc.grid, lc.block,
         adj_view, inv_rho.data_ptr<float>(),
         sx.data_ptr<float>(), sz.data_ptr<float>(), cpml, solver);
     LAUNCH_VTI_ADJOINT_VEL_TO_STRESS(
@@ -326,7 +374,7 @@ BackwardOutputCore backward_core(const BackwardInputCore& in)
             int field_index = receiver_fields[irec];
             float* field = vti_field_ptr(adj_view, field_index);
             if (field == nullptr) continue;
-            add_source<<<adjoint_src_config.grid, adjoint_src_config.block>>>(
+            SWEEP_LAUNCH(add_source, adjoint_src_config.grid, adjoint_src_config.block,
                 field,
                 p.adjoint_source.select(0, irec).data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
@@ -585,7 +633,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
             int field_index = receiver_fields[irec];
             float* field = vti_field_ptr(adj_view, field_index);
             if (field == nullptr) continue;
-            add_source<<<adj_src_config.grid, adj_src_config.block>>>(
+            SWEEP_LAUNCH(add_source, adj_src_config.grid, adj_src_config.block,
                 field, p.adjoint_source.select(0, irec).data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
                 it, adjoint_nsrc, solver);
@@ -599,7 +647,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
             int field_index = source_fields[isrc];
             float* field = vti_field_ptr(for_view, field_index);
             if (field == nullptr) continue;
-            add_source_signed<<<fwd_src_config.grid, fwd_src_config.block>>>(
+            SWEEP_LAUNCH(add_source_signed, fwd_src_config.grid, fwd_src_config.block,
                 field, p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
                 it, forward_nsrc, -1.0f, solver);
@@ -890,7 +938,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
                 int field_index = source_fields[isrc];
                 float* field = vti_field_ptr(fwd_view, field_index);
                 if (field == nullptr) continue;
-                add_source<<<fwd_src_config.grid, fwd_src_config.block>>>(
+                SWEEP_LAUNCH(add_source, fwd_src_config.grid, fwd_src_config.block,
                     field, p.forward_source.data_ptr<float>(),
                     p.forward_sources_loc.data_ptr<int>(),
                     it, forward_nsrc, solver);
@@ -925,7 +973,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
                 int field_index = receiver_fields[irec];
                 float* field = vti_field_ptr(adj_view, field_index);
                 if (field == nullptr) continue;
-                add_source<<<adj_src_config.grid, adj_src_config.block>>>(
+                SWEEP_LAUNCH(add_source, adj_src_config.grid, adj_src_config.block,
                     field, p.adjoint_source.select(0, irec).data_ptr<float>(),
                     p.adjoint_sources_loc.data_ptr<int>(),
                     it, adjoint_nsrc, solver);

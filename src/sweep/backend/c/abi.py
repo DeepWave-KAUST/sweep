@@ -16,7 +16,7 @@ shim packs them into the ctypes structs per call.
 import ctypes
 from ctypes import POINTER, Structure, c_bool, c_char_p, c_double, c_float, c_int32, c_int64, c_uint32, c_void_p
 
-ABI_VERSION = 3   # SWEEP_CORE_ABI_VERSION, csrc/core/capi.h
+ABI_VERSION = 4   # SWEEP_CORE_ABI_VERSION, csrc/core/capi.h
 BUF_MAX_DIMS = 8         # core/buf.h
 SWEEP_MAX_GRADS = 32     # core/outputs.h
 # BoundaryDtype (core/dtype.h, parsed): the tag in Buf.dtype_

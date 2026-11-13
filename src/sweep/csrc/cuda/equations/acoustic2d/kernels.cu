@@ -250,11 +250,79 @@ __global__ void accumulate_source_grad_2d(
     grad_source[grad_idx] += u_backward[u_idx];
 }
 
+#if defined(SWEEP_HOST_CORE)
+// Host launcher of acoustic2nd_nopml, the boundary-saving reconstruction
+// (launch/cell_path.h): it hands host/launch.h launch_rows the kernel's
+// interior box in virtual-thread coordinates -- the launch is the Wave2D
+// config over the whole grid and the kernel adds no x_base, so (gx, gy, gz) =
+// (ix, iz, b): box_rows -- and the cell body to run there, with the imaging
+// accumulator grad as the optional output.  Order -1 (runtime M) takes the
+// same box with M = solver.M; its row loop does not vectorise.  No
+// arithmetic of its own; the cell lambda captures BY VALUE.  acoustic2nd and
+// acoustic2nd_adjoint_fused stay plain tables: only visco_acoustic2d, which
+// the host core does not build, launches them.
+namespace {
+
+// acoustic2nd_nopml's interior box in (ix, iz), from the kernel's own tests:
+//   * the grid guard          [0, nx) x [0, nz);
+//   * the band guard          [bx_lo, nx - bx_hi) x [bz_lo, nz - bz_hi), the
+//     per-face band spelled as the kernel spells it (M on a DD cut face, 2M on
+//     a face without pad -- a free surface --, pad + 2M + 1 on a PML face;
+//     per-edge pads through padLo / padHi);
+//   * with the imaging on (grad != nullptr), the imaging test's box: the
+//     physical box minus the restore strips of every non-cut face.
+// So every cell of the box passes both guards and, with grad, the imaging
+// test: the branches the interior path hard-codes.  The kernel has no air
+// test, no x_base and no shot guard (grid.z = B, every shot alike), so
+// nothing else limits the box.
+template<int Order>
+CellBox acoustic2nd_nopml_box(const SolverContext& s, const float* grad, int save_width)
+{
+    const int M = Order == -1 ? s.M : Order / 2;
+    const int bx_lo = s.cut_x_lo() ? M : (s.padLo(2) > 0 ? s.padLo(2) + 2 * M + 1 : 2 * M);
+    const int bx_hi = s.cut_x_hi() ? M : (s.padHi(2) > 0 ? s.padHi(2) + 2 * M + 1 : 2 * M);
+    const int bz_lo = s.cut_z_lo() ? M : (s.padLo(0) > 0 ? s.padLo(0) + 2 * M + 1 : 2 * M);
+    const int bz_hi = s.cut_z_hi() ? M : (s.padHi(0) > 0 ? s.padHi(0) + 2 * M + 1 : 2 * M);
+    CellBox box = CellBox{0, s.nx, 0, s.nz}.intersect({bx_lo, s.nx - bx_hi, bz_lo, s.nz - bz_hi});
+    if (grad != nullptr)
+        box = box.intersect({s.cut_x_lo() ? s.phys_x0() : s.phys_x0() + save_width,
+                             s.cut_x_hi() ? s.phys_x1() : s.phys_x1() - save_width,
+                             s.cut_z_lo() ? s.phys_z0() : s.phys_z0() + save_width,
+                             s.cut_z_hi() ? s.phys_z1() : s.phys_z1() - save_width});
+    return box;
+}
+
+template<int Order>
+struct Acoustic2ndNopmlRows {
+    static void run(dim3 grid, dim3 block, AcousticWavefieldPointer wf, const float* vp,
+                    LaplaceParam lap_ctx, SolverContext solver, const float* adj, float* grad,
+                    int save_width)
+    {
+        auto call = [&](auto&&... a) { acoustic2nd_nopml<Order>(a...); };
+        const CellBox box = acoustic2nd_nopml_box<Order>(solver, grad, save_width);
+        sweep::host::with_optional(grad, [&](auto path) {
+            sweep::host::launch_rows(
+                grid, block, sweep::host::box_rows(box),
+                [=](int ix, int iz, int b) {
+                    acoustic2nd_nopml_cell<Order, decltype(path)::value>(
+                        Acoustic2dCellIndex{ix, iz, b}, wf, vp, lap_ctx, solver, adj, grad,
+                        save_width);
+                },
+                call,
+                wf, vp, lap_ctx, solver, adj, grad, save_width);
+        });
+    }
+};
+
+}  // namespace
+#endif
+
 // Tables behind the order-dispatch macros in kernels.cuh (launch/by_order.cuh).
 
 SWEEP_BY_ORDER_TABLE(acoustic2nd_fn, acoustic2nd_by_order, acoustic2nd);
 SWEEP_BY_ORDER_TABLE(acoustic2nd_adjoint_fused_fn, acoustic2nd_adjoint_fused_by_order, acoustic2nd_adjoint_fused);
-SWEEP_BY_ORDER_TABLE(acoustic2nd_nopml_fn, acoustic2nd_nopml_by_order, acoustic2nd_nopml);
+SWEEP_BY_ORDER_TABLE_ROWS(acoustic2nd_nopml_fn, acoustic2nd_nopml_by_order, acoustic2nd_nopml,
+                          Acoustic2ndNopmlRows);
 
 // Pre-pass: clear air cells (above per-column topo surface).  Launched
 // BEFORE acoustic2nd so the main kernel can early-return on air cells

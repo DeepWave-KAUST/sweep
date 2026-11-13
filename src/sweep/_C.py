@@ -1,7 +1,8 @@
 """Lazy entry point for sweep's CUDA backend (``impl='c'``).
 
 ``import sweep._C`` is instant.  The **first attribute access** (the first real
-use of ``impl='c'``) loads the prebuilt core through ctypes
+use of ``impl='c'``; a dunder lookup, which is introspection, never loads) loads
+the prebuilt core through ctypes
 (``sweep.backend.c``; no compile) and exposes its functions here, so
 ``is_torch_binding_available()`` / plain imports never do any work and
 eager/JAX-only users never touch the core at all.  ``SWEEP_JIT_FULL=1``
@@ -43,6 +44,13 @@ def _load(compile_only: bool = False):
 
 
 def __getattr__(name):
+    # No core entry is a dunder, and introspection asks for them: pytest's
+    # collection reads __test__ and (issubclass) __bases__ of every module-level
+    # name, so a test module importing sweep._C would load the core -- on a
+    # CPU-only source checkout, build the host core.  __all__ still loads
+    # (``from sweep._C import *`` takes what the load puts here).
+    if name.startswith("__") and name.endswith("__") and name != "__all__":
+        raise AttributeError(f"module 'sweep._C' has no attribute {name!r}")
     _load()                                    # load-on-first-use (cached after)
     try:
         return globals()[name]

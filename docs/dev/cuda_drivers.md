@@ -129,8 +129,10 @@ back to the per-call stepped path when a factory is missing.
   own struct that leaves the memory members undefined -- `view()` then hands
   `ptr_or_null` for them) and the carriers from the tail of the list.
   The checkpoint modes take the same route: `forward_wavefields` holds the replay
-  STATE sets (one set = the forward slot list without the psi double-buffer
-  shadows, `cuda_layout.checkpoint_state_nvar` when declared; `1 + depth(max_segment)`
+  STATE sets (one set = the forward slot list, psi double-buffer shadows
+  included -- the replay runs the forward kernel, which reads psi at
+  neighbouring cells and must not update it in place --
+  `cuda_layout.checkpoint_state_nvar` when declared; `1 + depth(max_segment)`
   sets for a bisecting driver that declares `recursive_state_depth`), taken with
   `wavefield_set(list, k, n, what)` and bound with the struct's full bind; the
   segment histories come from `checkpoint_replay` (`checkpoint_replay_shapes(B, nt,
@@ -594,7 +596,16 @@ steps 1–4 run once more at `it = 0`, followed under `compute_illumination` by
    fat binary each time). A step split into an interior launch and a CPML shell
    (the `*_split.cu` files) takes its box geometry from `launch/box.cuh`: the
    computed and physical boxes, the slabs around the interior, the launch shape
-   and the thread-to-cell mapping.
+   and the thread-to-cell mapping. Launch
+   through `SWEEP_LAUNCH(kernel, grid, block, args...)` / `SWEEP_LAUNCH_ON` /
+   `SWEEP_LAUNCH_BY_ORDER` (`launch/launch.h`), never a literal `<<<>>>`: the
+   same source is compiled by g++ for the [host core](host_core.md), where the
+   macro becomes the virtual-grid launcher. Keep a kernel one virtual thread's
+   work (no `__shared__` / `__syncthreads`; a kernel that needs them gets a host
+   body under `#if defined(SWEEP_HOST_CORE)`, as `boundarysaver.cu` does), test
+   residency with `sweep::on_compute_device(buf)` rather than `buf.is_cuda()`,
+   and name an equation that needs a CUDA library in
+   `sweep.backend.c.hostcore.HOST_UNPORTED`.
 3. **driver_traits.cuh**: copy the reference (acoustic2d or elastic2d), keep the five
    sections [1]–[5] and the call order inside each; fill in the constants; put only
    launches in the hooks, remembering that the order inside a composite hook is
@@ -620,10 +631,11 @@ steps 1–4 run once more at `it = 0`, followed under `compute_illumination` by
    `dd_backward_phases=True` once the backward implements numbered phases. Without
    recursive checkpointing set `C_HAS_RECURSIVE_CKPT = False`. For DD, also pick or
    declare a schedule in `parallel/dd_spec.py`.
-7. **Rebuild the core**: `python -m sweep.build` (or the next `impl='c'` use)
+7. **Rebuild the cores**: `python -m sweep.build` (or the next `impl='c'` use)
    re-stages only the files whose SHA-256 changed and runs the core's ninja graph
    incrementally; no `rm -rf` is needed (under `SWEEP_JIT_FULL=1` the pybind shim is
-   rebuilt the same way). Make sure no wheel-style core sits under
+   rebuilt the same way). `python -m sweep.build --cpu` does the same for the host
+   core; `test/test_host_core.py` is its gate. Make sure no wheel-style core sits under
    `src/sweep/lib/<cuN>/` and `SWEEP_CORE` is unset: a fitting shipped core is loaded
    as it is and `csrc/` edits are silently ignored
    (`sweep.backend.torch.binding.diagnostics()['shipped_core']` tells).
@@ -657,4 +669,5 @@ log.
 | `gate/ddgate.py` world≥2 | Real tiles, NCCL halo exchange, `cut_face_mask` — the only rung that can catch a wrong send-field list. Re-record the baseline from dev inside the same job | `torchrun --nproc-per-node=2 gate/ddgate.py --ranks 2 …` |
 | `gate/evr_ab.py` | `ElasticVRR` (elastic_vr2d) is not in the suite, so A/B/C/T can all be green without testing it: 4 backward modes × free surface, comparing the record plus 6 gradients — 56 tensors — bit for bit | `$PY gate/evr_ab.py --out new.pt --compare gate/evr_base.pt` |
 | `gate/check_equations_api.py` | Freezes the public surface of `sweep.equations` (name count, registered equation count, alias identity) | Run when touching `equations/` |
+| `test/test_host_core.py` | The host core: a `cpu` core at the shim's ABI with the CUDA core's entry table; stubs for the unported equations; acoustic2d on a CPU device resolves to `c`, matches eager CPU and the CUDA core in all four memory modes and is run-to-run bit-exact; host staging refused, `'auto'` takes the core explicit `c` runs on, building it when none is at hand | `$PY -m pytest test/test_host_core.py` after `python -m sweep.build --cpu` |
 | pytest | the suite exits 0 (`test_import_does_not_pull_optional_deps` runs in a fresh interpreter). Driver-related: `test_stepped_forward{,_elastic}.py`, `test_stepped_backward{,_elastic}.py`, `test_dd_*two_tile*.py`, `test_dd_tiles_3d.py`, `test_cut_face_mask.py`, `test_slot_table_consistency.py`, `test_dd_supported_equations.py`, `test_boundary_tail_truncation.py`; C-vs-eager gradient consistency lives in `test/solver_gradient_mode_suite.py` | `$PY -m pytest test/` (the default ctypes path, what the wheel ships); a second run under `SWEEP_JIT_FULL=1` covers the pybind shim |

@@ -5,6 +5,7 @@
 // save-all or in chunks [t0, t1) (sweep.sem.drivers.vs_chunks). Kernels and the
 // step's sub-steps: sem2d/biot2d_kernels.cuh.
 #include "../../../core/device.h"
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 #include "../../../core/sem_input_core.h"
 #include <cuda_runtime.h>
 #include <cstdint>
@@ -160,20 +161,20 @@ void biot2d_forward(const Sem2dBiotForwardInputCore& in) {
     for (int n = t0; n < t1; ++n) {
         const float wv = wavelet_at(wav.data(), n);
         const size_t row = static_cast<size_t>(n - t0);
-        biot2d_inject_p<<<nb, TPB, 0, stream>>>(p, c.inv_M1, c.pin_n, c.pp, wv, dt, ng);
-        biot2d_grad_p<<<E, m, sh1, stream>>>(p, gp, mp, c.ax, c.bx, c.az, c.bz,
+        SWEEP_LAUNCH_ON(biot2d_inject_p, nb, TPB, 0, stream, p, c.inv_M1, c.pin_n, c.pp, wv, dt, ng);
+        SWEEP_LAUNCH_ON(biot2d_grad_p, E, m, sh1, stream, p, gp, mp, c.ax, c.bx, c.az, c.bz,
             c.Ixx, c.Ixz, c.Iex, c.Iez, c.ibool, c.D, ngll, E);
         cudaMemsetAsync(Rx, 0, ngb, stream);
         cudaMemsetAsync(Rz, 0, ngb, stream);
         if (c.cp) cudaMemsetAsync(P, 0, 4 * ngb, stream);
-        sem2d_vs_sigma_div<<<E, m, sh4, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_vs_sigma_div, E, m, sh4, stream,
             sig, c.ax, c.bx, c.az, c.bz, c.wJ, c.Ixx, c.Ixz, c.Iex, c.Iez,
             c.ibool, c.D, Rx, Rz, P, ngll, E, ng);
         if (c.cp)
-            sem2d_vs_cpml_nodal<<<nb, TPB, 0, stream>>>(c.a_n, P, msig, Rx, Rz, ng);
-        biot2d_force<<<nb, TPB, 0, stream>>>(Rx, Rz, f, c.pvx, c.pvz, wv, !c.vmode, ng);
+            SWEEP_LAUNCH_ON(sem2d_vs_cpml_nodal, nb, TPB, 0, stream, c.a_n, P, msig, Rx, Rz, ng);
+        SWEEP_LAUNCH_ON(biot2d_force, nb, TPB, 0, stream, Rx, Rz, f, c.pvx, c.pvz, wv, !c.vmode, ng);
         if (c.npts)
-            biot2d_ifc_el<<<pb, TPB, 0, stream>>>(p, c.ifc_idx, c.ifc_w, c.ifc_nx, c.ifc_nz,
+            SWEEP_LAUNCH_ON(biot2d_ifc_el, pb, TPB, 0, stream, p, c.ifc_idx, c.ifc_w, c.ifc_nx, c.ifc_nz,
                                                   f, c.npts, ng);
         BIOT2D_LAUNCH_T(c.tensor, biot2d_flux, nb, TPB, 0, stream,
             vx, vz, q, r, gp, f, c.wJ, c.qmask, c.inv_M, c.inv_Mm, c.slot_elem, c.wr,
@@ -185,32 +186,32 @@ void biot2d_forward(const Sem2dBiotForwardInputCore& in) {
         cudaMemsetAsync(adiv, 0, ngb, stream);
         cudaMemsetAsync(divq, 0, ngb, stream);
         if (c.cp) cudaMemsetAsync(Pq, 0, 2 * ngb, stream);
-        biot2d_stress<<<E, m, sh2, stream>>>(
+        SWEEP_LAUNCH_ON(biot2d_stress, E, m, sh2, stream,
             vx, vz, sig, mv, c.ax, c.bx, c.az, c.bz, c.lam_d, c.mu, c.alpha, c.wJ,
             c.nsls, c.ptau, c.mtau, c.gsls_w, rmem,
             c.Ixx, c.Ixz, c.Iex, c.Iez, c.ibool, c.D, dt, adiv,
             save ? s_gv + row * 4 * Em : nullptr, ngll, E);
-        biot2d_div_q<<<E, m, sh4, stream>>>(
+        SWEEP_LAUNCH_ON(biot2d_div_q, E, m, sh4, stream,
             q, c.ax, c.bx, c.az, c.bz, c.wJ, c.Ixx, c.Ixz, c.Iex, c.Iez,
             c.ibool, c.D, divq, Pq, ngll, E, ng);
         if (c.cp)
-            biot2d_cpml_q<<<nb, TPB, 0, stream>>>(c.a_n, Pq, mq, divq, ng);
+            SWEEP_LAUNCH_ON(biot2d_cpml_q, nb, TPB, 0, stream, c.a_n, Pq, mq, divq, ng);
         if (c.npts)
-            biot2d_ifc_ac<<<pb, TPB, 0, stream>>>(vx, vz, c.ifc_idx, c.ifc_w, c.ifc_nx,
+            SWEEP_LAUNCH_ON(biot2d_ifc_ac, pb, TPB, 0, stream, vx, vz, c.ifc_idx, c.ifc_w, c.ifc_nx,
                                                   c.ifc_nz, divq, c.npts);
-        biot2d_pressure<<<nb, TPB, 0, stream>>>(p, divq, adiv, c.inv_Mp, c.pin_n, dt, dp,
+        SWEEP_LAUNCH_ON(biot2d_pressure, nb, TPB, 0, stream, p, divq, adiv, c.inv_Mp, c.pin_n, dt, dp,
                                                 save ? s_rhs + row * ng : nullptr, ng);
-        biot2d_stress2<<<eb, TPB, 0, stream>>>(sig, r, q, c.alpha, dp, c.bxx, c.bxz, c.bzz,
+        SWEEP_LAUNCH_ON(biot2d_stress2, eb, TPB, 0, stream, sig, r, q, c.alpha, dp, c.bxx, c.bxz, c.bzz,
             c.decay, c.gain, c.visc ? 1 : 0, s_q ? s_q + row * 2 * Em : nullptr, c.ibool, Em);
         if (nrec > 0) {
             const size_t fb = static_cast<size_t>(nrec) * nt;
             const float* nodal[3] = {vx, vz, p};
             for (int k = 0; k < 3; ++k)
-                sem2d_record<<<rb, TPB, 0, stream>>>(nodal[k], c.rec_G, c.rec_W, seis + k * fb,
+                SWEEP_LAUNCH_ON(sem2d_record, rb, TPB, 0, stream, nodal[k], c.rec_G, c.rec_W, seis + k * fb,
                                                      n, nt, nrec, m, ng);
             const float* elem[5] = {q, q + Em, sig, sig + Em, sig + 2 * Em};
             for (int k = 0; k < 5; ++k)
-                sem2d_record<<<rb, TPB, 0, stream>>>(elem[k], c.rec_Ge, c.rec_W,
+                SWEEP_LAUNCH_ON(sem2d_record, rb, TPB, 0, stream, elem[k], c.rec_Ge, c.rec_W,
                                                      seis + (3 + k) * fb, n, nt, nrec, m,
                                                      static_cast<int>(Em));
         }
@@ -294,33 +295,33 @@ void biot2d_backward(const Sem2dBiotBackwardInputCore& in) {
             const size_t fb = static_cast<size_t>(nrec) * nt;
             float* nodal[3] = {lvx, lvz, lp};
             for (int f2 = 0; f2 < 3; ++f2)
-                sem2d_adjoint_source<<<rj, TPB, 0, stream>>>(gseis + f2 * fb, c.rec_G, c.rec_W,
+                SWEEP_LAUNCH_ON(sem2d_adjoint_source, rj, TPB, 0, stream, gseis + f2 * fb, c.rec_G, c.rec_W,
                                                              nodal[f2], k, nt, nrec, m);
             float* elem[5] = {lq, lq + Em, lsig, lsig + Em, lsig + 2 * Em};
             for (int f2 = 0; f2 < 5; ++f2)
-                sem2d_adjoint_source<<<rj, TPB, 0, stream>>>(gseis + (3 + f2) * fb, c.rec_Ge,
+                SWEEP_LAUNCH_ON(sem2d_adjoint_source, rj, TPB, 0, stream, gseis + (3 + f2) * fb, c.rec_Ge,
                                                              c.rec_W, elem[f2], k, nt, nrec, m);
         }
         const float* rhs_k = s_rhs + row * ng;
         const float* gv_k = s_gv + row * 4 * Em;
         // K10^T / K11^T / K6^T: p' = p1 + dp, so dp's adjoint starts as lp
         cudaMemcpyAsync(ldp, lp, ngb, cudaMemcpyDeviceToDevice, stream);
-        biot2d_stress_T<<<eb, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(biot2d_stress_T, eb, TPB, 0, stream,
             lsig, lr, lq, gv_k, s_q ? s_q + row * 2 * Em : nullptr, rhs_k, c.inv_Mp, c.pin_n,
             dt, c.lam_d, c.mu, c.alpha, c.bxx, c.bxz, c.bzz, c.decay, c.gain, c.visc ? 1 : 0,
             c.ibool, c.nsls, c.ptau, c.mtau, c.gsls_w, lrmem, gPt, gMt,
             lgv, ldp, gLd, gMu, gAl, gBxx, gBxz, gBzz, Em);
-        biot2d_pressure_T<<<nb, TPB, 0, stream>>>(ldp, rhs_k, c.inv_Mp, c.pin_n, dt, ldivq,
+        SWEEP_LAUNCH_ON(biot2d_pressure_T, nb, TPB, 0, stream, ldp, rhs_k, c.inv_Mp, c.pin_n, dt, ldivq,
                                                   gMp, ng);
         if (c.npts)
-            biot2d_ifc_ac_T<<<pb, TPB, 0, stream>>>(ldivq, c.ifc_idx, c.ifc_w, c.ifc_nx,
+            SWEEP_LAUNCH_ON(biot2d_ifc_ac_T, pb, TPB, 0, stream, ldivq, c.ifc_idx, c.ifc_w, c.ifc_nx,
                                                     c.ifc_nz, lvx, lvz, c.npts);
-        biot2d_stress_grad_T<<<E, m, sh4, stream>>>(
+        SWEEP_LAUNCH_ON(biot2d_stress_grad_T, E, m, sh4, stream,
             lgv, gv_k, ldivq, lmv, c.ax, c.bx, c.az, c.bz, c.alpha, c.wJ,
             c.Ixx, c.Ixz, c.Iex, c.Iez, c.ibool, c.D, lvx, lvz, gAl, ngll, E);
         if (c.cp)
-            biot2d_cpml_q_T<<<nb, TPB, 0, stream>>>(c.a_n, ldivq, lmq, lPq, ng);
-        biot2d_div_q_T<<<E, m, sh2, stream>>>(
+            SWEEP_LAUNCH_ON(biot2d_cpml_q_T, nb, TPB, 0, stream, c.a_n, ldivq, lmq, lPq, ng);
+        SWEEP_LAUNCH_ON(biot2d_div_q_T, E, m, sh2, stream,
             ldivq, lPq, lq, c.ax, c.bx, c.az, c.bz, c.wJ, c.Ixx, c.Ixz, c.Iex, c.Iez,
             c.ibool, c.D, ngll, E, ng);
         // K5^T: the copies and v
@@ -331,21 +332,21 @@ void biot2d_backward(const Sem2dBiotBackwardInputCore& in) {
             c.qmask, c.inv_M, c.inv_Mm, c.slot_elem, c.wr, c.share, c.dragE, c.dragP,
             c.pvx, c.pvz, c.pqx, c.pqz, wv, c.vmode ? 1 : 0, dt, lf, lg,
             gE, gP, gwr, gsh, gM, gMm, gW, k, kmax, m, Em, ng);
-        biot2d_g_T<<<eb, TPB, 0, stream>>>(lg, lr, lgp, c.wJ, c.qmask, m, Em);
+        SWEEP_LAUNCH_ON(biot2d_g_T, eb, TPB, 0, stream, lg, lr, lgp, c.wJ, c.qmask, m, Em);
         // K4^T, K3^T
-        biot2d_force_T<<<nb, TPB, 0, stream>>>(lf, lRx, lRz, c.pvx, c.pvz, !c.vmode, gW, k, ng);
+        SWEEP_LAUNCH_ON(biot2d_force_T, nb, TPB, 0, stream, lf, lRx, lRz, c.pvx, c.pvz, !c.vmode, gW, k, ng);
         if (c.npts)
-            biot2d_ifc_el_T<<<pb, TPB, 0, stream>>>(lf, c.ifc_idx, c.ifc_w, c.ifc_nx, c.ifc_nz,
+            SWEEP_LAUNCH_ON(biot2d_ifc_el_T, pb, TPB, 0, stream, lf, c.ifc_idx, c.ifc_w, c.ifc_nx, c.ifc_nz,
                                                     lp, c.npts, ng);
         if (c.cp)
-            sem2d_vs_cpml_nodal_T<<<nb, TPB, 0, stream>>>(c.a_n, lRx, lRz, lmsig, lP, ng);
-        sem2d_vs_sigma_div_T<<<E, m, sh4, stream>>>(
+            SWEEP_LAUNCH_ON(sem2d_vs_cpml_nodal_T, nb, TPB, 0, stream, c.a_n, lRx, lRz, lmsig, lP, ng);
+        SWEEP_LAUNCH_ON(sem2d_vs_sigma_div_T, E, m, sh4, stream,
             lRx, lRz, lP, lsig, c.ax, c.bx, c.az, c.bz, c.wJ, c.Ixx, c.Ixz, c.Iex, c.Iez,
             c.ibool, c.D, ngll, E, ng);
         // K2^T, K1^T
-        biot2d_grad_p_T<<<E, m, sh2, stream>>>(lgp, lmp, c.ax, c.bx, c.az, c.bz,
+        SWEEP_LAUNCH_ON(biot2d_grad_p_T, E, m, sh2, stream, lgp, lmp, c.ax, c.bx, c.az, c.bz,
             c.Ixx, c.Ixz, c.Iex, c.Iez, c.ibool, c.D, lp, ngll, E);
-        biot2d_inject_p_T<<<nb, TPB, 0, stream>>>(lp, c.inv_M1, c.pin_n, c.pp, wv, dt, gM1,
+        SWEEP_LAUNCH_ON(biot2d_inject_p_T, nb, TPB, 0, stream, lp, c.inv_M1, c.pin_n, c.pp, wv, dt, gM1,
                                                   gW, k, ng);
     }
     SWEEP_CUDA_CHECK(cudaGetLastError());

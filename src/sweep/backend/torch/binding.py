@@ -26,12 +26,12 @@ def _jit_full() -> bool:
 
 
 def _core_loaded() -> bool:
-    """Whether the ctypes loader already holds the core library -- asked
+    """Whether the ctypes loader already holds a core library -- asked
     without importing it (never imported: nothing is loaded).
-    ``sweep.backend.c.loader._lib`` is its module-level cache, set by
-    ``loader.core_lib()``."""
+    ``sweep.backend.c.loader._libs`` is its module-level cache, filled by
+    ``loader.core_lib(kind)``."""
     loader = sys.modules.get("sweep.backend.c.loader")
-    return loader is not None and getattr(loader, "_lib", None) is not None
+    return loader is not None and bool(getattr(loader, "_libs", None))
 
 
 def is_available() -> bool:
@@ -91,15 +91,19 @@ def diagnostics() -> dict:
         prebuilt = _prebuilt_binding_present()
         if prebuilt:
             shim = "pybind"   # a compiled sweep._C is the pybind shim, whatever SWEEP_JIT_FULL says
+        from sweep.backend.c import hostcore
         can_jit, reason = jit.can_build()
         return {
-            "usable": prebuilt or can_jit,   # can impl='c' be used at all?
+            "usable": prebuilt or can_jit,   # can impl='c' be used on CUDA at all?
             "reason": "ok (pre-built extension)" if prebuilt else reason,
             "shim": shim,
             "cuda_home": jit._find_cuda_home(),
             "already_compiled": is_compiled(),
             "prebuilt": prebuilt,            # compiled ahead of time, no toolkit needed
             "shipped_core": jit.shipped_core_info(),   # {path, reason, tag, available}
+            # The host (CPU) core: impl='c' on a CPU device.  {shipped, cached,
+            # can_build, unported, available}; loads nothing and builds no core.
+            "host_core": hostcore.info(),
         }
     except Exception as exc:  # pragma: no cover
         return {"usable": False, "reason": f"{type(exc).__name__}: {exc}", "shim": shim,

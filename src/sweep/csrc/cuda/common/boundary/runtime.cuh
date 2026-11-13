@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -106,7 +107,8 @@ public:
         // kernel's last face write -- every face holds the same bits for fp32 /
         // bf16 storage, and the int8 / scaled-fp16 restore writes it from that
         // face only (boundary_kernel3d_compact_owned).  So this exists to prove
-        // that in a test (test_boundary_compact_kernel.py) and to isolate the
+        // that in a test (test_boundary_compact_kernel.py,
+        // test_host_core.py::TestLossyBoundary3DRestore) and to isolate the
         // compact kernels if they are ever suspected, not to change results.
         no_compact_kernel_ = std::getenv("SWEEP_BOUNDARY_NO_COMPACT") != nullptr;
         if (!enabled_ || !staged_)
@@ -591,13 +593,13 @@ public:
         auto b = forward_save_ptrs(chunk, direct);
 
         if (b.dtype == BoundaryDtype::BF16) {
-            boundary_kernel2d_bf16<<<grid, block>>>(
+            SWEEP_LAUNCH(boundary_kernel2d_bf16, grid, block,
                 u, b.top_bf, b.bottom_bf, b.left_bf, b.right_bf,
                 boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
         } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
             // INT8 2-pass save: FP32 kernel → staging (1-step), then
             // quantize → persistent uint8 + per-block FP32 scale.
-            boundary_kernel2d<<<grid, block>>>(
+            SWEEP_LAUNCH(boundary_kernel2d, grid, block,
                 u, b.top, b.bottom, b.left, b.right,
                 /*it=*/0, width, offset, ctx, BOUNDARY_SAVE);
             int64_t bt = boundary_time_index(chunk);
@@ -606,11 +608,11 @@ public:
             int compact_total = compact_boundary_count_2d(ctx, width, 0);
             int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
-            boundary_kernel2d_compact<<<compact_blocks, compact_threads>>>(
+            SWEEP_LAUNCH(boundary_kernel2d_compact, compact_blocks, compact_threads,
                 u, b.top, b.bottom, b.left, b.right,
                 boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
         } else {
-            boundary_kernel2d<<<grid, block>>>(
+            SWEEP_LAUNCH(boundary_kernel2d, grid, block,
                 u, b.top, b.bottom, b.left, b.right,
                 boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
         }
@@ -639,31 +641,31 @@ public:
             int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
             if (b.dtype == BoundaryDtype::BF16) {
-                boundary_kernel3d_compact_bf16<<<compact_blocks, compact_threads>>>(
+                SWEEP_LAUNCH(boundary_kernel3d_compact_bf16, compact_blocks, compact_threads,
                     u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
                     boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
             } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
-                boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
+                SWEEP_LAUNCH(boundary_kernel3d_compact, compact_blocks, compact_threads,
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
                     /*it=*/0, width, offset, ctx, BOUNDARY_SAVE);
                 quantize_step_3d(b, boundary_time_index(chunk));
             } else {
-                boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
+                SWEEP_LAUNCH(boundary_kernel3d_compact, compact_blocks, compact_threads,
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
                     boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
             }
         } else {
             if (b.dtype == BoundaryDtype::BF16) {
-                boundary_kernel3d_bf16<<<grid, block>>>(
+                SWEEP_LAUNCH(boundary_kernel3d_bf16, grid, block,
                     u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
                     boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
             } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
-                boundary_kernel3d<<<grid, block>>>(
+                SWEEP_LAUNCH(boundary_kernel3d, grid, block,
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
                     /*it=*/0, width, offset, ctx, BOUNDARY_SAVE);
                 quantize_step_3d(b, boundary_time_index(chunk));
             } else {
-                boundary_kernel3d<<<grid, block>>>(
+                SWEEP_LAUNCH(boundary_kernel3d, grid, block,
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
                     boundary_time_index(chunk), width, offset, ctx, BOUNDARY_SAVE);
             }
@@ -692,11 +694,11 @@ public:
         auto b = forward_save_ptrs_field(chunk, direct, field_idx);
 
         if (b.dtype == BoundaryDtype::BF16) {
-            boundary_kernel2d_bf16<<<grid, block>>>(
+            SWEEP_LAUNCH(boundary_kernel2d_bf16, grid, block,
                 u, b.top_bf, b.bottom_bf, b.left_bf, b.right_bf,
                 boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE, tangent_pad);
         } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
-            boundary_kernel2d<<<grid, block>>>(
+            SWEEP_LAUNCH(boundary_kernel2d, grid, block,
                 u, b.top, b.bottom, b.left, b.right,
                 /*it=*/0, width, offset, ctx, BOUNDARY_SAVE, tangent_pad);
             quantize_step_2d(b, boundary_time_index_field(chunk));
@@ -704,11 +706,11 @@ public:
             int compact_total = compact_boundary_count_2d(ctx, width, tangent_pad);
             int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
-            boundary_kernel2d_compact<<<compact_blocks, compact_threads>>>(
+            SWEEP_LAUNCH(boundary_kernel2d_compact, compact_blocks, compact_threads,
                 u, b.top, b.bottom, b.left, b.right,
                 boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE, tangent_pad);
         } else {
-            boundary_kernel2d<<<grid, block>>>(
+            SWEEP_LAUNCH(boundary_kernel2d, grid, block,
                 u, b.top, b.bottom, b.left, b.right,
                 boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE, tangent_pad);
         }
@@ -740,31 +742,31 @@ public:
             int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
             if (b.dtype == BoundaryDtype::BF16) {
-                boundary_kernel3d_compact_bf16<<<compact_blocks, compact_threads>>>(
+                SWEEP_LAUNCH(boundary_kernel3d_compact_bf16, compact_blocks, compact_threads,
                     u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
                     boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
             } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
-                boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
+                SWEEP_LAUNCH(boundary_kernel3d_compact, compact_blocks, compact_threads,
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
                     /*it=*/0, width, offset, ctx, BOUNDARY_SAVE);
                 quantize_step_3d(b, boundary_time_index_field(chunk));
             } else {
-                boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
+                SWEEP_LAUNCH(boundary_kernel3d_compact, compact_blocks, compact_threads,
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
                     boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
             }
         } else {
             if (b.dtype == BoundaryDtype::BF16) {
-                boundary_kernel3d_bf16<<<grid, block>>>(
+                SWEEP_LAUNCH(boundary_kernel3d_bf16, grid, block,
                     u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
                     boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
             } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
-                boundary_kernel3d<<<grid, block>>>(
+                SWEEP_LAUNCH(boundary_kernel3d, grid, block,
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
                     /*it=*/0, width, offset, ctx, BOUNDARY_SAVE);
                 quantize_step_3d(b, boundary_time_index_field(chunk));
             } else {
-                boundary_kernel3d<<<grid, block>>>(
+                SWEEP_LAUNCH(boundary_kernel3d, grid, block,
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
                     boundary_time_index_field(chunk), width, offset, ctx, BOUNDARY_SAVE);
             }
@@ -1117,23 +1119,23 @@ public:
         wait_before_backward_restore(it);
         auto b = backward_restore_ptrs(it, direct);
         if (b.dtype == BoundaryDtype::BF16) {
-            boundary_kernel2d_bf16<<<grid, block>>>(
+            SWEEP_LAUNCH(boundary_kernel2d_bf16, grid, block,
                 u, b.top_bf, b.bottom_bf, b.left_bf, b.right_bf,
                 backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
         } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
             dequantize_step_2d(b, backward_time_index(it));
-            boundary_kernel2d<<<grid, block>>>(
+            SWEEP_LAUNCH(boundary_kernel2d, grid, block,
                 u, b.top, b.bottom, b.left, b.right,
                 /*it=*/0, width, offset, ctx, BOUNDARY_RESTORE);
         } else if (use_compact_boundary_kernel()) {
             int compact_total = compact_boundary_count_2d(ctx, width, 0);
             int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
-            boundary_kernel2d_compact<<<compact_blocks, compact_threads>>>(
+            SWEEP_LAUNCH(boundary_kernel2d_compact, compact_blocks, compact_threads,
                 u, b.top, b.bottom, b.left, b.right,
                 backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
         } else {
-            boundary_kernel2d<<<grid, block>>>(
+            SWEEP_LAUNCH(boundary_kernel2d, grid, block,
                 u, b.top, b.bottom, b.left, b.right,
                 backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
         }
@@ -1158,33 +1160,33 @@ public:
             int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
             if (b.dtype == BoundaryDtype::BF16) {
-                boundary_kernel3d_compact_bf16<<<compact_blocks, compact_threads>>>(
+                SWEEP_LAUNCH(boundary_kernel3d_compact_bf16, compact_blocks, compact_threads,
                     u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
                     backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
             } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
                 // per-face lossy copies of an edge/corner cell differ: restore
                 // each from its owning face (boundary/kernels.cuh)
                 dequantize_step_3d(b, backward_time_index(it));
-                boundary_kernel3d_compact_owned<<<compact_blocks, compact_threads>>>(
+                SWEEP_LAUNCH(boundary_kernel3d_compact_owned, compact_blocks, compact_threads,
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
                     /*it=*/0, width, offset, ctx, BOUNDARY_RESTORE);
             } else {
-                boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
+                SWEEP_LAUNCH(boundary_kernel3d_compact, compact_blocks, compact_threads,
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
                     backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
             }
         } else {
             if (b.dtype == BoundaryDtype::BF16) {
-                boundary_kernel3d_bf16<<<grid, block>>>(
+                SWEEP_LAUNCH(boundary_kernel3d_bf16, grid, block,
                     u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
                     backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
             } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
                 dequantize_step_3d(b, backward_time_index(it));
-                boundary_kernel3d<<<grid, block>>>(
+                SWEEP_LAUNCH(boundary_kernel3d, grid, block,
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
                     /*it=*/0, width, offset, ctx, BOUNDARY_RESTORE);
             } else {
-                boundary_kernel3d<<<grid, block>>>(
+                SWEEP_LAUNCH(boundary_kernel3d, grid, block,
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
                     backward_time_index(it), width, offset, ctx, BOUNDARY_RESTORE);
             }
@@ -1211,23 +1213,23 @@ public:
             wait_before_backward_restore(it);
         auto b = backward_restore_ptrs_field(it, direct, field_idx);
         if (b.dtype == BoundaryDtype::BF16) {
-            boundary_kernel2d_bf16<<<grid, block>>>(
+            SWEEP_LAUNCH(boundary_kernel2d_bf16, grid, block,
                 u, b.top_bf, b.bottom_bf, b.left_bf, b.right_bf,
                 backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE, tangent_pad);
         } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
             dequantize_step_2d(b, backward_time_index_field(it));
-            boundary_kernel2d<<<grid, block>>>(
+            SWEEP_LAUNCH(boundary_kernel2d, grid, block,
                 u, b.top, b.bottom, b.left, b.right,
                 /*it=*/0, width, offset, ctx, BOUNDARY_RESTORE, tangent_pad);
         } else if (use_compact_boundary_kernel()) {
             int compact_total = compact_boundary_count_2d(ctx, width, tangent_pad);
             int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
-            boundary_kernel2d_compact<<<compact_blocks, compact_threads>>>(
+            SWEEP_LAUNCH(boundary_kernel2d_compact, compact_blocks, compact_threads,
                 u, b.top, b.bottom, b.left, b.right,
                 backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE, tangent_pad);
         } else {
-            boundary_kernel2d<<<grid, block>>>(
+            SWEEP_LAUNCH(boundary_kernel2d, grid, block,
                 u, b.top, b.bottom, b.left, b.right,
                 backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE, tangent_pad);
         }
@@ -1257,33 +1259,33 @@ public:
             int compact_threads = 512;
             int compact_blocks = (compact_total + compact_threads - 1) / compact_threads;
             if (b.dtype == BoundaryDtype::BF16) {
-                boundary_kernel3d_compact_bf16<<<compact_blocks, compact_threads>>>(
+                SWEEP_LAUNCH(boundary_kernel3d_compact_bf16, compact_blocks, compact_threads,
                     u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
                     backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
             } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
                 // per-face lossy copies of an edge/corner cell differ: restore
                 // each from its owning face (boundary/kernels.cuh)
                 dequantize_step_3d(b, backward_time_index_field(it));
-                boundary_kernel3d_compact_owned<<<compact_blocks, compact_threads>>>(
+                SWEEP_LAUNCH(boundary_kernel3d_compact_owned, compact_blocks, compact_threads,
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
                     /*it=*/0, width, offset, ctx, BOUNDARY_RESTORE);
             } else {
-                boundary_kernel3d_compact<<<compact_blocks, compact_threads>>>(
+                SWEEP_LAUNCH(boundary_kernel3d_compact, compact_blocks, compact_threads,
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
                     backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
             }
         } else {
             if (b.dtype == BoundaryDtype::BF16) {
-                boundary_kernel3d_bf16<<<grid, block>>>(
+                SWEEP_LAUNCH(boundary_kernel3d_bf16, grid, block,
                     u, b.top_bf, b.bottom_bf, b.front_bf, b.back_bf, b.left_bf, b.right_bf,
                     backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
             } else if (b.dtype == BoundaryDtype::INT8 || b.dtype == BoundaryDtype::FP16) {
                 dequantize_step_3d(b, backward_time_index_field(it));
-                boundary_kernel3d<<<grid, block>>>(
+                SWEEP_LAUNCH(boundary_kernel3d, grid, block,
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
                     /*it=*/0, width, offset, ctx, BOUNDARY_RESTORE);
             } else {
-                boundary_kernel3d<<<grid, block>>>(
+                SWEEP_LAUNCH(boundary_kernel3d, grid, block,
                     u, b.top, b.bottom, b.front, b.back, b.left, b.right,
                     backward_time_index_field(it), width, offset, ctx, BOUNDARY_RESTORE);
             }

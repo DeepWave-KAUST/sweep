@@ -1,4 +1,4 @@
-"""Gradient consistency matrix for eager/cpu, eager/gpu and C/cuda.
+"""Gradient consistency matrix for eager/cpu, eager/gpu, C/cuda and C/cpu (the host core).
 
 Run from the repository root after installing the compiled extension:
 
@@ -81,6 +81,10 @@ BACKENDS = (
     # fields run it full-grid.
     BackendSpec("eager-strips/gpu", "eager-strips", "cuda"),
     BackendSpec("c-cuda", "c", "cuda"),
+    # The host core: the same compiled drivers on CPU tensors.  Needs a host
+    # core at hand (sweep.backend.c.hostcore.available); pass --backends
+    # without it on a box with no C++ compiler.
+    BackendSpec("c-cpu", "c", "cpu"),
 )
 
 EAGER_MODES = {"full", "ckpt_chunk"}
@@ -121,11 +125,21 @@ def make_solver(case: Case, mode: str, backend: BackendSpec, config: RunConfig) 
     return make_c_solver(case, mode, device, config)
 
 
+def _host_core_available() -> bool:
+    try:
+        from sweep.backend.c import hostcore
+        return hostcore.available()
+    except Exception:
+        return False
+
+
 def backend_supported(mode: str, backend: BackendSpec, cuda_available: bool) -> bool:
     if backend.device == "cuda" and not cuda_available:
         return False
     if backend.family in ("eager", "eager-strips"):
         return mode in EAGER_MODES
+    if backend.device == "cpu":
+        return _host_core_available()
     return True
 
 
@@ -145,6 +159,7 @@ def reference_label_for_mode(mode: str, cuda_available: bool,
     labels = {b.label for b in backends}
     order = ["eager/cpu", "eager/gpu"] if mode in EAGER_MODES else []
     order += ["c-cuda"] if cuda_available else []
+    order += ["c-cpu"]
     for label in order:
         if label in labels:
             return label
@@ -240,7 +255,8 @@ def parse_args() -> argparse.Namespace:
         default="cross",
         help=(
             "cross compares every backend to one row reference "
-            "(eager/cpu for eager-supported modes, otherwise c-cuda). "
+            "(eager/cpu for eager-supported modes, otherwise c-cuda, or c-cpu "
+            "when no CUDA backend runs). "
             "within compares each backend mode to that same backend's full mode."
         ),
     )

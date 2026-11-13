@@ -7,19 +7,22 @@ SWEEP supports two main user-facing backend families:
 
 Within the Torch family, `PropTorch` now selects the actual implementation:
 
-- `impl=None` *(default — equivalent to `impl="auto"`)*: probe
-  `sweep.is_torch_binding_available()`; pick `"c"` when PyTorch, a visible CUDA
-  GPU and a CUDA core (the wheel's prebuilt one, a cached local build, or an nvcc
-  to build one) are present and the equation has compiled kernels, otherwise
-  transparently fall back to `"eager"`. A plain `import sweep._C` always
-  succeeds and proves nothing.
+- `impl=None` *(default — equivalent to `impl="auto"`)*: on a CUDA device,
+  probe `sweep.is_torch_binding_available()` and pick `"c"` when PyTorch, a
+  visible CUDA GPU and a CUDA core (the wheel's prebuilt one, a cached local
+  build, or an nvcc to build one) are present and the equation has compiled
+  kernels; on a CPU device, pick `"c"` when the host core comes up (below);
+  otherwise transparently fall back to `"eager"`. A plain `import sweep._C`
+  always succeeds and proves nothing.
 - `impl="eager"`: pure-PyTorch implementation (no build step required).
-- `impl="c"`: the compiled CUDA implementation — the prebuilt `libsweep_core.so`
-  the wheel ships (`sweep/lib/cu12/` or `cu13/`, picked by your torch's CUDA
-  major) driven by the pure-Python ctypes layer `sweep.backend.c`; nothing
-  compiles after `pip install`. If no core fits and none can be built, or the
-  equation has no compiled kernels, `PropTorch` falls back to `"eager"` with a
-  `UserWarning` so the slowdown is visible.
+- `impl="c"`: the compiled implementation — on a CUDA device the prebuilt
+  `libsweep_core.so` the wheel ships (`sweep/lib/cu12/` or `cu13/`, picked by
+  your torch's CUDA major), on a CPU device the **host core** (the same sources
+  built for the CPU, `sweep/lib/cpu/` or a local `g++` build), both driven by
+  the pure-Python ctypes layer `sweep.backend.c`; nothing compiles after
+  `pip install` when a shipped core fits. If no core fits and none can be built,
+  or the equation has no compiled kernels, `PropTorch` falls back to `"eager"`
+  with a `UserWarning` so the slowdown is visible.
 
 The wheel ships two cores: `cu12` (sm_70–sm_90 SASS + sm_90 PTX) and `cu13`
 (sm_75–sm_120 SASS + sm_120 PTX; no V100, driver >= 580). The loader picks
@@ -38,10 +41,32 @@ there. See [Building the CUDA core](../dev/building.md).
 - `jax`: JAX-based propagation and differentiation
 
 `cuda` is not a separate top-level backend alongside `torch` and `jax`. It is a
-device choice. `impl="c"` runs CUDA kernels only: the models must be CUDA
-tensors (a host tensor is refused with a clear error). There is no compiled CPU
-path: on a CPU device, or on a machine with no GPU, `impl=None` resolves to
-`"eager"` and an explicit `impl="c"` falls back to eager with a warning.
+device choice. `impl="c"` follows the device of the propagator: CUDA tensors
+run the CUDA core, CPU tensors run the host core — one compiled code base, two
+builds (see [The host (CPU) core](../dev/host_core.md)). On a CPU device
+`impl=None` (`"auto"`) takes the host core when the equation is built into it
+and you passed no eager options (`eager_options=`, `use_compile=`, ...) and no
+host staging (`storage='cpu'`/`'disk'`). The core is the wheel's `lib/cpu` one
+(from 0.3.7) or `SWEEP_CORE_CPU=<path>`; a source install builds it once with
+g++ (>= 9, with OpenMP) on the first such construction — about 1–3 minutes,
+announced on stderr, then cached — as it builds the CUDA core with nvcc. With
+no compiler that builds it, `"auto"` is `"eager"`, quietly; a build that fails
+warns once and the process runs eager. The host core is faster than eager on
+the CPU in nearly every case measured (1.2–18x at 8–28 threads; at 4 threads
+compiled eager still wins a 3-D forward). An explicit `impl="c"` resolves the
+core the same way, falls back to eager with a warning that says why when there
+is none or the equation is not built into it, and raises at its first call
+when the build fails. `python -m sweep.build --cpu` builds the core ahead of
+time with the compiler's output shown. With the host core
+a CPU run gets what a CUDA run gets from `impl="c"`: the compiled numerics
+(as close to eager as the CUDA core is, ~1e-5 relative on acoustic2d),
+boundary saving by default, no source-wavelet gradient for the elastic, DAS
+and VTI 1st-order equations, and no double backward; pass `impl="eager"` for
+those. `ViscoAcoustic` (cuFFT) is CUDA-only,
+and `ElasticBorn`, the qP equations and the SEM kernels are not in the host
+core yet. Boundary saving and checkpointing work on the host core with
+on-device storage; staging to `'cpu'`/`'disk'` and pinned memory are refused
+there, since the compute device already is host RAM.
 
 Typical Torch-family usage:
 
@@ -55,12 +80,17 @@ solver_c = PropTorch(..., backend="torch", impl="c")
 ## Compiled CUDA core (`sweep._C`)
 
 `sweep._C` is a lazy entry point: importing it is free, and the first attribute
-access loads the prebuilt CUDA core through ctypes (`sweep.backend.c` —
-`loader.py`, `adapt.py`, `entries.py`, `runners.py`, the generated `abi.py`;
-`jit.py` decides which core). The core covers the acoustic (2-D/3-D), VRZ,
-LSRTM, VTI 1st-order, elastic (2-D/3-D), elastic TTI (SG 2-D/3-D, 2nd), elastic
-VRR, DAS and visco-acoustic propagators — `sweep list equations` is the
-authoritative list. CUDA tensors only.
+access loads a core through ctypes (`sweep.backend.c` — `loader.py`,
+`adapt.py`, `entries.py`, `runners.py`, the generated `abi.py`; `jit.py`
+decides which CUDA core, `hostcore.py` which host core). Each entry picks the
+core by the device of the tensors it is given, so `sweep._C.acoustic2d_forward`
+serves CUDA and CPU models alike. The cores cover the acoustic (2-D/3-D), VRZ,
+Born, VTI 1st-order, elastic (2-D/3-D), elastic TTI (SG 2-D/3-D, 2nd), elastic
+VRR, DAS and visco-acoustic propagators, and the CUDA core also elastic Born,
+qP (VTI/TTI) and SEM — `sweep list equations` is the authoritative list. The
+host core leaves out `ViscoAcoustic` (cuFFT) and, not ported yet, `ElasticBorn`,
+`AcousticVTI` / `AcousticTTI` with their Born twins and the SEM kernels
+(`sweep.backend.c.hostcore.HOST_UNPORTED`).
 
 You can inspect backend capability from Python:
 
@@ -76,9 +106,13 @@ sweep.backend.torch.binding.diagnostics()
 
 `sweep.backend.torch.cuda.is_available()` only answers whether PyTorch can see CUDA.
 `sweep.backend.torch.binding.is_available()` answers whether `impl="c"` is
-usable here: PyTorch present, a CUDA GPU visible, and a CUDA core at hand (the
-shipped one for your torch's CUDA major, `SWEEP_CORE`, a cached local build, or
-an nvcc of torch's CUDA major to build one). It loads and compiles nothing.
+usable on CUDA here: PyTorch present, a CUDA GPU visible, and a CUDA core at
+hand (the shipped one for your torch's CUDA major, `SWEEP_CORE`, a cached local
+build, or an nvcc of torch's CUDA major to build one). It loads and compiles
+nothing. The host core's answer is `diagnostics()["host_core"]`
+(`sweep.backend.c.hostcore.info()`): a shipped `lib/cpu` core, a cached build,
+or a C++ compiler to build one (and why each compiler was turned down), and
+which equations are left out.
 
 Example diagnostics output:
 
@@ -92,6 +126,11 @@ Example diagnostics output:
     "prebuilt": False,           # a SWEEP_BUILD_CUDA=1 ahead-of-time extension on disk
     "shipped_core": {"path": ".../sweep/lib/cu12/libsweep_core.so",
                      "reason": "ok", "tag": "cu12", "available": ["cu12", "cu13"]},
+    "host_core": {"shipped": None,
+                  "shipped_reason": "the install ships no host (CPU) core (no lib/cpu/libsweep_core.so)",
+                  "cached": ".../sweep_C/core_cpu/libsweep_core.so",
+                  "can_build": True, "build_reason": "ok (g++ 11)",
+                  "unported": ["visco_acoustic2d"], "available": True},
 }
 ```
 

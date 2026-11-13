@@ -20,6 +20,7 @@
 #pragma once
 
 #include "driver_traits.cuh"
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 namespace qp2d {
 
@@ -201,7 +202,7 @@ struct BornDriver {
         sctx.x_limit = xe;
         auto L = fdtd::Wave2D::make(xe - xb, s.nz, s.B);
         float* rhs0 = u_thist ? u_thist + 5L * s.B * s.nx * s.nz : nullptr;   // history row it, slot 5
-        Tables<TILT>::born_forward()[sweep_order_slot(s.order)]<<<L.grid, L.block>>>(
+        SWEEP_LAUNCH((Tables<TILT>::born_forward()[sweep_order_slot(s.order)]), L.grid, L.block,
             view.bg, view.sc, s.models, s.mp, cpml, sctx, rhs0);
     }
 
@@ -221,14 +222,14 @@ struct BornDriver {
     static void inject_source_fwd(const State& s, const SolverContext& ctx, const View& view,
                                   const ForwardInputCore& p, int it, int nsrc)
     {
-        add_source<<<s.source_config.grid, s.source_config.block>>>(
+        SWEEP_LAUNCH(add_source, s.source_config.grid, s.source_config.block,
             view.bg.u_next, p.source.data_ptr<float>(), p.sources_loc.data_ptr<int>(), it, nsrc, ctx);
     }
 
     static void record(const State& s, const SolverContext& ctx, const View& view,
                        Buf& record, const ForwardInputCore& p, int it, int nrec)
     {
-        record_kernel<<<s.record_config.grid, s.record_config.block>>>(
+        SWEEP_LAUNCH(record_kernel, s.record_config.grid, s.record_config.block,
             view.sc.u_next, record.data_ptr<float>(), p.receivers_loc.data_ptr<int>(), it, nrec, ctx);
     }
 
@@ -306,26 +307,26 @@ struct BornDriver {
             sc = qp2d::State{state_row, state_row + n, state_row + 2 * n, state_row + 3 * n, state_row + 4 * n};
             if (grad_out != nullptr) {
                 const float* rhs0 = state_row + HISTORY_FIELDS * n + 5 * n;   // row k, slot 5
-                Tables<TILT>::born_image()[slot]<<<s.launch_config.grid, s.launch_config.block>>>(
+                SWEEP_LAUNCH((Tables<TILT>::born_image()[slot]), s.launch_config.grid, s.launch_config.block,
                     adj_view.sc, qp2d::State{nullptr, nullptr, nullptr, nullptr, nullptr}, rhs0,
                     s.models, cpml, ctx, ws.grad_mp);
             }
         } else if (ws.have_bs_state) {
             sc = ws.bs_sc;
-            Tables<TILT>::born_image()[slot]<<<s.launch_config.grid, s.launch_config.block>>>(
+            SWEEP_LAUNCH((Tables<TILT>::born_image()[slot]), s.launch_config.grid, s.launch_config.block,
                 adj_view.sc, ws.bs_bg, nullptr, s.models, cpml, ctx, ws.grad_mp);
         }
-        Tables<TILT>::prep()[slot]<<<s.launch_config.grid, s.launch_config.block>>>(
+        SWEEP_LAUNCH((Tables<TILT>::prep()[slot]), s.launch_config.grid, s.launch_config.block,
             adj_view.sc, sc, s.models, cpml, ctx, ws.scr, Grads{nullptr, nullptr, nullptr, nullptr},
             s.exact_s);
-        qp_adjoint_apply_by_order[slot]<<<s.launch_config.grid, s.launch_config.block>>>(
+        SWEEP_LAUNCH(qp_adjoint_apply_by_order[slot], s.launch_config.grid, s.launch_config.block,
             adj_view.sc, ws.scr, cpml, ctx);
     }
 
     static void inject_adjoint_source(const State& s, const SolverContext& ctx, const View& adj_view,
                                       const BackwardInputCore& p, int it, int nsrc, BwdWorkspace&)
     {
-        add_source<<<s.record_config.grid, s.record_config.block>>>(
+        SWEEP_LAUNCH(add_source, s.record_config.grid, s.record_config.block,
             adj_view.sc.u_next, p.adjoint_source.data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(), it, nsrc, ctx);
     }
@@ -372,9 +373,9 @@ struct BornDriver {
                               int it, int bs_it0)
     {
         auto v = forward.view();
-        Tables<TILT>::born_reverse()[sweep_order_slot(s.order)]<<<s.launch_config.grid, s.launch_config.block>>>(
+        SWEEP_LAUNCH((Tables<TILT>::born_reverse()[sweep_order_slot(s.order)]), s.launch_config.grid, s.launch_config.block,
             v.bg, v.sc, s.models, s.mp, cpml, ctx, save_width);
-        add_source<<<s.source_config.grid, s.source_config.block>>>(
+        SWEEP_LAUNCH(add_source, s.source_config.grid, s.source_config.block,
             v.bg.u_next, p.forward_source.data_ptr<float>(), p.forward_sources_loc.data_ptr<int>(), it,
             (int)p.forward_sources_loc.size(1), ctx);
         float* fields[BS_NVAR] = {v.bg.u_next, v.bg.psix, v.bg.psiz, v.bg.zetax, v.bg.zetaz,

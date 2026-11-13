@@ -1,4 +1,5 @@
 #include <cuda_runtime.h>
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 #include "visco_acoustic2d.h"
 #include "kernels.cuh"
@@ -186,7 +187,7 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
         // invariant (halo == 0 == the free-surface image condition) afterwards.
         visco_acoustic2d_apply_spectral_into(wavefield, spectral, scratch, p.dt, p.M);
 
-        add_source<<<source_config.grid, source_config.block>>>(
+        SWEEP_LAUNCH(add_source, source_config.grid, source_config.block,
             view.u_next,
             p.source.data_ptr<float>(),
             p.sources_loc.data_ptr<int>(),
@@ -195,7 +196,7 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
             ctx
         );
 
-        record_kernel<<<record_config.grid, record_config.block>>>(
+        SWEEP_LAUNCH(record_kernel, record_config.grid, record_config.block,
             view.u_next,
             record.data_ptr<float>(),
             p.receivers_loc.data_ptr<int>(),

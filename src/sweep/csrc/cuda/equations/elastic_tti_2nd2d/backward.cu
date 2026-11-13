@@ -1,4 +1,5 @@
 #include <algorithm>
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 #include <array>
 
 #include "elastic_tti_2nd2d.h"
@@ -163,7 +164,7 @@ void inject_adjoint_source(
         if (fld == 0) field = adjoint.ux_t.data_ptr<float>();
         else if (fld == 1) field = adjoint.uz_t.data_ptr<float>();
         if (field == nullptr) continue;
-        add_source<<<adj_source_config.grid, adj_source_config.block>>>(
+        SWEEP_LAUNCH(add_source, adj_source_config.grid, adj_source_config.block,
             field,
             p.adjoint_source.select(0, irec).data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(),
@@ -193,7 +194,7 @@ void rho_source_correction(
         if (fld == 0) adj_field = adjoint.ux_t.data_ptr<float>();
         else if (fld == 1) adj_field = adjoint.uz_t.data_ptr<float>();
         if (adj_field == nullptr) continue;
-        tti2nd_rho_grad_source_correction<<<fwd_source_config.grid, fwd_source_config.block>>>(
+        SWEEP_LAUNCH(tti2nd_rho_grad_source_correction, fwd_source_config.grid, fwd_source_config.block,
             grad_rho.data_ptr<float>(),
             adj_field,
             rho.data_ptr<float>(),
@@ -467,7 +468,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
             float* field = field_ptr(for_view, source_fields[isrc]);
             if (field == nullptr) continue;
-            sub_source_in_restore_strip<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            SWEEP_LAUNCH(sub_source_in_restore_strip, fwd_source_config.grid, fwd_source_config.block,
                 field,
                 p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
@@ -481,7 +482,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
             float* field = field_ptr(for_view, source_fields[isrc]);
             if (field == nullptr) continue;
-            add_source<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            SWEEP_LAUNCH(add_source, fwd_source_config.grid, fwd_source_config.block,
                 field,
                 p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
@@ -659,7 +660,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
             for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
                 float* field = field_ptr(rep_view, source_fields[isrc]);
                 if (field == nullptr) continue;
-                add_source<<<fwd_source_config.grid, fwd_source_config.block>>>(
+                SWEEP_LAUNCH(add_source, fwd_source_config.grid, fwd_source_config.block,
                     field,
                     p.forward_source.data_ptr<float>(),
                     p.forward_sources_loc.data_ptr<int>(),

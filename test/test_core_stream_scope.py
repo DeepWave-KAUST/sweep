@@ -54,6 +54,8 @@ def test_core_sees_torch_side_stream():
 
 
 def test_core_stream_is_nullptr_for_host_models():
+    """Host models launch on stream 0 whichever core serves them; the probe
+    answers from the cores already loaded and pulls in none."""
     import sweep._C as _C
     fi = _C.ForwardInput()
     fi.models = [torch.zeros(1, 1, 8, 8)]

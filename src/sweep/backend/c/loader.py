@@ -1,13 +1,18 @@
-"""Loading ``libsweep_core.so`` (csrc/core/capi.h) through ctypes.
+"""Loading a core (``libsweep_core.so``, csrc/core/capi.h) through ctypes.
 
-One load per process: :func:`core_lib` resolves the core (:mod:`.jit`
-``core_path``), seats cuFFT, dlopens it, declares every C signature
-(:func:`_declare`) and runs the ABI guard (:func:`_check_abi`) that refuses a
-core whose struct layout is not the generated mirror's (:mod:`.abi`).  The
-loaded library is cached in the module attribute ``_lib``, which
-``sweep.backend.torch.binding.is_compiled`` reads to answer "already loaded"
-without loading anything.  Only :func:`core_lib` touches the filesystem; the
-module imports without torch and without a GPU.
+Two cores share one C API and one ctypes mirror: the CUDA core (nvcc,
+``jit.core_path``) and the host core (the same sources built by g++,
+``hostcore.core_path``).  :func:`core_lib` loads the one asked for by kind --
+``"cuda"`` or ``"cpu"``, the ``device.type`` of the tensors a call carries --
+at most once per process: resolve the path, seat cuFFT (CUDA only), dlopen,
+declare every C signature (:func:`_declare`), run the ABI guard
+(:func:`_check_abi`) that refuses a core whose struct layout is not the
+generated mirror's (:mod:`.abi`), and ask the core which device it is
+(:func:`_check_device`) rather than trusting the path.  The loaded libraries
+are cached in ``_libs``; ``_lib`` keeps naming the first one loaded for the
+callers that only ask "is anything loaded"
+(``sweep.backend.torch.binding.is_compiled``).  Only :func:`core_lib` touches
+the filesystem; the module imports without torch and without a GPU.
 """
 from __future__ import annotations
 
@@ -19,8 +24,11 @@ from . import abi as _abi
 
 _ERR_CAP = 4096          # the message buffer every fallible C call fills
 
-_lib = None
-# Guards the first load (core_lib) and the namespace build (sweep.backend.c
+KINDS = ("cuda", "cpu")
+
+_libs: dict = {}
+_lib = None              # the first core loaded (what is_compiled() reads)
+# Guards the loads (core_lib) and the namespace build (sweep.backend.c
 # namespace): both happen on a propagator's first use, which several threads
 # may reach at once (per-GPU worker threads, a DataLoader worker).  Re-entrant
 # because namespace() holds it while it calls core_lib().
@@ -42,9 +50,11 @@ def _declare(lib, path: str = "<core>") -> None:
         f.restype = restype
 
     sig("sweep_core_abi_version", [], c_int)
+    sig("sweep_core_device", [], c_char_p)
     sig("sweep_entry_count", [], c_int)
     sig("sweep_entry_name", [c_int], c_char_p)
     sig("sweep_entry_kind", [c_int], c_int)
+    sig("sweep_entry_available", [c_int], c_int)
     sig("sweep_call", [c_int, c_void_p, c_void_p, c_char_p, c_int], c_int)
     sig("sweep_sem_call", [c_int, c_void_p, c_int64, c_char_p, c_int], c_int)
     sig("sweep_entry_struct", [c_int], c_char_p)
@@ -105,37 +115,66 @@ def _check_abi(lib, path: str) -> None:
                 "the mirror or rebuild the core from the same tree")
 
 
-def core_lib():
-    """The loaded core (cached, one per process).
+def _check_device(lib, kind: str, path: str) -> None:
+    """The core says which device it computes on; a mismatch means a core was
+    filed in the wrong drawer (or SWEEP_CORE points at the other one)."""
+    got = (lib.sweep_core_device() or b"").decode()
+    if got != kind:
+        raise RuntimeError(f"{path} is a {got!r} core, loaded as the {kind!r} core")
 
-    Thread-safe: the first load (dlopen, ``_declare``, the ABI guard) runs
-    under ``_load_lock`` and later callers get the cached ``ctypes.CDLL``,
-    which is safe to share across threads -- ctypes releases the GIL around
-    every core call, and the only per-thread state the core keeps (its launch
-    stream, ``sweep_set_stream``) is thread-local on the C side.
 
-    Opened ``RTLD_GLOBAL``.  That is not what makes cuFFT or the driver
-    resolve: the core links cudart statically under ``-fvisibility=hidden``
-    (``nm -D`` on the shipped core exports no ``cuda*`` symbol at all, and its
-    NEEDED list is the cuFFT of its CUDA major -- ``libcufft.so.11`` for the
-    cu12 core, ``libcufft.so.12`` for cu13 -- plus the system libraries, no
-    libcudart, no libcuda), so cuFFT comes through NEEDED/RUNPATH (or the
-    ``_preload_cufft`` seat) and the driver through cudart's own dlopen of
-    ``libcuda.so.1``, both inside the core's own scope whichever mode it is
-    opened with.  What ``RTLD_GLOBAL`` does is put the core's ``sweep_*``
-    exports in the process-global lookup scope, so anything loaded after it
-    that references them by name -- the ``SWEEP_JIT_FULL`` pybind shim
-    (linked ``-lsweep_core``) in the same process, a ``ctypes.CDLL(None)``
-    lookup, a profiler's hook -- binds to this one copy.
-    """
-    global _lib
-    if _lib is not None:
-        return _lib
-    with _load_lock:
-        if _lib is not None:
-            return _lib
+def _entry_rows(lib):
+    return [(lib.sweep_entry_name(i), lib.sweep_entry_kind(i)) for i in range(lib.sweep_entry_count())]
+
+
+def _check_same_table(a, b, path: str) -> None:
+    """The two cores are built from one capi.h, so their entry tables are one
+    table; the namespace assigns ids once and uses them against either library.
+    A mismatch means the cores come from different trees."""
+    if _entry_rows(a) != _entry_rows(b):
+        raise RuntimeError(f"{path}: its entry table differs from the core already loaded; "
+                           "the two cores were built from different trees")
+
+
+def default_kind() -> str:
+    """The core a device-less call (the entry table, a session with no
+    device) is served by: the CUDA core when torch can see a GPU, else the
+    host core."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda"
+    except Exception:
+        pass
+    return "cpu"
+
+
+def kind_for_device(device) -> str:
+    """``"cuda"`` / ``"cpu"`` for a torch device (or device type string); any
+    other device type is refused -- no core serves it."""
+    dtype = getattr(device, "type", None) or str(device).split(":", 1)[0]
+    if dtype not in KINDS:
+        raise RuntimeError(f"no compiled core serves tensors on a {device!r} device "
+                           "(the cores run on CUDA and on the host)")
+    return dtype
+
+
+def _resolve(kind: str) -> str:
+    if kind == "cuda":
         from . import jit
-        path = str(jit.core_path())
+        return str(jit.core_path())
+    from . import hostcore
+    return str(hostcore.core_path())
+
+
+def _dlopen(kind: str, path: str):
+    """CUDA: RTLD_GLOBAL, so the SWEEP_JIT_FULL pybind shim (linked
+    -lsweep_core) and a ``ctypes.CDLL(None)`` lookup bind to this copy.
+    Host: RTLD_LOCAL -- it exports the same ``sweep_*`` names, and a second
+    global copy would shadow the first for every by-name resolver; ctypes
+    itself resolves through the handle, so the local scope costs nothing."""
+    if kind == "cuda":
+        from . import jit
         # cuFFT: the core's RUNPATH reaches the pip nvidia-cufft wheel only
         # from an installed layout (a custom SWEEP_CORE, a moved
         # site-packages do not).  Seat the wheel's copy first (silent when
@@ -143,16 +182,87 @@ def core_lib():
         # on libcufft, so the common path never probes for nvcc.
         jit._preload_cufft(None)
         try:
-            lib = ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
+            return ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
         except OSError as exc:
             if "libcufft" not in str(exc):
                 raise
             jit._preload_cufft(jit._find_cuda_home())
-            lib = ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
+            return ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
+    return ctypes.CDLL(path, mode=ctypes.RTLD_LOCAL)
+
+
+def core_lib(kind: str = "cuda"):
+    """The loaded core of ``kind`` (cached, one per process and kind).
+
+    Thread-safe: the first load (dlopen, ``_declare``, the ABI guard) runs
+    under ``_load_lock`` and later callers get the cached ``ctypes.CDLL``,
+    which is safe to share across threads -- ctypes releases the GIL around
+    every core call, and the only per-thread state the core keeps (its launch
+    stream, ``sweep_set_stream``) is thread-local on the C side.
+    """
+    global _lib
+    if kind not in KINDS:
+        raise ValueError(f"core kind must be one of {KINDS}, got {kind!r}")
+    lib = _libs.get(kind)
+    if lib is not None:
+        return lib
+    with _load_lock:
+        lib = _libs.get(kind)
+        if lib is not None:
+            return lib
+        path = _resolve(kind)
+        lib = _dlopen(kind, path)
         _declare(lib, path)
         _check_abi(lib, path)
-        _lib = lib
+        _check_device(lib, kind, path)
+        for other in _libs.values():
+            _check_same_table(other, lib, path)
+        _libs[kind] = lib
+        if _lib is None:
+            _lib = lib
         return lib
+
+
+def core_lib_for(device):
+    """The core serving tensors on ``device`` (a torch device)."""
+    return core_lib(kind_for_device(device))
+
+
+def _ready_without_build(kind: str) -> bool:
+    """A core of ``kind`` is at hand as a file (shipped, or cached and current):
+    loading it compiles nothing."""
+    try:
+        if kind == "cuda":
+            from . import jit
+            return jit._shipped_core()[0] is not None or jit._cached_local_core() is not None
+        from . import hostcore
+        return hostcore.shipped_core()[0] is not None or hostcore.cached_local_core() is not None
+    except Exception:
+        return False
+
+
+def any_core_lib():
+    """Whichever core loads: what the entry table is read from when no tensor
+    names a device.  Both cores export one table, so the choice only decides
+    what gets loaded (or built) first -- a core already loaded, then one that
+    is a file on disk (no build), then the default kind.  Without this a CPU
+    run on a GPU box with nvcc would build the CUDA core it never calls."""
+    first = default_kind()
+    by_default = (first,) + tuple(k for k in KINDS if k != first)
+    order = list(loaded_kinds())
+    order += [k for k in by_default if k not in order and _ready_without_build(k)]
+    order += [k for k in by_default if k not in order]
+    errors = []
+    for kind in order:
+        try:
+            return core_lib(kind)
+        except (RuntimeError, OSError) as exc:
+            errors.append(f"{kind}: {exc}")
+    raise RuntimeError("no compiled core can be loaded -- " + "; ".join(errors))
+
+
+def loaded_kinds() -> tuple:
+    return tuple(k for k in KINDS if k in _libs)
 
 
 def _raise_core(err, what: str, rc: int):

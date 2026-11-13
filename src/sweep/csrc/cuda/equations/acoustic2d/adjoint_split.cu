@@ -13,7 +13,9 @@
 // Both fuse the lagged vp-gradient imaging on the physical box (full mode) and
 // skip air cells.  acoustic2nd_adjoint_fused itself stays for visco_acoustic2d.
 #include "kernels.cuh"
+#include "../../launch/launch.h"   // SWEEP_LAUNCH, SWEEP_LAUNCH_ROWS
 #include "../../launch/box.cuh"
+#include "../../common/host_rows.h"   // box_launch_rows, box_cell_at (host core only)
 #include "../../../core/check.h"
 
 namespace {
@@ -21,19 +23,27 @@ namespace {
 using fdtd::Box;
 
 // ----------------------------------------------------------------- interior
-template<int Order>
-__global__ void a2d_adj_interior(
-    AcousticWavefieldPointer wf, const float* __restrict__ vp,
-    LaplaceParam lap_ctx, SolverContext solver, Box box,
+// One cell of a2d_adj_interior: everything after the kernel's box decode
+// (launch/cell_path.h).  The kernel has no PML branch; its run-time tests are
+// the air test and the fused imaging's physical-box test.  On an interior
+// path the cell is in neither the air (the host span holds no row with an air
+// cell) nor outside the physical box (the span is clipped to it), so the
+// imaging is whether grad_out is there: optional output grad_out.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__ void a2d_adj_interior_cell(
+    Acoustic2dCellIndex cell,
+    const AcousticWavefieldPointer& wf, const float* __restrict__ vp,
+    const LaplaceParam& lap_ctx, const SolverContext& solver,
     const float* __restrict__ grad_forward_img, float* __restrict__ grad_out)
 {
-    int ix, iy, iz, b;
-    if (!fdtd::box_cell(box, solver.B, ix, iy, iz, b)) return;
+    const int ix = cell.ix, iz = cell.iz, b = cell.b;
 
     constexpr bool is_runtime = (Order == -1);
     constexpr int  M_static  = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
-    if (solver.has_topo && iz < solver.topo_rows[ix]) return;
+    if constexpr (!interior_path<Path>) {
+        if (solver.has_topo && iz < solver.topo_rows[ix]) return;
+    }
 
     int sp = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
@@ -49,9 +59,16 @@ __global__ void a2d_adj_interior(
     float gun = f.u_now[idx];
 
     // fused vp-gradient imaging, lagged one step (see acoustic2nd_adjoint_fused)
-    if (grad_out != nullptr &&
-        ix >= solver.phys_x0() && ix < solver.phys_x1() &&
-        iz >= solver.phys_z0() && iz < solver.phys_z1())
+    // -- the kernel's own test on the Any path (no optional_output call there:
+    // see a2d_fwd_interior_cell), the compile-time answer on an interior one.
+    bool image;
+    if constexpr (interior_path<Path>)
+        image = optional_output<Path>(grad_out);
+    else
+        image = grad_out != nullptr &&
+            ix >= solver.phys_x0() && ix < solver.phys_x1() &&
+            iz >= solver.phys_z0() && iz < solver.phys_z1();
+    if (image)
         grad_out[oidx] += 2.f * solver.dt * solver.dt
                         * grad_forward_img[oidx] * gun / vpb[idx];
 
@@ -68,6 +85,19 @@ __global__ void a2d_adj_interior(
     }
     f.u_next[idx] = 2.0f * gun - f.u_prev[idx] + lapx * invdx2 + lapz * invdz2;
     #undef GW_AT
+}
+
+template<int Order>
+__global__ void a2d_adj_interior(
+    AcousticWavefieldPointer wf, const float* __restrict__ vp,
+    LaplaceParam lap_ctx, SolverContext solver, Box box,
+    const float* __restrict__ grad_forward_img, float* __restrict__ grad_out)
+{
+    int ix, iy, iz, b;
+    if (!fdtd::box_cell(box, solver.B, ix, iy, iz, b)) return;
+
+    a2d_adj_interior_cell<Order>(Acoustic2dCellIndex{ix, iz, b}, wf, vp, lap_ctx, solver,
+                                 grad_forward_img, grad_out);
 }
 
 // ----------------------------------------------------------------- CPML ring
@@ -160,6 +190,66 @@ __global__ void __launch_bounds__(256) a2d_adj_ring(
     #undef GTMP_Z
 }
 
+#if defined(SWEEP_HOST_CORE)
+// box_launch_rows (common/host_rows.h) with every row clipped to ``keep``, a
+// box in (ix, iz): a row outside keep's z range is empty, the others keep only
+// keep's x range.  The span of a box launch whose interior path also answers a
+// box test of the cell's own (here a2d_adj_interior's imaging test); a local
+// helper, generic in all but its name.
+inline auto a2d_box_launch_rows_within(const Box& r, const SolverContext& solver, CellBox keep)
+{
+    const int nbz = r.zhi - r.zlo, zlo = r.zlo, xlo = r.xlo;
+    return [rows = sweep::host::box_launch_rows(r, solver), keep, nbz, zlo, xlo](int gy, int gz) {
+        sweep::host::RowSpan s = rows(gy, gz);
+        if (s.hi <= s.lo)
+            return s;   // past the box, the shots or the surface (and every row of an empty box)
+        const int iz = zlo + gz % nbz;
+        if (iz < keep.z0 || iz >= keep.z1)
+            return sweep::host::RowSpan{};
+        s.lo = std::max(s.lo, keep.x0 - xlo);
+        s.hi = std::min(s.hi, keep.x1 - xlo);
+        return s;
+    };
+}
+
+// Host row launcher of a2d_adj_interior, for SWEEP_LAUNCH_ROWS in launch_adj
+// (launch/cell_path.h).  The kernel has no PML branch; the span is built from
+// its three tests: the box decode and the air test -- the launch box minus the
+// rows past the last shot and the rows above the deepest surface row over the
+// box's columns (box_launch_rows) -- and the imaging test, whose physical box
+// [phys_x0, phys_x1) x [phys_z0, phys_z1) every row is clipped to.  (The
+// launch box, phys_box(ctx, M + 1), lies inside the physical box on every
+// face -- a band face starts M + 1 further in, a cut face at the same M -- so
+// the clip removes nothing; it keeps the span a subset should the box ever
+// change.)  box_cell_at decodes a virtual thread exactly as box_cell does.
+// Optional output: grad_out.  Order -1 (runtime M) takes the same span (the
+// box does not depend on the order); its row loop does not vectorise.  No
+// arithmetic of its own; the cell lambda captures BY VALUE.
+template<int Order>
+struct A2dAdjInteriorRows {
+    static void run(dim3 grid, dim3 block, AcousticWavefieldPointer wf, const float* vp,
+                    LaplaceParam lap_ctx, SolverContext solver, Box box,
+                    const float* grad_forward_img, float* grad_out)
+    {
+        auto call = [&](auto&&... a) { a2d_adj_interior<Order>(a...); };
+        const CellBox phys{solver.phys_x0(), solver.phys_x1(), solver.phys_z0(), solver.phys_z1()};
+        sweep::host::with_optional(grad_out, [&](auto path) {
+            sweep::host::launch_rows(
+                grid, block, a2d_box_launch_rows_within(box, solver, phys),
+                [=](int gx, int gy, int gz) {
+                    int ix, iy, iz, b;
+                    sweep::host::box_cell_at(box, gx, gy, gz, ix, iy, iz, b);
+                    a2d_adj_interior_cell<Order, decltype(path)::value>(
+                        Acoustic2dCellIndex{ix, iz, b}, wf, vp, lap_ctx, solver,
+                        grad_forward_img, grad_out);
+                },
+                call,
+                wf, vp, lap_ctx, solver, box, grad_forward_img, grad_out);
+        });
+    }
+};
+#endif
+
 struct AdjArgs {
     AcousticWavefieldPointer wf; const float* vp;
     LaplaceParam lap; GradParam gx, gz; AcousticCPMLPointer cpml;
@@ -176,12 +266,13 @@ void launch_adj(const AdjArgs& a, const SolverContext& ctx)
     const Box in = fdtd::phys_box(ctx, ctx.M + 1);
     if (!fdtd::empty(in)) {
         const auto L = fdtd::box_launch(in, ctx.B, fdtd::kBoxBlock);
-        a2d_adj_interior<Order><<<L.grid, L.block>>>(a.wf, a.vp, a.lap, ctx, in, a.img, a.grad);
+        SWEEP_LAUNCH_ROWS((a2d_adj_interior<Order>), A2dAdjInteriorRows<Order>::run, L.grid, L.block,
+                          a.wf, a.vp, a.lap, ctx, in, a.img, a.grad);
     }
     const fdtd::SlabSet ring = fdtd::slab_set(fdtd::computed_box(ctx), in);
     if (ring.n == 0) return;
     const auto L = fdtd::slab_set_launch(ring, ctx.B);
-    a2d_adj_ring<Order><<<L.grid, L.block>>>(a.wf, a.vp, a.lap, a.gx, a.gz, a.cpml, ctx, ring,
+    SWEEP_LAUNCH((a2d_adj_ring<Order>), L.grid, L.block, a.wf, a.vp, a.lap, a.gx, a.gz, a.cpml, ctx, ring,
                                              a.psixn, a.psizn, a.zetaxn, a.zetazn, a.img, a.grad);
 }
 

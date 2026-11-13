@@ -113,6 +113,7 @@ nav:
   - Developer:
       - CUDA driver skeletons: dev/cuda_drivers.md
       - Building the CUDA core: dev/building.md
+      - The host (CPU) core: dev/host_core.md
       - Release cores: dev/release_cores.md
   - Examples:
       - Overview: examples/index.md

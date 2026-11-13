@@ -42,6 +42,7 @@
 #pragma once
 
 #include <cuda_runtime.h>
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 #include <algorithm>
 #include <cstring>
@@ -351,7 +352,7 @@ struct Driver {
                               float* field, const Buf& source,
                               const Buf& sources_loc, int it, int nsrc)
     {
-        add_source<<<s.source_config.grid, s.source_config.block>>>(
+        SWEEP_LAUNCH(add_source, s.source_config.grid, s.source_config.block,
             field, source.data_ptr<float>(), sources_loc.data_ptr<int>(),
             it, nsrc, solver
         );
@@ -377,7 +378,7 @@ struct Driver {
                              float* field, Buf& record, int irec,
                              const Buf& receivers_loc, int it, int nrec)
     {
-        record_kernel<<<s.record_config.grid, s.record_config.block>>>(
+        SWEEP_LAUNCH(record_kernel, s.record_config.grid, s.record_config.block,
             field, record.select(0, irec).data_ptr<float>(),
             receivers_loc.data_ptr<int>(), it, nrec, solver
         );
@@ -545,7 +546,7 @@ public:
         for (int irec = 0; irec < receiver_fields.size(); ++irec) {
             float* field = elastic_field_ptr(adj_view, 2, receiver_fields[irec]);
             if (field == nullptr) continue;
-            add_source_signed<<<s.record_config.grid, s.record_config.block>>>(
+            SWEEP_LAUNCH(add_source_signed, s.record_config.grid, s.record_config.block,
                 field,
                 p.adjoint_source.select(0, irec).data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
@@ -556,9 +557,11 @@ public:
         // surface): zero the adjoint stresses at the surface row before any
         // grad/adjoint kernel reads them.  No-op when free_surface = false.
         // Every hand-written mode ran this immediately after the residual
-        // injection, so it lives here.
-        elastic_vr2d_kernels::evr_adjoint_zero_top_fs_0
-            <<<s.launch_config.grid, s.launch_config.block>>>(adj_view, solver);
+        // injection, so it lives here.  (The host core runs only the rows
+        // that can hold a surface cell: evr_adjoint_zero_top_fs_rows.)
+        SWEEP_LAUNCH_ROWS(elastic_vr2d_kernels::evr_adjoint_zero_top_fs_0,
+                          elastic_vr2d_kernels::evr_adjoint_zero_top_fs_rows,
+                          s.launch_config.grid, s.launch_config.block, adj_view, solver);
     }
 
     // Gradient kernel (pointwise terms + chain-rule sources), then the
@@ -692,7 +695,7 @@ public:
         for (int isrc = 0; isrc < source_fields.size(); ++isrc) {
             float* field = elastic_field_ptr(for_view, 2, source_fields[isrc]);
             if (field == nullptr) continue;
-            add_source_signed<<<s.source_config.grid, s.source_config.block>>>(
+            SWEEP_LAUNCH(add_source_signed, s.source_config.grid, s.source_config.block,
                 field,
                 p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
@@ -855,7 +858,7 @@ public:
         for (int isrc = 0; isrc < source_fields.size(); ++isrc) {
             float* field = elastic_field_ptr(for_view, 2, source_fields[isrc]);
             if (field == nullptr) continue;
-            add_source<<<s.source_config.grid, s.source_config.block>>>(
+            SWEEP_LAUNCH(add_source, s.source_config.grid, s.source_config.block,
                 field,
                 p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),

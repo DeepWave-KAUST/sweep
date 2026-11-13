@@ -39,6 +39,7 @@
 #pragma once
 
 #include <cuda_runtime.h>
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 #include <algorithm>
 
@@ -233,7 +234,7 @@ struct Driver {
             actx.x_base = axb;
             actx.x_limit = axe;
             auto alc = fdtd::Wave2D::make(axe - axb, s.nz, s.B);
-            acoustic2d_air_clear_kernel<<<alc.grid, alc.block>>>(
+            SWEEP_LAUNCH(acoustic2d_air_clear_kernel, alc.grid, alc.block,
                 view, save_all, u_thist, actx
             );
         }
@@ -269,7 +270,7 @@ struct Driver {
                                   const AcousticWavefieldPointer& view,
                                   const ForwardInputCore& p, int it, int nsrc)
     {
-        add_source<<<s.source_config.grid, s.source_config.block>>>(
+        SWEEP_LAUNCH(add_source, s.source_config.grid, s.source_config.block,
             view.u_next,
             p.source.data_ptr<float>(),
             p.sources_loc.data_ptr<int>(),
@@ -284,7 +285,7 @@ struct Driver {
                        Buf& record, const ForwardInputCore& p,
                        int it, int nrec)
     {
-        record_kernel<<<s.record_config.grid, s.record_config.block>>>(
+        SWEEP_LAUNCH(record_kernel, s.record_config.grid, s.record_config.block,
             view.u_next,
             record.data_ptr<float>(),
             p.receivers_loc.data_ptr<int>(),
@@ -391,7 +392,7 @@ struct Driver {
                                       BwdWorkspace&)
     {
         // record_config slot carries the ADJOINT source config in backward states.
-        add_source<<<s.record_config.grid, s.record_config.block>>>(
+        SWEEP_LAUNCH(add_source, s.record_config.grid, s.record_config.block,
             adj_view.u_next,
             p.adjoint_source.data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(),
@@ -411,7 +412,7 @@ struct Driver {
                                        std::vector<Buf>& grads,
                                        int it, int nsrc)
     {
-        accumulate_source_grad_2d<<<s.source_config.grid, s.source_config.block>>>(
+        SWEEP_LAUNCH(accumulate_source_grad_2d, s.source_config.grid, s.source_config.block,
             adjoint.u_now_t.data_ptr<float>(),
             grads[0].data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(),
@@ -428,7 +429,7 @@ struct Driver {
     {
         const float* adjoint_ptr = adjoint.u_now_t.data_ptr<float>();
         if (grads != nullptr) {
-            calculate_grad<<<s.launch_config.grid, s.launch_config.block>>>(
+            SWEEP_LAUNCH(calculate_grad, s.launch_config.grid, s.launch_config.block,
                 forward_ptr, adjoint_ptr,
                 s.vp,
                 (*grads)[1].data_ptr<float>(),
@@ -437,7 +438,7 @@ struct Driver {
             );
         }
         if (rtm_out != nullptr) {
-            accumulate_illumination_2d<<<s.launch_config.grid, s.launch_config.block>>>(
+            SWEEP_LAUNCH(accumulate_illumination_2d, s.launch_config.grid, s.launch_config.block,
                 forward_ptr, nullptr, nullptr,   // the store IS u_tt
                 adjoint_ptr,
                 rtm_out->source_illumination.data_ptr<float>(),
@@ -495,10 +496,10 @@ struct Driver {
         copy_tensor_cuda_async(forward.u_prev_t, p.u_last_two.select(1, 1).squeeze(0));
         copy_tensor_cuda_async(forward.u_now_t, p.u_last_two.select(1, 0).squeeze(0));
         auto for_view = forward.view();
-        set_boundary_zeros<<<s.launch_config.grid, s.launch_config.block>>>(
+        SWEEP_LAUNCH(set_boundary_zeros, s.launch_config.grid, s.launch_config.block,
             for_view.u_prev, ctx.abcn + ctx.M, s.nx, s.nz,
             ctx.fsLo(0), ctx.fsHi(0), ctx.fsLo(2), ctx.fsHi(2), ctx.cut_mask());
-        set_boundary_zeros<<<s.launch_config.grid, s.launch_config.block>>>(
+        SWEEP_LAUNCH(set_boundary_zeros, s.launch_config.grid, s.launch_config.block,
             for_view.u_now, ctx.abcn + ctx.M, s.nx, s.nz,
             ctx.fsLo(0), ctx.fsHi(0), ctx.fsLo(2), ctx.fsHi(2), ctx.cut_mask());
     }
@@ -515,7 +516,7 @@ struct Driver {
     static void bs_illum_tail(const State& s, const SolverContext& ctx,
                               Wavefield& adjoint, RTMOutputCore& illumination)
     {
-        accumulate_illumination_2d<<<s.launch_config.grid, s.launch_config.block>>>(
+        SWEEP_LAUNCH(accumulate_illumination_2d, s.launch_config.grid, s.launch_config.block,
             nullptr, nullptr, nullptr,
             adjoint.u_now_t.data_ptr<float>(),
             /*source_illumination=*/nullptr,
@@ -571,7 +572,7 @@ struct Driver {
         // below and the add_source that completes w^{it-1} see what they see at
         // any other source cell.  Same (width, offset, tangent_pad = 0) as the
         // restore; same source / time index as the add_source below.
-        sub_source_in_restore_strip<<<s.source_config.grid, s.source_config.block>>>(
+        SWEEP_LAUNCH(sub_source_in_restore_strip, s.source_config.grid, s.source_config.block,
             for_view.u_next,
             p.forward_source.data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(),
@@ -592,7 +593,7 @@ struct Driver {
             const int n_strip = (wzl + wzh) * bw + (wxl + wxh) * (bh > 0 ? bh : 0);
             if (n_strip > 0) {
                 dim3 band_grid((n_strip + 255) / 256, s.B);
-                calculate_grad_utt_band<<<band_grid, 256>>>(
+                SWEEP_LAUNCH(calculate_grad_utt_band, band_grid, 256,
                     forward.u_prev_t.data_ptr<float>(),
                     for_view.u_next,
                     forward.u_now_t.data_ptr<float>(),
@@ -611,7 +612,7 @@ struct Driver {
         // Deliberately its own kernel: the gradient arithmetic above is not
         // touched, so nothing here can move a gradient.
         if (rtm_out != nullptr && p.compute_illumination) {
-            accumulate_illumination_2d<<<s.launch_config.grid, s.launch_config.block>>>(
+            SWEEP_LAUNCH(accumulate_illumination_2d, s.launch_config.grid, s.launch_config.block,
                 forward.u_prev_t.data_ptr<float>(),
                 for_view.u_next,
                 forward.u_now_t.data_ptr<float>(),
@@ -622,7 +623,7 @@ struct Driver {
                 ctx.phys_x0(), ctx.phys_x1(), ctx.phys_z0(), ctx.phys_z1()
             );
         }
-        add_source<<<s.source_config.grid, s.source_config.block>>>(
+        SWEEP_LAUNCH(add_source, s.source_config.grid, s.source_config.block,
             for_view.u_next,
             p.forward_source.data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(),
@@ -649,7 +650,7 @@ struct Driver {
             int nlag = illumination.adcig.size(0);
             int Bloc = illumination.adcig.size(1) * illumination.adcig.size(2);
             int max_lag = (nlag - 1) / 2;
-            accumulate_adcig_2d<<<s.launch_config.grid, s.launch_config.block>>>(
+            SWEEP_LAUNCH(accumulate_adcig_2d, s.launch_config.grid, s.launch_config.block,
                 forward.u_now_t.data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
                 illumination.adcig.data_ptr<float>(),
@@ -734,7 +735,7 @@ struct Driver {
                                   const AcousticWavefieldPointer& view,
                                   const BackwardInputCore& p, int it, int nsrc)
     {
-        add_source<<<s.source_config.grid, s.source_config.block>>>(
+        SWEEP_LAUNCH(add_source, s.source_config.grid, s.source_config.block,
             view.u_next,
             p.forward_source.data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(),

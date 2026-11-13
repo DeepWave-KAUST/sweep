@@ -1,5 +1,6 @@
 #pragma once
 #include "../../launch/by_order.cuh"
+#include "../../launch/cell_path.h"
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -21,6 +22,12 @@
 // Exact transpose of a field's step (acoustic_born3d_adjoint_exact below).
 #define ACOUSTIC_BORN3D_ADJOINT(order, grid, block, ...) \
     SWEEP_LAUNCH_BY_ORDER(acoustic_born3d_adjoint_exact_by_order, order, grid, block, __VA_ARGS__)
+
+// The four stencil kernels below are split per launch/cell_path.h: the
+// __global__ function keeps its index decode and guards and calls a _cell
+// body (the rest of the kernel, unchanged and in the same order), which the
+// host core's row launchers (kernels.cu) also run on an interior path.  The
+// interior boxes, in (ix, iy, iz), are spelled next to the launchers.
 
 template <int Order>
 __device__ inline float acoustic_cpml_update_3d(
@@ -97,6 +104,63 @@ __device__ inline float acoustic_cpml_update_3d(
     return w_sum;
 }
 
+// One cell of acoustic3d_single: everything after the kernel's bounds guards
+// (launch/cell_path.h).  Interior box: the cells acoustic_cpml_update_3d's
+// in_cpml_3d test sends down its laplacian-only branch (kernels.cu
+// born3d_forward_box).  There the cell asks the helper for exactly that
+// branch with use_pml = false, which returns the same lap_x + lap_y + lap_z
+// before any CPML test.  Optional output: u_this, which the kernel stores
+// only under save_all_wavefields as well (the host launcher folds the two into
+// one pointer).  On an interior path the u_this null test is answered too:
+// left as a select, the store's address is not an affine access and the row
+// does not vectorise ("not suitable for scatter store").
+template <int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__ void acoustic3d_single_cell(
+    int ix, int iy, int iz, int b,
+    const AcousticWavefieldPointer& wf,
+    bool save_all_wavefields,
+    float* __restrict__ u_this,
+    const float* __restrict__ vp,
+    const LaplaceParam& lap_ctx,
+    const GradParam& grad_ctx,
+    const GradParam& grad_ctx_x,
+    const GradParam& grad_ctx_y,
+    const GradParam& grad_ctx_z,
+    const AcousticCPMLPointer& cpml,
+    const SolverContext& solver
+) {
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int m_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : m_static;
+
+    int stride_y = solver.nx;
+    int stride_z = solver.nx * solver.ny;
+    int spatial_size = stride_z * solver.nz;
+    int idx = iz * stride_z + iy * stride_y + ix;
+
+    auto f = wf.offset(b, spatial_size);
+    float* u_this_b;
+    if constexpr (interior_path<Path>)
+        u_this_b = optional_output<Path>(u_this) ? u_this + b * spatial_size : nullptr;
+    else
+        u_this_b = u_this ? u_this + b * spatial_size : nullptr;
+    const float* vp_b = vp + b * spatial_size;
+
+    float utt = (vp_b[idx] * vp_b[idx]) * acoustic_cpml_update_3d<Order>(
+        f, ix, iy, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, !interior_path<Path>, solver, halo
+    );
+    f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * utt;
+    if constexpr (interior_path<Path>) {
+        if (optional_output<Path>(u_this_b)) {
+            u_this_b[idx] = utt;
+        }
+    } else {
+        if (save_all_wavefields && u_this_b != nullptr) {
+            u_this_b[idx] = utt;
+        }
+    }
+}
+
 template <int Order>
 __global__ void acoustic3d_single(
     AcousticWavefieldPointer wf,
@@ -128,28 +192,59 @@ __global__ void acoustic3d_single(
         return;
     }
 
-    int stride_y = solver.nx;
-    int stride_z = solver.nx * solver.ny;
-    int spatial_size = stride_z * solver.nz;
-    int idx = iz * stride_z + iy * stride_y + ix;
-
-    auto f = wf.offset(b, spatial_size);
-    float* u_this_b = u_this ? u_this + b * spatial_size : nullptr;
-    const float* vp_b = vp + b * spatial_size;
-
-    float utt = (vp_b[idx] * vp_b[idx]) * acoustic_cpml_update_3d<Order>(
-        f, ix, iy, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, true, solver, halo
-    );
-    f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * utt;
-    if (save_all_wavefields && u_this_b != nullptr) {
-        u_this_b[idx] = utt;
-    }
+    acoustic3d_single_cell<Order>(ix, iy, iz, b, wf, save_all_wavefields, u_this, vp, lap_ctx,
+                                  grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, solver);
 }
 
 using acoustic3d_single_fn = void (*)(AcousticWavefieldPointer, bool, float*,
     const float*, LaplaceParam, GradParam, GradParam, GradParam, GradParam,
     AcousticCPMLPointer, SolverContext);
 SWEEP_BY_ORDER_DECL(acoustic3d_single_fn, acoustic3d_single_by_order);
+
+// One cell of acoustic3d_single_nopml: everything after the kernel's bounds
+// guards (launch/cell_path.h).  Every cell the guards let through takes the
+// one branch (acoustic_cpml_update_3d with use_pml = false returns before any
+// CPML test), so the interior box is the guard box (kernels.cu
+// born3d_nopml_box); ``halo`` is the kernel's own (abcn + 2m + 1 or 2m).
+// Optional output: u_this, its null test answered on an interior path (see
+// acoustic3d_single_cell).
+template <int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__ void acoustic3d_single_nopml_cell(
+    int ix, int iy, int iz, int b,
+    const AcousticWavefieldPointer& wf,
+    float* __restrict__ u_this,
+    const float* __restrict__ vp,
+    const LaplaceParam& lap_ctx,
+    const SolverContext& solver,
+    int halo
+) {
+    int stride_y = solver.nx;
+    int stride_z = solver.nx * solver.ny;
+    int spatial_size = stride_z * solver.nz;
+    int idx = iz * stride_z + iy * stride_y + ix;
+
+    auto f = wf.offset(b, spatial_size);
+    float* u_this_b;
+    if constexpr (interior_path<Path>)
+        u_this_b = optional_output<Path>(u_this) ? u_this + b * spatial_size : nullptr;
+    else
+        u_this_b = u_this ? u_this + b * spatial_size : nullptr;
+    const float* vp_b = vp + b * spatial_size;
+
+    float utt = (vp_b[idx] * vp_b[idx]) * acoustic_cpml_update_3d<Order>(
+        f, ix, iy, iz, idx, AcousticCPMLPointer{}, lap_ctx, GradParam{}, GradParam{}, GradParam{}, GradParam{}, false, solver, halo
+    );
+    f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * utt;
+    if constexpr (interior_path<Path>) {
+        if (optional_output<Path>(u_this_b)) {
+            u_this_b[idx] = utt;
+        }
+    } else {
+        if (u_this_b != nullptr) {
+            u_this_b[idx] = utt;
+        }
+    }
+}
 
 template <int Order>
 __global__ void acoustic3d_single_nopml(
@@ -188,22 +283,7 @@ __global__ void acoustic3d_single_nopml(
         return;
     }
 
-    int stride_y = solver.nx;
-    int stride_z = solver.nx * solver.ny;
-    int spatial_size = stride_z * solver.nz;
-    int idx = iz * stride_z + iy * stride_y + ix;
-
-    auto f = wf.offset(b, spatial_size);
-    float* u_this_b = u_this ? u_this + b * spatial_size : nullptr;
-    const float* vp_b = vp + b * spatial_size;
-
-    float utt = (vp_b[idx] * vp_b[idx]) * acoustic_cpml_update_3d<Order>(
-        f, ix, iy, iz, idx, AcousticCPMLPointer{}, lap_ctx, GradParam{}, GradParam{}, GradParam{}, GradParam{}, false, solver, halo
-    );
-    f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + solver.dt * solver.dt * utt;
-    if (u_this_b != nullptr) {
-        u_this_b[idx] = utt;
-    }
+    acoustic3d_single_nopml_cell<Order>(ix, iy, iz, b, wf, u_this, vp, lap_ctx, solver, halo);
 }
 
 using acoustic3d_single_nopml_fn = void (*)(AcousticWavefieldPointer, float*,
@@ -231,29 +311,30 @@ __global__ void compute_v2_lambda_born3d(
 // lambda_sc) for the RWI background adjoint.  An axis none of whose taps is
 // in_cpml reduces to L_d(g) and leaves its (zero) aux unwritten.  New psi* /
 // zeta* go to the double buffers; the caller rotates with swap_aux().
-template <int Order>
-__global__ void acoustic_born3d_adjoint_exact(
-    AcousticWavefieldPointer wf,
+//
+// One cell of acoustic_born3d_adjoint_exact: everything after the kernel's
+// bounds guards (launch/cell_path.h).  Interior box: the cells none of whose
+// axes has a tap in the CPML (every taps_in_cpml_* false: kernels.cu
+// born3d_adjoint_box), which take the pure L* = lap(v^2 . lambda) branch; no
+// optional output.  The CPML profiles stay in the AcousticCPMLPointer: the
+// kernel loads them as plain LDG.E (nvcc does not take the struct members'
+// __restrict__ here), and handed in as separate __restrict__ pointers they
+// became LDG.E.CONSTANT -- 54 loads at order 4, 64 -> 72 registers.
+template <int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__ void acoustic_born3d_adjoint_exact_cell(
+    int ix, int iy, int iz, int b,
+    const AcousticWavefieldPointer& wf,
     const float* __restrict__ v2l,
-    LaplaceParam lap_ctx,
-    GradParam grad_ctx_x,
-    GradParam grad_ctx_y,
-    GradParam grad_ctx_z,
-    AcousticCPMLPointer cpml,
-    SolverContext solver
+    const LaplaceParam& lap_ctx,
+    const GradParam& grad_ctx_x,
+    const GradParam& grad_ctx_y,
+    const GradParam& grad_ctx_z,
+    const AcousticCPMLPointer& cpml,
+    const SolverContext& solver
 ) {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iy = blockIdx.y * blockDim.y + threadIdx.y;
-    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
-    int b = iz_global / solver.nz; int iz = iz_global % solver.nz;
-    if (b >= solver.B || ix >= solver.nx || iy >= solver.ny || iz >= solver.nz) return;
-
     constexpr bool is_runtime = (Order == -1);
     constexpr int M_static = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
-    if (ix < halo || ix >= solver.nx - halo || iy < halo || iy >= solver.ny - halo ||
-        iz < halo || iz >= solver.nz - halo)
-        return;
 
     const int sy = solver.nx;
     const int sz = solver.nx * solver.ny;
@@ -266,9 +347,13 @@ __global__ void acoustic_born3d_adjoint_exact(
     const float* gc = grad_ctx_x.coeff;  // [_, c1..cM] (antisymmetric)
 
     // Does the tap range [i - M, i + M] meet a band face's in_cpml cells?
-    const bool xfull = solver.taps_in_cpml_x(ix, halo, halo);
-    const bool yfull = solver.taps_in_cpml_y(iy, halo, halo);
-    const bool zfull = solver.taps_in_cpml_z(iz, halo, halo);
+    // (Never in an interior path's box.)
+    bool xfull = false, yfull = false, zfull = false;
+    if constexpr (!interior_path<Path>) {
+        xfull = solver.taps_in_cpml_x(ix, halo, halo);
+        yfull = solver.taps_in_cpml_y(iy, halo, halo);
+        zfull = solver.taps_in_cpml_z(iz, halo, halo);
+    }
 
     if (!xfull && !yfull && !zfull) {
         // No tap in the CPML: L* = lap(v^2 . lambda), the transpose of the
@@ -323,9 +408,114 @@ __global__ void acoustic_born3d_adjoint_exact(
     f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + (Lx + Ly + Lz - Dx - Dy - Dz);
 }
 
+template <int Order>
+__global__ void acoustic_born3d_adjoint_exact(
+    AcousticWavefieldPointer wf,
+    const float* __restrict__ v2l,
+    LaplaceParam lap_ctx,
+    GradParam grad_ctx_x,
+    GradParam grad_ctx_y,
+    GradParam grad_ctx_z,
+    AcousticCPMLPointer cpml,
+    SolverContext solver
+) {
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    int iz_global = blockIdx.z * blockDim.z + threadIdx.z;
+    int b = iz_global / solver.nz; int iz = iz_global % solver.nz;
+    if (b >= solver.B || ix >= solver.nx || iy >= solver.ny || iz >= solver.nz) return;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int M_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+    if (ix < halo || ix >= solver.nx - halo || iy < halo || iy >= solver.ny - halo ||
+        iz < halo || iz >= solver.nz - halo)
+        return;
+
+    acoustic_born3d_adjoint_exact_cell<Order>(ix, iy, iz, b, wf, v2l, lap_ctx, grad_ctx_x, grad_ctx_y,
+                                              grad_ctx_z, cpml, solver);
+}
+
 using acoustic_born3d_adjoint_exact_fn = void (*)(AcousticWavefieldPointer, const float*,
     LaplaceParam, GradParam, GradParam, GradParam, AcousticCPMLPointer, SolverContext);
 SWEEP_BY_ORDER_DECL(acoustic_born3d_adjoint_exact_fn, acoustic_born3d_adjoint_exact_by_order);
+
+// One cell of acoustic_born3d_coupled: everything after the kernel's bounds
+// guards (launch/cell_path.h).  Interior box: as acoustic3d_single_cell's (the
+// in_cpml_3d test of acoustic_cpml_update_3d, the same for both fields), where
+// both helper calls take the laplacian-only branch through use_pml = false.
+// Optional outputs: bg_utt (output 0) and sc_utt (output 1), which the kernel
+// stores only under save_all_wavefields as well (the host launcher folds the
+// flag into both pointers); their null tests answered on an interior path
+// (see acoustic3d_single_cell).
+template <int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__ void acoustic_born3d_coupled_cell(
+    int ix, int iy, int iz, int b,
+    const AcousticWavefieldPointer& bg,
+    const AcousticWavefieldPointer& sc,
+    bool save_all_wavefields,
+    float* __restrict__ bg_utt,
+    float* __restrict__ sc_utt,
+    const float* __restrict__ vp,
+    const float* __restrict__ mp,
+    const LaplaceParam& lap_ctx,
+    const GradParam& grad_ctx,
+    const GradParam& grad_ctx_x,
+    const GradParam& grad_ctx_y,
+    const GradParam& grad_ctx_z,
+    const AcousticCPMLPointer& cpml,
+    const SolverContext& solver
+) {
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int m_static = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : m_static;
+
+    int stride_y = solver.nx;
+    int stride_z = solver.nx * solver.ny;
+    int spatial_size = stride_z * solver.nz;
+    int idx = iz * stride_z + iy * stride_y + ix;
+
+    auto bg_f = bg.offset(b, spatial_size);
+    auto sc_f = sc.offset(b, spatial_size);
+    float* bg_utt_b;
+    float* sc_utt_b;
+    if constexpr (interior_path<Path>) {
+        bg_utt_b = optional_output<Path, 0>(bg_utt) ? bg_utt + b * spatial_size : nullptr;
+        sc_utt_b = optional_output<Path, 1>(sc_utt) ? sc_utt + b * spatial_size : nullptr;
+    } else {
+        bg_utt_b = bg_utt ? bg_utt + b * spatial_size : nullptr;
+        sc_utt_b = sc_utt ? sc_utt + b * spatial_size : nullptr;
+    }
+    const float* vp_b = vp + b * spatial_size;
+    const float* mp_b = mp + b * spatial_size;
+
+    float v2 = vp_b[idx] * vp_b[idx];
+    float bg_utt_val = v2 * acoustic_cpml_update_3d<Order>(
+        bg_f, ix, iy, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, !interior_path<Path>, solver, halo
+    );
+    float sc_utt_val = v2 * acoustic_cpml_update_3d<Order>(
+        sc_f, ix, iy, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, !interior_path<Path>, solver, halo
+    );
+
+    bg_f.u_next[idx] = 2.0f * bg_f.u_now[idx] - bg_f.u_prev[idx] + solver.dt * solver.dt * bg_utt_val;
+    sc_f.u_next[idx] = 2.0f * sc_f.u_now[idx] - sc_f.u_prev[idx] + solver.dt * solver.dt * (sc_utt_val + mp_b[idx] * bg_utt_val);
+
+    if constexpr (interior_path<Path>) {
+        if (optional_output<Path, 0>(bg_utt_b)) {
+            bg_utt_b[idx] = bg_utt_val;
+        }
+        if (optional_output<Path, 1>(sc_utt_b)) {
+            sc_utt_b[idx] = sc_utt_val;
+        }
+    } else {
+        if (save_all_wavefields && bg_utt_b != nullptr) {
+            bg_utt_b[idx] = bg_utt_val;
+        }
+        if (save_all_wavefields && sc_utt_b != nullptr) {
+            sc_utt_b[idx] = sc_utt_val;
+        }
+    }
+}
 
 template <int Order>
 __global__ void acoustic_born3d_coupled(
@@ -361,35 +551,9 @@ __global__ void acoustic_born3d_coupled(
         return;
     }
 
-    int stride_y = solver.nx;
-    int stride_z = solver.nx * solver.ny;
-    int spatial_size = stride_z * solver.nz;
-    int idx = iz * stride_z + iy * stride_y + ix;
-
-    auto bg_f = bg.offset(b, spatial_size);
-    auto sc_f = sc.offset(b, spatial_size);
-    float* bg_utt_b = bg_utt ? bg_utt + b * spatial_size : nullptr;
-    float* sc_utt_b = sc_utt ? sc_utt + b * spatial_size : nullptr;
-    const float* vp_b = vp + b * spatial_size;
-    const float* mp_b = mp + b * spatial_size;
-
-    float v2 = vp_b[idx] * vp_b[idx];
-    float bg_utt_val = v2 * acoustic_cpml_update_3d<Order>(
-        bg_f, ix, iy, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, true, solver, halo
-    );
-    float sc_utt_val = v2 * acoustic_cpml_update_3d<Order>(
-        sc_f, ix, iy, iz, idx, cpml, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, true, solver, halo
-    );
-
-    bg_f.u_next[idx] = 2.0f * bg_f.u_now[idx] - bg_f.u_prev[idx] + solver.dt * solver.dt * bg_utt_val;
-    sc_f.u_next[idx] = 2.0f * sc_f.u_now[idx] - sc_f.u_prev[idx] + solver.dt * solver.dt * (sc_utt_val + mp_b[idx] * bg_utt_val);
-
-    if (save_all_wavefields && bg_utt_b != nullptr) {
-        bg_utt_b[idx] = bg_utt_val;
-    }
-    if (save_all_wavefields && sc_utt_b != nullptr) {
-        sc_utt_b[idx] = sc_utt_val;
-    }
+    acoustic_born3d_coupled_cell<Order>(ix, iy, iz, b, bg, sc, save_all_wavefields, bg_utt, sc_utt, vp,
+                                        mp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z,
+                                        cpml, solver);
 }
 
 using acoustic_born3d_coupled_fn = void (*)(AcousticWavefieldPointer,
@@ -449,6 +613,38 @@ __global__ void calculate_grad_born3d_vp_2diff(
     const float* __restrict__ mp, const float* __restrict__ vp,
     float* __restrict__ grad_vp, float* __restrict__ grad_iii,
     int B, int nx, int ny, int nz);
+
+#if defined(SWEEP_HOST_CORE)
+// Host row launchers of the pointwise kernels above (kernels.cu; launched
+// through SWEEP_LAUNCH_ROWS in backward.cu).
+void calculate_grad_born3d_mp_rows(dim3 grid, dim3 block, const float* u_tt_bg,
+                                   const float* u_backward, const float* vp, float* grad_mp, int B,
+                                   int nx, int ny, int nz, float dt);
+void calculate_grad_born3d_mp_utt_rows(dim3 grid, dim3 block, const float* u_forward_next,
+                                       const float* u_forward_now, const float* u_forward_prev,
+                                       const float* u_backward, const float* vp, float* grad_mp,
+                                       int B, int nx, int ny, int nz, float dt);
+void compute_v2_lambda_born3d_rows(dim3 grid, dim3 block, const float* vp, const float* lambda,
+                                   float* v2_lambda, int nx, int ny, int nz, int B);
+void compute_v2_lambda_bg_born3d_rows(dim3 grid, dim3 block, const float* vp, const float* mp,
+                                      const float* lambda_bg, const float* lambda_sc,
+                                      float* v2_lambda, int nx, int ny, int nz, int B);
+void calculate_grad_born3d_vp_utt_rows(dim3 grid, dim3 block, const float* bg_utt,
+                                       const float* sc_utt, const float* lam_bg,
+                                       const float* lam_sc, const float* mp, const float* vp,
+                                       float* grad_vp, float* grad_iii, int B, int nx, int ny,
+                                       int nz, float dt);
+void add_born3d_scattered_coupling_rows(dim3 grid, dim3 block, float* sc_next, const float* bg_next,
+                                        const float* bg_now, const float* bg_prev, const float* mp,
+                                        int B, int nx, int ny, int nz, int halo);
+void calculate_grad_born3d_vp_2diff_rows(dim3 grid, dim3 block, const float* bg_prev,
+                                         const float* bg_now, const float* bg_next,
+                                         const float* sc_prev, const float* sc_now,
+                                         const float* sc_next, const float* lam_bg,
+                                         const float* lam_sc, const float* mp, const float* vp,
+                                         float* grad_vp, float* grad_iii, int B, int nx, int ny,
+                                         int nz);
+#endif
 
 // Defined in acoustic3d/kernels.cu and shared across translation units -- LSRTM
 // re-declares it here rather than pulling in the whole acoustic3d header.

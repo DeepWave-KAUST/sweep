@@ -21,28 +21,45 @@
 // The shell runs over the six slabs around the box (all the computed cells when
 // the box is empty).  Blocks are 32x1x8, deep in z, so the z-taps of a block's
 // cells are reused in L1; the x slabs, a few cells wide, take 8x4x8.
+//
+// Host core: the interior kernel is split per launch/cell_path.h (decode +
+// guards in the kernel, the body in a _cell) and launched through a row
+// launcher (SWEEP_LAUNCH_ROWS) that runs each row's cells as one SIMD loop
+// over that same body.  The shell stays scalar.
 #include "kernels.cuh"
+#include "../../launch/launch.h"   // SWEEP_LAUNCH, SWEEP_LAUNCH_ROWS
 #include "../../launch/box.cuh"
+#include "../../launch/cell_path.h"   // CellPath
+#include "../../common/host_rows.h"   // box_cell_at, box_launch_rows (host core only)
 #include "../../../core/check.h"
 
 namespace {
 
 using fdtd::Box;
 
+// The indices of one cell as fdtd::box_cell decodes them, handed to a _cell
+// body in one by-value struct rather than as four int parameters: nvcc orders
+// a compare's operands by kind, a bare int parameter below a load, so with
+// ints the split kernel would not keep its SASS (elastic_tti_sg3d CellIndex3,
+// docs/dev/host_core.md rule 7).  On the host it is free.
+struct A3dCell { int ix, iy, iz, b; };
+
 // --------------------------------------------------------------------------
 // interior, one thread per cell
 // --------------------------------------------------------------------------
-template<int Order>
-__global__ void adj3d_interior_percell(
-    AcousticWavefieldPointer wf, const float* __restrict__ vp,
-    LaplaceParam lap_ctx, SolverContext solver, Box box,
+// One cell of adj3d_interior_percell: everything after the kernel's guards
+// (launch/cell_path.h), with the stencil half order it computes first.
+// Interior path: the cell is in the physical box, so the imaging test is the
+// optional output alone; optional output: grad_out.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__ void adj3d_interior_percell_cell(
+    A3dCell cell, const AcousticWavefieldPointer& wf, const float* __restrict__ vp,
+    const LaplaceParam& lap_ctx, const SolverContext& solver,
     const float* __restrict__ grad_forward_img, float* __restrict__ grad_out)
 {
     constexpr bool is_runtime = (Order == -1);
     const int halo = is_runtime ? solver.M : Order / 2;
-    int ix, iy, iz, b;
-    if (!fdtd::box_cell(box, solver.B, ix, iy, iz, b)) return;
-    if (solver.has_topo && iz < solver.topo_rows[iy * solver.nx + ix]) return;
+    const int ix = cell.ix, iy = cell.iy, iz = cell.iz, b = cell.b;
 
     int sy = solver.nx, sz = solver.nx * solver.ny, sp = sz * solver.nz;
     int idx = iz * sz + iy * sy + ix;
@@ -56,10 +73,15 @@ __global__ void adj3d_interior_percell(
     float invdz2 = 1.0f / (lap_ctx.dz * lap_ctx.dz);
 
     float gun = f.u_now[idx];
-    if (grad_out != nullptr &&
-        ix >= solver.phys_x0() && ix < solver.phys_x1() &&
-        iy >= solver.phys_y0() && iy < solver.phys_y1() &&
-        iz >= solver.phys_z0() && iz < solver.phys_z1())
+    bool image;
+    if constexpr (interior_path<Path>)
+        image = optional_output<Path>(grad_out);
+    else
+        image = grad_out != nullptr &&
+            ix >= solver.phys_x0() && ix < solver.phys_x1() &&
+            iy >= solver.phys_y0() && iy < solver.phys_y1() &&
+            iz >= solver.phys_z0() && iz < solver.phys_z1();
+    if (image)
         grad_out[oidx] += 2.f * solver.dt * solver.dt
                         * grad_forward_img[oidx] * gun / vpb[idx];
     float c0c = vpb[idx]; c0c = c0c * c0c * dt2;
@@ -76,6 +98,64 @@ __global__ void adj3d_interior_percell(
     f.u_next[idx] = 2.0f * gun - f.u_prev[idx]
                   + lapx * invdx2 + lapy * invdy2 + lapz * invdz2;
 }
+
+template<int Order>
+__global__ void adj3d_interior_percell(
+    AcousticWavefieldPointer wf, const float* __restrict__ vp,
+    LaplaceParam lap_ctx, SolverContext solver, Box box,
+    const float* __restrict__ grad_forward_img, float* __restrict__ grad_out)
+{
+    int ix, iy, iz, b;
+    if (!fdtd::box_cell(box, solver.B, ix, iy, iz, b)) return;
+    if (solver.has_topo && iz < solver.topo_rows[iy * solver.nx + ix]) return;
+    adj3d_interior_percell_cell<Order>(A3dCell{ix, iy, iz, b}, wf, vp, lap_ctx, solver,
+                                       grad_forward_img, grad_out);
+}
+
+#if defined(SWEEP_HOST_CORE)
+// Host launcher of adj3d_interior_percell (SWEEP_LAUNCH_ROWS in
+// launch_interior): host/launch.h launch_rows over the kernel's own box launch
+// and the cell body run in each row's span.  It holds no arithmetic; the cell
+// lambda captures BY VALUE.  Order -1 (runtime M) takes the same span (the box
+// does not depend on the order); its row loop does not vectorise.
+//
+// The span, from the kernel's own tests: its guards are the box decode
+// (fdtd::box_cell: in the box, before the last shot) and the air return, which
+// common/host_rows.h box_launch_rows answers row by row (the box's whole x
+// extent, minus the rows (iy, iz) above the deepest surface row over the
+// box's columns).  The cell's one test is the imaging's physical box, run when
+// grad_out is there: the launcher's box phys_box(ctx, M + 1) lies inside it on
+// every face (a band face M + 1 cells in, a DD cut face at M, which is the
+// cut face's phys bound), and when a box does not, no row is interior.
+// Nothing else in the cell depends on where it is.
+template<int Order>
+struct Adj3dInteriorRows {
+    static void run(dim3 grid, dim3 block, AcousticWavefieldPointer wf, const float* vp,
+                    LaplaceParam lap_ctx, SolverContext solver, Box box,
+                    const float* grad_forward_img, float* grad_out)
+    {
+        auto call = [&](auto&&... a) { adj3d_interior_percell<Order>(a...); };
+        const bool in_phys = box.xlo >= solver.phys_x0() && box.xhi <= solver.phys_x1() &&
+                             box.ylo >= solver.phys_y0() && box.yhi <= solver.phys_y1() &&
+                             box.zlo >= solver.phys_z0() && box.zhi <= solver.phys_z1();
+        const auto span = sweep::host::box_launch_rows(
+            (grad_out == nullptr || in_phys) ? box : Box{}, solver);
+        sweep::host::with_optional(grad_out, [&](auto path) {
+            constexpr CellPath P = decltype(path)::value;
+            sweep::host::launch_rows(
+                grid, block, span,
+                [=](int gx, int gy, int gz) {
+                    A3dCell c;
+                    sweep::host::box_cell_at(box, gx, gy, gz, c.ix, c.iy, c.iz, c.b);
+                    adj3d_interior_percell_cell<Order, P>(c, wf, vp, lap_ctx, solver,
+                                                          grad_forward_img, grad_out);
+                },
+                call,
+                wf, vp, lap_ctx, solver, box, grad_forward_img, grad_out);
+        });
+    }
+};
+#endif
 
 // --------------------------------------------------------------------------
 // PML shell: the CPML transpose, per axis
@@ -249,7 +329,7 @@ void launch_shell(const AcousticWavefieldPointer& w, const float* vp,
     const Box clear = fdtd::phys_box(ctx, ctx.M + 1);
     fdtd::for_each_slab(fdtd::computed_box(ctx), box, [&](const Box& r, bool x_slab) {
         const auto L = fdtd::box_launch(r, ctx.B, x_slab ? fdtd::kNarrowBlock : fdtd::kBoxBlock);
-        adj3d_shell<Order><<<L.grid, L.block>>>(w, vp, lap, gx, gy, gz, cpml, ctx, box, clear,
+        SWEEP_LAUNCH((adj3d_shell<Order>), L.grid, L.block, w, vp, lap, gx, gy, gz, cpml, ctx, box, clear,
             Region{r.xlo, r.ylo, r.zlo, r.xhi - r.xlo, r.yhi - r.ylo, r.zhi - r.zlo},
             out[0], out[1], out[2], out[3], out[4], out[5], img, grad);
     });
@@ -260,7 +340,8 @@ void launch_interior(const AcousticWavefieldPointer& w, const float* vp, const L
                      const SolverContext& ctx, const Box& box, const float* img, float* grad)
 {
     const auto L = fdtd::box_launch(box, ctx.B, fdtd::kBoxBlock);
-    adj3d_interior_percell<Order><<<L.grid, L.block>>>(w, vp, lap, ctx, box, img, grad);
+    SWEEP_LAUNCH_ROWS((adj3d_interior_percell<Order>), Adj3dInteriorRows<Order>::run, L.grid, L.block,
+                      w, vp, lap, ctx, box, img, grad);
 }
 
 }  // namespace

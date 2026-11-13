@@ -1,5 +1,7 @@
 #pragma once
 #include "../../launch/by_order.cuh"
+#include "../../launch/cell_path.h"
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 #include <cuda.h>
 #include <cuda_runtime.h>
 
@@ -8,6 +10,21 @@
 #include "../../common/acoustic_vrz_fused.cuh"
 #include "../../operators/gradient.cuh"
 #include "../../operators/laplace.cuh"
+
+#if defined(SWEEP_HOST_CORE)
+// The host row launchers' unit-stride copy of the gradient parameters
+// (kernels.cu, forward_split.cu).  gradient<> steps x by the run-time
+// grad_ctx.sx, which every driver of this equation sets to 1 (GradParam{1, nx, nx * ny, ...}).  A
+// stride the compiler cannot see turns the x taps of a row into strided
+// element loads, so the cells get a copy with sx = 1 written in (ix * 1 ==
+// ix * sx: the same indices); a launcher whose grad_ctx.sx is not 1 hands
+// launch_rows an empty span, and every cell runs through the kernel.
+inline GradParam vrz3d_unit_sx(GradParam g)
+{
+    g.sx = 1;
+    return g;
+}
+#endif
 
 // Defined in kernels.cu.
 __global__ void build_kappa_lambda_vrz3d(
@@ -82,20 +99,20 @@ __global__ void calculate_grad_vrz3d(
 
 #define ACOUSTIC_VRZ3D_ADJOINT(order, grid, block, ...)                                     \
     do {                                                                                    \
-        if      ((order) == 2) acoustic_vrz3nd_adjoint<2><<<grid, block>>>(__VA_ARGS__);    \
-        else if ((order) == 4) acoustic_vrz3nd_adjoint<4><<<grid, block>>>(__VA_ARGS__);    \
-        else if ((order) == 6) acoustic_vrz3nd_adjoint<6><<<grid, block>>>(__VA_ARGS__);    \
-        else if ((order) == 8) acoustic_vrz3nd_adjoint<8><<<grid, block>>>(__VA_ARGS__);    \
-        else                   acoustic_vrz3nd_adjoint<-1><<<grid, block>>>(__VA_ARGS__);   \
+        if      ((order) == 2) SWEEP_LAUNCH((acoustic_vrz3nd_adjoint<2>), grid, block, __VA_ARGS__);    \
+        else if ((order) == 4) SWEEP_LAUNCH((acoustic_vrz3nd_adjoint<4>), grid, block, __VA_ARGS__);    \
+        else if ((order) == 6) SWEEP_LAUNCH((acoustic_vrz3nd_adjoint<6>), grid, block, __VA_ARGS__);    \
+        else if ((order) == 8) SWEEP_LAUNCH((acoustic_vrz3nd_adjoint<8>), grid, block, __VA_ARGS__);    \
+        else                   SWEEP_LAUNCH((acoustic_vrz3nd_adjoint<-1>), grid, block, __VA_ARGS__);   \
     } while (0)
 
 #define BUILD_VRZ_ADJOINT_FIELDS_3D(order, grid, block, ...)                                \
     do {                                                                                    \
-        if      ((order) == 2) build_vrz_adjoint_fields_3d<2><<<grid, block>>>(__VA_ARGS__);\
-        else if ((order) == 4) build_vrz_adjoint_fields_3d<4><<<grid, block>>>(__VA_ARGS__);\
-        else if ((order) == 6) build_vrz_adjoint_fields_3d<6><<<grid, block>>>(__VA_ARGS__);\
-        else if ((order) == 8) build_vrz_adjoint_fields_3d<8><<<grid, block>>>(__VA_ARGS__);\
-        else                   build_vrz_adjoint_fields_3d<-1><<<grid, block>>>(__VA_ARGS__);\
+        if      ((order) == 2) SWEEP_LAUNCH((build_vrz_adjoint_fields_3d<2>), grid, block, __VA_ARGS__);\
+        else if ((order) == 4) SWEEP_LAUNCH((build_vrz_adjoint_fields_3d<4>), grid, block, __VA_ARGS__);\
+        else if ((order) == 6) SWEEP_LAUNCH((build_vrz_adjoint_fields_3d<6>), grid, block, __VA_ARGS__);\
+        else if ((order) == 8) SWEEP_LAUNCH((build_vrz_adjoint_fields_3d<8>), grid, block, __VA_ARGS__);\
+        else                   SWEEP_LAUNCH((build_vrz_adjoint_fields_3d<-1>), grid, block, __VA_ARGS__);\
     } while (0)
 
 #define BUILD_VRZ_GRAD_FIELDS_3D(order, grid, block, ...) \
@@ -290,22 +307,38 @@ void launch_acoustic_vrz3d_nopml(
     const float* vp, const float* z, const float* inv_z,
     LaplaceParam lap_ctx, GradParam grad_ctx, SolverContext ctx);
 
+// The indices of one cell, as the kernels decode them, handed to a _cell body
+// (launch/cell_path.h) in one by-value struct rather than as four int
+// parameters (as elastic_tti_sg3d's CellIndex3): nvcc puts a compare's
+// operands in a canonical order by kind, and a bare int parameter ranks below
+// a load, so a test on it is emitted with its operands swapped; a field of a
+// by-value struct ranks like the kernel's own decoded index, and the split
+// kernel keeps its SASS (docs/dev/host_core.md rule 7).  On the host it is
+// free.  Used by every split kernel of this equation (forward_split.cu,
+// adjoint_split.cu and the gradient kernels below).
+struct Vrz3dCellIndex {
+    int ix, iy, iz, b;
+};
+
 // Reverse-mode buffers for the exact discrete-adjoint gradient (3-D):
 //   c_d = λ·vp·∂_d p ,   e_d = λ·vp²·z·∂_d p   (d = x, y, z)
-template<int Order>
-__global__ void build_vrz_grad_fields_3d(
+// One cell of build_vrz_grad_fields_3d: everything after the kernel's guards.
+// Straight-line, so every path is the same code; the host's interior box is
+// the guard's own (kernels.cu).
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void build_vrz_grad_fields_3d_cell(
+    Vrz3dCellIndex cell,
     const float* __restrict__ f_u_now,
     const float* __restrict__ lambda_now,
     const float* __restrict__ vp,
     const float* __restrict__ z,
     float* __restrict__ c_x, float* __restrict__ c_y, float* __restrict__ c_z,
     float* __restrict__ e_x, float* __restrict__ e_y, float* __restrict__ e_z,
-    GradParam grad_ctx,
-    SolverContext solver
+    const GradParam& grad_ctx,
+    const SolverContext& solver
 ) {
-    int ix, iy, iz, b;
-    vrz3d_index<Order>(solver, ix, iy, iz, b);
-    if (!vrz3d_interior<Order>(solver, ix, iy, iz, b)) return;
+    const int ix = cell.ix, iy = cell.iy, iz = cell.iz, b = cell.b;
 
     int spatial_size = solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
@@ -330,6 +363,25 @@ __global__ void build_vrz_grad_fields_3d(
     e_x[gidx] = lam_v2z * dpdx;
     e_y[gidx] = lam_v2z * dpdy;
     e_z[gidx] = lam_v2z * dpdz;
+}
+
+template<int Order>
+__global__ void build_vrz_grad_fields_3d(
+    const float* __restrict__ f_u_now,
+    const float* __restrict__ lambda_now,
+    const float* __restrict__ vp,
+    const float* __restrict__ z,
+    float* __restrict__ c_x, float* __restrict__ c_y, float* __restrict__ c_z,
+    float* __restrict__ e_x, float* __restrict__ e_y, float* __restrict__ e_z,
+    GradParam grad_ctx,
+    SolverContext solver
+) {
+    int ix, iy, iz, b;
+    vrz3d_index<Order>(solver, ix, iy, iz, b);
+    if (!vrz3d_interior<Order>(solver, ix, iy, iz, b)) return;
+
+    build_vrz_grad_fields_3d_cell<Order>(Vrz3dCellIndex{ix, iy, iz, b}, f_u_now, lambda_now, vp, z,
+                                         c_x, c_y, c_z, e_x, e_y, e_z, grad_ctx, solver);
 }
 
 using build_vrz_grad_fields_3d_fn = void (*)(const float*, const float*, const float*,
@@ -516,12 +568,19 @@ __global__ void acoustic_vrz3nd_adjoint(
 
 // Exact discrete-adjoint gradient (3-D), reverse-mode transpose of the forward
 //   rhs = vp²·∇²p + vp·(∇vp·∇p) + vp²·z·(∇(1/z)·∇p).  Mirrors calculate_grad_vrz2d.
-template<int Order>
-__global__ void calculate_grad_vrz3d(
+// One cell of calculate_grad_vrz3d: everything after the kernel's guards
+// (launch/cell_path.h).  The host's interior box is the guards' own (the
+// physical box inside the halo guard, kernels.cu); optional input p_tt
+// (slot 0: present = the stored second time difference, absent = three time
+// levels).
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void calculate_grad_vrz3d_cell(
+    Vrz3dCellIndex cell,
     const float* __restrict__ f_u_now,
     const float* __restrict__ lambda_now,
-    const float* __restrict__ p_tt,       // U_{it+1} − 2U_it + U_{it−1}, or nullptr
-    const float* __restrict__ p_prev,     // used when p_tt == nullptr
+    const float* __restrict__ p_tt,
+    const float* __restrict__ p_prev,
     const float* __restrict__ p_next,
     const float* __restrict__ c_x, const float* __restrict__ c_y, const float* __restrict__ c_z,
     const float* __restrict__ e_x, const float* __restrict__ e_y, const float* __restrict__ e_z,
@@ -530,26 +589,10 @@ __global__ void calculate_grad_vrz3d(
     const float* __restrict__ inv_z,
     float* __restrict__ grad_vp,
     float* __restrict__ grad_z,
-    GradParam grad_ctx,
-    LaplaceParam lap_ctx,
-    SolverContext solver
+    const GradParam& grad_ctx,
+    const SolverContext& solver
 ) {
-    int ix, iy, iz, b;
-    vrz3d_index<Order>(solver, ix, iy, iz, b);
-    if (!vrz3d_interior<Order>(solver, ix, iy, iz, b)) return;
-
-    // Image the PHYSICAL box only.  ``EdgePadding.backward`` crops the pad
-    // gradients on the way back to the model, so everything this kernel writes
-    // in the PML shell, the sigma=0 buffer and the stencil halo is read,
-    // multiplied and accumulated for nothing, once per time step -- 43% of the
-    // threads on a production-size 3-D grid (stepped vs
-    // physical cells).  The 2-D twin and acoustic3d have had this guard; the 3-D VRZ
-    // kernels did not.  The bounds are CUT-AWARE: on a DD cut face phys_x0()
-    // collapses to the halo, so cut-adjacent cells are still imaged.
-    if (ix < solver.phys_x0() || ix >= solver.phys_x1() ||
-        iy < solver.phys_y0() || iy >= solver.phys_y1() ||
-        iz < solver.phys_z0() || iz >= solver.phys_z1()) return;
-
+    const int ix = cell.ix, iy = cell.iy, iz = cell.iz, b = cell.b;
 
     int spatial_size = solver.nx * solver.ny * solver.nz;
     int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
@@ -575,7 +618,7 @@ __global__ void calculate_grad_vrz3d(
     //   => 2vλ∇²p = 2λ·p_tt/(dt²·v) − 2λ·∇p·∇vp − 2vzλ·∇p·∇(1/z)
     // so grad_vp takes NO second spatial derivative of the stored /
     // reconstructed field.  Source term removed by vrz3d_utt_source_correction.
-    float ptt = (p_tt != nullptr)
+    float ptt = optional_output<Path>(p_tt)
         ? p_tt[shift + idx]
         : (p_next[shift + idx] - 2.0f * p_b[idx] + p_prev[shift + idx]);
 
@@ -610,6 +653,45 @@ __global__ void calculate_grad_vrz3d(
     float g_z  = lam * v * v * dp_dinvz
                + div_e * inv_z0 * inv_z0;
     grad_z_b[idx]  += -dt2 * g_z;
+}
+
+template<int Order>
+__global__ void calculate_grad_vrz3d(
+    const float* __restrict__ f_u_now,
+    const float* __restrict__ lambda_now,
+    const float* __restrict__ p_tt,       // U_{it+1} − 2U_it + U_{it−1}, or nullptr
+    const float* __restrict__ p_prev,     // used when p_tt == nullptr
+    const float* __restrict__ p_next,
+    const float* __restrict__ c_x, const float* __restrict__ c_y, const float* __restrict__ c_z,
+    const float* __restrict__ e_x, const float* __restrict__ e_y, const float* __restrict__ e_z,
+    const float* __restrict__ vp,
+    const float* __restrict__ z,
+    const float* __restrict__ inv_z,
+    float* __restrict__ grad_vp,
+    float* __restrict__ grad_z,
+    GradParam grad_ctx,
+    LaplaceParam lap_ctx,
+    SolverContext solver
+) {
+    int ix, iy, iz, b;
+    vrz3d_index<Order>(solver, ix, iy, iz, b);
+    if (!vrz3d_interior<Order>(solver, ix, iy, iz, b)) return;
+
+    // Image the PHYSICAL box only.  ``EdgePadding.backward`` crops the pad
+    // gradients on the way back to the model, so everything this kernel writes
+    // in the PML shell, the sigma=0 buffer and the stencil halo is read,
+    // multiplied and accumulated for nothing, once per time step -- 43% of the
+    // threads on a production-size 3-D grid (stepped vs
+    // physical cells).  The 2-D twin and acoustic3d have had this guard; the 3-D VRZ
+    // kernels did not.  The bounds are CUT-AWARE: on a DD cut face phys_x0()
+    // collapses to the halo, so cut-adjacent cells are still imaged.
+    if (ix < solver.phys_x0() || ix >= solver.phys_x1() ||
+        iy < solver.phys_y0() || iy >= solver.phys_y1() ||
+        iz < solver.phys_z0() || iz >= solver.phys_z1()) return;
+
+    calculate_grad_vrz3d_cell<Order>(Vrz3dCellIndex{ix, iy, iz, b}, f_u_now, lambda_now, p_tt,
+                                     p_prev, p_next, c_x, c_y, c_z, e_x, e_y, e_z, vp, z, inv_z,
+                                     grad_vp, grad_z, grad_ctx, solver);
 }
 
 using calculate_grad_vrz3d_fn = void (*)(const float*, const float*, const float*,
@@ -673,7 +755,10 @@ SWEEP_BY_ORDER_DECL(build_vrz_adjoint_coeffs_3d_fn, build_vrz_adjoint_coeffs_3d_
 
 // Accessor recomputing c_d = λ·vp·∂_d p (UseE=false) or e_d = λ·vp²·z·∂_d p
 // (UseE=true) at stencil tap `off` along Dir, matching build_vrz_grad_fields_3d.
-template<int Order, int Dir, bool UseE>
+// On an interior Path (launch/cell_path.h) every tap passes the tap test --
+// the host's box (kernels.cu) keeps the taps inside the halo box and short of
+// x_end() -- so the test is gone; on Any it is the kernel's own.
+template<int Order, int Dir, bool UseE, CellPath Path = CellPath::Any>
 struct VrzGradAccessor3D {
     const float* __restrict__ p;
     const float* __restrict__ lam;
@@ -689,8 +774,10 @@ struct VrzGradAccessor3D {
         if constexpr (Dir & X) jx = ix + off;
         else if constexpr (Dir & Y) jy = iy + off;
         else jz = iz + off;
-        if (!vrz3d_interior<Order>(solver, jx, jy, jz, b))
-            return 0.f;
+        if constexpr (!interior_path<Path>) {
+            if (!vrz3d_interior<Order>(solver, jx, jy, jz, b))
+                return 0.f;
+        }
         int j = jz * solver.nx * solver.ny + jy * solver.nx + jx;
         float dpd = gradient<3, Order, Dir>(p, jx, jy, jz, grad_ctx);
         float lam_j = lam[j];
@@ -704,6 +791,91 @@ struct VrzGradAccessor3D {
         }
     }
 };
+
+// One cell of calculate_grad_vrz3d_fused: everything after the kernel's
+// guards (launch/cell_path.h).  The host's interior box (kernels.cu) is the
+// guards' own, cut further so that no tap of the six VrzGradAccessor3D
+// stencils fails the accessor's tap test; optional input p_tt (slot 0, as
+// calculate_grad_vrz3d_cell).
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void calculate_grad_vrz3d_fused_cell(
+    Vrz3dCellIndex cell,
+    const float* __restrict__ f_u_now,
+    const float* __restrict__ lambda_now,
+    const float* __restrict__ p_tt,
+    const float* __restrict__ p_prev,
+    const float* __restrict__ p_next,
+    const float* __restrict__ vp,
+    const float* __restrict__ z,
+    const float* __restrict__ inv_z,
+    float* __restrict__ grad_vp,
+    float* __restrict__ grad_z,
+    const GradParam& grad_ctx,
+    const SolverContext& solver
+) {
+    const int ix = cell.ix, iy = cell.iy, iz = cell.iz, b = cell.b;
+
+    int spatial_size = solver.nx * solver.ny * solver.nz;
+    int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
+    int shift = b * spatial_size;
+
+    const float* p_b = f_u_now + shift;
+    const float* lambda_b = lambda_now + shift;
+    const float* vp_b = vp + shift;
+    const float* z_b = z + shift;
+    const float* inv_z_b = inv_z + shift;
+    float* grad_vp_b = grad_vp + shift;
+    float* grad_z_b = grad_z + shift;
+
+    // 2·v·λ·∇²p is replaced through the forward identity (same operators as
+    // the forward kernel, so exact in the interior up to rounding):
+    //   U_{it+1} − 2U_it + U_{it−1} = dt²·κ·(β·∇²p + ∇b·∇p)   (+ S at source cells)
+    //   => 2vλ∇²p = 2λ·p_tt/(dt²·v) − 2λ·∇p·∇vp − 2vzλ·∇p·∇(1/z)
+    // so grad_vp takes NO second spatial derivative of the stored /
+    // reconstructed field.  Source term removed by vrz3d_utt_source_correction.
+    float ptt = optional_output<Path>(p_tt)
+        ? p_tt[shift + idx]
+        : (p_next[shift + idx] - 2.0f * p_b[idx] + p_prev[shift + idx]);
+
+    float dpdx = gradient<3, Order, X>(p_b, ix, iy, iz, grad_ctx);
+    float dpdy = gradient<3, Order, Y>(p_b, ix, iy, iz, grad_ctx);
+    float dpdz = gradient<3, Order, Z>(p_b, ix, iy, iz, grad_ctx);
+
+    float dvpdx = gradient<3, Order, X>(vp_b, ix, iy, iz, grad_ctx);
+    float dvpdy = gradient<3, Order, Y>(vp_b, ix, iy, iz, grad_ctx);
+    float dvpdz = gradient<3, Order, Z>(vp_b, ix, iy, iz, grad_ctx);
+    float z1x = gradient<3, Order, X>(inv_z_b, ix, iy, iz, grad_ctx);
+    float z1y = gradient<3, Order, Y>(inv_z_b, ix, iy, iz, grad_ctx);
+    float z1z = gradient<3, Order, Z>(inv_z_b, ix, iy, iz, grad_ctx);
+
+    VrzGradAccessor3D<Order, X, false, Path> cx{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver.bounds(), grad_ctx};
+    VrzGradAccessor3D<Order, Y, false, Path> cy{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver.bounds(), grad_ctx};
+    VrzGradAccessor3D<Order, Z, false, Path> cz{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver.bounds(), grad_ctx};
+    float div_c = centered_gradient_stencil<Order>(cx, solver.M, grad_ctx.coeff, grad_ctx.dx)
+                + centered_gradient_stencil<Order>(cy, solver.M, grad_ctx.coeff, grad_ctx.dy)
+                + centered_gradient_stencil<Order>(cz, solver.M, grad_ctx.coeff, grad_ctx.dz);
+    VrzGradAccessor3D<Order, X, true, Path> ex{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver.bounds(), grad_ctx};
+    VrzGradAccessor3D<Order, Y, true, Path> ey{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver.bounds(), grad_ctx};
+    VrzGradAccessor3D<Order, Z, true, Path> ez{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver.bounds(), grad_ctx};
+    float div_e = centered_gradient_stencil<Order>(ex, solver.M, grad_ctx.coeff, grad_ctx.dx)
+                + centered_gradient_stencil<Order>(ey, solver.M, grad_ctx.coeff, grad_ctx.dy)
+                + centered_gradient_stencil<Order>(ez, solver.M, grad_ctx.coeff, grad_ctx.dz);
+
+    float v = vp_b[idx];
+    float inv_z0 = inv_z_b[idx];
+    float lam = lambda_b[idx];
+
+    float dp_dvp   = dpdx * dvpdx + dpdy * dvpdy + dpdz * dvpdz;
+    float dp_dinvz = dpdx * z1x  + dpdy * z1y  + dpdz * z1z;
+
+    float dt2 = solver.dt * solver.dt;
+    // grad_vp += −dt²·[2λ·p_tt/(dt²·v) − λ·∇p·∇vp − ∇·(λ·vp·∇p)]
+    grad_vp_b[idx] += -2.0f * lam * ptt / v + dt2 * (lam * dp_dvp + div_c);
+    float g_z  = lam * v * v * dp_dinvz
+               + div_e * inv_z0 * inv_z0;
+    grad_z_b[idx]  += -dt2 * g_z;
+}
 
 template<int Order>
 __global__ void calculate_grad_vrz3d_fused(
@@ -737,66 +909,9 @@ __global__ void calculate_grad_vrz3d_fused(
         iy < solver.phys_y0() || iy >= solver.phys_y1() ||
         iz < solver.phys_z0() || iz >= solver.phys_z1()) return;
 
-
-    int spatial_size = solver.nx * solver.ny * solver.nz;
-    int idx = iz * solver.nx * solver.ny + iy * solver.nx + ix;
-    int shift = b * spatial_size;
-
-    const float* p_b = f_u_now + shift;
-    const float* lambda_b = lambda_now + shift;
-    const float* vp_b = vp + shift;
-    const float* z_b = z + shift;
-    const float* inv_z_b = inv_z + shift;
-    float* grad_vp_b = grad_vp + shift;
-    float* grad_z_b = grad_z + shift;
-
-    // 2·v·λ·∇²p is replaced through the forward identity (same operators as
-    // the forward kernel, so exact in the interior up to rounding):
-    //   U_{it+1} − 2U_it + U_{it−1} = dt²·κ·(β·∇²p + ∇b·∇p)   (+ S at source cells)
-    //   => 2vλ∇²p = 2λ·p_tt/(dt²·v) − 2λ·∇p·∇vp − 2vzλ·∇p·∇(1/z)
-    // so grad_vp takes NO second spatial derivative of the stored /
-    // reconstructed field.  Source term removed by vrz3d_utt_source_correction.
-    float ptt = (p_tt != nullptr)
-        ? p_tt[shift + idx]
-        : (p_next[shift + idx] - 2.0f * p_b[idx] + p_prev[shift + idx]);
-
-    float dpdx = gradient<3, Order, X>(p_b, ix, iy, iz, grad_ctx);
-    float dpdy = gradient<3, Order, Y>(p_b, ix, iy, iz, grad_ctx);
-    float dpdz = gradient<3, Order, Z>(p_b, ix, iy, iz, grad_ctx);
-
-    float dvpdx = gradient<3, Order, X>(vp_b, ix, iy, iz, grad_ctx);
-    float dvpdy = gradient<3, Order, Y>(vp_b, ix, iy, iz, grad_ctx);
-    float dvpdz = gradient<3, Order, Z>(vp_b, ix, iy, iz, grad_ctx);
-    float z1x = gradient<3, Order, X>(inv_z_b, ix, iy, iz, grad_ctx);
-    float z1y = gradient<3, Order, Y>(inv_z_b, ix, iy, iz, grad_ctx);
-    float z1z = gradient<3, Order, Z>(inv_z_b, ix, iy, iz, grad_ctx);
-
-    VrzGradAccessor3D<Order, X, false> cx{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver.bounds(), grad_ctx};
-    VrzGradAccessor3D<Order, Y, false> cy{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver.bounds(), grad_ctx};
-    VrzGradAccessor3D<Order, Z, false> cz{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver.bounds(), grad_ctx};
-    float div_c = centered_gradient_stencil<Order>(cx, solver.M, grad_ctx.coeff, grad_ctx.dx)
-                + centered_gradient_stencil<Order>(cy, solver.M, grad_ctx.coeff, grad_ctx.dy)
-                + centered_gradient_stencil<Order>(cz, solver.M, grad_ctx.coeff, grad_ctx.dz);
-    VrzGradAccessor3D<Order, X, true> ex{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver.bounds(), grad_ctx};
-    VrzGradAccessor3D<Order, Y, true> ey{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver.bounds(), grad_ctx};
-    VrzGradAccessor3D<Order, Z, true> ez{p_b, lambda_b, vp_b, z_b, ix, iy, iz, b, solver.bounds(), grad_ctx};
-    float div_e = centered_gradient_stencil<Order>(ex, solver.M, grad_ctx.coeff, grad_ctx.dx)
-                + centered_gradient_stencil<Order>(ey, solver.M, grad_ctx.coeff, grad_ctx.dy)
-                + centered_gradient_stencil<Order>(ez, solver.M, grad_ctx.coeff, grad_ctx.dz);
-
-    float v = vp_b[idx];
-    float inv_z0 = inv_z_b[idx];
-    float lam = lambda_b[idx];
-
-    float dp_dvp   = dpdx * dvpdx + dpdy * dvpdy + dpdz * dvpdz;
-    float dp_dinvz = dpdx * z1x  + dpdy * z1y  + dpdz * z1z;
-
-    float dt2 = solver.dt * solver.dt;
-    // grad_vp += −dt²·[2λ·p_tt/(dt²·v) − λ·∇p·∇vp − ∇·(λ·vp·∇p)]
-    grad_vp_b[idx] += -2.0f * lam * ptt / v + dt2 * (lam * dp_dvp + div_c);
-    float g_z  = lam * v * v * dp_dinvz
-               + div_e * inv_z0 * inv_z0;
-    grad_z_b[idx]  += -dt2 * g_z;
+    calculate_grad_vrz3d_fused_cell<Order>(Vrz3dCellIndex{ix, iy, iz, b}, f_u_now, lambda_now, p_tt,
+                                           p_prev, p_next, vp, z, inv_z, grad_vp, grad_z, grad_ctx,
+                                           solver);
 }
 
 using calculate_grad_vrz3d_fused_fn = void (*)(const float*, const float*, const float*,

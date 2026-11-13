@@ -231,6 +231,36 @@ def _ensure_ninja_on_path() -> None:
         pass
 
 
+# On Linux ninja starts under this launcher: PR_SET_PDEATHSIG has the kernel
+# SIGTERM ninja when the process that started the build dies -- SIGKILLed by a
+# timeout, a restarted notebook kernel -- and ninja passes the signal on to its
+# compilers and removes their half-written outputs.  Otherwise the orphaned
+# build runs on beside the build of the next process to take the lock, which
+# _FileBaton hands over once the dead holder is noticed.  The next holder
+# resumes from the objects already built; the files being compiled at the kill
+# start over.  A kill of the whole process group (GNU timeout) takes ninja down
+# before it can stop its compilers, which then finish on their own.
+_NINJA_LAUNCHER = """\
+import os, sys
+try:
+    import ctypes, signal
+    ctypes.CDLL(None).prctl(1, int(signal.SIGTERM))
+    if os.getppid() != int(sys.argv[1]):
+        sys.exit("sweep: the process that started this build has exited")
+except (ImportError, OSError, AttributeError):
+    pass
+os.execvp(sys.argv[2], sys.argv[2:])
+"""
+
+
+def _ninja_command(build_dir: Path) -> list[str]:
+    """``ninja -C build_dir``, on Linux under :data:`_NINJA_LAUNCHER`."""
+    cmd = ["ninja", "-C", str(build_dir)]
+    if sys.platform.startswith("linux") and sys.executable:
+        return [sys.executable, "-I", "-S", "-c", _NINJA_LAUNCHER, str(os.getpid()), *cmd]
+    return cmd
+
+
 # --------------------------------------------------------------------------- #
 # the shipped core (wheel-bundled libsweep_core.so)
 # --------------------------------------------------------------------------- #
@@ -629,27 +659,171 @@ def _digest(path: Path) -> str:
     return h.hexdigest()
 
 
+def _proc_stat(pid: int) -> tuple[str, str] | None:
+    """(state, start time in clock ticks since boot) of a process, from
+    /proc/<pid>/stat; None where that cannot be read (no /proc, or gone)."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            text = fh.read().decode(errors="replace")
+        rest = text[text.rindex(")") + 2:].split()   # the name may hold spaces
+        return rest[0], rest[19]                      # fields 3 and 22
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _machine() -> str:
+    """Who can tell whether a lock holder's PID is alive: this host, in this
+    boot, in this PID namespace."""
+    import socket
+
+    def read(path, link=False):
+        try:
+            return os.readlink(path) if link else Path(path).read_text().strip()
+        except OSError:
+            return ""
+    return "|".join((socket.gethostname(), read("/proc/sys/kernel/random/boot_id"),
+                     read("/proc/self/ns/pid", link=True))).replace(" ", "_")
+
+
+def _holder_record() -> str:
+    pid = os.getpid()
+    st = _proc_stat(pid)
+    return f"{pid} {_machine()} {st[1] if st else ''}\n"
+
+
+def _holder_gone(record: str) -> bool:
+    """Whether the process a lock file names has provably exited: it ran on
+    this machine (see :func:`_machine`) and its PID is free, a zombie, or now
+    another process's.  A record that cannot be read -- empty, being written,
+    or written by an older sweep, which writes none -- or a holder on another
+    machine is not gone."""
+    try:
+        pid_s, machine, *rest = record.split()
+        pid = int(pid_s)
+    except ValueError:
+        return False
+    if pid <= 0 or machine != _machine():
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:                 # EPERM: alive, and another user's
+        return False
+    st = _proc_stat(pid)
+    return st is not None and (st[0] in ("Z", "X") or bool(rest and st[1] != rest[0]))
+
+
+def _read_text(path: str) -> str | None:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
 class _FileBaton:
     """torch.utils.file_baton.FileBaton, torch-free: an O_EXCL lock file.
     ``try_acquire()`` wins by creating it; a loser ``wait()``s until the
-    winner's ``release()`` removes it."""
+    winner's ``release()`` removes it.
+
+    Unlike torch's, the lock file names its holder (PID, machine, start time),
+    so a waiter can tell a holder that died -- SIGKILLed mid-build by a
+    timeout, a restarted notebook kernel, a cancelled job -- and remove its
+    lock instead of waiting on it forever.  It stays an O_EXCL file, so a
+    process running an older sweep still sees it as held."""
 
     def __init__(self, lock_file_path: str, wait_seconds: float = 0.1):
         self.lock_file_path = lock_file_path
         self.wait_seconds = wait_seconds
         self.fd = None
+        self._gone = None   # (record, when) of a holder first seen gone
 
     def try_acquire(self) -> bool:
         try:
-            self.fd = os.open(self.lock_file_path, os.O_CREAT | os.O_EXCL)
-            return True
+            self.fd = os.open(self.lock_file_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         except FileExistsError:
             return False
+        try:
+            os.write(self.fd, _holder_record().encode())
+            os.fsync(self.fd)       # readable on another NFS client too
+        except OSError:
+            pass                    # an unnamed holder: waited on, never removed
+        return True
+
+    def acquire(self) -> None:
+        while not self.try_acquire():
+            self.wait()
 
     def wait(self) -> None:
+        """Until the lock is released -- or removed because its holder died
+        (checked about once a second).  Either way the caller cannot assume
+        the holder's work got done: it checks, or takes the lock and does it."""
         import time
+        polls = 0
         while os.path.exists(self.lock_file_path):
+            if polls % 10 == 0 and self._remove_if_holder_gone():
+                return
+            polls += 1
             time.sleep(self.wait_seconds)
+
+    def holder(self) -> str:
+        """``'pid N on HOST'`` for messages; ``'holder unknown'`` without a record."""
+        try:
+            pid_s, machine, *_ = (_read_text(self.lock_file_path) or "").split()
+            return f"pid {int(pid_s)} on {machine.split('|')[0]}"
+        except ValueError:
+            return "holder unknown"
+
+    def _remove_if_holder_gone(self) -> bool:
+        """Remove the lock when its holder has exited; True when the lock is
+        gone now.  The holder must be seen gone twice, a second apart: the
+        build it started gets SIGTERM when it dies (_NINJA_LAUNCHER) and is
+        stopped by then.  Waiters remove the lock one at a time, each under a
+        breaker lock and only while the file still holds the dead holder's
+        record, so a fresh lock taken meanwhile is never removed."""
+        import time
+        record = _read_text(self.lock_file_path)
+        if record is None:
+            return True
+        if not _holder_gone(record):
+            self._gone = None
+            return False
+        now = time.monotonic()
+        if self._gone is None or self._gone[0] != record:
+            self._gone = (record, now)
+            return False
+        if now - self._gone[1] < 1.0:
+            return False
+        breaker = self.lock_file_path + ".break"
+        try:
+            fd = os.open(breaker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            # Another waiter is removing it.  A removal takes microseconds, so
+            # a breaker this old belongs to a waiter that died doing it.
+            try:
+                if time.time() - os.stat(breaker).st_mtime > 30:
+                    os.remove(breaker)
+            except OSError:
+                pass
+            return False
+        except OSError:
+            return False            # not ours to touch (permissions): wait, as before
+        try:
+            if _read_text(self.lock_file_path) == record:
+                os.remove(self.lock_file_path)
+            gone = True             # removed, or a fresh lock took its place
+        except FileNotFoundError:
+            gone = True
+        except OSError:
+            gone = False            # not ours to remove: wait, as before
+        finally:
+            os.close(fd)
+            try:
+                os.remove(breaker)
+            except OSError:
+                pass
+        return gone
 
     def release(self) -> None:
         if self.fd is not None:
@@ -692,12 +866,13 @@ def _stage(build_dir: Path) -> tuple[list[str], list[str]]:
     # (seen on a 2-rank DD benchmark). The baton is the mechanism torch's
     # extension build uses (an O_EXCL lock file; the loser polls until the
     # winner removes it), written out here so the core builds without torch
-    # -- a manylinux container has none.
+    # -- a manylinux container has none.  Each rank stages under it in turn:
+    # after a holder that staged, the manifest matches and nothing is copied;
+    # after one that died midway (its lock removed by wait()), the staging
+    # completes here.
     build_dir.mkdir(parents=True, exist_ok=True)
     baton = _FileBaton(str(build_dir / "sweep_stage_lock"))
-    if not baton.try_acquire():
-        baton.wait()
-        return _staged_paths(stage)
+    baton.acquire()
     try:
         return _stage_locked(stage, manifest_path)
     finally:
@@ -966,18 +1141,22 @@ def _build_core(build_dir: Path, sources: list[str], inc: list[str], cuda_home: 
         ninja_file.write_text(text)
     _ensure_ninja_on_path()
     baton = _FileBaton(str(build_dir / "sweep_core_lock"))
-    if not baton.try_acquire():
+    # A process that waited takes the holder's core only when its stamp is
+    # this tree's: the holder may have failed, died midway (its lock removed
+    # by wait()), or built another worktree's sources into this drawer.
+    while not baton.try_acquire():
         baton.wait()
-    else:
-        try:
-            r = subprocess.run(["ninja", "-C", str(core_dir)], capture_output=not verbose, text=True)
-            if r.returncode != 0:
-                raise RuntimeError("sweep core build (libsweep_core.so) failed:\n"
-                                   + (r.stdout or "")[-4000:] + (r.stderr or "")[-4000:])
-            if (core_dir / "libsweep_core.so").exists():
-                _write_stamp(build_dir, _source_stamp())
-        finally:
-            baton.release()
+        if _local_core_current(build_dir):
+            return core_dir / "libsweep_core.so"
+    try:
+        r = subprocess.run(_ninja_command(core_dir), capture_output=not verbose, text=True)
+        if r.returncode != 0:
+            raise RuntimeError("sweep core build (libsweep_core.so) failed:\n"
+                               + (r.stdout or "")[-4000:] + (r.stderr or "")[-4000:])
+        if (core_dir / "libsweep_core.so").exists():
+            _write_stamp(build_dir, _source_stamp())
+    finally:
+        baton.release()
     so = core_dir / "libsweep_core.so"
     if not so.exists():
         raise RuntimeError(f"sweep core build left no {so}")

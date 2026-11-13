@@ -15,6 +15,21 @@ sys.modules["run_snippets"] = run_snippets  # dataclasses look the module up
 _spec.loader.exec_module(run_snippets)
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _host_core_up():
+    """Bring the host core up before the first block. On a box without CUDA the
+    blocks run on it, and a clone builds it on its first CPU run: minutes on a
+    CI runner, which would count against that block's timeout. A block killed
+    in the middle of the build leaves the build lock behind, and every later
+    block then waits on it until it times out too."""
+    import torch
+    if torch.cuda.is_available():
+        return
+    from sweep.backend.c import hostcore
+    if hostcore.available():
+        hostcore.core_path(verbose=False)
+
+
 @pytest.mark.parametrize("md", run_snippets.skill_files(SKILL),
                          ids=lambda p: str(p.relative_to(SKILL)))
 def test_skill_snippets_run(md):

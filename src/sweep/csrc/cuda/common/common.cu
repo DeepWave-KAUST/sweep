@@ -1,5 +1,6 @@
 
 #include "common.cuh"
+#include "../launch/launch.h"   // SWEEP_LAUNCH
 #include "context.h"
 #include "boundary/strip.cuh"
 #include "../../core/check.h"
@@ -419,7 +420,7 @@ void second_time_difference(const Buf& out, const Buf& next, const Buf& now, con
     if (n == 0) return;
     constexpr int kThreads = 256;
     const unsigned blocks = static_cast<unsigned>((n + kThreads - 1) / kThreads);
-    second_time_difference_kernel<<<blocks, kThreads>>>(
+    SWEEP_LAUNCH(second_time_difference_kernel, blocks, kThreads,
         out.data_ptr<float>(), next.data_ptr<float>(), now.data_ptr<float>(), prev.data_ptr<float>(), n);
     SWEEP_CUDA_CHECK(cudaGetLastError());
 }

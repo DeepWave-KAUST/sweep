@@ -90,6 +90,11 @@ class Acoustic(SecondOrderEquation):
     supports_batched_models = True
     supports_image_topography = True
     supports_image_topography_c = True
+    # The image-method surface clears the vacuum above it every step, so a
+    # receiver there records an identically-zero trace (the elastic image
+    # method keeps image values in the air instead).  The compiled backward
+    # drops such a receiver's cotangent: propagator/_c.py _drop_air_receivers.
+    air_cells_are_vacuum = True
 
     def __init__(self, spatial_order=4, device='cpu', backend='torch', dim=2):
         """Build the acoustic equation operator.

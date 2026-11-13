@@ -30,7 +30,8 @@ from sweep.sem.equations import AcousticSEM3D, AcousticSEM3DDeformed
 
 try:
     import sweep._C as _C
-    _HAS_C = hasattr(_C, "sem3d_acoustic_cpml_dd_asm")
+    # CUDA first: on a CPU-only box the probe would load (or build) the host core.
+    _HAS_C = torch.cuda.is_available() and hasattr(_C, "sem3d_acoustic_cpml_dd_asm")
 except Exception:                                   # pragma: no cover
     _HAS_C = False
 

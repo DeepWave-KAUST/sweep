@@ -10,6 +10,7 @@
 #include <string>
 #include "../../core/capi.h"
 #include "../../core/check.h"
+#include "../../core/compute_device.h"
 #include "../../core/device.h"
 #include "../../core/input_core.h"
 #include "../../core/outputs.h"
@@ -40,6 +41,15 @@
 #include "../equations/sem3d/sem3d.h"
 #include "../../core/sem_input_core.h"
 #include "../equations/qp2d/qp2d.h"
+
+// Which entries are stubs (sweep_entry_available == 0).  The CUDA core builds
+// every equation; the host core's generated stub TU (sweep.backend.c.hostcore)
+// defines this for the equations it leaves out.  Global scope on purpose: the
+// stub TU defines the same global function.
+bool sweep_entry_is_stub(int entry);
+#if !defined(SWEEP_HOST_CORE)
+bool sweep_entry_is_stub(int) { return false; }
+#endif
 
 namespace {
 
@@ -355,8 +365,16 @@ void sem_dispatch(int entry, const void* in, int64_t arg)
 
 void dispatch(int entry, const void* in, void* out)
 {
+    SWEEP_CHECK(entry >= 0 && entry < SWEEP_ENTRY_COUNT, "sweep_call: no entry ", entry);
     SWEEP_CHECK(!is_sem_entry(entry), "sweep_call: ", sweep_entry_name(entry),
                 " is a SEM entry; call it through sweep_sem_call");
+    // Host/disk staging moves bytes between the compute tier and the host; on
+    // the host core they are the same tier, so the options are refused up front
+    // (a no-op on the CUDA core).
+    if (ENTRY_KINDS[entry] == 0)
+        sweep::refuse_host_staging(*static_cast<const ForwardInputCore*>(in), ENTRY_NAMES[entry]);
+    else
+        sweep::refuse_host_staging(*static_cast<const BackwardInputCore*>(in), ENTRY_NAMES[entry]);
     switch (entry) {
         case 0: *static_cast<ForwardOutputCore*>(out) = acoustic2d::forward_core(*static_cast<const ForwardInputCore*>(in)); return;
         case 1: *static_cast<BackwardOutputCore*>(out) = acoustic2d::backward_core(*static_cast<const BackwardInputCore*>(in)); return;
@@ -482,39 +500,63 @@ void dispatch(int entry, const void* in, void* out)
     }
 }
 
-ForwardRunnerCorePtr make_forward_runner(int entry, const ForwardInputCore& in)
+using ForwardRunnerFactory = ForwardRunnerCorePtr (*)(const ForwardInputCore&);
+using BackwardRunnerFactory = BackwardRunnerCorePtr (*)(const BackwardInputCore&);
+
+ForwardRunnerFactory forward_runner_factory(int entry)
 {
     switch (entry) {
-        case 0: return acoustic2d::forward_runner_core(in);
-        case 5: return acoustic3d::forward_runner_core(in);
-        case 20: return acoustic_vrz2d::forward_runner_core(in);
-        case 50: return das_mu2d::forward_runner_core(in);
-        case 55: return das_mu3d::forward_runner_core(in);
-        case 60: return elastic2d::forward_runner_core(in);
-        case 66: return elastic3d::forward_runner_core(in);
-        case 76: return elastic_tti_sg2d::forward_runner_core(in);
-        case 80: return elastic_tti_sg3d::forward_runner_core(in);
-        case 84: return elastic_vr2d::forward_runner_core(in);
-        default: SWEEP_CHECK(false, "no stepped forward runner for entry ", entry, " (", sweep_entry_name(entry) ? sweep_entry_name(entry) : "?", ")"); return nullptr;
+        case 0: return acoustic2d::forward_runner_core;
+        case 5: return acoustic3d::forward_runner_core;
+        case 20: return acoustic_vrz2d::forward_runner_core;
+        case 50: return das_mu2d::forward_runner_core;
+        case 55: return das_mu3d::forward_runner_core;
+        case 60: return elastic2d::forward_runner_core;
+        case 66: return elastic3d::forward_runner_core;
+        case 76: return elastic_tti_sg2d::forward_runner_core;
+        case 80: return elastic_tti_sg3d::forward_runner_core;
+        case 84: return elastic_vr2d::forward_runner_core;
+        default: return nullptr;
     }
 }
 
-BackwardRunnerCorePtr make_backward_runner(int entry, const BackwardInputCore& in)
+BackwardRunnerFactory backward_runner_factory(int entry)
 {
     switch (entry) {
-        case 2: return acoustic2d::backward_bs_runner_core(in);
-        case 7: return acoustic3d::backward_bs_runner_core(in);
-        case 22: return acoustic_vrz2d::backward_bs_runner_core(in);
-        case 27: return acoustic_vrz3d::backward_bs_runner_core(in);
-        case 52: return das_mu2d::backward_bs_runner_core(in);
-        case 57: return das_mu3d::backward_bs_runner_core(in);
-        case 62: return elastic2d::backward_bs_runner_core(in);
-        case 67: return elastic3d::backward_bs_runner_core(in);
-        case 78: return elastic_tti_sg2d::backward_bs_runner_core(in);
-        case 82: return elastic_tti_sg3d::backward_bs_runner_core(in);
-        case 86: return elastic_vr2d::backward_bs_runner_core(in);
-        default: SWEEP_CHECK(false, "no stepped backward runner for entry ", entry, " (", sweep_entry_name(entry) ? sweep_entry_name(entry) : "?", ")"); return nullptr;
+        case 2: return acoustic2d::backward_bs_runner_core;
+        case 7: return acoustic3d::backward_bs_runner_core;
+        case 22: return acoustic_vrz2d::backward_bs_runner_core;
+        case 27: return acoustic_vrz3d::backward_bs_runner_core;
+        case 52: return das_mu2d::backward_bs_runner_core;
+        case 57: return das_mu3d::backward_bs_runner_core;
+        case 62: return elastic2d::backward_bs_runner_core;
+        case 67: return elastic3d::backward_bs_runner_core;
+        case 78: return elastic_tti_sg2d::backward_bs_runner_core;
+        case 82: return elastic_tti_sg3d::backward_bs_runner_core;
+        case 86: return elastic_vr2d::backward_bs_runner_core;
+        default: return nullptr;
     }
+}
+
+// The input is read only once the entry is known to have a runner: a bad
+// entry may come with no input at all, and the host core's staging check
+// reads it.
+ForwardRunnerCorePtr make_forward_runner(int entry, const void* in)
+{
+    const ForwardRunnerFactory make = forward_runner_factory(entry);
+    SWEEP_CHECK(make != nullptr, "no stepped forward runner for entry ", entry, " (", sweep_entry_name(entry) ? sweep_entry_name(entry) : "?", ")");
+    const auto& input = *static_cast<const ForwardInputCore*>(in);
+    sweep::refuse_host_staging(input, sweep_entry_name(entry));
+    return make(input);
+}
+
+BackwardRunnerCorePtr make_backward_runner(int entry, const void* in)
+{
+    const BackwardRunnerFactory make = backward_runner_factory(entry);
+    SWEEP_CHECK(make != nullptr, "no stepped backward runner for entry ", entry, " (", sweep_entry_name(entry) ? sweep_entry_name(entry) : "?", ")");
+    const auto& input = *static_cast<const BackwardInputCore*>(in);
+    sweep::refuse_host_staging(input, sweep_entry_name(entry));
+    return make(input);
 }
 
 }  // namespace
@@ -525,6 +567,12 @@ int sweep_core_abi_version(void) { return SWEEP_CORE_ABI_VERSION; }
 int sweep_entry_count(void) { return SWEEP_ENTRY_COUNT; }
 const char* sweep_entry_name(int entry) { return (entry >= 0 && entry < SWEEP_ENTRY_COUNT) ? ENTRY_NAMES[entry] : nullptr; }
 int sweep_entry_kind(int entry) { return (entry >= 0 && entry < SWEEP_ENTRY_COUNT) ? ENTRY_KINDS[entry] : -1; }
+int sweep_entry_available(int entry)
+{
+    if (entry < 0 || entry >= SWEEP_ENTRY_COUNT) return -1;
+    return sweep_entry_is_stub(entry) ? 0 : 1;
+}
+const char* sweep_core_device(void) { return sweep::kCoreIsCuda ? "cuda" : "cpu"; }
 
 int sweep_call(int entry, const void* in, void* out, char* err, int err_cap)
 {
@@ -545,7 +593,7 @@ const char* sweep_entry_struct(int entry)
 int sweep_forward_runner_create(int entry, const void* in, void** handle, char* err, int err_cap)
 {
     return guarded([&] {
-        *handle = new ForwardRunnerCorePtr(make_forward_runner(entry, *static_cast<const ForwardInputCore*>(in)));
+        *handle = new ForwardRunnerCorePtr(make_forward_runner(entry, in));
     }, err, err_cap);
 }
 int sweep_forward_runner_run(void* handle, int it_begin, int it_end, int step_phase, void* out, char* err, int err_cap)
@@ -560,7 +608,7 @@ void sweep_forward_runner_destroy(void* handle) { delete static_cast<ForwardRunn
 int sweep_backward_runner_create(int entry, const void* in, void** handle, char* err, int err_cap)
 {
     return guarded([&] {
-        *handle = new BackwardRunnerCorePtr(make_backward_runner(entry, *static_cast<const BackwardInputCore*>(in)));
+        *handle = new BackwardRunnerCorePtr(make_backward_runner(entry, in));
     }, err, err_cap);
 }
 int sweep_backward_runner_run(void* handle, int bw_it_begin, int bw_it_end, int step_phase, void* out, char* err, int err_cap)
@@ -583,6 +631,13 @@ void sweep_session_destroy(void* session) { delete static_cast<BoundarySession*>
 void sweep_set_stream(void* stream) { sweep::current_stream_slot() = static_cast<cudaStream_t>(stream); }
 void* sweep_get_stream(void) { return static_cast<void*>(sweep::current_stream()); }
 
-size_t sweep_visco_fft_workspace_bytes(int64_t B, int64_t nz, int64_t nx) { return visco_acoustic2d::fft_workspace_bytes(B, nz, nx); }
+// No error channel on this query: a core that does not build visco_acoustic2d
+// (its stub throws) answers 0 -- the Python side sizes an empty pool slot and
+// the equation's entries report unavailable through sweep_entry_available.
+size_t sweep_visco_fft_workspace_bytes(int64_t B, int64_t nz, int64_t nx)
+{
+    try { return visco_acoustic2d::fft_workspace_bytes(B, nz, nx); }
+    catch (...) { return 0; }
+}
 
 }  // extern "C"

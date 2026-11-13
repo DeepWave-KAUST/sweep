@@ -1,6 +1,7 @@
 #pragma once
 #include "context.h"
 #include "../operators/staggered.cuh"
+#include "../launch/cell_path.h"
 
 template<int Order>
 __device__ __forceinline__ int elastic_stencil_half_order(const SolverContext& solver)
@@ -16,6 +17,184 @@ __device__ __forceinline__ int elastic_stencil_half_order(const SolverContext& s
 __device__ __forceinline__ int elastic_z_bottom_surface_row(const SolverContext& solver)
 {
     return solver.phys_z1() - 1;
+}
+
+// =====================================================================
+// Interior paths (launch/cell_path.h).
+//
+// Every derivative and surface-row helper in this header takes a trailing
+// ``CellPath Path = CellPath::Any``.  On Any it is the helper it always was
+// (the CUDA core's only path).  On an interior path the caller promises that
+// the cell lies in the helper's interior box -- common/host_rows.h
+// elastic_fs_box_2d / elastic3d_fs_box, ``adjoint`` for the *_adjoint_*
+// helpers -- where no mirror read, order-2 band, air row, fold tap or
+// surface row/column test fires, and the launch says which faces are on
+// with two flags (cell_path.h add_flags / path_flag; host/launch.h
+// with_flags, or host_rows.h with_elastic_fs_2d / _3d):
+//
+//   ELASTIC_FS_Z   2-D: solver.fsLo(0) || solver.fsHi(0);  3-D: solver.free_surface
+//   ELASTIC_FS_X   2-D: solver.fsLo(2) || solver.fsHi(2)
+//
+// A family that needs launch flags of its own numbers them from 2 up.
+// Axis off: the plain sgradient the Any path returns.  Axis on: the Any
+// path's tap loop with every test answered -- the same taps in the same
+// order, grad_ctx.coeff[m] * (up - um) accumulated from 0.f and then divided
+// by the spacing, so each lane rounds what the scalar cell rounded.  The
+// surface row/column tests are constant false there.
+// =====================================================================
+constexpr int ELASTIC_FS_Z = 0;
+constexpr int ELASTIC_FS_X = 1;
+
+// elastic_top_fs_sgradient_z_2d where no tap mirrors and no band applies.
+template<int Order, int Type>
+__device__ __forceinline__ float elastic_fs_loop_sgradient_z_2d(
+    const float* __restrict__ u,
+    int ix,
+    int iz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    const int M = elastic_stencil_half_order<Order>(solver);
+    float gz = 0.f;
+
+    #pragma unroll
+    for (int m = 0; m < M; ++m) {
+        const float c = grad_ctx.coeff[m];
+        if constexpr (Type & DIFF_FORWARD) {
+            const float up = u[(iz + m + 1) * grad_ctx.sz + ix * grad_ctx.sx];
+            const float um = u[(iz - m) * grad_ctx.sz + ix * grad_ctx.sx];
+            gz += c * (up - um);
+        }
+        if constexpr (Type & DIFF_BACKWARD) {
+            const float up = u[(iz + m) * grad_ctx.sz + ix * grad_ctx.sx];
+            const float um = u[(iz - m - 1) * grad_ctx.sz + ix * grad_ctx.sx];
+            gz += c * (up - um);
+        }
+    }
+
+    return gz / grad_ctx.dz;
+}
+
+// elastic_fs_sgradient_x_2d where no tap mirrors and no band applies.
+template<int Order, int Type>
+__device__ __forceinline__ float elastic_fs_loop_sgradient_x_2d(
+    const float* __restrict__ u,
+    int ix,
+    int iz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    const int M = elastic_stencil_half_order<Order>(solver);
+    float gx = 0.f;
+    #pragma unroll
+    for (int m = 0; m < M; ++m) {
+        const float c = grad_ctx.coeff[m];
+        if constexpr (Type & DIFF_FORWARD) {
+            const float up = u[iz * grad_ctx.sz + (ix + m + 1) * grad_ctx.sx];
+            const float um = u[iz * grad_ctx.sz + (ix - m) * grad_ctx.sx];
+            gx += c * (up - um);
+        }
+        if constexpr (Type & DIFF_BACKWARD) {
+            const float up = u[iz * grad_ctx.sz + (ix + m) * grad_ctx.sx];
+            const float um = u[iz * grad_ctx.sz + (ix - m - 1) * grad_ctx.sx];
+            gx += c * (up - um);
+        }
+    }
+    return gx / grad_ctx.dx;
+}
+
+// The adjoint helpers away from every face: elastic_fs_plain_reduced_adjoint_*
+// with all its taps in range and out of the bands, then the air folds.  Each
+// active face's fold is taken (its mirror source is an air row/column) and
+// every one of its taps falls outside the grid, so it adds
+// ``parity * (0.f / d)``: -0 for an odd field, an exact no-op; +0 for an even
+// one, which turns a -0 sum into +0 (FTZ makes that reachable).  With two
+// faces on an axis the Any path adds it twice; x + 0 + 0 == x + 0 for every
+// x (also under DAZ), so once is the same bits.
+template<int Order, int ForwardType>
+__device__ __forceinline__ float elastic_fs_loop_adjoint_z_2d(
+    const float* __restrict__ q,
+    int ix,
+    int iz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver,
+    bool odd
+)
+{
+    const int M  = elastic_stencil_half_order<Order>(solver);
+    const int sz = grad_ctx.sz;
+    const int sx = grad_ctx.sx;
+    const float parity = odd ? -1.f : 1.f;
+    float acc = 0.f;
+
+    if constexpr (ForwardType & DIFF_FORWARD) {
+        #pragma unroll
+        for (int i = 0; i < M; ++i) {
+            const float c = grad_ctx.coeff[i];
+            const int jp = iz + i;
+            const int jm = iz - i - 1;
+            acc += c * q[jp * sz + ix * sx];
+            acc -= c * q[jm * sz + ix * sx];
+        }
+    } else {
+        #pragma unroll
+        for (int i = 0; i < M; ++i) {
+            const float c = grad_ctx.coeff[i];
+            const int jp = iz + i + 1;
+            const int jm = iz - i;
+            acc += c * q[jp * sz + ix * sx];
+            acc -= c * q[jm * sz + ix * sx];
+        }
+    }
+
+    float gz = acc / grad_ctx.dz;
+    const float fold = 0.f;
+    gz += parity * (fold / grad_ctx.dz);
+    return gz;
+}
+
+template<int Order, int ForwardType>
+__device__ __forceinline__ float elastic_fs_loop_adjoint_x_2d(
+    const float* __restrict__ q,
+    int ix,
+    int iz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver,
+    bool odd
+)
+{
+    const int M  = elastic_stencil_half_order<Order>(solver);
+    const int sz = grad_ctx.sz;
+    const int sx = grad_ctx.sx;
+    const float parity = odd ? -1.f : 1.f;
+    float acc = 0.f;
+
+    if constexpr (ForwardType & DIFF_FORWARD) {
+        #pragma unroll
+        for (int i = 0; i < M; ++i) {
+            const float c = grad_ctx.coeff[i];
+            const int jp = ix + i;
+            const int jm = ix - i - 1;
+            acc += c * q[iz * sz + jp * sx];
+            acc -= c * q[iz * sz + jm * sx];
+        }
+    } else {
+        #pragma unroll
+        for (int i = 0; i < M; ++i) {
+            const float c = grad_ctx.coeff[i];
+            const int jp = ix + i + 1;
+            const int jm = ix - i;
+            acc += c * q[iz * sz + jp * sx];
+            acc -= c * q[iz * sz + jm * sx];
+        }
+    }
+
+    float gx = acc / grad_ctx.dx;
+    const float fold = 0.f;
+    gx += parity * (fold / grad_ctx.dx);
+    return gx;
 }
 
 // ``half`` marks a field whose nodes sit half a cell BELOW the surface plane
@@ -63,7 +242,7 @@ __device__ __forceinline__ float elastic_top_fs_value_2d(
     return u[iz * grad_ctx.sz + ix * grad_ctx.sx];
 }
 
-template<int Order, int Type>
+template<int Order, int Type, CellPath Path = CellPath::Any>
 __device__ __forceinline__ float elastic_top_fs_sgradient_z_2d(
     const float* __restrict__ u,
     int ix,
@@ -74,6 +253,13 @@ __device__ __forceinline__ float elastic_top_fs_sgradient_z_2d(
     bool half = false
 )
 {
+    if constexpr (interior_path<Path>) {   // see "Interior paths" above
+        if constexpr (path_flag<Path, ELASTIC_FS_Z>)
+            return elastic_fs_loop_sgradient_z_2d<Order, Type>(u, ix, iz, grad_ctx, solver);
+        else
+            return sgradient<2, Order, Z, Type>(u, ix, 0, iz, grad_ctx);
+    }
+
     if (!solver.fsLo(0) && !solver.fsHi(0)) {
         return sgradient<2, Order, Z, Type>(u, ix, 0, iz, grad_ctx);
     }
@@ -198,7 +384,7 @@ __device__ __forceinline__ float elastic_fs_plain_reduced_adjoint_z_2d(
     return acc / grad_ctx.dz;
 }
 
-template<int Order, int ForwardType>
+template<int Order, int ForwardType, CellPath Path = CellPath::Any>
 __device__ __forceinline__ float elastic_top_fs_adjoint_sgradient_z_2d(
     const float* __restrict__ q,
     int ix,
@@ -209,6 +395,16 @@ __device__ __forceinline__ float elastic_top_fs_adjoint_sgradient_z_2d(
     bool half = false   // must match the forward mirror of the SAME field
 )
 {
+    if constexpr (interior_path<Path>) {   // see "Interior paths" above
+        if constexpr (path_flag<Path, ELASTIC_FS_Z>) {
+            return elastic_fs_loop_adjoint_z_2d<Order, ForwardType>(q, ix, iz, grad_ctx, solver, odd);
+        } else if constexpr (ForwardType & DIFF_FORWARD) {
+            return sgradient<2, Order, Z, DIFF_BACKWARD>(q, ix, 0, iz, grad_ctx);
+        } else {
+            return sgradient<2, Order, Z, DIFF_FORWARD>(q, ix, 0, iz, grad_ctx);
+        }
+    }
+
     if (!solver.fsLo(0) && !solver.fsHi(0)) {
         if constexpr (ForwardType & DIFF_FORWARD) {
             return sgradient<2, Order, Z, DIFF_BACKWARD>(q, ix, 0, iz, grad_ctx);
@@ -256,11 +452,14 @@ __device__ __forceinline__ float elastic_top_fs_adjoint_sgradient_z_2d(
 // True on a z-normal free-surface row: the top (z-low) surface row and/or the
 // bottom (z-high) surface row, whichever faces are active.  (Name kept for the
 // existing call sites; now covers both z faces.)
+template<CellPath Path = CellPath::Any>
 __device__ __forceinline__ bool elastic_is_top_free_surface_row(
     const SolverContext& solver,
     int iz
 )
 {
+    if constexpr (interior_path<Path>)   // the interior box holds no surface row
+        return false;
     return (solver.fsLo(0) && iz == solver.phys_z0())
         || (solver.fsHi(0) && iz == elastic_z_bottom_surface_row(solver));
 }
@@ -289,9 +488,12 @@ __device__ __forceinline__ int elastic_x_right_surface_col(const SolverContext& 
 // INSIDE the medium — a real shear value that must NOT be zeroed (zeroing it is
 // the spurious over-constraint that slowed the top/left Rayleigh wave ~6%; cf.
 // Kristek, Moczo & Archuleta 2002 Table 1, and ``Elastic._fs_zero_traction``).
+template<CellPath Path = CellPath::Any>
 __device__ __forceinline__ bool elastic_fs_zero_shear(
     const SolverContext& solver, int ix, int iz)
 {
+    if constexpr (interior_path<Path>)   // the interior box holds no surface row/column
+        return false;
     return (solver.fsHi(0) && iz == elastic_z_bottom_surface_row(solver))
         || (solver.fsHi(2) && ix == elastic_x_right_surface_col(solver));
 }
@@ -330,7 +532,7 @@ __device__ __forceinline__ float elastic_fs_value_x_2d(
     return u[iz * grad_ctx.sz + ix * grad_ctx.sx];
 }
 
-template<int Order, int Type>
+template<int Order, int Type, CellPath Path = CellPath::Any>
 __device__ __forceinline__ float elastic_fs_sgradient_x_2d(
     const float* __restrict__ u,
     int ix,
@@ -341,6 +543,12 @@ __device__ __forceinline__ float elastic_fs_sgradient_x_2d(
     bool half = false
 )
 {
+    if constexpr (interior_path<Path>) {   // see "Interior paths" above
+        if constexpr (path_flag<Path, ELASTIC_FS_X>)
+            return elastic_fs_loop_sgradient_x_2d<Order, Type>(u, ix, iz, grad_ctx, solver);
+        else
+            return sgradient<2, Order, X, Type>(u, ix, 0, iz, grad_ctx);
+    }
     if (!solver.fsLo(2) && !solver.fsHi(2)) {
         return sgradient<2, Order, X, Type>(u, ix, 0, iz, grad_ctx);
     }
@@ -436,7 +644,7 @@ __device__ __forceinline__ float elastic_fs_plain_reduced_adjoint_x_2d(
     return acc / grad_ctx.dx;
 }
 
-template<int Order, int ForwardType>
+template<int Order, int ForwardType, CellPath Path = CellPath::Any>
 __device__ __forceinline__ float elastic_fs_adjoint_sgradient_x_2d(
     const float* __restrict__ q,
     int ix,
@@ -447,6 +655,15 @@ __device__ __forceinline__ float elastic_fs_adjoint_sgradient_x_2d(
     bool half = false   // must match the forward mirror of the SAME field
 )
 {
+    if constexpr (interior_path<Path>) {   // see "Interior paths" above
+        if constexpr (path_flag<Path, ELASTIC_FS_X>) {
+            return elastic_fs_loop_adjoint_x_2d<Order, ForwardType>(q, ix, iz, grad_ctx, solver, odd);
+        } else if constexpr (ForwardType & DIFF_FORWARD) {
+            return sgradient<2, Order, X, DIFF_BACKWARD>(q, ix, 0, iz, grad_ctx);
+        } else {
+            return sgradient<2, Order, X, DIFF_FORWARD>(q, ix, 0, iz, grad_ctx);
+        }
+    }
     if (!solver.fsLo(2) && !solver.fsHi(2)) {
         if constexpr (ForwardType & DIFF_FORWARD) {
             return sgradient<2, Order, X, DIFF_BACKWARD>(q, ix, 0, iz, grad_ctx);
@@ -479,11 +696,14 @@ __device__ __forceinline__ float elastic_fs_adjoint_sgradient_x_2d(
     return gx;
 }
 
+template<CellPath Path = CellPath::Any>
 __device__ __forceinline__ bool elastic_is_x_free_surface_col(
     const SolverContext& solver,
     int ix
 )
 {
+    if constexpr (interior_path<Path>)   // the interior box holds no surface column
+        return false;
     return (solver.fsLo(2) && ix == elastic_x_left_surface_col(solver))
         || (solver.fsHi(2) && ix == elastic_x_right_surface_col(solver));
 }
@@ -531,7 +751,39 @@ __device__ __forceinline__ float elastic3d_top_fs_value(
     return u[elastic3d_index(ix, iy, iz, grad_ctx)];
 }
 
+// elastic3d_top_fs_sgradient_z below the mirror rows (iz >= phys_z0 + M).
 template<int Order, int Type>
+__device__ __forceinline__ float elastic3d_fs_loop_sgradient_z(
+    const float* __restrict__ u,
+    int ix,
+    int iy,
+    int iz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    const int M = elastic3d_stencil_half_order<Order>(solver);
+    float gz = 0.f;
+
+    #pragma unroll
+    for (int m = 0; m < M; ++m) {
+        const float c = grad_ctx.coeff[m];
+        if constexpr (Type & DIFF_FORWARD) {
+            const float up = u[elastic3d_index(ix, iy, iz + m + 1, grad_ctx)];
+            const float um = u[elastic3d_index(ix, iy, iz - m,     grad_ctx)];
+            gz += c * (up - um);
+        }
+        if constexpr (Type & DIFF_BACKWARD) {
+            const float up = u[elastic3d_index(ix, iy, iz + m,     grad_ctx)];
+            const float um = u[elastic3d_index(ix, iy, iz - m - 1, grad_ctx)];
+            gz += c * (up - um);
+        }
+    }
+
+    return gz / grad_ctx.dz;
+}
+
+template<int Order, int Type, CellPath Path = CellPath::Any>
 __device__ __forceinline__ float elastic3d_top_fs_sgradient_z(
     const float* __restrict__ u,
     int ix,
@@ -543,6 +795,13 @@ __device__ __forceinline__ float elastic3d_top_fs_sgradient_z(
     bool half = false
 )
 {
+    if constexpr (interior_path<Path>) {   // see "Interior paths" above
+        if constexpr (path_flag<Path, ELASTIC_FS_Z>)
+            return elastic3d_fs_loop_sgradient_z<Order, Type>(u, ix, iy, iz, grad_ctx, solver);
+        else
+            return sgradient<3, Order, Z, Type>(u, ix, iy, iz, grad_ctx);
+    }
+
     if (!solver.free_surface) {
         return sgradient<3, Order, Z, Type>(u, ix, iy, iz, grad_ctx);
     }
@@ -573,7 +832,42 @@ __device__ __forceinline__ float elastic3d_top_fs_sgradient_z(
 // ``2*top-1-j``), so the adjoint fold and its validity range shift by one cell
 // relative to the integer-grid case (``2*top-j``).  See
 // ``elastic3d_top_fs_value``.
+// elastic3d_top_fs_adjoint_sgradient_z below the fold (iz >= phys_z0 + M + 1):
+// every tap is in [phys_z0, nz) and no ghost term applies (in 3-D a ghost tap
+// out of reach is skipped, not added as a zero).
 template<int Order, int ForwardType>
+__device__ __forceinline__ float elastic3d_fs_loop_adjoint_z(
+    const float* __restrict__ q,
+    int ix,
+    int iy,
+    int iz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    const int M = elastic3d_stencil_half_order<Order>(solver);
+    float gz = 0.f;
+
+    #pragma unroll
+    for (int m = 0; m < M; ++m) {
+        const float c = grad_ctx.coeff[m];
+        if constexpr (ForwardType & DIFF_FORWARD) {
+            const int jp = iz + m;
+            gz += c * q[elastic3d_index(ix, iy, jp, grad_ctx)];
+            const int jm = iz - m - 1;
+            gz -= c * q[elastic3d_index(ix, iy, jm, grad_ctx)];
+        } else {
+            const int jp = iz + m + 1;
+            gz += c * q[elastic3d_index(ix, iy, jp, grad_ctx)];
+            const int jm = iz - m;
+            gz -= c * q[elastic3d_index(ix, iy, jm, grad_ctx)];
+        }
+    }
+
+    return gz / grad_ctx.dz;
+}
+
+template<int Order, int ForwardType, CellPath Path = CellPath::Any>
 __device__ __forceinline__ float elastic3d_top_fs_adjoint_sgradient_z(
     const float* __restrict__ q,
     int ix,
@@ -585,6 +879,16 @@ __device__ __forceinline__ float elastic3d_top_fs_adjoint_sgradient_z(
     bool half = false
 )
 {
+    if constexpr (interior_path<Path>) {   // see "Interior paths" above
+        if constexpr (path_flag<Path, ELASTIC_FS_Z>) {
+            return elastic3d_fs_loop_adjoint_z<Order, ForwardType>(q, ix, iy, iz, grad_ctx, solver);
+        } else if constexpr (ForwardType & DIFF_FORWARD) {
+            return sgradient<3, Order, Z, DIFF_BACKWARD>(q, ix, iy, iz, grad_ctx);
+        } else {
+            return sgradient<3, Order, Z, DIFF_FORWARD>(q, ix, iy, iz, grad_ctx);
+        }
+    }
+
     if (!solver.free_surface) {
         if constexpr (ForwardType & DIFF_FORWARD) {
             return sgradient<3, Order, Z, DIFF_BACKWARD>(q, ix, iy, iz, grad_ctx);
@@ -636,10 +940,13 @@ __device__ __forceinline__ float elastic3d_top_fs_adjoint_sgradient_z(
     return gz / grad_ctx.dz;
 }
 
+template<CellPath Path = CellPath::Any>
 __device__ __forceinline__ bool elastic3d_is_top_free_surface_row(
     const SolverContext& solver,
     int iz
 )
 {
+    if constexpr (interior_path<Path>)   // the interior box holds no surface row
+        return false;
     return solver.free_surface && iz == solver.phys_z0();
 }

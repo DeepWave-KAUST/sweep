@@ -37,9 +37,16 @@ class _Recorder(torch.nn.Module):
 
 @pytest.fixture()
 def compiled(monkeypatch):
-    """Keep impl='c' on a CPU box and record what the backend is built with."""
+    """Keep impl='c' on a CPU box and record what the backend is built with.
+    The box plays a CUDA one throughout: the resolver answers 'c', the backend
+    is the recorder, and the capability table consulted is the CUDA core's
+    (the host core's row refuses a host-staged ring, which is not the question
+    here)."""
+    real_check = ptorch.check_memory_supported
     monkeypatch.setattr(ptorch, "_resolve_impl_with_fallback",
                         lambda impl, **kw: "c" if impl in ("c", "auto") else impl)
+    monkeypatch.setattr(ptorch, "check_memory_supported",
+                        lambda impl, strategy, device=None: real_check(impl, strategy, device="cuda"))
     monkeypatch.setattr(_c, "_CompiledPropagator", _Recorder)
 
 

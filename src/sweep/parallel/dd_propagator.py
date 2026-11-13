@@ -65,7 +65,7 @@ from sweep.parallel.routing import (
 )
 from sweep.propagator.options import BoundarySaving
 from sweep.parallel.pml import dd_cut_face_mask
-from sweep.propagator.torch import PropTorch
+from sweep.propagator.torch import PropTorch, _device_type
 from sweep.propagator._stepped import (
     SteppedBackwardRunner,
     SteppedBindingRunner,
@@ -399,6 +399,8 @@ class ModelParallel:
         # runs step's halo exchange while step's interior computes. Eligible
         # only for x-face cuts (the phase-split forward emits x cut strips) AND
         # when no source sits in a cut strip (checked per-call in forward).
+        # Not gated on the device: a CPU tile takes the same phased loop, minus
+        # the stream (see _run_dd_loop_overlapped).
         # SWEEP_DD_DISABLE_OVERLAP=1 forces the serial step-then-exchange path —
         # the bit-exact reference for validating the overlap, and a production
         # safety escape hatch.
@@ -448,11 +450,15 @@ class ModelParallel:
         # coupling exchange; otherwise it is the plain second-order schedule.
         # More than one rotating block is a multi-field equation (AcousticBorn /
         # AcousticBorn3D: background + scattered), whose schedule ships every block.
+        # The host (CPU) core builds no tiled VRZ gradient (grad_tiled.cu: its
+        # host branch reports "not tiled" at every order), so a CPU tile takes
+        # the runtime-order schedule: phase 2 builds c/e and ships them.
+        tiled_orders = (tuple(getattr(_layout, "dd_tiled_gradient_orders", ()) or ())
+                        if _device_type(self.dev) == "cuda" else ())
         self._spec = (ELASTIC_DD if not table.u_blocks
                       else BORN_DD if len(table.u_blocks) > 1
                       else ACOUSTIC_DD if not self._dd_coupling_nvar
-                      else VRZ_DD_TILED
-                      if self.so in tuple(getattr(_layout, "dd_tiled_gradient_orders", ()) or ())
+                      else VRZ_DD_TILED if self.so in tiled_orders
                       else VRZ_DD)
         # Admission is DECLARED, not name-listed (see check_dd_admission).
         check_dd_admission(equation, _layout, self._spec)
@@ -1399,7 +1405,8 @@ class ModelParallel:
             _acc = {}
 
             def _tick(key, t0):
-                _torch.cuda.synchronize()
+                if _device_type(self.dev) == "cuda":   # a host launch is done when it returns
+                    _torch.cuda.synchronize()
                 _acc[key] = _acc.get(key, [0.0, 0])
                 _acc[key][0] += _t.perf_counter() - t0
                 _acc[key][1] += 1
@@ -1449,15 +1456,30 @@ class ModelParallel:
         before the next step's phase 1. Bit-identical to the serial loop -- the
         strips carry the same values either way -- so ``SWEEP_DD_DISABLE_OVERLAP``
         selecting the serial variant is a usable reference, not a fallback.
+        On a CPU device the same phases run without the stream.
         """
         p1, p2 = L.phases
         grp = p1.after[0]
+        hs = halo["x"]          # eligibility implies x-only cuts, so one axis
+        if _device_type(self.dev) != "cuda":
+            # A CPU tile (host core over gloo) runs the same schedule with no
+            # stream, and a process without CUDA cannot create one.  A host
+            # launch has finished when it returns, so phase 1's strips are final
+            # before exchange_start copies them; the P2P it posts progresses on
+            # gloo's threads while phase 2 computes.
+            for it in range(self.nt):
+                runner.run(it + 1, phase=p1.step_phase, advance=p1.advances)
+                (t,) = self._tensors(grp.refs[0], runner)
+                view = self._halo_view(t, "x")
+                hs.exchange_start(view)
+                runner.run(it + 1, phase=p2.step_phase, advance=p2.advances)
+                hs.exchange_finish(view)
+            return
         if self._comm_stream is None:
             self._comm_stream = torch.cuda.Stream()
             self._comm_evt = torch.cuda.Event()
         comm, evt = self._comm_stream, self._comm_evt
         compute = torch.cuda.current_stream()
-        hs = halo["x"]          # eligibility implies x-only cuts, so one axis
         for it in range(self.nt):
             runner.run(it + 1, phase=p1.step_phase, advance=p1.advances)
             evt.record()

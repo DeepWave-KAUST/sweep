@@ -36,9 +36,16 @@ except `equation` and `shape`; unknown keywords raise `TypeError`.
 
 | `impl` | Runs | Device | Notes |
 |---|---|---|---|
-| `None` | `'c'` if a CUDA core fits, the device is CUDA and the equation has kernels; else `'eager'` | any | read `solver.impl` to see what you got |
-| `"c"` | prebuilt CUDA core via ctypes | CUDA only, FP32 | falls back to eager with a `UserWarning` if impossible; default memory: boundary saving |
+| `None` | `'c'` if the device's core is at hand and the equation has kernels there; else `'eager'` | any | read `solver.impl` to see what you got |
+| `"c"` | compiled core via ctypes: the prebuilt CUDA core, or on the CPU the host core | CUDA or CPU, FP32 | falls back to eager with a `UserWarning` if impossible; default memory: boundary saving |
 | `"eager"` | PyTorch ops + autograd (`torch.compile`d step by default) | CPU or CUDA | every equation; default memory: chunked checkpointing |
+
+On a CPU device `None` takes the host core unless you pass eager options or host staging
+(`storage="cpu"`/`"disk"`). The wheel ships the host core; a git clone builds it once with g++
+(1-3 min, on the first CPU construction, then cached). A failed build warns once and the
+process runs eager; with no compiler `None` is `'eager'` quietly. The host core lacks
+`ViscoAcoustic`, `ElasticBorn` and the pure-qP `AcousticVTI`/`AcousticTTI` (+ Born): those
+run eager on the CPU.
 
 The first eager call compiles the time step (seconds to minutes, cached on disk per grid size).
 For tiny or one-off runs pass `impl="eager", eager_options=EagerOptions(use_compile=False)`.
@@ -150,7 +157,9 @@ assert p.shape == (2, *shape)
 | `CUDAOptions(memory=...)` | `cuda_options=` with `impl="c"` | only a memory strategy; prefer `memory=` |
 
 Invalid combinations raise at construction (e.g. `disk_async_read=True` with `storage="cpu"`,
-`tail_steps` on eager, recursive checkpointing on eager).
+`tail_steps` on eager, recursive checkpointing on eager). `impl="c"` on a CPU device keeps the
+boundary ring and checkpoints on the compute device (`storage="gpu"`, the default; the device is
+host RAM): `"cpu"`/`"disk"` raise there.
 
 ## 7. Attributes worth reading
 

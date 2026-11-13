@@ -1,4 +1,5 @@
 #include <algorithm>
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 #include "acoustic_born3d.h"
 #include "kernels.cuh"
@@ -121,7 +122,7 @@ static inline void run_born3d_adjoint_step(
     const std::vector<Buf>& workspace)
 {
     auto v2_lambda = pool_required(workspace, V2_LAMBDA, vp, "adjoint_workspace");   // vp^2 * lambda_now (fully overwritten each step)
-    compute_v2_lambda_born3d<<<grid, block>>>(
+    SWEEP_LAUNCH_ROWS(compute_v2_lambda_born3d, compute_v2_lambda_born3d_rows, grid, block,
         vp.data_ptr<float>(), adj_view.u_now, v2_lambda.data_ptr<float>(), ctx.nx, ctx.ny, ctx.nz, ctx.B);
     ACOUSTIC_BORN3D_ADJOINT(order, grid, block,
         adj_view, v2_lambda.data_ptr<float>(), lap_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx);
@@ -218,7 +219,7 @@ void accumulate_rtm_3d(
     // want squared (so the u_tt branch is off), and the box spans the whole
     // padded grid, which is the region this kernel covered before it learnt
     // about the physical box. dt is unused when u_forward_now is null.
-    accumulate_illumination_3d<<<wave_grid, wave_block>>>(
+    SWEEP_LAUNCH(accumulate_illumination_3d, wave_grid, wave_block,
         forward_ptr, nullptr, nullptr,
         adjoint_ptr,
         out.source_illumination.data_ptr<float>(),
@@ -244,7 +245,7 @@ void accumulate_imaging_3d(
 )
 {
     if (grad != nullptr) {
-        calculate_grad_born3d_mp<<<wave_grid, wave_block>>>(
+        SWEEP_LAUNCH_ROWS(calculate_grad_born3d_mp, calculate_grad_born3d_mp_rows, wave_grid, wave_block,
             forward_ptr,
             adjoint_ptr,
             vp.data_ptr<float>(),
@@ -276,7 +277,7 @@ void accumulate_imaging_utt_3d(
 )
 {
     if (grad != nullptr) {
-        calculate_grad_born3d_mp_utt<<<wave_grid, wave_block>>>(
+        SWEEP_LAUNCH_ROWS(calculate_grad_born3d_mp_utt, calculate_grad_born3d_mp_utt_rows, wave_grid, wave_block,
             u_next_ptr,
             u_now_ptr,
             u_prev_ptr,
@@ -307,7 +308,7 @@ void accumulate_source_gradient_3d(
         return;
     }
 
-    accumulate_source_grad_3d<<<source_grid, source_block>>>(
+    SWEEP_LAUNCH(accumulate_source_grad_3d, source_grid, source_block,
         adjoint_ptr,
         grad_wavelet->data_ptr<float>(),
         p.forward_sources_loc.data_ptr<int>(),
@@ -358,7 +359,7 @@ void advance_forward_interval_3d(
             ctx
         );
 
-        add_source_3d<<<source_grid, source_block>>>(
+        SWEEP_LAUNCH(add_source_3d, source_grid, source_block,
             view.u_next,
             p.forward_source.data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(),
@@ -442,7 +443,7 @@ void process_recursive_interval_3d(
             ctx
         );
 
-        add_source_3d<<<forward_source_grid, forward_source_block>>>(
+        SWEEP_LAUNCH(add_source_3d, forward_source_grid, forward_source_block,
             fwd_view.u_next,
             p.forward_source.data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(),
@@ -459,7 +460,7 @@ void process_recursive_interval_3d(
             order, wave_grid, wave_block, adj_view,
             vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
-        add_source_3d<<<adj_source_grid, adj_source_block>>>(
+        SWEEP_LAUNCH(add_source_3d, adj_source_grid, adj_source_block,
             adj_view.u_next,
             p.adjoint_source.data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(),
@@ -482,7 +483,7 @@ void process_recursive_interval_3d(
         );
 
         if (grad != nullptr) {
-            calculate_grad_born3d_mp<<<wave_grid, wave_block>>>(
+            SWEEP_LAUNCH_ROWS(calculate_grad_born3d_mp, calculate_grad_born3d_mp_rows, wave_grid, wave_block,
                 u_this.data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
                 vp.data_ptr<float>(),
@@ -671,7 +672,7 @@ void run_full_imaging(
         // source is lambda_sc(it+1) = adjoint.u_now before the scattered step below ----
         if (rwi) {
             auto bg_adj_view = bg_adjoint.view();
-            compute_v2_lambda_bg_born3d<<<launch_config.grid, launch_config.block>>>(
+            SWEEP_LAUNCH_ROWS(compute_v2_lambda_bg_born3d, compute_v2_lambda_bg_born3d_rows, launch_config.grid, launch_config.block,
                 vp.data_ptr<float>(), mp.data_ptr<float>(),
                 bg_adjoint.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
                 v2lbg.data_ptr<float>(), nx, ny, nz, B);
@@ -688,7 +689,7 @@ void run_full_imaging(
             order, launch_config.grid, launch_config.block, adj_view,
             vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
-        add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
+        SWEEP_LAUNCH(add_source_3d, adj_source_config.grid, adj_source_config.block,
             adj_view.u_next,
             p.adjoint_source.data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(),
@@ -716,7 +717,7 @@ void run_full_imaging(
         float* bg_utt = (rwi ? u_fwd_it.select(0, 0) : u_fwd_it).data_ptr<float>();
         if (rwi) {
             float* sc_utt = u_fwd_it.select(0, 1).data_ptr<float>();
-            calculate_grad_born3d_vp_utt<<<launch_config.grid, launch_config.block>>>(
+            SWEEP_LAUNCH_ROWS(calculate_grad_born3d_vp_utt, calculate_grad_born3d_vp_utt_rows, launch_config.grid, launch_config.block,
                 bg_utt, sc_utt,
                 bg_adjoint.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
                 mp.data_ptr<float>(), vp.data_ptr<float>(),
@@ -936,7 +937,7 @@ void run_bs_imaging(
         // ---- background adjoint FIRST (lambda_bg = mu; rwi only) ----
         if (rwi) {
             auto bg_adj_view = bg_adjoint.view();
-            compute_v2_lambda_bg_born3d<<<launch_config.grid, launch_config.block>>>(
+            SWEEP_LAUNCH_ROWS(compute_v2_lambda_bg_born3d, compute_v2_lambda_bg_born3d_rows, launch_config.grid, launch_config.block,
                 vp.data_ptr<float>(), mp.data_ptr<float>(),
                 bg_adjoint.u_now_t.data_ptr<float>(), adjoint.u_now_t.data_ptr<float>(),
                 v2lbg.data_ptr<float>(), nx, ny, nz, B);
@@ -953,7 +954,7 @@ void run_bs_imaging(
             order, launch_config.grid, launch_config.block, adj_view,
             vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
-        add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
+        SWEEP_LAUNCH(add_source_3d, adj_source_config.grid, adj_source_config.block,
             adj_view.u_next,
             p.adjoint_source.data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(),
@@ -997,7 +998,7 @@ void run_bs_imaging(
 
         // Strip source cells back to w^{it-1} - s^{it} before the imaging and
         // the add_source below (see common.cuh).
-        sub_source_in_restore_strip_3d<<<fwd_source_config.grid, fwd_source_config.block>>>(
+        SWEEP_LAUNCH(sub_source_in_restore_strip_3d, fwd_source_config.grid, fwd_source_config.block,
             for_view.u_next,
             p.forward_source.data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(),
@@ -1014,7 +1015,7 @@ void run_bs_imaging(
             ACOUSTIC_BORN3D_SINGLE_NOPML(
                 order, launch_config.grid, launch_config.block,
                 sc_view, f_this.data_ptr<float>(), vp.data_ptr<float>(), lap_ctx, ctx);
-            add_born3d_scattered_coupling<<<launch_config.grid, launch_config.block>>>(
+            SWEEP_LAUNCH_ROWS(add_born3d_scattered_coupling, add_born3d_scattered_coupling_rows, launch_config.grid, launch_config.block,
                 sc_view.u_next, for_view.u_next,
                 forward.u_now_t.data_ptr<float>(), forward.u_prev_t.data_ptr<float>(),
                 mp.data_ptr<float>(), B, nx, ny, nz, p.M);
@@ -1022,7 +1023,7 @@ void run_bs_imaging(
                 it, sc_view.u_next, launch_config.grid, launch_config.block,
                 bs, save_width, 0, ctx, /*field_idx=*/1, /*wait_chunk=*/false, /*record_done=*/true);
 
-            calculate_grad_born3d_vp_2diff<<<launch_config.grid, launch_config.block>>>(
+            SWEEP_LAUNCH_ROWS(calculate_grad_born3d_vp_2diff, calculate_grad_born3d_vp_2diff_rows, launch_config.grid, launch_config.block,
                 forward.u_prev_t.data_ptr<float>(),     // bg[it+1]
                 forward.u_now_t.data_ptr<float>(),      // bg[it]
                 for_view.u_next,                        // bg[it-1], source-free
@@ -1053,7 +1054,7 @@ void run_bs_imaging(
             nz
         );
 
-        add_source_3d<<<fwd_source_config.grid, fwd_source_config.block>>>(
+        SWEEP_LAUNCH(add_source_3d, fwd_source_config.grid, fwd_source_config.block,
             for_view.u_next,
             p.forward_source.data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(),
@@ -1076,7 +1077,7 @@ void run_bs_imaging(
             order, launch_config.grid, launch_config.block, adj_view,
             vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
-        add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
+        SWEEP_LAUNCH(add_source_3d, adj_source_config.grid, adj_source_config.block,
             adj_view.u_next,
             p.adjoint_source.data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(),
@@ -1229,7 +1230,7 @@ void run_ckpt_imaging(
                 ctx
             );
 
-            add_source_3d<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            SWEEP_LAUNCH(add_source_3d, fwd_source_config.grid, fwd_source_config.block,
                 for_view.u_next,
                 p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
@@ -1248,7 +1249,7 @@ void run_ckpt_imaging(
                 order, launch_config.grid, launch_config.block, adj_view,
                 vp, lap_ctx, grad_ctx, grad_ctx_x, grad_ctx_y, grad_ctx_z, cpml, ctx, p.adjoint_workspace);
 
-            add_source_3d<<<adj_source_config.grid, adj_source_config.block>>>(
+            SWEEP_LAUNCH(add_source_3d, adj_source_config.grid, adj_source_config.block,
                 adj_view.u_next,
                 p.adjoint_source.data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),

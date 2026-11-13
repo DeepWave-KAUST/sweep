@@ -10,6 +10,18 @@ and this project adheres to
 ## [Unreleased]
 
 ### Fixed
+- A core build killed midway (SIGKILLed by a timeout, a restarted notebook
+  kernel, a cancelled job) no longer hangs every later build in the same
+  extension directory. Its lock file stayed behind, and the next process
+  waited on it until someone deleted it by hand; with `impl='auto'` building
+  the host core on a CPU device's first run, that could be any CPU run. The
+  lock (staging, CUDA core, host core) now names its holder, and a waiter on
+  the holder's machine removes it once that process has exited; the process
+  that takes the lock then checks the holder's work instead of assuming it was
+  done. On Linux ninja runs under a launcher that has it SIGTERMed when the
+  process that started it dies, so when that process alone is killed (a
+  subprocess timeout, `kill -9`) its compilers stop instead of running beside
+  the next build. A holder on another machine is still waited on.
 - The eager default, `memory=Ckpt` with `torch.compile` on, no longer fails the
   first forward of a CPU process in grad mode with "PyTorch's device state was
   initialized in the forward pass of a Checkpoint" -- on
@@ -440,8 +452,99 @@ and this project adheres to
   there by their shares, as a moment source is spread over them. Against SPECFEM2D inside an
   element: round-off (4e-12..5e-12); on an edge SPECFEM2D takes one element (1e-4..2e-4).
   `test/sem/test_sem_spatial_receivers.py`, notebook `47_sem_receivers`.
+- **Host (CPU) core: `impl='c'` on a CPU device.**  The compiled backend's
+  sources (`csrc/cuda/`) are compiled a second time by g++ -- through a small
+  CUDA stand-in header set (`csrc/host/include/`), a virtual-grid launcher that
+  runs each kernel once per `(block, thread)` of the grid the CUDA core
+  launches (OpenMP over blocks), and a launch macro (`SWEEP_LAUNCH`,
+  `launch/launch.h`) that nvcc expands to `<<<>>>` -- into a second
+  `libsweep_core.so` with the same C API, entry table and ctypes layer.  No
+  kernel, driver, boundary saver or checkpoint scheduler exists twice.  An
+  explicit `impl='c'` on a CPU device takes the host core when one is at hand
+  (`python -m sweep.build --cpu`, `g++ >= 9` with OpenMP; `SWEEP_CORE_CPU`;
+  `sweep/lib/cpu/` in a wheel) and the equation is built into it, else falls
+  back to eager with a warning saying why; `impl='auto'` takes it too
+  (see Changed).  The host core is reached through the default ctypes layer; the
+  pybind shim (`SWEEP_JIT_FULL=1`, an ahead-of-time extension) reaches the
+  CUDA core only and falls back the same way.  Full, boundary-saving and
+  checkpoint modes with on-device storage; host staging
+  (`storage='cpu'`/`'disk'`, pinned) is refused by name.  Not in the host
+  core: `ViscoAcoustic` (cuFFT) and, not ported yet, `ElasticBorn`,
+  `AcousticVTI` / `AcousticTTI` and their Born twins, and the SEM kernels
+  (`sweep.backend.c.hostcore.HOST_UNPORTED`); the VRZ gradients take the
+  global-memory kernels there (the tiled ones need shared memory).
+  `ModelParallel` runs on CPU tiles over gloo: two ranks equal one domain bit
+  for bit (`test/test_dd_two_rank_cpu.py`).  All 19 host-core equations were
+  checked against the CUDA core and eager CPU in every memory mode the host
+  takes (interior and free surface): records and gradients within 2.8e-5
+  relative of the CUDA core, as close to eager as the CUDA core is; lossy
+  boundary storage (fp16 / bf16 / int8) within 1e-3.  Host runs are
+  bit-reproducible (DAS scatter atomics excepted).  The host core flushes
+  denormals to zero (FTZ/DAZ, per thread, caller's mode restored) as the CUDA
+  core does under --use_fast_math: 1.2-5.6x faster on decaying wavefields
+  (e.g. acoustic2d order 8 forward + backward, 28 threads: 39.6 -> 7.1
+  ns/cell/step), gradients unchanged within 6e-6.  `test/test_host_core.py`,
+  a `c-cpu` column in `test/backend_gradient_matrix.py`, docs in
+  `docs/dev/host_core.md`.
+- **Host core: interior rows as SIMD loops.**  Every host-core equation's
+  stencil kernels are split into "decode + guards" and a per-cell body
+  (`launch/cell_path.h`); on the host the interior of each grid row runs that
+  body as one `#pragma omp simd` loop with its PML, free-surface, topography
+  and optional-output tests answered at compile time, and the rest of the row
+  through the kernel (`host/launch.h launch_rows`) -- the interior kernels of
+  the split acoustic, VRZ and Born steps and the Born pointwise kernels
+  included; the CPML rings and shells stay scalar.  Rows go to the OpenMP
+  threads in one contiguous run each, whose tails the other threads steal
+  (`parallel_for_runs`): handed out two rows at a time, 2-D launches ran 2-7x
+  slower at 32-64 threads on a 2-socket EPYC 7702.  Bit-identical to the
+  scalar launcher and to `SWEEP_HOST_ROWS=0` (552 configurations, 17
+  equations, every memory mode, orders 2-10; the scheduler 282 more).  Against
+  `SWEEP_HOST_ROWS=0`, order 4, EPYC 7702, 8 / 64 threads: 2-D 2048^2 forward
+  1.3-7.5x / 1.0-5.0x, forward + boundary-saving backward 1.1-6.4x /
+  0.8-2.4x; 3-D 160^3 1.1-1.9x / 1.0-1.5x (half of it is CPML band, scalar);
+  table in `docs/dev/host_core.md`.  The CUDA machine code is unchanged on
+  sm_70-sm_90 except `a2d_adj_interior<-1>` (orders 10 and up), which nvcc
+  schedules differently behind the cell function (V100 time unchanged, H200
+  +0.5% on the order-10 step), and `elastic_stress_kernel_3d<8>` on sm_90
+  only (H200 time unchanged).  Large `cudaMemcpy` / `cudaMemset` in the host
+  stand-in are split over the OpenMP threads.  The host core builds in 1-2
+  min.
 
 ### Changed
+- **`impl='auto'` on a CPU device runs the host core** when the equation is
+  built into it; it was always eager.  The core is resolved as for an
+  explicit `impl='c'`, and as a CUDA source install resolves its core: the
+  wheel's `lib/cpu` one or `SWEEP_CORE_CPU=<path>`, else a current cached
+  build, else a g++ build on the first such construction (1-3 min, announced
+  on stderr, the compiler's output kept in `build.log` beside it).  A
+  compiler is offered only once it builds a small OpenMP shared object with
+  the core's flags, so Apple clang or a clang++ without libomp leave 'auto'
+  on eager quietly, as no nvcc does on CUDA; a build or load that fails warns
+  once and the process runs eager.  Processes that start together build
+  once, and a waiter takes the core only when its source stamp is this
+  tree's.  Eager options (`eager_options=`, or an eager knob at top level or
+  in `backend_options`), host staging (`storage='cpu'`/`'disk'`, the legacy
+  dict included), an equation the host core does not build and the pybind
+  shim keep 'auto' on eager, quietly, as before.
+  Against eager with its defaults (compiled), steady state, 2 x Xeon Platinum
+  8176: 1.2-18x faster at 8-28 threads (acoustic2d, elastic2d 256^2-2048^2,
+  acoustic3d 128^3, forward and with the backward); at 4 threads compiled
+  eager is ahead on the 3-D forward (1.5x) and the 1024^2 acoustic forward
+  (1.16x), where the host core's CPML band runs scalar; eager also compiles
+  for 6-12 s on each new grid.  A CPU run on 'auto' now gets what a CUDA run
+  always got: the compiled numerics (as close to eager as the CUDA core, 1e-5
+  relative on acoustic2d), boundary saving as the default memory strategy, and
+  the compiled backward's coverage -- no source-wavelet gradient from the
+  elastic, DAS, VTI 1st-order, VRZ and Born kernels (a wavelet requiring grad
+  is refused), no double backward.  `impl='eager'` keeps the old path.
+  `torch.set_num_threads` sets the host core's thread count too (one OpenMP
+  runtime: the core binds to torch's `libgomp.so.1`).
+- **The wheel ships the host core** (`lib/cpu/`, from 0.3.7):
+  `utils/build_cores_manylinux.sh` builds it in the cu12 builder image beside
+  the CUDA cores and packs the wheel with `SWEEP_REQUIRE_CORE=cu12,cu13,cpu`;
+  it refuses a host core that needs a `GOMP_*`/`OMP_*` version newer than
+  torch's libgomp defines (5.0; the core needs 4.0 / 1.0).  23 MB, 7 MB
+  compressed: the wheel goes from 62 MB to about 69 MB.
 - **Smaller cores and wheel: the SEM kernels are compiled once.**  The
   `impl='c'` kernels of `PropSEM` were `static` kernels defined in their
   headers, so each was compiled into every translation unit that included its
@@ -734,6 +837,13 @@ and this project adheres to
   -- as on PropTorch: chi is now a near-DC tail (fitting it, bf16/int8
   boundary-saving gradients fell to cos 0.1-0.4 of the full tape's). Ask for
   `chi` / `u_x` / `u_z` by name; the low-level propagators still record chi.
+- Core C ABI 3 -> 4: `sweep_entry_available(int)` and
+  `sweep_core_device(void)`.  The loader asks a core which device it computes
+  on instead of trusting its path, and checks that two loaded cores share one
+  entry table.  Residency checks in the shared C++ read
+  `sweep::on_compute_device(buf)` instead of `buf.is_cuda()`.
+- Every kernel launch in `csrc/cuda/` (807 sites, 66 files) is spelled
+  `SWEEP_LAUNCH(kernel, grid, block, args...)`.
 
 ### Removed
 - Scripts under `test/` that are not tests: 85 standalone files that no test, CI job,
@@ -773,6 +883,10 @@ and this project adheres to
   curvilinear grid only.
 
 ### Fixed
+- **`sweep._C` no longer loads a core for a dunder lookup.**  pytest's
+  collection reads `__test__` (and `issubclass` reads `__bases__`) of every
+  module-level name, so a test module importing `sweep._C` loaded the core at
+  collection -- with the host core, on a CPU-only source checkout, built it.
 - **The eager gradient of the qP equations in their default
   `s_gradient='adjoint'` compiles.** Its backward re-ran the update under
   `requires_grad_()` and `torch.autograd.grad`, which torch.compile cannot
@@ -1188,6 +1302,16 @@ and this project adheres to
   it. Keep one face of the pair absorbing, or free all four. `Acoustic` and
   `ViscoAcoustic` accept every layout; an equation declares a solid with
   `free_plate_unstable`.
+- **`impl='c'` with topography: receivers above the surface moved the
+  gradient.**  The acoustic image method clears the vacuum above the surface
+  every step, so a receiver there records an identically-zero trace and can
+  add nothing to a loss -- eager's gradient is exactly the gradient without
+  it.  The compiled backward injected that receiver's cotangent into the
+  vacuum, where the adjoint kernels neither update nor clear it, and the solid
+  cells next to it read it back: the gradient moved by 5-40% (`Acoustic`,
+  `Acoustic3D`).  The backward now zeroes the cotangent of a receiver above
+  the surface -- the transpose of the forward's air clear -- for equations
+  that declare `air_cells_are_vacuum` (no kernel change).
 - **`impl='c'` refuses a wavelet that requires grad where its backward
   returns none**: `Elastic`, `Elastic3D`, `ElasticVRR`, `ElasticTTI2nd`,
   `ElasticTTISG`, `ElasticTTISG3D`, `ViscoElastic`, the four DAS equations

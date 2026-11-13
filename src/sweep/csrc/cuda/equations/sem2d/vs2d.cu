@@ -4,6 +4,7 @@
 // with the C-PML, the natural free surface, save-all. The 3-D velocity-stress
 // drivers (sem3d/forward.cu, backward.cu) with two components.
 #include "../../../core/device.h"
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 #include "../../../core/sem_input_core.h"
 #include <cuda_runtime.h>
 #include <cstdint>
@@ -117,13 +118,13 @@ void elastic_vs2d_forward(const Sem2dVsForwardInputCore& in) {
         cudaMemsetAsync(Rx, 0, ngb, stream);
         cudaMemsetAsync(Rz, 0, ngb, stream);
         if (c.cp) cudaMemsetAsync(P, 0, 4 * ngb, stream);
-        sem2d_vs_sigma_div<<<E, m, sh4, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_vs_sigma_div, E, m, sh4, stream,
             sig, c.ax, c.bx, c.az, c.bz, c.wJ, c.Ixx, c.Ixz, c.Iex, c.Iez,
             c.ibool, c.D, Rx, Rz, P, ngll, E, ng);
         if (c.cp)
-            sem2d_vs_cpml_nodal<<<nb, TPB, 0, stream>>>(c.a_n, P, msig, Rx, Rz, ng);
+            SWEEP_LAUNCH_ON(sem2d_vs_cpml_nodal, nb, TPB, 0, stream, c.a_n, P, msig, Rx, Rz, ng);
         const size_t o = static_cast<size_t>(n - t0 + 1) * ng;
-        sem2d_vs_vel_update<<<nb, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_vs_vel_update, nb, TPB, 0, stream,
             vx, vz, Rx, Rz, c.inv_M, c.px, c.pz, wav, n, dt,
             save ? s_vx + o : nullptr, save ? s_vz + o : nullptr, ng);
         float* gv_n = save ? s_gv + static_cast<size_t>(n - t0) * 4 * Em : nullptr;
@@ -132,8 +133,8 @@ void elastic_vs2d_forward(const Sem2dVsForwardInputCore& in) {
             c.nsls, c.ptau, c.mtau, c.gsls_w, rmem, c.Ixx, c.Ixz, c.Iex, c.Iez,
             c.ibool, c.D, dt, gv_n, ngll, E);
         if (nrec > 0) {
-            sem2d_record<<<rb, TPB, 0, stream>>>(vx, c.rec_G, c.rec_W, sx, n, nt, nrec, m, ng);
-            sem2d_record<<<rb, TPB, 0, stream>>>(vz, c.rec_G, c.rec_W, sz, n, nt, nrec, m, ng);
+            SWEEP_LAUNCH_ON(sem2d_record, rb, TPB, 0, stream, vx, c.rec_G, c.rec_W, sx, n, nt, nrec, m, ng);
+            SWEEP_LAUNCH_ON(sem2d_record, rb, TPB, 0, stream, vz, c.rec_G, c.rec_W, sz, n, nt, nrec, m, ng);
         }
     }
     SWEEP_CUDA_CHECK(cudaGetLastError());
@@ -182,8 +183,8 @@ void elastic_vs2d_backward(const Sem2dVsBackwardInputCore& in) {
     SWEEP_CHECK(0 <= t0 && t0 < t1 && t1 <= nt, "sem2d VS: bad step range");
     for (int k = t1 - 1; k >= t0; --k) {
         if (nrec > 0) {
-            sem2d_adjoint_source<<<rj, TPB, 0, stream>>>(gsx, c.rec_G, c.rec_W, lvx, k, nt, nrec, m);
-            sem2d_adjoint_source<<<rj, TPB, 0, stream>>>(gsz, c.rec_G, c.rec_W, lvz, k, nt, nrec, m);
+            SWEEP_LAUNCH_ON(sem2d_adjoint_source, rj, TPB, 0, stream, gsx, c.rec_G, c.rec_W, lvx, k, nt, nrec, m);
+            SWEEP_LAUNCH_ON(sem2d_adjoint_source, rj, TPB, 0, stream, gsz, c.rec_G, c.rec_W, lvz, k, nt, nrec, m);
         }
         const float* gv_k = sgv + static_cast<size_t>(k - t0) * 4 * Em;
         SEM2D_VS_LAUNCH_NC(c.nc, sem2d_vs_stress_update_T, E, m, sh4, stream,
@@ -193,14 +194,14 @@ void elastic_vs2d_backward(const Sem2dVsBackwardInputCore& in) {
             gLam, gMu, gL2m, gC, ngll, E);
         // v^k at history row k - t0 + 1, v^(k-1) one row up (row 0: the call's start)
         const size_t ok = static_cast<size_t>(k - t0 + 1) * ng;
-        sem2d_vs_vel_update_T<<<nb, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_vs_vel_update_T, nb, TPB, 0, stream,
             lvx, lvz, svx + ok, svz + ok, svx + (ok - ng), svz + (ok - ng),
             c.inv_M, dt, lRx, lRz, gM, ng);
-        sem2d_accum_gradW<<<nb, TPB, 0, stream>>>(c.px, c.inv_M, lvx, dt, k, gW, ng);
-        sem2d_accum_gradW<<<nb, TPB, 0, stream>>>(c.pz, c.inv_M, lvz, dt, k, gW, ng);
+        SWEEP_LAUNCH_ON(sem2d_accum_gradW, nb, TPB, 0, stream, c.px, c.inv_M, lvx, dt, k, gW, ng);
+        SWEEP_LAUNCH_ON(sem2d_accum_gradW, nb, TPB, 0, stream, c.pz, c.inv_M, lvz, dt, k, gW, ng);
         if (c.cp)
-            sem2d_vs_cpml_nodal_T<<<nb, TPB, 0, stream>>>(c.a_n, lRx, lRz, lmsig, lP, ng);
-        sem2d_vs_sigma_div_T<<<E, m, sh4, stream>>>(
+            SWEEP_LAUNCH_ON(sem2d_vs_cpml_nodal_T, nb, TPB, 0, stream, c.a_n, lRx, lRz, lmsig, lP, ng);
+        SWEEP_LAUNCH_ON(sem2d_vs_sigma_div_T, E, m, sh4, stream,
             lRx, lRz, lP, lsig, c.ax, c.bx, c.az, c.bz, c.wJ, c.Ixx, c.Ixz, c.Iex, c.Iez,
             c.ibool, c.D, ngll, E, ng);
     }

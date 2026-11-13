@@ -7,7 +7,9 @@ travels inside ``cuda_options``. Dropping the object took the request with it,
 so a caller who asked for boundary saving got the eager default, checkpointing,
 and nothing said so.
 
-CPU + eager: this is about which request survives construction.
+CPU + eager: this is about which request survives construction.  The host
+core is pinned away too: with one at hand an explicit ``impl='c'`` on the CPU
+is served, not demoted (test_host_core.py covers that path).
 """
 import pytest
 
@@ -21,6 +23,9 @@ from sweep.propagator.torch import PropTorch
 def demoted(monkeypatch):
     """Force the fallback: asked for 'c', gets 'eager'."""
     monkeypatch.setattr(ptorch, "_compiled_binding_available", lambda: False)
+    monkeypatch.setattr(ptorch, "_host_core_serves",
+                        lambda equation: (False, "no host (CPU) core is at hand (test)",
+                                          "get a host core (`python -m sweep.build --cpu`)"))
 
 
 def _prop(**kw):

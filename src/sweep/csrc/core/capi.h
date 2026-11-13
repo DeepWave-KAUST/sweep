@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define SWEEP_CORE_ABI_VERSION 3
+#define SWEEP_CORE_ABI_VERSION 4
 SWEEP_CAPI int sweep_core_abi_version(void);
 
 // Layout probe for the ctypes mirror (sweep/_core_abi.py): sizeof / offsetof
@@ -210,6 +210,16 @@ enum SweepEntry {
 SWEEP_CAPI int sweep_entry_count(void);
 SWEEP_CAPI const char* sweep_entry_name(int entry);   // NULL when out of range
 SWEEP_CAPI int sweep_entry_kind(int entry);           // -1 when out of range
+// 1 when the entry is implemented in this core, 0 when it is a stub that would
+// throw (an equation the host core does not build: sweep.backend.c.hostcore),
+// -1 out of range.  The same table above is exported by every core, so the
+// Python namespace is one; this is how a core says which rows it serves.
+SWEEP_CAPI int sweep_entry_available(int entry);
+
+// The memory tier this core's kernels run on: "cuda" (libsweep_core.so built by
+// nvcc) or "cpu" (the same sources built by a C++ compiler through csrc/host).
+// Asked by the loader rather than inferred from a path.
+SWEEP_CAPI const char* sweep_core_device(void);
 
 // The monolithic call: ``in``/``out`` point at the structs of the entry's kind.
 SWEEP_CAPI int sweep_call(int entry, const void* in, void* out, char* err, int err_cap);

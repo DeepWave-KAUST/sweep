@@ -1,4 +1,5 @@
 #include <cuda_runtime.h>
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 
 #include "das2d.h"
@@ -178,7 +179,7 @@ Buf recompute_strain_history(const BackwardInputCore& p)
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
             float* field = das2d_field_ptr(wf, source_fields[isrc]);
             if (field == nullptr) continue;
-            add_source<<<source_config.grid, source_config.block>>>(
+            SWEEP_LAUNCH(add_source, source_config.grid, source_config.block,
                 field,
                 p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
@@ -275,7 +276,7 @@ BackwardOutputCore backward_core(const BackwardInputCore& in)
         for (int irec = 0; irec < nrec_fields; ++irec) {
             float* field = das2d_field_ptr(adj_view, receiver_fields[irec]);
             if (field == nullptr) continue;
-            add_source<<<source_config.grid, source_config.block>>>(
+            SWEEP_LAUNCH(add_source, source_config.grid, source_config.block,
                 field,
                 p.adjoint_source.select(0, irec).data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
@@ -611,7 +612,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
         for (int irec = 0; irec < nrec_fields; ++irec) {
             float* field = das2d_field_ptr(adj_view, receiver_fields[irec]);
             if (field == nullptr) continue;
-            add_source<<<adj_source_config.grid, adj_source_config.block>>>(
+            SWEEP_LAUNCH(add_source, adj_source_config.grid, adj_source_config.block,
                 field,
                 p.adjoint_source.select(0, irec).data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
@@ -629,7 +630,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
         for (int isrc = 0; isrc < nsrc_fields; ++isrc) {
             float* field = das2d_field_ptr(for_view, source_fields[isrc]);
             if (field == nullptr) continue;
-            add_source_signed<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            SWEEP_LAUNCH(add_source_signed, fwd_source_config.grid, fwd_source_config.block,
                 field,
                 p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
@@ -868,7 +869,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
     for (int irec = 0; irec < nrec_fields; ++irec) {
         float* field = das2d_field_ptr(adj_view, receiver_fields[irec]);
         if (field == nullptr) continue;
-        add_source<<<adj_source_config.grid, adj_source_config.block>>>(
+        SWEEP_LAUNCH(add_source, adj_source_config.grid, adj_source_config.block,
             field,
             p.adjoint_source.select(0, irec).data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(),

@@ -1,4 +1,5 @@
 #include <algorithm>
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 #include "visco_acoustic2d.h"
 #include "kernels.cuh"
@@ -397,7 +398,7 @@ void image_step_from_raw(
         // Imaging runs over the PHYSICAL box only: EdgePadding.backward crops the
         // pad gradients, so the skipped cells never reach the model. (This
         // branch's acoustic2d change; the shared kernel now takes the box.)
-        calculate_grad<<<grid, block>>>(
+        SWEEP_LAUNCH(calculate_grad, grid, block,
             carrier.data_ptr<float>(), lam_ptr,
             vp.data_ptr<float>(), grad->data_ptr<float>(),
             nx, nz, dt,
@@ -407,7 +408,7 @@ void image_step_from_raw(
         // ``carrier`` is vp^2*Lap(u) = u_tt, so the u_tt branch stays off. Same
         // physical box as the calculate_grad above: illumination and gradient
         // now cover the same cells.
-        accumulate_illumination_2d<<<grid, block>>>(
+        SWEEP_LAUNCH(accumulate_illumination_2d, grid, block,
             carrier.data_ptr<float>(), nullptr, nullptr, lam_ptr,
             rtm_out->source_illumination.data_ptr<float>(),
             rtm_out->receiver_illumination.data_ptr<float>(),
@@ -516,7 +517,7 @@ void run_full_imaging_visco(
 
         adjoint_damping_extra(adjoint, spectral, ws, M);
 
-        add_source<<<adj_source_config.grid, adj_source_config.block>>>(
+        SWEEP_LAUNCH(add_source, adj_source_config.grid, adj_source_config.block,
             adj_view.u_next,
             p.adjoint_source.data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(),
@@ -528,8 +529,7 @@ void run_full_imaging_visco(
         adjoint.swap_aux();   // fused adjoint: rotate u + psi + zeta double-buffer
 
         if (grad_wavelet != nullptr) {
-            accumulate_source_grad_2d<<<forward_source_config.grid,
-                                        forward_source_config.block>>>(
+            SWEEP_LAUNCH(accumulate_source_grad_2d, forward_source_config.grid, forward_source_config.block,
                 adjoint.u_now_t.data_ptr<float>(),
                 grad_wavelet->data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
@@ -749,7 +749,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 
             visco_acoustic2d_apply_spectral_into(forward, spectral, ws, dt, M);
 
-            add_source<<<fwd_source_config.grid, fwd_source_config.block>>>(
+            SWEEP_LAUNCH(add_source, fwd_source_config.grid, fwd_source_config.block,
                 for_view.u_next,
                 p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
@@ -772,7 +772,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 
             adjoint_damping_extra(adjoint, spectral, ws, M);
 
-            add_source<<<adj_source_config.grid, adj_source_config.block>>>(
+            SWEEP_LAUNCH(add_source, adj_source_config.grid, adj_source_config.block,
                 adj_view.u_next,
                 p.adjoint_source.data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
@@ -783,8 +783,7 @@ BackwardOutputCore backward_ckpt_core(const BackwardInputCore& in)
 
             adjoint.swap_aux();
 
-            accumulate_source_grad_2d<<<fwd_source_config.grid,
-                                        fwd_source_config.block>>>(
+            SWEEP_LAUNCH(accumulate_source_grad_2d, fwd_source_config.grid, fwd_source_config.block,
                 adjoint.u_now_t.data_ptr<float>(),
                 grads.wavelet.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
@@ -890,7 +889,7 @@ void advance_forward_interval_visco_2d(
 
         visco_acoustic2d_apply_spectral_into(forward, spectral, ws, ctx.dt, ctx.M);
 
-        add_source<<<source_grid, source_block>>>(
+        SWEEP_LAUNCH(add_source, source_grid, source_block,
             view.u_next,
             p.forward_source.data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(),
@@ -967,7 +966,7 @@ void process_recursive_interval_visco_2d(
 
         visco_acoustic2d_apply_spectral_into(start_state, spectral, ws, ctx.dt, ctx.M);
 
-        add_source<<<forward_source_grid, forward_source_block>>>(
+        SWEEP_LAUNCH(add_source, forward_source_grid, forward_source_block,
             fwd_view.u_next,
             p.forward_source.data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(),
@@ -1000,7 +999,7 @@ void process_recursive_interval_visco_2d(
 
         adjoint_damping_extra(adjoint, spectral, ws, ctx.M);
 
-        add_source<<<adj_source_grid, adj_source_block>>>(
+        SWEEP_LAUNCH(add_source, adj_source_grid, adj_source_block,
             adj_view.u_next,
             p.adjoint_source.data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(),
@@ -1012,7 +1011,7 @@ void process_recursive_interval_visco_2d(
         adjoint.swap_aux();
 
         if (grad_wavelet != nullptr) {
-            accumulate_source_grad_2d<<<forward_source_grid, forward_source_block>>>(
+            SWEEP_LAUNCH(accumulate_source_grad_2d, forward_source_grid, forward_source_block,
                 adjoint.u_now_t.data_ptr<float>(),
                 grad_wavelet->data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
@@ -1023,7 +1022,7 @@ void process_recursive_interval_visco_2d(
         }
 
         if (grad != nullptr) {
-            calculate_grad<<<wave_grid, wave_block>>>(
+            SWEEP_LAUNCH(calculate_grad, wave_grid, wave_block,
                 ws.CARRIER.data_ptr<float>(),
                 adjoint.u_now_t.data_ptr<float>(),
                 vp.data_ptr<float>(),
@@ -1032,7 +1031,7 @@ void process_recursive_interval_visco_2d(
                 ctx.phys_x0(), ctx.phys_x1(), ctx.phys_z0(), ctx.phys_z1());
         }
         if (rtm_out != nullptr) {
-            accumulate_illumination_2d<<<wave_grid, wave_block>>>(
+            SWEEP_LAUNCH(accumulate_illumination_2d, wave_grid, wave_block,
                 ws.CARRIER.data_ptr<float>(), nullptr, nullptr,
                 adjoint.u_now_t.data_ptr<float>(),
                 rtm_out->source_illumination.data_ptr<float>(),

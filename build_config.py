@@ -173,8 +173,8 @@ def make_build_extension(BuildExtension):
 
 
 def shipped_core_paths(root_dir=ROOT_DIR):
-    """Every prebuilt core under src/sweep/lib/<tag>/, one per CUDA major the
-    wheel ships (cu12, cu13), sorted by tag."""
+    """Every prebuilt core under src/sweep/lib/<tag>/: one per CUDA major the
+    wheel ships (cu12, cu13) and the host core (cpu), sorted by tag."""
     return sorted(glob.glob(os.path.join(root_dir, "src", "sweep", "lib", "*", "libsweep_core.so")))
 
 
@@ -183,7 +183,8 @@ def shipped_core_tags(root_dir=ROOT_DIR):
     return [os.path.basename(os.path.dirname(p)) for p in shipped_core_paths(root_dir)]
 
 
-_CORE_TAG_RE = re.compile(r"^cu\d+$")
+# cu<major> for the CUDA cores, cpu for the host core (sweep.backend.c.hostcore).
+_CORE_TAG_RE = re.compile(r"^(cu\d+|cpu)$")
 
 
 def required_core_tags(value):
@@ -223,12 +224,14 @@ def require_shipped_core(root_dir=ROOT_DIR):
         missing = [t for t in wanted if t not in have]
         if not missing:
             return
+        first = missing[0]
+        how = ("`python -m sweep.build --cpu --core` (g++ >= 9 with OpenMP)" if first == "cpu" else
+               f"`python -m sweep.build --core --cuda-home <CUDA {first[2:]} toolkit>`; the tag "
+               "follows the nvcc's CUDA major")
         raise SystemExit(
             f"SWEEP_REQUIRE_CORE={','.join(wanted)} but src/sweep/lib/<tag>/libsweep_core.so "
             f"is missing for: {', '.join(missing)} (present: {', '.join(have) or 'none'}). "
-            f"Build each with the matching nvcc first (`python -m sweep.build --core "
-            f"--cuda-home <CUDA {missing[0][2:]} toolkit>`; the tag follows the nvcc's "
-            "CUDA major), then run `python -m build --wheel` from the same tree."
+            f"Build each first ({how}), then run `python -m build --wheel` from the same tree."
         )
     if have:
         return

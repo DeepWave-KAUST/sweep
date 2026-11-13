@@ -70,6 +70,9 @@ the core's C API table (`SweepEntry` in `src/sweep/csrc/core/capi.h`;
 `ENTRY_NAMES` / `ENTRY_KINDS` / `dispatch()` in
 `src/sweep/csrc/cuda/common/capi.cu`). `src/sweep/csrc/bindings/module.cpp`
 mirrors that table and is compiled only on the `SWEEP_JIT_FULL=1` developer path.
+The CUDA sources are also compiled by g++ into the host (CPU) core, so launch
+kernels through `SWEEP_LAUNCH` (never a literal `<<<>>>`) and keep to the kernel
+rules in [docs/dev/host_core.md](docs/dev/host_core.md).
 
 Two entry points:
 
@@ -95,7 +98,8 @@ For usage questions rather than bugs, please open a GitHub Discussion.
 ## Code style
 
 - Python: PEP 8, NumPy-style docstrings, type hints where they aid clarity.
-- C++ / CUDA: follow the conventions already in `src/sweep/csrc/`.
+- C++ / CUDA: follow the conventions already in `src/sweep/csrc/`; every kernel
+  launch goes through `SWEEP_LAUNCH` so the same source builds as the host core.
 
 ## Documentation changes
 

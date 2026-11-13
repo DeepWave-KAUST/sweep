@@ -1,5 +1,6 @@
 #pragma once
 #include "../../launch/by_order.cuh"
+#include "../../launch/cell_path.h"
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include "../../operators/staggered.cuh"
@@ -16,6 +17,15 @@
 // slots as ::elastic2d.
 
 namespace elastic_vr2d_kernels {
+
+// A cell's (ix, iz, b), by value.  The two adjoint prepares take their
+// indices this way and SolverContext by value: with plain int indices and a
+// const reference nvcc turned their lazy in_pml chain into branches
+// (BSSY/BRA) and flipped compares after the split; this spelling compiles to
+// the kernels' previous code (as elastic_tti_2nd2d's CellIndex2).
+struct EvrCellIndex {
+    int ix, iz, b;
+};
 
 // ---------------------------------------------------------------------------
 // Launch macros
@@ -97,27 +107,25 @@ evr_model_grad_z(const float* __restrict__ u, int ix, int iz, const SGradParam& 
 //   d_t p_i = d_j sigma_ij                             (S&S 2025 Eq 23)
 // ---------------------------------------------------------------------------
 
-template<int Order>
-__global__ void evr_momentum_kernel(
-    ElasticWavefieldPointer wf,
-    SGradParam grad_ctx,
-    ElasticCPMLPointer cpml,
-    SolverContext solver
+// One cell of evr_momentum_kernel: everything after the kernel's guards
+// (launch/cell_path.h).  Interior box: the in_pml_2d test's interior (the
+// physical box), inside the FS helpers' forward box (common/host_rows.h
+// elastic_fs_box_2d); the z free surface as the ELASTIC_FS_Z flag (the x
+// derivatives are plain: no x-face logic in this equation); no optional
+// output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void evr_momentum_cell(
+    int ix, int iz, int b,
+    const ElasticWavefieldPointer& wf,
+    const SGradParam& grad_ctx,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
-
     constexpr bool is_runtime = (Order == -1);
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
-
-    if (ix < halo || ix >= solver.nx - halo ||
-        iz < halo || iz >= solver.nz - halo)
-        return;
 
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
@@ -126,13 +134,15 @@ __global__ void evr_momentum_kernel(
     float dsxx_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.sxx, ix, 0, iz, grad_ctx);
     // z-derivatives of stress: image-method mirror at the top free surface
     // (odd parity), else plain staggered FD. Matches the eager step core.
-    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true, true);
+    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(f.sxz, ix, iz, grad_ctx, solver, true, true);
     float dsxz_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
-    float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.szz, ix, iz, grad_ctx, solver, true);
+    float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path>(f.szz, ix, iz, grad_ctx, solver, true);
 
     // Free surface: the top has no PML (the surface replaces it), so the top
     // physical rows take the plain (non-PML) update path.
-    bool in_pml = solver.in_pml_2d(ix, iz, halo);
+    bool in_pml = false;
+    if constexpr (!interior_path<Path>)
+        in_pml = solver.in_pml_2d(ix, iz, halo);
 
     if (!in_pml) {
         f.vx[idx] += solver.dt * (dsxx_dx + dsxz_dz);   // px += ...
@@ -163,9 +173,60 @@ __global__ void evr_momentum_kernel(
     f.vz[idx] += solver.dt * (dsxz_dx + dszz_dz);
 }
 
+template<int Order>
+__global__ void evr_momentum_kernel(
+    ElasticWavefieldPointer wf,
+    SGradParam grad_ctx,
+    ElasticCPMLPointer cpml,
+    SolverContext solver
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
+    if (ix < halo || ix >= solver.nx - halo ||
+        iz < halo || iz >= solver.nz - halo)
+        return;
+
+    evr_momentum_cell<Order>(ix, iz, b, wf, grad_ctx, cpml, solver);
+}
+
 using evr_momentum_kernel_fn = void (*)(ElasticWavefieldPointer, SGradParam,
     ElasticCPMLPointer, SolverContext);
 SWEEP_BY_ORDER_DECL(evr_momentum_kernel_fn, evr_momentum_kernel_by_order);
+
+// One cell of evr_momentum_kernel_nopml: everything after the kernel's
+// guards (launch/cell_path.h).  Interior box: the guard band, inside the FS
+// helpers' forward box; the z free surface as the ELASTIC_FS_Z flag; no
+// optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void evr_momentum_nopml_cell(
+    int ix, int iz, int b,
+    const ElasticWavefieldPointer& wf,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+    auto f = wf.offset(b, spatial_size);
+
+    float dsxx_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.sxx, ix, 0, iz, grad_ctx);
+    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(f.sxz, ix, iz, grad_ctx, solver, true, true);
+    float dsxz_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
+    float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path>(f.szz, ix, iz, grad_ctx, solver, true);
+
+    f.vx[idx] -= solver.dt * (dsxx_dx + dsxz_dz);
+    f.vz[idx] -= solver.dt * (dsxz_dx + dszz_dz);
+}
 
 template<int Order>
 __global__ void evr_momentum_kernel_nopml(
@@ -193,17 +254,7 @@ __global__ void evr_momentum_kernel_nopml(
         iz < top_halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-    auto f = wf.offset(b, spatial_size);
-
-    float dsxx_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.sxx, ix, 0, iz, grad_ctx);
-    float dsxz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.sxz, ix, iz, grad_ctx, solver, true, true);
-    float dsxz_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.sxz, ix, 0, iz, grad_ctx);
-    float dszz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.szz, ix, iz, grad_ctx, solver, true);
-
-    f.vx[idx] -= solver.dt * (dsxx_dx + dsxz_dz);
-    f.vz[idx] -= solver.dt * (dsxz_dx + dszz_dz);
+    evr_momentum_nopml_cell<Order>(ix, iz, b, wf, grad_ctx, solver);
 }
 
 using evr_momentum_kernel_nopml_fn = void (*)(ElasticWavefieldPointer, SGradParam,
@@ -225,9 +276,16 @@ SWEEP_BY_ORDER_DECL(evr_momentum_kernel_nopml_fn, evr_momentum_kernel_nopml_by_o
 // cheap and avoids extra global memory.
 // ---------------------------------------------------------------------------
 
-template<int Order>
-__global__ void evr_stress_kernel(
-    ElasticWavefieldPointer wf,
+// One cell of evr_stress_kernel: everything after the kernel's guards
+// (launch/cell_path.h).  Interior box: the in_pml_2d test's interior (the
+// physical box), inside the FS helpers' forward box (common/host_rows.h
+// elastic_fs_box_2d, which also keeps the surface rows -- the traction BC --
+// out); the z free surface as the ELASTIC_FS_Z flag; optional output: u_this.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void evr_stress_cell(
+    int ix, int iz, int b,
+    const ElasticWavefieldPointer& wf,
     const float* __restrict__ vp,
     const float* __restrict__ vs,
     const float* __restrict__ Rp_x,
@@ -235,30 +293,20 @@ __global__ void evr_stress_kernel(
     const float* __restrict__ Rs_x,
     const float* __restrict__ Rs_z,
     float* __restrict__ u_this,
-    SGradParam grad_ctx,
-    ElasticCPMLPointer cpml,
-    SolverContext solver
+    const SGradParam& grad_ctx,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
-
     constexpr bool is_runtime = (Order == -1);
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
-
-    if (ix < halo || ix >= solver.nx - halo ||
-        iz < halo || iz >= solver.nz - halo)
-        return;
 
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
 
     auto f = wf.offset(b, spatial_size);
-    float* u_this_b = u_this ? u_this + b * spatial_size : nullptr;
+    float* u_this_b = optional_output<Path>(u_this) ? u_this + b * spatial_size : nullptr;
 
     const float* vp_b   = vp   + b * spatial_size;
     const float* vs_b   = vs   + b * spatial_size;
@@ -271,12 +319,14 @@ __global__ void evr_stress_kernel(
     // z-derivatives use the image-method mirror at the top free surface
     // (pz odd like vz, px even like vx), matching the eager step core.
     float dpx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.vx, ix, 0, iz, grad_ctx);
-    float dpz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true, true);
-    float dpx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.vx, ix, iz, grad_ctx, solver, false);
+    float dpz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(f.vz, ix, iz, grad_ctx, solver, true, true);
+    float dpx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path>(f.vx, ix, iz, grad_ctx, solver, false);
     float dpz_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.vz, ix, 0, iz, grad_ctx);
 
     // Free surface: top physical rows are not in the PML zone.
-    bool in_pml = solver.in_pml_2d(ix, iz, halo);
+    bool in_pml = false;
+    if constexpr (!interior_path<Path>)
+        in_pml = solver.in_pml_2d(ix, iz, halo);
 
     if (in_pml) {
         // CPML on the momentum derivatives (same memvar layout as elastic m_vxx etc.).
@@ -339,22 +389,116 @@ __global__ void evr_stress_kernel(
     // 2002, Table 1; the half-cell mirror above carries the traction-free sxz).  VR-native coefficient on
     // d px/dx: physical 4 mu (lam+mu)/(lam+2mu) * d vx/dx  ->  with px = rho*vx
     // becomes  4 vs^2 (vp^2 - vs^2)/vp^2 * d px/dx (rho cancels).
-    if (elastic_is_top_free_surface_row(solver, iz)) {
+    if (elastic_is_top_free_surface_row<Path>(solver, iz)) {
         f.sxx[idx] = sxx_pre + solver.dt * (4.f * Vs2 * (Vp2 - Vs2) / Vp2) * dpx_dx;
         f.szz[idx] = 0.f;
     }
 
-    if (u_this_b) {
+    if (optional_output<Path>(u_this_b)) {
         int comp_stride = solver.B * spatial_size;
         u_this_b[0 * comp_stride + idx] = f.vx[idx];   // px
         u_this_b[1 * comp_stride + idx] = f.vz[idx];   // pz
     }
 }
 
+template<int Order>
+__global__ void evr_stress_kernel(
+    ElasticWavefieldPointer wf,
+    const float* __restrict__ vp,
+    const float* __restrict__ vs,
+    const float* __restrict__ Rp_x,
+    const float* __restrict__ Rp_z,
+    const float* __restrict__ Rs_x,
+    const float* __restrict__ Rs_z,
+    float* __restrict__ u_this,
+    SGradParam grad_ctx,
+    ElasticCPMLPointer cpml,
+    SolverContext solver
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
+    if (ix < halo || ix >= solver.nx - halo ||
+        iz < halo || iz >= solver.nz - halo)
+        return;
+
+    evr_stress_cell<Order>(ix, iz, b, wf, vp, vs, Rp_x, Rp_z, Rs_x, Rs_z, u_this, grad_ctx, cpml,
+                           solver);
+}
+
 using evr_stress_kernel_fn = void (*)(ElasticWavefieldPointer, const float*,
     const float*, const float*, const float*, const float*, const float*, float*,
     SGradParam, ElasticCPMLPointer, SolverContext);
 SWEEP_BY_ORDER_DECL(evr_stress_kernel_fn, evr_stress_kernel_by_order);
+
+// One cell of evr_stress_kernel_nopml: everything after the kernel's guards
+// (launch/cell_path.h) but the kernel's ``(void) u_this``.  Interior box: the
+// guard band, inside the FS helpers' forward box; the z free surface as the
+// ELASTIC_FS_Z flag; no optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void evr_stress_nopml_cell(
+    int ix, int iz, int b,
+    const ElasticWavefieldPointer& wf,
+    const float* __restrict__ vp,
+    const float* __restrict__ vs,
+    const float* __restrict__ Rp_x,
+    const float* __restrict__ Rp_z,
+    const float* __restrict__ Rs_x,
+    const float* __restrict__ Rs_z,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+
+    auto f = wf.offset(b, spatial_size);
+
+    const float* vp_b   = vp   + b * spatial_size;
+    const float* vs_b   = vs   + b * spatial_size;
+    const float* Rpx_b  = Rp_x + b * spatial_size;
+    const float* Rpz_b  = Rp_z + b * spatial_size;
+    const float* Rsx_b  = Rs_x + b * spatial_size;
+    const float* Rsz_b  = Rs_z + b * spatial_size;
+
+    float dpx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.vx, ix, 0, iz, grad_ctx);
+    float dpz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(f.vz, ix, iz, grad_ctx, solver, true, true);
+    float dpx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path>(f.vx, ix, iz, grad_ctx, solver, false);
+    float dpz_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.vz, ix, 0, iz, grad_ctx);
+
+    float dvp_dx = evr_model_grad_x<Order>(vp_b, ix, iz, grad_ctx);
+    float dvp_dz = evr_model_grad_z<Order>(vp_b, ix, iz, grad_ctx);
+    float dvs_dx = evr_model_grad_x<Order>(vs_b, ix, iz, grad_ctx);
+    float dvs_dz = evr_model_grad_z<Order>(vs_b, ix, iz, grad_ctx);
+
+    float Vp = vp_b[idx], Vs = vs_b[idx];
+    float Vp2 = Vp * Vp, Vs2 = Vs * Vs;
+    float Rpx = Rpx_b[idx], Rpz = Rpz_b[idx];
+    float Rsx = Rsx_b[idx], Rsz = Rsz_b[idx];
+    float px = f.vx[idx], pz = f.vz[idx];
+
+    float gamma_P_xx = Vp * dvp_dx * px - 2.f * Vp2 * Rpx * px + Vp2 * dpx_dx;
+    float gamma_P_zz = Vp * dvp_dz * pz - 2.f * Vp2 * Rpz * pz + Vp2 * dpz_dz;
+    float gamma_S_xx = Vs * dvs_dx * px - 2.f * Vs2 * Rsx * px + Vs2 * dpx_dx;
+    float gamma_S_zz = Vs * dvs_dz * pz - 2.f * Vs2 * Rsz * pz + Vs2 * dpz_dz;
+    float gamma_S_xz = Vs * dvs_dx * pz - 2.f * Vs2 * Rsx * pz + Vs2 * dpz_dx;
+    float gamma_S_zx = Vs * dvs_dz * px - 2.f * Vs2 * Rsz * px + Vs2 * dpx_dz;
+
+    float gamma_P_kk = gamma_P_xx + gamma_P_zz;
+
+    f.sxx[idx] -= solver.dt * (gamma_P_kk - 2.f * gamma_S_zz);
+    f.szz[idx] -= solver.dt * (gamma_P_kk - 2.f * gamma_S_xx);
+    f.sxz[idx] -= solver.dt * (gamma_S_xz + gamma_S_zx);
+}
 
 template<int Order>
 __global__ void evr_stress_kernel_nopml(
@@ -386,47 +530,9 @@ __global__ void evr_stress_kernel_nopml(
         iz < top_halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-
-    auto f = wf.offset(b, spatial_size);
     (void) u_this;
 
-    const float* vp_b   = vp   + b * spatial_size;
-    const float* vs_b   = vs   + b * spatial_size;
-    const float* Rpx_b  = Rp_x + b * spatial_size;
-    const float* Rpz_b  = Rp_z + b * spatial_size;
-    const float* Rsx_b  = Rs_x + b * spatial_size;
-    const float* Rsz_b  = Rs_z + b * spatial_size;
-
-    float dpx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(f.vx, ix, 0, iz, grad_ctx);
-    float dpz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true, true);
-    float dpx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(f.vx, ix, iz, grad_ctx, solver, false);
-    float dpz_dx = sgradient<2, Order, X, DIFF_FORWARD>(f.vz, ix, 0, iz, grad_ctx);
-
-    float dvp_dx = evr_model_grad_x<Order>(vp_b, ix, iz, grad_ctx);
-    float dvp_dz = evr_model_grad_z<Order>(vp_b, ix, iz, grad_ctx);
-    float dvs_dx = evr_model_grad_x<Order>(vs_b, ix, iz, grad_ctx);
-    float dvs_dz = evr_model_grad_z<Order>(vs_b, ix, iz, grad_ctx);
-
-    float Vp = vp_b[idx], Vs = vs_b[idx];
-    float Vp2 = Vp * Vp, Vs2 = Vs * Vs;
-    float Rpx = Rpx_b[idx], Rpz = Rpz_b[idx];
-    float Rsx = Rsx_b[idx], Rsz = Rsz_b[idx];
-    float px = f.vx[idx], pz = f.vz[idx];
-
-    float gamma_P_xx = Vp * dvp_dx * px - 2.f * Vp2 * Rpx * px + Vp2 * dpx_dx;
-    float gamma_P_zz = Vp * dvp_dz * pz - 2.f * Vp2 * Rpz * pz + Vp2 * dpz_dz;
-    float gamma_S_xx = Vs * dvs_dx * px - 2.f * Vs2 * Rsx * px + Vs2 * dpx_dx;
-    float gamma_S_zz = Vs * dvs_dz * pz - 2.f * Vs2 * Rsz * pz + Vs2 * dpz_dz;
-    float gamma_S_xz = Vs * dvs_dx * pz - 2.f * Vs2 * Rsx * pz + Vs2 * dpz_dx;
-    float gamma_S_zx = Vs * dvs_dz * px - 2.f * Vs2 * Rsz * px + Vs2 * dpx_dz;
-
-    float gamma_P_kk = gamma_P_xx + gamma_P_zz;
-
-    f.sxx[idx] -= solver.dt * (gamma_P_kk - 2.f * gamma_S_zz);
-    f.szz[idx] -= solver.dt * (gamma_P_kk - 2.f * gamma_S_xx);
-    f.sxz[idx] -= solver.dt * (gamma_S_xz + gamma_S_zx);
+    evr_stress_nopml_cell<Order>(ix, iz, b, wf, vp, vs, Rp_x, Rp_z, Rs_x, Rs_z, grad_ctx, solver);
 }
 
 using evr_stress_kernel_nopml_fn = void (*)(ElasticWavefieldPointer, const float*,
@@ -476,13 +582,14 @@ SWEEP_BY_ORDER_DECL(evr_stress_kernel_nopml_fn, evr_stress_kernel_nopml_by_order
 // zeroing applied to the ADJOINT stress at the START of each adjoint step
 // (before any kernel reads the adjoint szz). No-op when free_surface=false
 // (elastic_is_top_free_surface_row returns false).
+// One cell of evr_adjoint_zero_top_fs: everything after the kernel's bounds
+// guard.  The host launcher (evr_adjoint_zero_top_fs_rows) runs it on the rows
+// that can hold a surface cell only; every other cell returns here anyway.
 template<int Order>
-__global__ void evr_adjoint_zero_top_fs(ElasticWavefieldPointer wf, SolverContext solver)
+__device__ __forceinline__
+void evr_adjoint_zero_top_fs_cell(int ix, int iz, int b, const ElasticWavefieldPointer& wf,
+                                  const SolverContext& solver)
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-    if (ix >= solver.nx || iz >= solver.nz) return;
     if (!elastic_is_top_free_surface_row(solver, iz)) return;
     int spatial_size = solver.nx * solver.nz;
     auto f = wf.offset(b, spatial_size);
@@ -490,40 +597,58 @@ __global__ void evr_adjoint_zero_top_fs(ElasticWavefieldPointer wf, SolverContex
     f.szz[idx] = 0.f;
 }
 
+template<int Order>
+__global__ void evr_adjoint_zero_top_fs(ElasticWavefieldPointer wf, SolverContext solver)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+    if (ix >= solver.nx || iz >= solver.nz) return;
+    evr_adjoint_zero_top_fs_cell<Order>(ix, iz, b, wf, solver);
+}
+
 // The driver launches the <0> specialization; like the launch tables, its
 // pointer is defined in kernels.cu (launch/by_order.cuh).
 using evr_adjoint_zero_top_fs_fn = void (*)(ElasticWavefieldPointer, SolverContext);
 extern evr_adjoint_zero_top_fs_fn const evr_adjoint_zero_top_fs_0;
 
-template<int Order>
-__global__ void evr_stress_adjoint_prepare(
-    ElasticWavefieldPointer wf,
+#if defined(SWEEP_HOST_CORE)
+// The host core's launcher of evr_adjoint_zero_top_fs<0> for SWEEP_LAUNCH_ROWS
+// (launch/launch.h): (grid, block, <the kernel's parameters>).  It visits only
+// the rows that can hold a surface cell instead of the whole grid
+// (kernels.cu).
+void evr_adjoint_zero_top_fs_rows(dim3 grid, dim3 block, ElasticWavefieldPointer wf,
+                                  SolverContext solver);
+#endif
+
+// One cell of evr_stress_adjoint_prepare: everything after the kernel's
+// bounds guard (launch/cell_path.h).  Interior box: the interior of the
+// legacy symmetric abcn + halo in_pml test, inside [halo, n - halo)^2 (the
+// ``interior`` test) and below every surface row (no FS transpose); no FS
+// derivative helper, so no flag; no optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void evr_stress_adjoint_prepare_cell(
+    EvrCellIndex at,
+    const ElasticWavefieldPointer& wf,
     const float* __restrict__ vp,
     const float* __restrict__ vs,
     const float* __restrict__ Rp_x,
     const float* __restrict__ Rp_z,
     const float* __restrict__ Rs_x,
     const float* __restrict__ Rs_z,
-    SGradParam grad_ctx,
-    ElasticCPMLPointer cpml,
+    const SGradParam& grad_ctx,
+    const ElasticCPMLPointer& cpml,
     SolverContext solver,
     float* __restrict__ qxx,
     float* __restrict__ qzz,
     float* __restrict__ qxz,
     float* __restrict__ qzx,
-    // Per-cell pointwise contribution to adjoint momentum (from V*(dV)*p
-    // and -2 V^2 R p terms). Stored in extra workspace tensors so the
-    // *apply* kernel can ADD them to adj_px/adj_pz after the FD pass.
     float* __restrict__ point_px,
     float* __restrict__ point_pz
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
-
+    const int ix = at.ix, iz = at.iz, b = at.b;
     constexpr bool is_runtime = (Order == -1);
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
@@ -563,7 +688,7 @@ __global__ void evr_stress_adjoint_prepare(
     float lam          = Vp2 - 2.f * Vs2;
     float mu_          = Vs2;          // V_S^2
 
-    bool is_fs = elastic_is_top_free_surface_row(solver, iz);
+    bool is_fs = elastic_is_top_free_surface_row<Path>(solver, iz);
     float bar_sxx = f.sxx[idx];
     float bar_szz = f.szz[idx];
     float bar_sxz = f.sxz[idx];
@@ -625,8 +750,12 @@ __global__ void evr_stress_adjoint_prepare(
     // so the adjoint contribution is non-zero only there too -- and
     // restricting the reads to the interior keeps the +/-(Order/2) stencil
     // in bounds at the grid edge.
-    bool interior = (ix >= halo && ix < solver.nx - halo &&
-                     iz >= halo && iz < solver.nz - halo);
+    bool interior;
+    if constexpr (interior_path<Path>)   // the box is inside [halo, n - halo)^2
+        interior = true;
+    else
+        interior = (ix >= halo && ix < solver.nx - halo &&
+                    iz >= halo && iz < solver.nz - halo);
     // At the free surface only sxz keeps gamma multiplicative terms (sxx is the
     // pure C_surf * dpx_dx form, szz is zero); the L_g* above are zeroed to match.
     if (interior) {
@@ -660,8 +789,10 @@ __global__ void evr_stress_adjoint_prepare(
 
     // Position-based PML / interior split. Outside the PML band all
     // ax/az/bx/bz coefficients vanish, m_v* aux fields stay 0 -> 0.
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = false;
+    if constexpr (!interior_path<Path>)
+        in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
+                 (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
     if (!in_pml) {
         qxx_b[idx] = bar_dpx_dx;
         qzz_b[idx] = bar_dpz_dz;
@@ -695,10 +826,96 @@ __global__ void evr_stress_adjoint_prepare(
     f.m_vzx[idx] = axh * tmp_pzx;
 }
 
+template<int Order>
+__global__ void evr_stress_adjoint_prepare(
+    ElasticWavefieldPointer wf,
+    const float* __restrict__ vp,
+    const float* __restrict__ vs,
+    const float* __restrict__ Rp_x,
+    const float* __restrict__ Rp_z,
+    const float* __restrict__ Rs_x,
+    const float* __restrict__ Rs_z,
+    SGradParam grad_ctx,
+    ElasticCPMLPointer cpml,
+    SolverContext solver,
+    float* __restrict__ qxx,
+    float* __restrict__ qzz,
+    float* __restrict__ qxz,
+    float* __restrict__ qzx,
+    // Per-cell pointwise contribution to adjoint momentum (from V*(dV)*p
+    // and -2 V^2 R p terms). Stored in extra workspace tensors so the
+    // *apply* kernel can ADD them to adj_px/adj_pz after the FD pass.
+    float* __restrict__ point_px,
+    float* __restrict__ point_pz
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    evr_stress_adjoint_prepare_cell<Order>(EvrCellIndex{ix, iz, b}, wf, vp, vs, Rp_x, Rp_z, Rs_x,
+                                           Rs_z, grad_ctx, cpml, solver, qxx, qzz, qxz, qzx,
+                                           point_px, point_pz);
+}
+
 using evr_stress_adjoint_prepare_fn = void (*)(ElasticWavefieldPointer, const float*,
     const float*, const float*, const float*, const float*, const float*, SGradParam,
     ElasticCPMLPointer, SolverContext, float*, float*, float*, float*, float*, float*);
 SWEEP_BY_ORDER_DECL(evr_stress_adjoint_prepare_fn, evr_stress_adjoint_prepare_by_order);
+
+// One cell of evr_stress_adjoint_apply: everything after the kernel's guards
+// (launch/cell_path.h).  Interior box: the halo box inside the FS adjoint
+// helpers' box (common/host_rows.h elastic_fs_box_2d, adjoint); the z free
+// surface as the ELASTIC_FS_Z flag; no optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void evr_stress_adjoint_apply_cell(
+    int ix, int iz, int b,
+    const ElasticWavefieldPointer& wf,
+    const float* __restrict__ qxx,
+    const float* __restrict__ qzz,
+    const float* __restrict__ qxz,
+    const float* __restrict__ qzx,
+    const float* __restrict__ point_px,
+    const float* __restrict__ point_pz,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    int spatial_size = solver.nx * solver.nz;
+    auto f = wf.offset(b, spatial_size);
+
+    const float* qxx_b = qxx + b * spatial_size;
+    const float* qzz_b = qzz + b * spatial_size;
+    const float* qxz_b = qxz + b * spatial_size;
+    const float* qzx_b = qzx + b * spatial_size;
+    const float* pt_px_b = point_px + b * spatial_size;
+    const float* pt_pz_b = point_pz + b * spatial_size;
+
+    // EXACT transpose of the forward staggered FD. The forward stress kernel
+    // formed the gamma divergence terms from
+    //   dpx_dx = sgrad<X,BACKWARD>(px),  dpz_dz = sgrad<Z,BACKWARD>(pz),
+    //   dpx_dz = sgrad<Z,FORWARD>(px),   dpz_dx = sgrad<X,FORWARD>(pz).
+    // The adjoint applies the transpose of each. For the staggered operators
+    // here  D_b^T = -D_f  and  D_f^T = -D_b  (verified against autograd), so
+    // the transpose is the OPPOSITE-direction sgradient NEGATED. q* hold the
+    // modulus-weighted adjoint stress (qxx<-dpx_dx, qzz<-dpz_dz,
+    // qxz<-dpx_dz, qzx<-dpz_dx).
+    //   a_px gets dpx_dx (->-sgrad<X,FORWARD>) and dpx_dz (->-sgrad<Z,BACKWARD>)
+    //   a_pz gets dpz_dz (->-sgrad<Z,FORWARD>) and dpz_dx (->-sgrad<X,BACKWARD>)
+    float dqxx_dx = sgradient<2, Order, X, DIFF_FORWARD>(qxx_b, ix, 0, iz, grad_ctx);
+    // z-derivative transposes use the image-method ADJOINT at the free surface
+    // (forward dpx_dz was FORWARD/even, dpz_dz was BACKWARD/odd).
+    float dqxz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD, Path>(qxz_b, ix, iz, grad_ctx, solver, false);
+    float dqzz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(qzz_b, ix, iz, grad_ctx, solver, true, true);
+    float dqzx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(qzx_b, ix, 0, iz, grad_ctx);
+
+    int idx = iz * solver.nx + ix;
+    f.vx[idx] += -(dqxx_dx + dqxz_dz) + pt_px_b[idx];   // exact transpose + pointwise
+    f.vz[idx] += -(dqzz_dz + dqzx_dx) + pt_pz_b[idx];
+}
 
 template<int Order>
 __global__ void evr_stress_adjoint_apply(
@@ -727,37 +944,8 @@ __global__ void evr_stress_adjoint_apply(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.nz;
-    auto f = wf.offset(b, spatial_size);
-
-    const float* qxx_b = qxx + b * spatial_size;
-    const float* qzz_b = qzz + b * spatial_size;
-    const float* qxz_b = qxz + b * spatial_size;
-    const float* qzx_b = qzx + b * spatial_size;
-    const float* pt_px_b = point_px + b * spatial_size;
-    const float* pt_pz_b = point_pz + b * spatial_size;
-
-    // EXACT transpose of the forward staggered FD. The forward stress kernel
-    // formed the gamma divergence terms from
-    //   dpx_dx = sgrad<X,BACKWARD>(px),  dpz_dz = sgrad<Z,BACKWARD>(pz),
-    //   dpx_dz = sgrad<Z,FORWARD>(px),   dpz_dx = sgrad<X,FORWARD>(pz).
-    // The adjoint applies the transpose of each. For the staggered operators
-    // here  D_b^T = -D_f  and  D_f^T = -D_b  (verified against autograd), so
-    // the transpose is the OPPOSITE-direction sgradient NEGATED. q* hold the
-    // modulus-weighted adjoint stress (qxx<-dpx_dx, qzz<-dpz_dz,
-    // qxz<-dpx_dz, qzx<-dpz_dx).
-    //   a_px gets dpx_dx (->-sgrad<X,FORWARD>) and dpx_dz (->-sgrad<Z,BACKWARD>)
-    //   a_pz gets dpz_dz (->-sgrad<Z,FORWARD>) and dpz_dx (->-sgrad<X,BACKWARD>)
-    float dqxx_dx = sgradient<2, Order, X, DIFF_FORWARD>(qxx_b, ix, 0, iz, grad_ctx);
-    // z-derivative transposes use the image-method ADJOINT at the free surface
-    // (forward dpx_dz was FORWARD/even, dpz_dz was BACKWARD/odd).
-    float dqxz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD>(qxz_b, ix, iz, grad_ctx, solver, false);
-    float dqzz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD>(qzz_b, ix, iz, grad_ctx, solver, true, true);
-    float dqzx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(qzx_b, ix, 0, iz, grad_ctx);
-
-    int idx = iz * solver.nx + ix;
-    f.vx[idx] += -(dqxx_dx + dqxz_dz) + pt_px_b[idx];   // exact transpose + pointwise
-    f.vz[idx] += -(dqzz_dz + dqzx_dx) + pt_pz_b[idx];
+    evr_stress_adjoint_apply_cell<Order>(ix, iz, b, wf, qxx, qzz, qxz, qzx, point_px, point_pz,
+                                         grad_ctx, solver);
 }
 
 using evr_stress_adjoint_apply_fn = void (*)(ElasticWavefieldPointer, const float*,
@@ -765,10 +953,16 @@ using evr_stress_adjoint_apply_fn = void (*)(ElasticWavefieldPointer, const floa
     SolverContext);
 SWEEP_BY_ORDER_DECL(evr_stress_adjoint_apply_fn, evr_stress_adjoint_apply_by_order);
 
-template<int Order>
-__global__ void evr_momentum_adjoint_prepare(
-    ElasticWavefieldPointer wf,
-    ElasticCPMLPointer cpml,
+// One cell of evr_momentum_adjoint_prepare: everything after the kernel's
+// bounds guard (launch/cell_path.h).  Interior box: the interior of the
+// legacy symmetric abcn + halo in_pml test (no free-surface logic here); no
+// optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void evr_momentum_adjoint_prepare_cell(
+    EvrCellIndex at,
+    const ElasticWavefieldPointer& wf,
+    const ElasticCPMLPointer& cpml,
     SolverContext solver,
     float* __restrict__ pxx,
     float* __restrict__ pzz,
@@ -776,12 +970,7 @@ __global__ void evr_momentum_adjoint_prepare(
     float* __restrict__ pzx
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
-
+    const int ix = at.ix, iz = at.iz, b = at.b;
     constexpr bool is_runtime = (Order == -1);
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
@@ -804,8 +993,10 @@ __global__ void evr_momentum_adjoint_prepare(
     float bar_dsxz_dx = solver.dt * inv_rho * f.vz[idx];
     float bar_dszz_dz = solver.dt * inv_rho * f.vz[idx];
 
-    bool in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
-                  (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
+    bool in_pml = false;
+    if constexpr (!interior_path<Path>)
+        in_pml = (ix < solver.abcn + halo) || (ix >= solver.nx - solver.abcn - halo) ||
+                 (iz < solver.abcn + halo) || (iz >= solver.nz - solver.abcn - halo);
     if (!in_pml) {
         pxx_b[idx] = bar_dsxx_dx;
         pxz_b[idx] = bar_dsxz_dz;
@@ -838,9 +1029,74 @@ __global__ void evr_momentum_adjoint_prepare(
     f.m_szzz[idx] = azh * tmp_szzz;
 }
 
+template<int Order>
+__global__ void evr_momentum_adjoint_prepare(
+    ElasticWavefieldPointer wf,
+    ElasticCPMLPointer cpml,
+    SolverContext solver,
+    float* __restrict__ pxx,
+    float* __restrict__ pzz,
+    float* __restrict__ pxz,
+    float* __restrict__ pzx
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    evr_momentum_adjoint_prepare_cell<Order>(EvrCellIndex{ix, iz, b}, wf, cpml, solver, pxx, pzz, pxz, pzx);
+}
+
 using evr_momentum_adjoint_prepare_fn = void (*)(ElasticWavefieldPointer,
     ElasticCPMLPointer, SolverContext, float*, float*, float*, float*);
 SWEEP_BY_ORDER_DECL(evr_momentum_adjoint_prepare_fn, evr_momentum_adjoint_prepare_by_order);
+
+// One cell of evr_momentum_adjoint_apply: everything after the kernel's
+// guards (launch/cell_path.h).  Interior box: the halo box inside the FS
+// adjoint helpers' box (common/host_rows.h elastic_fs_box_2d, adjoint); the z
+// free surface as the ELASTIC_FS_Z flag; no optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void evr_momentum_adjoint_apply_cell(
+    int ix, int iz, int b,
+    const ElasticWavefieldPointer& wf,
+    const float* __restrict__ pxx,
+    const float* __restrict__ pzz,
+    const float* __restrict__ pxz,
+    const float* __restrict__ pzx,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    int spatial_size = solver.nx * solver.nz;
+    auto f = wf.offset(b, spatial_size);
+
+    const float* pxx_b = pxx + b * spatial_size;
+    const float* pzz_b = pzz + b * spatial_size;
+    const float* pxz_b = pxz + b * spatial_size;
+    const float* pzx_b = pzx + b * spatial_size;
+
+    // EXACT transpose of the forward momentum update. The forward momentum
+    // kernel used
+    //   px += dt*(sgrad<X,FORWARD>(sxx) + sgrad<Z,BACKWARD>(sxz))
+    //   pz += dt*(sgrad<X,BACKWARD>(sxz) + sgrad<Z,FORWARD>(szz))
+    // so the transposes are the OPPOSITE-direction sgradient NEGATED
+    // (D_f^T=-D_b, D_b^T=-D_f). p* hold dt*adjoint-momentum
+    // (pxx<-dsxx_dx[F-x], pzz<-dszz_dz[F-z], pxz<-dsxz_dz[B-z], pzx<-dsxz_dx[B-x]).
+    float dpxx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(pxx_b, ix, 0, iz, grad_ctx);  // (F-x)^T
+    // z-derivative transposes use the image-method ADJOINT at the free surface
+    // (forward dszz_dz was FORWARD/odd, dsxz_dz was BACKWARD/odd).
+    float dpzz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD, Path>(pzz_b, ix, iz, grad_ctx, solver, true);  // (F-z)^T
+    float dpxz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(pxz_b, ix, iz, grad_ctx, solver, true, true); // (B-z)^T
+    float dpzx_dx = sgradient<2, Order, X, DIFF_FORWARD>(pzx_b, ix, 0, iz, grad_ctx);   // (B-x)^T
+
+    int idx = iz * solver.nx + ix;
+    f.sxx[idx] += -dpxx_dx;
+    f.szz[idx] += -dpzz_dz;
+    f.sxz[idx] += -(dpxz_dz + dpzx_dx);
+}
 
 template<int Order>
 __global__ void evr_momentum_adjoint_apply(
@@ -867,32 +1123,7 @@ __global__ void evr_momentum_adjoint_apply(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.nz;
-    auto f = wf.offset(b, spatial_size);
-
-    const float* pxx_b = pxx + b * spatial_size;
-    const float* pzz_b = pzz + b * spatial_size;
-    const float* pxz_b = pxz + b * spatial_size;
-    const float* pzx_b = pzx + b * spatial_size;
-
-    // EXACT transpose of the forward momentum update. The forward momentum
-    // kernel used
-    //   px += dt*(sgrad<X,FORWARD>(sxx) + sgrad<Z,BACKWARD>(sxz))
-    //   pz += dt*(sgrad<X,BACKWARD>(sxz) + sgrad<Z,FORWARD>(szz))
-    // so the transposes are the OPPOSITE-direction sgradient NEGATED
-    // (D_f^T=-D_b, D_b^T=-D_f). p* hold dt*adjoint-momentum
-    // (pxx<-dsxx_dx[F-x], pzz<-dszz_dz[F-z], pxz<-dsxz_dz[B-z], pzx<-dsxz_dx[B-x]).
-    float dpxx_dx = sgradient<2, Order, X, DIFF_BACKWARD>(pxx_b, ix, 0, iz, grad_ctx);  // (F-x)^T
-    // z-derivative transposes use the image-method ADJOINT at the free surface
-    // (forward dszz_dz was FORWARD/odd, dsxz_dz was BACKWARD/odd).
-    float dpzz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_FORWARD>(pzz_b, ix, iz, grad_ctx, solver, true);  // (F-z)^T
-    float dpxz_dz = elastic_top_fs_adjoint_sgradient_z_2d<Order, DIFF_BACKWARD>(pxz_b, ix, iz, grad_ctx, solver, true, true); // (B-z)^T
-    float dpzx_dx = sgradient<2, Order, X, DIFF_FORWARD>(pzx_b, ix, 0, iz, grad_ctx);   // (B-x)^T
-
-    int idx = iz * solver.nx + ix;
-    f.sxx[idx] += -dpxx_dx;
-    f.szz[idx] += -dpzz_dz;
-    f.sxz[idx] += -(dpxz_dz + dpzx_dx);
+    evr_momentum_adjoint_apply_cell<Order>(ix, iz, b, wf, pxx, pzz, pxz, pzx, grad_ctx, solver);
 }
 
 using evr_momentum_adjoint_apply_fn = void (*)(ElasticWavefieldPointer, const float*,
@@ -914,13 +1145,19 @@ SWEEP_BY_ORDER_DECL(evr_momentum_adjoint_apply_fn, evr_momentum_adjoint_apply_by
 // The chain-rule contribution through (dV/dx, dV/dz) is added by a
 // follow-up kernel.
 
-template<int Order>
-__global__ void calculate_grad_evr_nobs(
-    ElasticWavefieldPointer adjoint,
+// One cell of calculate_grad_evr_nobs: everything after the kernel's guards
+// (launch/cell_path.h); the kernel's fpx_prev / fpz_prev are never read, so
+// the cell does not take them.  Interior box: the halo box inside the FS
+// helpers' forward box (common/host_rows.h elastic_fs_box_2d, which also
+// keeps the surface rows -- the FS material derivative -- out); the z free
+// surface as the ELASTIC_FS_Z flag; no optional output.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void calculate_grad_evr_nobs_cell(
+    int ix, int iz, int b,
+    const ElasticWavefieldPointer& adjoint,
     const float* __restrict__ fpx,
     const float* __restrict__ fpz,
-    const float* __restrict__ fpx_prev,
-    const float* __restrict__ fpz_prev,
     const float* __restrict__ vp,
     const float* __restrict__ vs,
     const float* __restrict__ Rp_x,
@@ -933,30 +1170,14 @@ __global__ void calculate_grad_evr_nobs(
     float* __restrict__ grad_Rp_z,
     float* __restrict__ grad_Rs_x,
     float* __restrict__ grad_Rs_z,
-    // Chain-rule source tensors -- this kernel WRITES them; a subsequent
-    // kernel reads neighbours via transpose central FD into grad_vp/grad_vs.
     float* __restrict__ L_dVp_dx,
     float* __restrict__ L_dVp_dz,
     float* __restrict__ L_dVs_dx,
     float* __restrict__ L_dVs_dz,
-    SGradParam grad_ctx,
-    SolverContext solver
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
-
-    constexpr bool is_runtime = (Order == -1);
-    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
-    int halo = is_runtime ? solver.M : M_static;
-
-    if (ix < halo || ix >= solver.nx - halo ||
-        iz < halo || iz >= solver.nz - halo)
-        return;
-
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
 
@@ -990,8 +1211,8 @@ __global__ void calculate_grad_evr_nobs(
     float fpx_x = sgradient<2, Order, X, DIFF_BACKWARD>(fpx_b, ix, 0, iz, grad_ctx);
     // forward momentum z-derivatives use the image-method mirror at the surface
     // (matches the forward stress kernel: pz BACKWARD/odd, px FORWARD/even).
-    float fpz_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(fpz_b, ix, iz, grad_ctx, solver, true, true);
-    float fpx_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD>(fpx_b, ix, iz, grad_ctx, solver, false);
+    float fpz_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(fpz_b, ix, iz, grad_ctx, solver, true, true);
+    float fpx_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path>(fpx_b, ix, iz, grad_ctx, solver, false);
     float fpz_x = sgradient<2, Order, X, DIFF_FORWARD>(fpz_b, ix, 0, iz, grad_ctx);
 
     // Forward velocity gradients (4th-order central) -- needed for the
@@ -1007,7 +1228,7 @@ __global__ void calculate_grad_evr_nobs(
     float Rsx = Rsx_b[idx], Rsz = Rsz_b[idx];
     float px = fpx_b[idx], pz = fpz_b[idx];
 
-    bool is_fs = elastic_is_top_free_surface_row(solver, iz);
+    bool is_fs = elastic_is_top_free_surface_row<Path>(solver, iz);
     if (is_fs) {
         // Material derivative of the VR FS sigma_xx fix.  Forward surface row:
         //   sxx = old + dt * C_surf * dpx_dx,  C_surf = 4 vs^2 (vp^2 - vs^2)/vp^2.
@@ -1074,6 +1295,55 @@ __global__ void calculate_grad_evr_nobs(
     lvsz_b[idx] = L_gS_zz * Vs * pz + L_gS_zx * Vs * px;
 }
 
+template<int Order>
+__global__ void calculate_grad_evr_nobs(
+    ElasticWavefieldPointer adjoint,
+    const float* __restrict__ fpx,
+    const float* __restrict__ fpz,
+    const float* __restrict__ fpx_prev,
+    const float* __restrict__ fpz_prev,
+    const float* __restrict__ vp,
+    const float* __restrict__ vs,
+    const float* __restrict__ Rp_x,
+    const float* __restrict__ Rp_z,
+    const float* __restrict__ Rs_x,
+    const float* __restrict__ Rs_z,
+    float* __restrict__ grad_vp,
+    float* __restrict__ grad_vs,
+    float* __restrict__ grad_Rp_x,
+    float* __restrict__ grad_Rp_z,
+    float* __restrict__ grad_Rs_x,
+    float* __restrict__ grad_Rs_z,
+    // Chain-rule source tensors -- this kernel WRITES them; a subsequent
+    // kernel reads neighbours via transpose central FD into grad_vp/grad_vs.
+    float* __restrict__ L_dVp_dx,
+    float* __restrict__ L_dVp_dz,
+    float* __restrict__ L_dVs_dx,
+    float* __restrict__ L_dVs_dz,
+    SGradParam grad_ctx,
+    SolverContext solver
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
+    if (ix < halo || ix >= solver.nx - halo ||
+        iz < halo || iz >= solver.nz - halo)
+        return;
+
+    calculate_grad_evr_nobs_cell<Order>(ix, iz, b, adjoint, fpx, fpz, vp, vs, Rp_x, Rp_z, Rs_x,
+                                        Rs_z, grad_vp, grad_vs, grad_Rp_x, grad_Rp_z, grad_Rs_x,
+                                        grad_Rs_z, L_dVp_dx, L_dVp_dz, L_dVs_dx, L_dVs_dz,
+                                        grad_ctx, solver);
+}
+
 using calculate_grad_evr_nobs_fn = void (*)(ElasticWavefieldPointer, const float*,
     const float*, const float*, const float*, const float*, const float*, const float*,
     const float*, const float*, const float*, float*, float*, float*, float*, float*,
@@ -1082,6 +1352,47 @@ SWEEP_BY_ORDER_DECL(calculate_grad_evr_nobs_fn, calculate_grad_evr_nobs_by_order
 
 #define LAUNCH_EVR_GRAD_CHAIN_APPLY(order, grid, block, ...) \
     SWEEP_LAUNCH_BY_ORDER(elastic_vr2d_kernels::evr_grad_chain_apply_by_order, order, grid, block, __VA_ARGS__)
+
+// One cell of evr_grad_chain_apply: everything after the kernel's guards
+// (launch/cell_path.h).  Straight-line: no PML, no free surface, no optional
+// output, so the interior box is the whole guard box ([h, n - h)^2 with
+// h = Order / 2, 2 for Order -1 -- not solver.M).
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void evr_grad_chain_apply_cell(
+    int ix, int iz, int b,
+    const float* __restrict__ L_dVp_dx,
+    const float* __restrict__ L_dVp_dz,
+    const float* __restrict__ L_dVs_dx,
+    const float* __restrict__ L_dVs_dz,
+    float* __restrict__ grad_vp,
+    float* __restrict__ grad_vs,
+    const SGradParam& grad_ctx,
+    const SolverContext& solver
+)
+{
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+
+    const float* lvpx_b = L_dVp_dx + b * spatial_size;
+    const float* lvpz_b = L_dVp_dz + b * spatial_size;
+    const float* lvsx_b = L_dVs_dx + b * spatial_size;
+    const float* lvsz_b = L_dVs_dz + b * spatial_size;
+    float* gvp_b = grad_vp + b * spatial_size;
+    float* gvs_b = grad_vs + b * spatial_size;
+
+    // Central FD is anti-symmetric: A^T = -A. So
+    //   grad_vp += -central_dx(L_(dV_P/dx)) - central_dz(L_(dV_P/dz))
+    // Use the SAME canonical centered stencil (same order) as the forward
+    // model-gradient pass so the discrete transpose is exact.
+    float ext_vp_dx = evr_model_grad_x<Order>(lvpx_b, ix, iz, grad_ctx);
+    float ext_vp_dz = evr_model_grad_z<Order>(lvpz_b, ix, iz, grad_ctx);
+    float ext_vs_dx = evr_model_grad_x<Order>(lvsx_b, ix, iz, grad_ctx);
+    float ext_vs_dz = evr_model_grad_z<Order>(lvsz_b, ix, iz, grad_ctx);
+
+    gvp_b[idx] += -(ext_vp_dx + ext_vp_dz);
+    gvs_b[idx] += -(ext_vs_dx + ext_vs_dz);
+}
 
 template<int Order>
 __global__ void evr_grad_chain_apply(
@@ -1109,27 +1420,8 @@ __global__ void evr_grad_chain_apply(
         iz < halo || iz >= solver.nz - halo)
         return;
 
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-
-    const float* lvpx_b = L_dVp_dx + b * spatial_size;
-    const float* lvpz_b = L_dVp_dz + b * spatial_size;
-    const float* lvsx_b = L_dVs_dx + b * spatial_size;
-    const float* lvsz_b = L_dVs_dz + b * spatial_size;
-    float* gvp_b = grad_vp + b * spatial_size;
-    float* gvs_b = grad_vs + b * spatial_size;
-
-    // Central FD is anti-symmetric: A^T = -A. So
-    //   grad_vp += -central_dx(L_(dV_P/dx)) - central_dz(L_(dV_P/dz))
-    // Use the SAME canonical centered stencil (same order) as the forward
-    // model-gradient pass so the discrete transpose is exact.
-    float ext_vp_dx = evr_model_grad_x<Order>(lvpx_b, ix, iz, grad_ctx);
-    float ext_vp_dz = evr_model_grad_z<Order>(lvpz_b, ix, iz, grad_ctx);
-    float ext_vs_dx = evr_model_grad_x<Order>(lvsx_b, ix, iz, grad_ctx);
-    float ext_vs_dz = evr_model_grad_z<Order>(lvsz_b, ix, iz, grad_ctx);
-
-    gvp_b[idx] += -(ext_vp_dx + ext_vp_dz);
-    gvs_b[idx] += -(ext_vs_dx + ext_vs_dz);
+    evr_grad_chain_apply_cell<Order>(ix, iz, b, L_dVp_dx, L_dVp_dz, L_dVs_dx, L_dVs_dz, grad_vp,
+                                     grad_vs, grad_ctx, solver);
 }
 
 using evr_grad_chain_apply_fn = void (*)(const float*, const float*, const float*,

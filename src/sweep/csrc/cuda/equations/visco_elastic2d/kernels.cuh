@@ -100,31 +100,31 @@ __device__ __forceinline__ bool visco_elastic2d_in_cpml(const SolverContext& sol
            (!solver.cut_z_hi() && iz >= solver.nz - solver.padHi(0) - halo);
 }
 
-template<int Order>
-__global__ void __launch_bounds__(256, 4) visco_elastic2d_stress_kernel(
-    ElasticWavefieldPointer wf,
-    ViscoElastic2dMemory mem,
-    ViscoElastic2dModel m,
-    float* __restrict__ u_this,     // (2, B, nz, nx) vx/vz snapshot, or null
-    float* __restrict__ fs_strain,  // (B, S) surface strip, or null
-    SGradParam grad_ctx,
-    ElasticCPMLPointer cpml,
-    SolverContext solver
+// One cell of visco_elastic2d_stress_kernel: everything after the kernel's
+// guards (launch/cell_path.h).  Interior box: the visco_elastic2d_in_cpml
+// test's interior, inside the FS helpers' forward box (common/host_rows.h
+// elastic_fs_box_2d: no surface row/column, so neither the surface strain
+// solve -- the only fs_strain store -- nor the traction BC fires); FS faces as
+// the ELASTIC_FS_Z / ELASTIC_FS_X flags; optional output: u_this.  ``LMech``
+// is the mechanism count m.L made compile-time for an interior path (the host
+// launcher dispatches it, 1..4); the Any path reads m.L as it always did.
+template<int Order, CellPath Path = CellPath::Any, int LMech = 0>
+__device__ __forceinline__
+void visco_elastic2d_stress_cell(
+    int ix, int iz, int b,
+    const ElasticWavefieldPointer& wf,
+    const ViscoElastic2dMemory& mem,
+    const ViscoElastic2dModel& m,
+    float* __restrict__ u_this,
+    float* __restrict__ fs_strain,
+    const SGradParam& grad_ctx,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
-
     constexpr bool is_runtime = (Order == -1);
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
-
-    if (ix < halo || ix >= solver.nx - halo ||
-        iz < halo || iz >= solver.nz - halo)
-        return;
 
     int spatial_size = solver.nx * solver.nz;
     int idx = iz * solver.nx + ix;
@@ -132,12 +132,12 @@ __global__ void __launch_bounds__(256, 4) visco_elastic2d_stress_kernel(
 
     auto f = wf.offset(b, spatial_size);
 
-    float dvx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD> (f.vx, ix, iz, grad_ctx, solver, true, true);
-    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(f.vz, ix, iz, grad_ctx, solver, true, true);
-    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (f.vx, ix, iz, grad_ctx, solver, false);
-    float dvz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD>  (f.vz, ix, iz, grad_ctx, solver, false);
+    float dvx_dx = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD, Path> (f.vx, ix, iz, grad_ctx, solver, true, true);
+    float dvz_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(f.vz, ix, iz, grad_ctx, solver, true, true);
+    float dvx_dz = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path> (f.vx, ix, iz, grad_ctx, solver, false);
+    float dvz_dx = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD, Path>  (f.vz, ix, iz, grad_ctx, solver, false);
 
-    if (visco_elastic2d_in_cpml(solver, ix, iz, halo)) {
+    if (!interior_path<Path> && visco_elastic2d_in_cpml(solver, ix, iz, halo)) {
         // Slab-resident CPML memories: exactly elastic_stress_kernel's update.
         long xi = solver.aux_rd_x2(iz, ix);
         long zi = solver.aux_rd_z2(iz, ix);
@@ -158,7 +158,7 @@ __global__ void __launch_bounds__(256, 4) visco_elastic2d_stress_kernel(
         dvz_dx += m_vzx;
     }
 
-    const int L = m.L;
+    const int L = interior_path<Path> ? LMech : m.L;
     const float lam = m.lam[off];
     const float mu_ = m.mu[off];
     const float l2m = m.lam2mu[off];
@@ -178,8 +178,8 @@ __global__ void __launch_bounds__(256, 4) visco_elastic2d_stress_kernel(
     float ezz = dvz_dz;
     const float exz = dvx_dz + dvz_dx;
 
-    const bool is_z_fs = elastic_is_top_free_surface_row(solver, iz);
-    const bool is_x_fs = elastic_is_x_free_surface_col(solver, ix);
+    const bool is_z_fs = elastic_is_top_free_surface_row<Path>(solver, iz);
+    const bool is_x_fs = elastic_is_x_free_surface_col<Path>(solver, ix);
     if (is_z_fs || is_x_fs) {
         float sum_cp = 0.f, sum_cross = 0.f;
         #pragma unroll
@@ -241,16 +241,45 @@ __global__ void __launch_bounds__(256, 4) visco_elastic2d_stress_kernel(
     // Traction BC: normal stress on each active face, shear on high faces only.
     if (is_z_fs) szz = 0.f;
     if (is_x_fs) sxx = 0.f;
-    if (elastic_fs_zero_shear(solver, ix, iz)) sxz = 0.f;
+    if (elastic_fs_zero_shear<Path>(solver, ix, iz)) sxz = 0.f;
     f.szz[idx] = szz;
     f.sxx[idx] = sxx;
     f.sxz[idx] = sxz;
 
-    if (u_this) {
+    if (optional_output<Path>(u_this)) {
         const long comp_stride = (long)solver.B * spatial_size;
         u_this[off] = f.vx[idx];
         u_this[comp_stride + off] = f.vz[idx];
     }
+}
+
+template<int Order>
+__global__ void __launch_bounds__(256, 4) visco_elastic2d_stress_kernel(
+    ElasticWavefieldPointer wf,
+    ViscoElastic2dMemory mem,
+    ViscoElastic2dModel m,
+    float* __restrict__ u_this,     // (2, B, nz, nx) vx/vz snapshot, or null
+    float* __restrict__ fs_strain,  // (B, S) surface strip, or null
+    SGradParam grad_ctx,
+    ElasticCPMLPointer cpml,
+    SolverContext solver
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    constexpr bool is_runtime = (Order == -1);
+    constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
+    int halo = is_runtime ? solver.M : M_static;
+
+    if (ix < halo || ix >= solver.nx - halo ||
+        iz < halo || iz >= solver.nz - halo)
+        return;
+
+    visco_elastic2d_stress_cell<Order>(ix, iz, b, wf, mem, m, u_this, fs_strain, grad_ctx, cpml, solver);
 }
 
 using visco_elastic2d_stress_kernel_fn = void (*)(ElasticWavefieldPointer,
@@ -264,27 +293,33 @@ SWEEP_BY_ORDER_DECL(visco_elastic2d_stress_kernel_fn, visco_elastic2d_stress_ker
 // With ``g`` set it also accumulates this reverse step's model gradient; the
 // operands are the un-mutated post-source adjoint at entry, as elastic2d's
 // fused imaging.
-template<int Order>
-__global__ void visco_elastic2d_stress_adjoint_prepare(
-    ElasticWavefieldPointer wf,
-    ViscoElastic2dMemory mem,
-    ViscoElastic2dModel m,
-    ElasticCPMLPointer cpml,
-    SolverContext solver,
+//
+// One cell of it: everything after the kernel's bounds guard
+// (launch/cell_path.h).  Interior box: the visco_elastic2d_in_cpml test's
+// interior (where the q* stores return), inside the FS helpers' forward box
+// (common/host_rows.h elastic_fs_box_2d: no surface row/column, so no traction
+// or surface-solve transpose and no fs_strain read, and the imaging stencils
+// on the forward v mirror nothing) and, with imaging, inside the physical
+// box; FS faces as the ELASTIC_FS_Z / ELASTIC_FS_X flags; optional output: the
+// fused imaging (g.g_lam decides for every gradient pointer).  ``LMech`` as in
+// visco_elastic2d_stress_cell.
+template<int Order, CellPath Path = CellPath::Any, int LMech = 0>
+__device__ __forceinline__
+void visco_elastic2d_stress_adjoint_prepare_cell(
+    int ix, int iz, int b,
+    const ElasticWavefieldPointer& wf,
+    const ViscoElastic2dMemory& mem,
+    const ViscoElastic2dModel& m,
+    const ElasticCPMLPointer& cpml,
+    const SolverContext& solver,
     float* __restrict__ qxx,
     float* __restrict__ qzz,
     float* __restrict__ qxz,
     float* __restrict__ qzx,
-    SGradParam grad_ctx,
-    ViscoElastic2dGrad g
+    const SGradParam& grad_ctx,
+    const ViscoElastic2dGrad& g
 )
 {
-    int ix = blockIdx.x * blockDim.x + threadIdx.x;
-    int iz = blockIdx.y * blockDim.y + threadIdx.y;
-    int b  = blockIdx.z;
-
-    if (ix >= solver.nx || iz >= solver.nz) return;
-
     constexpr bool is_runtime = (Order == -1);
     constexpr int  M_static   = is_runtime ? 0 : (Order / 2);
     int halo = is_runtime ? solver.M : M_static;
@@ -295,7 +330,7 @@ __global__ void visco_elastic2d_stress_adjoint_prepare(
 
     auto f = wf.offset(b, spatial_size);
 
-    const int L = m.L;
+    const int L = interior_path<Path> ? LMech : m.L;
     const float dt  = solver.dt;
     const float hdt = 0.5f * dt;
     const float lam = m.lam[off];
@@ -310,14 +345,14 @@ __global__ void visco_elastic2d_stress_adjoint_prepare(
     }
 
     // Transpose of the traction zeroing (as elastic_stress_adjoint_prepare).
-    const bool is_z_fs = elastic_is_top_free_surface_row(solver, iz);
-    const bool is_x_fs = elastic_is_x_free_surface_col(solver, ix);
+    const bool is_z_fs = elastic_is_top_free_surface_row<Path>(solver, iz);
+    const bool is_x_fs = elastic_is_x_free_surface_col<Path>(solver, ix);
     float bar_sxx = f.sxx[idx];
     float bar_szz = f.szz[idx];
     float bar_sxz = f.sxz[idx];
     if (is_z_fs) { bar_szz = 0.f; f.szz[idx] = 0.f; }
     if (is_x_fs) { bar_sxx = 0.f; f.sxx[idx] = 0.f; }
-    if (elastic_fs_zero_shear(solver, ix, iz)) { bar_sxz = 0.f; f.sxz[idx] = 0.f; }
+    if (elastic_fs_zero_shear<Path>(solver, ix, iz)) { bar_sxz = 0.f; f.sxz[idx] = 0.f; }
 
     // Total multiplier of r^{it+1}: its own adjoint plus the dt/2 stress coupling.
     float rho_xx[VISCO_ELASTIC2D_MAX_SLS], rho_zz[VISCO_ELASTIC2D_MAX_SLS], rho_xz[VISCO_ELASTIC2D_MAX_SLS];
@@ -381,15 +416,20 @@ __global__ void visco_elastic2d_stress_adjoint_prepare(
     // adjoint velocity, which carries the true sign (as elastic2d).  Physical
     // box only, as elastic2d: EdgePadding.backward crops the rest, and the
     // prepared models are pointwise in the user's.
-    if (g.g_lam != nullptr &&
-        ix >= solver.phys_x0() && ix < solver.phys_x1() &&
-        iz >= solver.phys_z0() && iz < solver.phys_z1()) {
+    bool image;
+    if constexpr (interior_path<Path>)   // the box is inside the physical box
+        image = optional_output<Path>(g.g_lam);
+    else
+        image = g.g_lam != nullptr &&
+            ix >= solver.phys_x0() && ix < solver.phys_x1() &&
+            iz >= solver.phys_z0() && iz < solver.phys_z1();
+    if (image) {
         const float* fvx_b = g.fvx + (long)b * spatial_size;
         const float* fvz_b = g.fvz + (long)b * spatial_size;
-        const float fvx_x = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD>(fvx_b, ix, iz, grad_ctx, solver, true, true);
-        const float fvz_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD>(fvz_b, ix, iz, grad_ctx, solver, true, true);
-        const float fvx_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD> (fvx_b, ix, iz, grad_ctx, solver, false);
-        const float fvz_x = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD>(fvz_b, ix, iz, grad_ctx, solver, false);
+        const float fvx_x = elastic_fs_sgradient_x_2d<Order, DIFF_BACKWARD, Path>(fvx_b, ix, iz, grad_ctx, solver, true, true);
+        const float fvz_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_BACKWARD, Path>(fvz_b, ix, iz, grad_ctx, solver, true, true);
+        const float fvx_z = elastic_top_fs_sgradient_z_2d<Order, DIFF_FORWARD, Path> (fvx_b, ix, iz, grad_ctx, solver, false);
+        const float fvz_x = elastic_fs_sgradient_x_2d<Order, DIFF_FORWARD, Path>(fvz_b, ix, iz, grad_ctx, solver, false);
 
         const float exx_raw = fvx_x;
         const float exz = fvx_z + fvz_x;
@@ -462,7 +502,7 @@ __global__ void visco_elastic2d_stress_adjoint_prepare(
     float* qzz_b = qzz + (long)b * spatial_size;
     float* qxz_b = qxz + (long)b * spatial_size;
     float* qzx_b = qzx + (long)b * spatial_size;
-    if (!visco_elastic2d_in_cpml(solver, ix, iz, halo)) {
+    if (interior_path<Path> || !visco_elastic2d_in_cpml(solver, ix, iz, halo)) {
         qxx_b[idx] = bxx;
         qzz_b[idx] = bzz;
         qxz_b[idx] = bxz;
@@ -487,6 +527,31 @@ __global__ void visco_elastic2d_stress_adjoint_prepare(
         f.m_vzz[zi] = cpml.az[iz]  * tmp_vzz;
         f.m_vxz[zi] = cpml.azh[iz] * tmp_vxz;
     }
+}
+
+template<int Order>
+__global__ void visco_elastic2d_stress_adjoint_prepare(
+    ElasticWavefieldPointer wf,
+    ViscoElastic2dMemory mem,
+    ViscoElastic2dModel m,
+    ElasticCPMLPointer cpml,
+    SolverContext solver,
+    float* __restrict__ qxx,
+    float* __restrict__ qzz,
+    float* __restrict__ qxz,
+    float* __restrict__ qzx,
+    SGradParam grad_ctx,
+    ViscoElastic2dGrad g
+)
+{
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iz = blockIdx.y * blockDim.y + threadIdx.y;
+    int b  = blockIdx.z;
+
+    if (ix >= solver.nx || iz >= solver.nz) return;
+
+    visco_elastic2d_stress_adjoint_prepare_cell<Order>(ix, iz, b, wf, mem, m, cpml, solver,
+                                                       qxx, qzz, qxz, qzx, grad_ctx, g);
 }
 
 using visco_elastic2d_stress_adjoint_prepare_fn = void (*)(ElasticWavefieldPointer,

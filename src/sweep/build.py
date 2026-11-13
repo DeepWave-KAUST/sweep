@@ -40,6 +40,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -246,8 +247,13 @@ def main(argv=None) -> int:
                     help="build without a visible device; TORCH_CUDA_ARCH_LIST "
                          "must name the target architecture")
     ap.add_argument("--core", action="store_true",
-                    help="build only the torch-free core as a fat binary for the "
+                    help="build only the torch-free CUDA core as a fat binary for the "
                          "wheel (no GPU needed); see --archs/--out/--cuda-home")
+    ap.add_argument("--cpu", action="store_true",
+                    help="build the host (CPU) core: the same sources compiled by g++ "
+                         "(no nvcc, no GPU) into the cache a CPU-device impl='c' loads; "
+                         "with --out (or --core) it is filed under sweep/lib/cpu/ with its "
+                         "core.json for the wheel")
     ap.add_argument("--archs", default=None,
                     help="--core: TORCH_CUDA_ARCH_LIST spelling; the default is the "
                          "recommended list for the nvcc's CUDA major -- cu12: "
@@ -265,6 +271,31 @@ def main(argv=None) -> int:
     ap.add_argument("--cuda-home", default=None,
                     help="--core: toolkit with bin/nvcc (default: what sweep would use)")
     a = ap.parse_args(argv)
+
+    if a.cpu:
+        from sweep.backend.c import hostcore, jit
+        try:
+            if a.core or a.out:
+                out_dir = Path(a.out) if a.out else jit._PKG / "lib" / "cpu"
+                # Built in the cache, as a CUDA core is in its scratch dir: the
+                # drawer gets the .so and its core.json, not the build's objects.
+                built = hostcore.build_core(verbose=True)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                so = out_dir / "libsweep_core.so"
+                tmp = out_dir / f".libsweep_core.so.{os.getpid()}.tmp"
+                shutil.copyfile(built, tmp)
+                os.chmod(tmp, 0o755)
+                os.replace(tmp, so)       # a new inode: a process that maps the old core keeps it
+                sidecar = hostcore.write_sidecar(out_dir, hostcore.find_host_cxx())
+                print(f"{so} ({so.stat().st_size / 2**20:.1f} MB)")
+                print(str(sidecar))
+            else:
+                so = hostcore.build_core(verbose=True)
+                print(f"the host (CPU) core is at {so}")
+        except Exception as exc:
+            print(f"host core build failed: {exc}", file=sys.stderr)
+            return 1
+        return 0
 
     if a.core:
         try:

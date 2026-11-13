@@ -1,4 +1,5 @@
 #include "kernels.cuh"
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 namespace sem2d {
 
@@ -769,20 +770,20 @@ void sem2d_band_save(const float* field, const long* band_idx,
     float* sc = nullptr;
     if (h.kind == SEM_BAND_I8) {
         sc = h.scale + static_cast<size_t>(step) * B;
-        sem2d_band_amax<<<dim3(1, B), 256, 0, stream>>>(field, band_idx, sc, nband, ng);
+        SWEEP_LAUNCH_ON(sem2d_band_amax, dim3(1, B), 256, 0, stream, field, band_idx, sc, nband, ng);
     }
     switch (h.kind) {
     case SEM_BAND_BF16:
-        sem2d_band_gather_q<__nv_bfloat16><<<g, tpb, 0, stream>>>(
+        SWEEP_LAUNCH_ON((sem2d_band_gather_q<__nv_bfloat16>), g, tpb, 0, stream,
             field, band_idx, static_cast<__nv_bfloat16*>(h.data) + off,
             nullptr, nband, ng);
         break;
     case SEM_BAND_I8:
-        sem2d_band_gather_q<signed char><<<g, tpb, 0, stream>>>(
+        SWEEP_LAUNCH_ON((sem2d_band_gather_q<signed char>), g, tpb, 0, stream,
             field, band_idx, static_cast<signed char*>(h.data) + off, sc, nband, ng);
         break;
     default:
-        sem2d_band_gather<<<g, tpb, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_band_gather, g, tpb, 0, stream,
             field, band_idx, static_cast<float*>(h.data) + off, nband, ng);
     }
 }
@@ -796,17 +797,17 @@ void sem2d_band_load(SemBandHist h, long step, const long* band_idx,
     const size_t off = static_cast<size_t>(step) * nband * B;
     switch (h.kind) {
     case SEM_BAND_BF16:
-        sem2d_band_scatter_q<__nv_bfloat16><<<g, tpb, 0, stream>>>(
+        SWEEP_LAUNCH_ON((sem2d_band_scatter_q<__nv_bfloat16>), g, tpb, 0, stream,
             static_cast<const __nv_bfloat16*>(h.data) + off, band_idx, field,
             nullptr, nband, ng);
         break;
     case SEM_BAND_I8:
-        sem2d_band_scatter_q<signed char><<<g, tpb, 0, stream>>>(
+        SWEEP_LAUNCH_ON((sem2d_band_scatter_q<signed char>), g, tpb, 0, stream,
             static_cast<const signed char*>(h.data) + off, band_idx, field,
             h.scale + static_cast<size_t>(step) * B, nband, ng);
         break;
     default:
-        sem2d_band_scatter<<<g, tpb, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_band_scatter, g, tpb, 0, stream,
             static_cast<const float*>(h.data) + off, band_idx, field, nband, ng);
     }
 }
@@ -932,22 +933,22 @@ void sem2d_band_save_elem(const float* field,
     float* sc = nullptr;
     if (h.kind == SEM_BAND_I8) {
         sc = h.scale + static_cast<size_t>(step) * B * nbe;
-        sem2d_band_amax_elem<<<dim3(nbe, B), 128, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_band_amax_elem, dim3(nbe, B), 128, 0, stream,
             field, elem_idx, sc, nbe, m, Em);
     }
     switch (h.kind) {
     case SEM_BAND_BF16:
-        sem2d_band_gather_elem_q<__nv_bfloat16><<<g, tpb, 0, stream>>>(
+        SWEEP_LAUNCH_ON((sem2d_band_gather_elem_q<__nv_bfloat16>), g, tpb, 0, stream,
             field, elem_idx, static_cast<__nv_bfloat16*>(h.data) + off,
             nullptr, nbe, m, Em);
         break;
     case SEM_BAND_I8:
-        sem2d_band_gather_elem_q<signed char><<<g, tpb, 0, stream>>>(
+        SWEEP_LAUNCH_ON((sem2d_band_gather_elem_q<signed char>), g, tpb, 0, stream,
             field, elem_idx, static_cast<signed char*>(h.data) + off, sc,
             nbe, m, Em);
         break;
     default:
-        sem2d_band_gather_elem<<<g, tpb, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_band_gather_elem, g, tpb, 0, stream,
             field, elem_idx, static_cast<float*>(h.data) + off, nbe, m, Em);
     }
 }
@@ -962,17 +963,17 @@ void sem2d_band_load_elem(SemBandHist h, long step,
     const size_t off = static_cast<size_t>(step) * n * B;
     switch (h.kind) {
     case SEM_BAND_BF16:
-        sem2d_band_scatter_elem_q<__nv_bfloat16><<<g, tpb, 0, stream>>>(
+        SWEEP_LAUNCH_ON((sem2d_band_scatter_elem_q<__nv_bfloat16>), g, tpb, 0, stream,
             static_cast<const __nv_bfloat16*>(h.data) + off, elem_idx, field,
             nullptr, nbe, m, Em);
         break;
     case SEM_BAND_I8:
-        sem2d_band_scatter_elem_q<signed char><<<g, tpb, 0, stream>>>(
+        SWEEP_LAUNCH_ON((sem2d_band_scatter_elem_q<signed char>), g, tpb, 0, stream,
             static_cast<const signed char*>(h.data) + off, elem_idx, field,
             h.scale + static_cast<size_t>(step) * B * nbe, nbe, m, Em);
         break;
     default:
-        sem2d_band_scatter_elem<<<g, tpb, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_band_scatter_elem, g, tpb, 0, stream,
             static_cast<const float*>(h.data) + off, elem_idx, field, nbe, m,
             Em);
     }

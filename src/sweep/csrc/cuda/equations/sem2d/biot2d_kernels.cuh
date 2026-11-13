@@ -239,6 +239,6 @@ __global__ void biot2d_inject_p_T(
 // Launch KERNEL<TENSOR> for the input's drag.
 // KERNEL##_by_flag is the kernel's table, <false> then <true>.
 #define BIOT2D_LAUNCH_T(tensor, KERNEL, grid, block, shmem, stream, ...) \
-    KERNEL##_by_flag[(tensor) ? 1 : 0]<<<grid, block, shmem, stream>>>(__VA_ARGS__)
+    SWEEP_LAUNCH_ON(KERNEL##_by_flag[(tensor) ? 1 : 0], grid, block, shmem, stream, __VA_ARGS__)
 
 } // namespace sem2d

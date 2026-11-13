@@ -60,8 +60,16 @@ from .drivers.bare import (_SEMAcousticC, _SEMElasticC, _SEMAcoustic3DC,
 
 
 def sem_c_available() -> bool:
-    """True when the compiled ``sweep._C`` binding with the SEM entry points is usable."""
+    """True when the compiled ``sweep._C`` binding with the SEM entry points is usable.
+
+    The SEM kernels run on CUDA only, so a box without a CUDA device answers
+    False before touching ``sweep._C``: that namespace also serves the host
+    (CPU) core, which carries the SEM entries as stubs (and loading it could
+    mean building it)."""
     try:
+        import torch
+        if not torch.cuda.is_available():
+            return False
         import sweep._C as _C
         return hasattr(_C, "sem2d_acoustic_forward")
     except Exception:

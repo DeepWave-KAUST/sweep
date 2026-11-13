@@ -32,6 +32,7 @@
 #pragma once
 
 #include <cuda_runtime.h>
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 #include <algorithm>
 
@@ -255,7 +256,7 @@ struct Driver {
         sctx.x_base = xb;
         sctx.x_limit = xe;
         auto L = fdtd::Wave2D::make(xe - xb, s.nz, s.B);
-        Tables<TILT>::forward()[sweep_order_slot(s.order)]<<<L.grid, L.block>>>(
+        SWEEP_LAUNCH((Tables<TILT>::forward()[sweep_order_slot(s.order)]), L.grid, L.block,
             view, s.models, cpml, sctx);
     }
 
@@ -280,7 +281,7 @@ struct Driver {
                                   const AcousticWavefieldPointer& view,
                                   const ForwardInputCore& p, int it, int nsrc)
     {
-        add_source<<<s.source_config.grid, s.source_config.block>>>(
+        SWEEP_LAUNCH(add_source, s.source_config.grid, s.source_config.block,
             view.u_next, p.source.data_ptr<float>(), p.sources_loc.data_ptr<int>(), it, nsrc, ctx);
     }
 
@@ -288,7 +289,7 @@ struct Driver {
                        const AcousticWavefieldPointer& view,
                        Buf& record, const ForwardInputCore& p, int it, int nrec)
     {
-        record_kernel<<<s.record_config.grid, s.record_config.block>>>(
+        SWEEP_LAUNCH(record_kernel, s.record_config.grid, s.record_config.block,
             view.u_next, record.data_ptr<float>(), p.receivers_loc.data_ptr<int>(), it, nrec, ctx);
     }
 
@@ -378,9 +379,9 @@ struct Driver {
             gr = ws.grads;
         }
         const int slot = sweep_order_slot(s.order);
-        Tables<TILT>::prep()[slot]<<<s.launch_config.grid, s.launch_config.block>>>(
+        SWEEP_LAUNCH((Tables<TILT>::prep()[slot]), s.launch_config.grid, s.launch_config.block,
             adj_view, st, s.models, cpml, ctx, ws.scr, gr, s.exact_s);
-        qp_adjoint_apply_by_order[slot]<<<s.launch_config.grid, s.launch_config.block>>>(
+        SWEEP_LAUNCH(qp_adjoint_apply_by_order[slot], s.launch_config.grid, s.launch_config.block,
             adj_view, ws.scr, cpml, ctx);
     }
 
@@ -389,7 +390,7 @@ struct Driver {
                                       const BackwardInputCore& p, int it, int nsrc,
                                       BwdWorkspace&)
     {
-        add_source<<<s.record_config.grid, s.record_config.block>>>(
+        SWEEP_LAUNCH(add_source, s.record_config.grid, s.record_config.block,
             adj_view.u_next, p.adjoint_source.data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(), it, nsrc, ctx);
     }
@@ -403,7 +404,7 @@ struct Driver {
                                        Wavefield& adjoint, const BackwardInputCore& p,
                                        std::vector<Buf>& grads, int it, int nsrc)
     {
-        accumulate_source_grad_2d<<<s.source_config.grid, s.source_config.block>>>(
+        SWEEP_LAUNCH(accumulate_source_grad_2d, s.source_config.grid, s.source_config.block,
             adjoint.u_now_t.data_ptr<float>(), grads[0].data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(), it, nsrc, ctx);
     }
@@ -453,10 +454,10 @@ struct Driver {
     {
         auto for_view = forward.view();
         // p^{it-1} on the deep interior, without the step-it source ...
-        Tables<TILT>::reverse()[sweep_order_slot(s.order)]<<<s.launch_config.grid, s.launch_config.block>>>(
+        SWEEP_LAUNCH((Tables<TILT>::reverse()[sweep_order_slot(s.order)]), s.launch_config.grid, s.launch_config.block,
             for_view, s.models, cpml, ctx, save_width);
         // ... plus it; a source cell inside the frame is overwritten below.
-        add_source<<<s.source_config.grid, s.source_config.block>>>(
+        SWEEP_LAUNCH(add_source, s.source_config.grid, s.source_config.block,
             for_view.u_next, p.forward_source.data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(), it,
             (int)p.forward_sources_loc.size(1), ctx);

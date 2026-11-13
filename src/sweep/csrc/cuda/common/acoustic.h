@@ -329,10 +329,17 @@ struct AcousticWavefieldTensor {
         if (dim_ == 2) {
             check(psix_t,  slot(2), "psix");  check(psiz_t,  slot(3), "psiz");
             check(zetax_t, slot(4), "zetax"); check(zetaz_t, slot(5), "zetaz");
+            if (tensors.size() == n_dbuf) {
+                check(psixn_t, slot(2), "psixn"); check(psizn_t, slot(3), "psizn");
+            }
         } else {
             check(psix_t,  slot(2), "psix");  check(psiy_t,  slot(3), "psiy");
             check(psiz_t,  slot(4), "psiz");  check(zetax_t, slot(5), "zetax");
             check(zetay_t, slot(6), "zetay"); check(zetaz_t, slot(7), "zetaz");
+            if (tensors.size() == n_dbuf) {
+                check(psixn_t, slot(2), "psixn"); check(psiyn_t, slot(3), "psiyn");
+                check(psizn_t, slot(4), "psizn");
+            }
         }
     }
 

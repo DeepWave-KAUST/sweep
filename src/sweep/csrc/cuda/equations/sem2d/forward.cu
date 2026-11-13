@@ -5,6 +5,7 @@
 // Ported from SPECFEM2D's device kernels but hosted in sweep.sem's native
 // (E, ngll, ngll) / (a=eta, b=xi) layout; see kernels.cuh.
 #include "../../../core/device.h"
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 #include "../../../core/sem_input_core.h"
 #include <cuda_runtime.h>
 #include <cstdint>
@@ -63,14 +64,14 @@ void acoustic_forward(const SemForwardInputCore& in) {
 
     for (int n = 0; n < nt; ++n) {
         cudaMemsetAsync(K, 0, static_cast<size_t>(ng) * sizeof(float), stream);
-        sem2d_acoustic_stiffness<<<E, m, shmem, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_acoustic_stiffness, E, m, shmem, stream,
             chi_now, ibool, D, inv_rho, wJ, ixx, ixz, iex, iez, mask_e, K, ngll, E);
-        sem2d_acoustic_newmark<<<nm_blocks, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_acoustic_newmark, nm_blocks, TPB, 0, stream,
             chi_now, chi_prev, K, pattern, inv_M, wavelet, n, dt2, chi_next, ng);
         if (kdir > 0)
-            sem2d_dirichlet_fill<<<dir_blocks, TPB, 0, stream>>>(chi_next, didx, kdir);
+            SWEEP_LAUNCH_ON(sem2d_dirichlet_fill, dir_blocks, TPB, 0, stream, chi_next, didx, kdir);
         if (nrec > 0)
-            sem2d_record<<<rec_blocks, TPB, 0, stream>>>(
+            SWEEP_LAUNCH_ON(sem2d_record, rec_blocks, TPB, 0, stream,
                 chi_next, rec_G, rec_W, seis, n, nt, nrec, m, ng);
         if (save)   // save-all forward wavefield: save_wf[n] = chi_next = u^{n+1}
             cudaMemcpyAsync(save_wf + static_cast<size_t>(n) * ng, chi_next,
@@ -136,14 +137,14 @@ void elastic_forward(const SemElasticForwardInputCore& in) {
     for (int n = 0; n < nt; ++n) {
         cudaMemsetAsync(Kux, 0, ngb, stream);
         cudaMemsetAsync(Kuz, 0, ngb, stream);
-        sem2d_elastic_stiffness<<<E, m, shmem, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_elastic_stiffness, E, m, shmem, stream,
             ux, uz, ibool, D, lam, mu, lam2mu, wJ, ixx, ixz, iex, iez, mask_e, Kux, Kuz, ngll, E);
-        sem2d_elastic_newmark<<<nb, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_elastic_newmark, nb, TPB, 0, stream,
             ux, uz, ux_prev, uz_prev, Kux, Kuz, pat_x, pat_z, inv_M, wavelet,
             n, dt2, ux_next, uz_next, ng, 0);
         if (nrec > 0) {
-            sem2d_record<<<rb, TPB, 0, stream>>>(ux_next, rec_G, rec_W, seis_x, n, nt, nrec, m, ng);
-            sem2d_record<<<rb, TPB, 0, stream>>>(uz_next, rec_G, rec_W, seis_z, n, nt, nrec, m, ng);
+            SWEEP_LAUNCH_ON(sem2d_record, rb, TPB, 0, stream, ux_next, rec_G, rec_W, seis_x, n, nt, nrec, m, ng);
+            SWEEP_LAUNCH_ON(sem2d_record, rb, TPB, 0, stream, uz_next, rec_G, rec_W, seis_z, n, nt, nrec, m, ng);
         }
         if (save) {
             cudaMemcpyAsync(sux + static_cast<size_t>(n) * ng, ux_next, ngb, cudaMemcpyDeviceToDevice, stream);
@@ -274,7 +275,7 @@ void acoustic_cpml_forward(const SemAcousticCpmlForwardInputCore& in) {
             cudaMemsetAsync(kx, 0, ngb, stream);  cudaMemsetAsync(kz, 0, ngb, stream);
             cudaMemsetAsync(gax, 0, ngb, stream); cudaMemsetAsync(gaz, 0, ngb, stream);
         }
-        sem2d_acoustic_cpml_grads_f<<<gE, m, shmem, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_acoustic_cpml_grads_f, gE, m, shmem, stream,
             chi, psi_x, psi_z, ax, az, ibool, D, inv_rho, w1d, ixx, ixz, iex, iez,
             mask_e, gx, gz, kx, kz, gax, gaz, ngll, E, ng, msr);
         const size_t o = static_cast<size_t>(n) * ngB;   // (nt, B, ng) histories
@@ -290,15 +291,15 @@ void acoustic_cpml_forward(const SemAcousticCpmlForwardInputCore& in) {
             wsave ? save_ws + o : nullptr,          // row n = w_sum^n
             ng, msn, ws);
         if (kdir > 0)
-            sem2d_dirichlet_fill5<<<gD, TPB, 0, stream>>>(
+            SWEEP_LAUNCH_ON(sem2d_dirichlet_fill5, gD, TPB, 0, stream,
                 chi_next, psi_x_n, psi_z_n, zeta_x_n, zeta_z_n,
                 save ? save_wf + o : nullptr, ssave ? save_px + o : nullptr,
                 ssave ? save_pz + o : nullptr, ssave ? save_zx + o : nullptr,
                 ssave ? save_zz + o : nullptr, didx, kdir, ng);
         if (illum)
-            sem2d_illum_src<<<gN, TPB, 0, stream>>>(chi_next, chi, chi_prev, 1.f / dt2, illum, ng);
+            SWEEP_LAUNCH_ON(sem2d_illum_src, gN, TPB, 0, stream, chi_next, chi, chi_prev, 1.f / dt2, illum, ng);
         if (nrec > 0)
-            sem2d_record<<<gR, TPB, 0, stream>>>(chi_next, rec_G, rec_W, seis, n, nt, nrec, m, ng);
+            SWEEP_LAUNCH_ON(sem2d_record, gR, TPB, 0, stream, chi_next, rec_G, rec_W, seis, n, nt, nrec, m, ng);
         if (bs && nband > 0) {
             sem2d_band_save(chi_next, band_g, h_chi, n, nband, TPB, stream, B, ng);
             sem2d_band_save(psi_x_n, bi_x.idx, h_px, n, bi_x.n, TPB, stream, B, ng);
@@ -351,7 +352,7 @@ void acoustic_cpml_dd_grads(const SemAcousticCpmlForwardInputCore& in) {
         cudaMemsetAsync(gax, 0, ngb, stream); cudaMemsetAsync(gaz, 0, ngb, stream);
     }
     const size_t shmem = static_cast<size_t>(7 * m) * sizeof(float);
-    sem2d_acoustic_cpml_grads_f<<<E, m, shmem, stream>>>(
+    SWEEP_LAUNCH_ON(sem2d_acoustic_cpml_grads_f, E, m, shmem, stream,
         in.chi.data_ptr<float>(), in.psi_x.data_ptr<float>(), in.psi_z.data_ptr<float>(),
         in.a_x.data_ptr<float>(), in.a_z.data_ptr<float>(),
         in.ibool.data_ptr<int32_t>(), in.D.data_ptr<float>(),
@@ -406,7 +407,7 @@ void acoustic_cpml_dd_step(const SemAcousticCpmlForwardInputCore& in, int64_t n)
         swf, spx, spz, szx, szz, sws, ng, 0, 0);
     if (kdir > 0) {
         const int db = (kdir + TPB - 1) / TPB;
-        sem2d_dirichlet_fill5<<<db, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_dirichlet_fill5, db, TPB, 0, stream,
             in.chi_next.data_ptr<float>(),
             in.psi_x_n.data_ptr<float>(), in.psi_z_n.data_ptr<float>(),
             in.zeta_x_n.data_ptr<float>(), in.zeta_z_n.data_ptr<float>(),
@@ -415,7 +416,7 @@ void acoustic_cpml_dd_step(const SemAcousticCpmlForwardInputCore& in, int64_t n)
     }
     if (nrec > 0) {
         const int rb = (nrec + TPB - 1) / TPB;
-        sem2d_record<<<rb, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_record, rb, TPB, 0, stream,
             in.chi_next.data_ptr<float>(), in.rec_G.data_ptr<int64_t>(),
             in.rec_W.data_ptr<float>(), in.seis.data_ptr<float>(),
             static_cast<int>(n), nt, nrec, m, ng);
@@ -557,27 +558,27 @@ void elastic_cpml_forward(const SemElasticCpmlForwardInputCore& in) {
     for (int n = 0; n < nt; ++n) {
         cudaMemsetAsync(Acc_x, 0, ngb, stream);
         cudaMemsetAsync(Acc_z, 0, ngb, stream);
-        sem2d_elastic_cpml_element<<<gE, m, shmem, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_elastic_cpml_element, gE, m, shmem, stream,
             ux, uz, ux_prev, uz_prev, ibool, D, lam, mu, lam2mu, wJ, wrhoJ,
             ixx, ixz, iex, iez, mask_e, cf,
             r_dux_dx, r_dux_dz, r_duz_dx, r_duz_dz, r_displ_x, r_displ_z,
             inv_dt, Acc_x, Acc_z,
             sd_xx, sd_zx, sd_xz, sd_zz, s_apx, s_apz,
             bs ? 0L : static_cast<long>(n) * B * Em, ngll, E, ng);
-        sem2d_elastic_newmark<<<gN, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_elastic_newmark, gN, TPB, 0, stream,
             ux, uz, ux_prev, uz_prev, Acc_x, Acc_z, pat_x, pat_z, inv_M, wavelet,
             n, dt2, ux_next, uz_next, ng, wst);
         if (kpin > 0) {   // rigid-wall PML termination: pin u=0 on the outer edge
-            sem2d_dirichlet_fill_b<<<gP, TPB, 0, stream>>>(ux_next, pin_idx, kpin, ng);
-            sem2d_dirichlet_fill_b<<<gP, TPB, 0, stream>>>(uz_next, pin_idx, kpin, ng);
+            SWEEP_LAUNCH_ON(sem2d_dirichlet_fill_b, gP, TPB, 0, stream, ux_next, pin_idx, kpin, ng);
+            SWEEP_LAUNCH_ON(sem2d_dirichlet_fill_b, gP, TPB, 0, stream, uz_next, pin_idx, kpin, ng);
         }
         if (illum) {
-            sem2d_illum_src<<<gN, TPB, 0, stream>>>(ux_next, ux, ux_prev, 1.f / dt2, illum, ng);
-            sem2d_illum_src<<<gN, TPB, 0, stream>>>(uz_next, uz, uz_prev, 1.f / dt2, illum, ng);
+            SWEEP_LAUNCH_ON(sem2d_illum_src, gN, TPB, 0, stream, ux_next, ux, ux_prev, 1.f / dt2, illum, ng);
+            SWEEP_LAUNCH_ON(sem2d_illum_src, gN, TPB, 0, stream, uz_next, uz, uz_prev, 1.f / dt2, illum, ng);
         }
         if (nrec > 0) {
-            sem2d_record<<<gR, TPB, 0, stream>>>(ux_next, rec_G, rec_W, seis_x, n, nt, nrec, m, ng);
-            sem2d_record<<<gR, TPB, 0, stream>>>(uz_next, rec_G, rec_W, seis_z, n, nt, nrec, m, ng);
+            SWEEP_LAUNCH_ON(sem2d_record, gR, TPB, 0, stream, ux_next, rec_G, rec_W, seis_x, n, nt, nrec, m, ng);
+            SWEEP_LAUNCH_ON(sem2d_record, gR, TPB, 0, stream, uz_next, rec_G, rec_W, seis_z, n, nt, nrec, m, ng);
         }
         if (save) {          // (nt, B, ng) histories
             cudaMemcpyAsync(sux + static_cast<size_t>(n) * ngB, ux_next, ngb, cudaMemcpyDeviceToDevice, stream);
@@ -650,7 +651,7 @@ void fluid_solid_dd_asm(const SemFluidSolidForwardInputCore& in, int64_t n) {
     cudaMemsetAsync(kx, 0, ngb, stream);  cudaMemsetAsync(kz, 0, ngb, stream);
     cudaMemsetAsync(gax, 0, ngb, stream); cudaMemsetAsync(gaz, 0, ngb, stream);
     const size_t sh_ac = static_cast<size_t>(7 * m) * sizeof(float);
-    sem2d_acoustic_cpml_grads_f<<<E, m, sh_ac, stream>>>(
+    SWEEP_LAUNCH_ON(sem2d_acoustic_cpml_grads_f, E, m, sh_ac, stream,
         in.chi.data_ptr<float>(), in.psi_x.data_ptr<float>(),
         in.psi_z.data_ptr<float>(), in.a_x.data_ptr<float>(),
         in.a_z.data_ptr<float>(), in.ibool.data_ptr<int32_t>(),
@@ -662,7 +663,7 @@ void fluid_solid_dd_asm(const SemFluidSolidForwardInputCore& in, int64_t n) {
     cudaMemsetAsync(in.s_ac.data_ptr<float>(), 0, ngb, stream);
     if (nifc > 0) {
         const int ib = (nifc + TPB - 1) / TPB;
-        sem2d_ifc_ac<<<ib, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_ifc_ac, ib, TPB, 0, stream,
             in.ux.data_ptr<float>(), in.uz.data_ptr<float>(),
             in.ifc_idx.data_ptr<int64_t>(), in.ifc_w.data_ptr<float>(),
             in.ifc_nx.data_ptr<float>(), in.ifc_nz.data_ptr<float>(),
@@ -670,7 +671,7 @@ void fluid_solid_dd_asm(const SemFluidSolidForwardInputCore& in, int64_t n) {
     }
     const int npp = static_cast<int>(in.ifc_pml_g.numel());
     if (npp > 0)   // the band points' stretching, before s_ac's exchange
-        sem2d_ifc_pml_ac<<<(npp + TPB - 1) / TPB, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_ifc_pml_ac, (npp + TPB - 1) / TPB, TPB, 0, stream,
             in.ux.data_ptr<float>(), in.uz.data_ptr<float>(),
             in.ux_prev.data_ptr<float>(), in.uz_prev.data_ptr<float>(),
             in.ifc_pml_g.data_ptr<int64_t>(), in.ifc_pml_cf.data_ptr<float>(),
@@ -694,7 +695,7 @@ void fluid_solid_dd_mid(const SemFluidSolidForwardInputCore& in, int64_t n) {
     const size_t ngb = static_cast<size_t>(ng) * sizeof(float);
     const bool save = in.save_chi.numel() > 0;
     const bool bs = in.bs != 0;
-    sem2d_acoustic_cpml_step<<<nb, TPB, 0, stream>>>(
+    SWEEP_LAUNCH_ON(sem2d_acoustic_cpml_step, nb, TPB, 0, stream,
         in.gx.data_ptr<float>(), in.gz.data_ptr<float>(),
         in.kx.data_ptr<float>(), in.kz.data_ptr<float>(),
         in.gax.data_ptr<float>(), in.gaz.data_ptr<float>(),
@@ -707,26 +708,26 @@ void fluid_solid_dd_mid(const SemFluidSolidForwardInputCore& in, int64_t n) {
         in.w_sum.data_ptr<float>(), in.psi_x_n.data_ptr<float>(),
         in.psi_z_n.data_ptr<float>(), in.zeta_x_n.data_ptr<float>(),
         in.zeta_z_n.data_ptr<float>(), ng);
-    sem2d_fs_chidd<<<nb, TPB, 0, stream>>>(
+    SWEEP_LAUNCH_ON(sem2d_fs_chidd, nb, TPB, 0, stream,
         in.ac_kappa.data_ptr<float>(), in.w_sum.data_ptr<float>(),
         in.ac_inv_M.data_ptr<float>(), in.pat_chi.data_ptr<float>(),
         in.wavelet.data_ptr<float>(), static_cast<int>(n),
         in.s_ac.data_ptr<float>(), in.chi_dd.data_ptr<float>(), ng, 0);
     if (kdir > 0) {
         const int db = (kdir + TPB - 1) / TPB;
-        sem2d_dirichlet_fill<<<db, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_dirichlet_fill, db, TPB, 0, stream,
             in.chi_dd.data_ptr<float>(),
             in.dirichlet_idx.data_ptr<int64_t>(), kdir);
     }
-    sem2d_fs_pat_wav<<<nb, TPB, 0, stream>>>(
+    SWEEP_LAUNCH_ON(sem2d_fs_pat_wav, nb, TPB, 0, stream,
         in.pat_x.data_ptr<float>(), in.wavelet.data_ptr<float>(),
         static_cast<int>(n), in.f_x.data_ptr<float>(), ng, 0);
-    sem2d_fs_pat_wav<<<nb, TPB, 0, stream>>>(
+    SWEEP_LAUNCH_ON(sem2d_fs_pat_wav, nb, TPB, 0, stream,
         in.pat_z.data_ptr<float>(), in.wavelet.data_ptr<float>(),
         static_cast<int>(n), in.f_z.data_ptr<float>(), ng, 0);
     if (nifc > 0) {
         const int ib = (nifc + TPB - 1) / TPB;
-        sem2d_ifc_el<<<ib, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_ifc_el, ib, TPB, 0, stream,
             in.chi_dd.data_ptr<float>(), in.ifc_idx.data_ptr<int64_t>(),
             in.ifc_w.data_ptr<float>(), in.ifc_nx.data_ptr<float>(),
             in.ifc_nz.data_ptr<float>(), in.f_x.data_ptr<float>(),
@@ -734,7 +735,7 @@ void fluid_solid_dd_mid(const SemFluidSolidForwardInputCore& in, int64_t n) {
     }
     const int npp = static_cast<int>(in.ifc_pml_g.numel());
     if (npp > 0)   // the band points' stretching, before the force's exchange
-        sem2d_ifc_pml_el<<<(npp + TPB - 1) / TPB, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_ifc_pml_el, (npp + TPB - 1) / TPB, TPB, 0, stream,
             in.chi_dd.data_ptr<float>(), in.chi.data_ptr<float>(),
             in.chi_prev.data_ptr<float>(),
             in.ifc_pml_g.data_ptr<int64_t>(), in.ifc_pml_cf.data_ptr<float>(),
@@ -759,7 +760,7 @@ void fluid_solid_dd_mid(const SemFluidSolidForwardInputCore& in, int64_t n) {
     float* s_apz = save ? in.save_apz.data_ptr<float>()
                         : (bs ? in.ap_scr_z.data_ptr<float>() : nullptr);
     const size_t sh_el = static_cast<size_t>(8 * m) * sizeof(float);
-    sem2d_elastic_cpml_element<<<E, m, sh_el, stream>>>(
+    SWEEP_LAUNCH_ON(sem2d_elastic_cpml_element, E, m, sh_el, stream,
         in.ux.data_ptr<float>(), in.uz.data_ptr<float>(),
         in.ux_prev.data_ptr<float>(), in.uz_prev.data_ptr<float>(),
         in.ibool.data_ptr<int32_t>(), in.D.data_ptr<float>(),
@@ -789,7 +790,7 @@ void fluid_solid_dd_step(const SemFluidSolidForwardInputCore& in, int64_t n) {
     const int TPB = 256;
     const int nb = (ng + TPB - 1) / TPB;
     const size_t ngb = static_cast<size_t>(ng) * sizeof(float);
-    sem2d_elastic_newmark_force<<<nb, TPB, 0, stream>>>(
+    SWEEP_LAUNCH_ON(sem2d_elastic_newmark_force, nb, TPB, 0, stream,
         in.ux.data_ptr<float>(), in.uz.data_ptr<float>(),
         in.ux_prev.data_ptr<float>(), in.uz_prev.data_ptr<float>(),
         in.Acc_x.data_ptr<float>(), in.Acc_z.data_ptr<float>(),
@@ -798,19 +799,19 @@ void fluid_solid_dd_step(const SemFluidSolidForwardInputCore& in, int64_t n) {
         in.ux_next.data_ptr<float>(), in.uz_next.data_ptr<float>(), ng);
     if (kpin > 0) {
         const int pb = (kpin + TPB - 1) / TPB;
-        sem2d_dirichlet_fill<<<pb, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_dirichlet_fill, pb, TPB, 0, stream,
             in.ux_next.data_ptr<float>(),
             in.outer_edge_idx.data_ptr<int64_t>(), kpin);
-        sem2d_dirichlet_fill<<<pb, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_dirichlet_fill, pb, TPB, 0, stream,
             in.uz_next.data_ptr<float>(),
             in.outer_edge_idx.data_ptr<int64_t>(), kpin);
     }
-    sem2d_fs_chi_leapfrog<<<nb, TPB, 0, stream>>>(
+    SWEEP_LAUNCH_ON(sem2d_fs_chi_leapfrog, nb, TPB, 0, stream,
         in.chi.data_ptr<float>(), in.chi_prev.data_ptr<float>(),
         in.chi_dd.data_ptr<float>(), dt2, in.chi_next.data_ptr<float>(), ng);
     if (kdir > 0) {
         const int db = (kdir + TPB - 1) / TPB;
-        sem2d_dirichlet_fill5<<<db, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_dirichlet_fill5, db, TPB, 0, stream,
             in.chi_next.data_ptr<float>(), in.psi_x_n.data_ptr<float>(),
             in.psi_z_n.data_ptr<float>(), in.zeta_x_n.data_ptr<float>(),
             in.zeta_z_n.data_ptr<float>(),
@@ -821,11 +822,11 @@ void fluid_solid_dd_step(const SemFluidSolidForwardInputCore& in, int64_t n) {
         const int rb = (nrec + TPB - 1) / TPB;
         const long* rg = in.rec_G.data_ptr<int64_t>();
         const float* rw = in.rec_W.data_ptr<float>();
-        sem2d_record<<<rb, TPB, 0, stream>>>(in.chi_next.data_ptr<float>(),
+        SWEEP_LAUNCH_ON(sem2d_record, rb, TPB, 0, stream, in.chi_next.data_ptr<float>(),
             rg, rw, in.seis_chi.data_ptr<float>(), static_cast<int>(n), nt, nrec, m, ng);
-        sem2d_record<<<rb, TPB, 0, stream>>>(in.ux_next.data_ptr<float>(),
+        SWEEP_LAUNCH_ON(sem2d_record, rb, TPB, 0, stream, in.ux_next.data_ptr<float>(),
             rg, rw, in.seis_x.data_ptr<float>(), static_cast<int>(n), nt, nrec, m, ng);
-        sem2d_record<<<rb, TPB, 0, stream>>>(in.uz_next.data_ptr<float>(),
+        SWEEP_LAUNCH_ON(sem2d_record, rb, TPB, 0, stream, in.uz_next.data_ptr<float>(),
             rg, rw, in.seis_z.data_ptr<float>(), static_cast<int>(n), nt, nrec, m, ng);
     }
     const bool save = in.save_chi.numel() > 0;
@@ -979,7 +980,7 @@ void elastic_cpml_dd_asm(const SemElasticCpmlForwardInputCore& in, int64_t n) {
     cudaMemsetAsync(in.Acc_x.data_ptr<float>(), 0, ngb, stream);
     cudaMemsetAsync(in.Acc_z.data_ptr<float>(), 0, ngb, stream);
     const size_t shmem = static_cast<size_t>(8 * m) * sizeof(float);
-    sem2d_elastic_cpml_element<<<E, m, shmem, stream>>>(
+    SWEEP_LAUNCH_ON(sem2d_elastic_cpml_element, E, m, shmem, stream,
         in.ux.data_ptr<float>(), in.uz.data_ptr<float>(),
         in.ux_prev.data_ptr<float>(), in.uz_prev.data_ptr<float>(),
         in.ibool.data_ptr<int32_t>(), in.D.data_ptr<float>(),
@@ -1013,7 +1014,7 @@ void elastic_cpml_dd_step(const SemElasticCpmlForwardInputCore& in, int64_t n) {
     const int TPB = 256;
     const int nb = (ng + TPB - 1) / TPB;
     const size_t ngb = static_cast<size_t>(ng) * sizeof(float);
-    sem2d_elastic_newmark<<<nb, TPB, 0, stream>>>(
+    SWEEP_LAUNCH_ON(sem2d_elastic_newmark, nb, TPB, 0, stream,
         in.ux.data_ptr<float>(), in.uz.data_ptr<float>(),
         in.ux_prev.data_ptr<float>(), in.uz_prev.data_ptr<float>(),
         in.Acc_x.data_ptr<float>(), in.Acc_z.data_ptr<float>(),
@@ -1023,18 +1024,18 @@ void elastic_cpml_dd_step(const SemElasticCpmlForwardInputCore& in, int64_t n) {
         in.ux_next.data_ptr<float>(), in.uz_next.data_ptr<float>(), ng, 0);
     if (kpin > 0) {
         const int pb = (kpin + TPB - 1) / TPB;
-        sem2d_dirichlet_fill<<<pb, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_dirichlet_fill, pb, TPB, 0, stream,
             in.ux_next.data_ptr<float>(), in.outer_edge_idx.data_ptr<int64_t>(), kpin);
-        sem2d_dirichlet_fill<<<pb, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_dirichlet_fill, pb, TPB, 0, stream,
             in.uz_next.data_ptr<float>(), in.outer_edge_idx.data_ptr<int64_t>(), kpin);
     }
     if (nrec > 0) {
         const int rb = (nrec + TPB - 1) / TPB;
-        sem2d_record<<<rb, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_record, rb, TPB, 0, stream,
             in.ux_next.data_ptr<float>(), in.rec_G.data_ptr<int64_t>(),
             in.rec_W.data_ptr<float>(), in.seis_x.data_ptr<float>(),
             static_cast<int>(n), nt, nrec, m, ng);
-        sem2d_record<<<rb, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_record, rb, TPB, 0, stream,
             in.uz_next.data_ptr<float>(), in.rec_G.data_ptr<int64_t>(),
             in.rec_W.data_ptr<float>(), in.seis_z.data_ptr<float>(),
             static_cast<int>(n), nt, nrec, m, ng);
@@ -1283,44 +1284,44 @@ void fluid_solid_forward(const SemFluidSolidForwardInputCore& in) {
             cudaMemsetAsync(gxp, 0, ngb, stream);  cudaMemsetAsync(gzp, 0, ngb, stream);
             cudaMemsetAsync(kxp, 0, ngb, stream);  cudaMemsetAsync(kzp, 0, ngb, stream);
             cudaMemsetAsync(gaxp, 0, ngb, stream); cudaMemsetAsync(gazp, 0, ngb, stream);
-            sem2d_acoustic_cpml_grads_f<<<gE, m, sh_ac, stream>>>(
+            SWEEP_LAUNCH_ON(sem2d_acoustic_cpml_grads_f, gE, m, sh_ac, stream,
                 chi, psi_x, psi_z, ax, az, ibool, D, ac_ir, w1d, ixx, ixz, iex, iez,
                 ac_me, gxp, gzp, kxp, kzp, gaxp, gazp, ngll, E, ng, 0);
-            sem2d_acoustic_cpml_step<<<gN, TPB, 0, stream>>>(
+            SWEEP_LAUNCH_ON(sem2d_acoustic_cpml_step, gN, TPB, 0, stream,
                 gxp, gzp, kxp, kzp, gaxp, gazp, ac_iMg, ax, bx, dbxdx, az, bz, dbzdz,
                 psi_x, psi_z, zeta_x, zeta_z, w_sum, psi_x_n, psi_z_n, zeta_x_n, zeta_z_n, ng);
         } else {
             cudaMemsetAsync(Kchi, 0, ngb, stream);
-            sem2d_acoustic_stiffness<<<E, m, sh_ac, stream>>>(
+            SWEEP_LAUNCH_ON(sem2d_acoustic_stiffness, E, m, sh_ac, stream,
                 chi, ibool, D, ac_ir, wJ, ixx, ixz, iex, iez, ac_me, Kchi, ngll, E);
         }
         cudaMemsetAsync(s_ac, 0, ngb, stream);
         if (nifc > 0)
-            sem2d_ifc_ac<<<gI, TPB, 0, stream>>>(ux, uz, ifc_g, ifc_w, ifc_nx, ifc_nz, s_ac, nifc, ng);
+            SWEEP_LAUNCH_ON(sem2d_ifc_ac, gI, TPB, 0, stream, ux, uz, ifc_g, ifc_w, ifc_nx, ifc_nz, s_ac, nifc, ng);
         if (npp > 0)
-            sem2d_ifc_pml_ac<<<gPP, TPB, 0, stream>>>(ux, uz, ux_prev, uz_prev, pml_g, pml_cf,
+            SWEEP_LAUNCH_ON(sem2d_ifc_pml_ac, gPP, TPB, 0, stream, ux, uz, ux_prev, uz_prev, pml_g, pml_cf,
                                                       pml_mem, s_ac, pml_tn, npp, ng);
         // 2-3. chi_dd (post-inversion), free surface wins at the triple point
         if (cp)
-            sem2d_fs_chidd<<<gN, TPB, 0, stream>>>(
+            SWEEP_LAUNCH_ON(sem2d_fs_chidd, gN, TPB, 0, stream,
                 ac_kp, w_sum, ac_iM, pat_chi, wav, n, s_ac, chi_dd, ng, wst);
         else
-            sem2d_fs_chidd_bare<<<nb, TPB, 0, stream>>>(
+            SWEEP_LAUNCH_ON(sem2d_fs_chidd_bare, nb, TPB, 0, stream,
                 Kchi, ac_iM, pat_chi, wav, n, s_ac, chi_dd, ng);
         if (kdir > 0)
-            sem2d_dirichlet_fill_b<<<gD, TPB, 0, stream>>>(chi_dd, didx, kdir, ng);
+            SWEEP_LAUNCH_ON(sem2d_dirichlet_fill_b, gD, TPB, 0, stream, chi_dd, didx, kdir, ng);
         // 4. solid force = pat*wav + S^el(-chi_dd), then the solid step
-        sem2d_fs_pat_wav<<<gN, TPB, 0, stream>>>(pat_x, wav, n, f_x, ng, wst);
-        sem2d_fs_pat_wav<<<gN, TPB, 0, stream>>>(pat_z, wav, n, f_z, ng, wst);
+        SWEEP_LAUNCH_ON(sem2d_fs_pat_wav, gN, TPB, 0, stream, pat_x, wav, n, f_x, ng, wst);
+        SWEEP_LAUNCH_ON(sem2d_fs_pat_wav, gN, TPB, 0, stream, pat_z, wav, n, f_z, ng, wst);
         if (nifc > 0)
-            sem2d_ifc_el<<<gI, TPB, 0, stream>>>(chi_dd, ifc_g, ifc_w, ifc_nx, ifc_nz, f_x, f_z, nifc, ng);
+            SWEEP_LAUNCH_ON(sem2d_ifc_el, gI, TPB, 0, stream, chi_dd, ifc_g, ifc_w, ifc_nx, ifc_nz, f_x, f_z, nifc, ng);
         if (npp > 0)
-            sem2d_ifc_pml_el<<<gPP, TPB, 0, stream>>>(chi_dd, chi, chi_prev, pml_g, pml_cf,
+            SWEEP_LAUNCH_ON(sem2d_ifc_pml_el, gPP, TPB, 0, stream, chi_dd, chi, chi_prev, pml_g, pml_cf,
                                                       pml_mem, f_x, f_z, pml_tn, npp, ng);
         cudaMemsetAsync(Acc_x, 0, ngb, stream);
         cudaMemsetAsync(Acc_z, 0, ngb, stream);
         if (cp)
-            sem2d_elastic_cpml_element<<<gE, m, sh_el, stream>>>(
+            SWEEP_LAUNCH_ON(sem2d_elastic_cpml_element, gE, m, sh_el, stream,
                 ux, uz, ux_prev, uz_prev, ibool, D, el_lam, el_mu, el_l2m, wJ, el_wrJ,
                 ixx, ixz, iex, iez, el_me, cf,
                 r_dux_dx, r_dux_dz, r_duz_dx, r_duz_dz, r_displ_x, r_displ_z,
@@ -1328,36 +1329,36 @@ void fluid_solid_forward(const SemFluidSolidForwardInputCore& in) {
                 sd_xx, sd_zx, sd_xz, sd_zz, s_apx, s_apz,
                 save ? static_cast<long>(n) * B * Em : 0L, ngll, E, ng);
         else
-            sem2d_elastic_stiffness<<<E, m, sh_el, stream>>>(
+            SWEEP_LAUNCH_ON(sem2d_elastic_stiffness, E, m, sh_el, stream,
                 ux, uz, ibool, D, el_lam, el_mu, el_l2m, wJ, ixx, ixz, iex, iez,
                 el_me, Acc_x, Acc_z, ngll, E);
-        sem2d_elastic_newmark_force<<<gN, TPB, 0, stream>>>(
+        SWEEP_LAUNCH_ON(sem2d_elastic_newmark_force, gN, TPB, 0, stream,
             ux, uz, ux_prev, uz_prev, Acc_x, Acc_z, f_x, f_z, el_iM, dt2,
             ux_next, uz_next, ng);
         if (kpin > 0) {
-            sem2d_dirichlet_fill_b<<<gP, TPB, 0, stream>>>(ux_next, pin_idx, kpin, ng);
-            sem2d_dirichlet_fill_b<<<gP, TPB, 0, stream>>>(uz_next, pin_idx, kpin, ng);
+            SWEEP_LAUNCH_ON(sem2d_dirichlet_fill_b, gP, TPB, 0, stream, ux_next, pin_idx, kpin, ng);
+            SWEEP_LAUNCH_ON(sem2d_dirichlet_fill_b, gP, TPB, 0, stream, uz_next, pin_idx, kpin, ng);
         }
         // 5. fluid update + free surface (chi and, with CPML, its memories)
-        sem2d_fs_chi_leapfrog<<<gN, TPB, 0, stream>>>(chi, chi_prev, chi_dd, dt2, chi_next, ng);
+        SWEEP_LAUNCH_ON(sem2d_fs_chi_leapfrog, gN, TPB, 0, stream, chi, chi_prev, chi_dd, dt2, chi_next, ng);
         if (kdir > 0) {
             if (cp) {   // chi + the four CPML memories in ONE launch (was 5)
-                sem2d_dirichlet_fill5<<<gD, TPB, 0, stream>>>(
+                SWEEP_LAUNCH_ON(sem2d_dirichlet_fill5, gD, TPB, 0, stream,
                     chi_next, psi_x_n, psi_z_n, zeta_x_n, zeta_z_n,
                     nullptr, nullptr, nullptr, nullptr, nullptr, didx, kdir, ng);
             } else {
-                sem2d_dirichlet_fill<<<db, TPB, 0, stream>>>(chi_next, didx, kdir);
+                SWEEP_LAUNCH_ON(sem2d_dirichlet_fill, db, TPB, 0, stream, chi_next, didx, kdir);
             }
         }
         if (fs_illum) {
-            sem2d_illum_src<<<gN, TPB, 0, stream>>>(chi_next, chi, chi_prev, 1.f / dt2, fs_illum, ng);
-            sem2d_illum_src<<<gN, TPB, 0, stream>>>(ux_next, ux, ux_prev, 1.f / dt2, fs_illum, ng);
-            sem2d_illum_src<<<gN, TPB, 0, stream>>>(uz_next, uz, uz_prev, 1.f / dt2, fs_illum, ng);
+            SWEEP_LAUNCH_ON(sem2d_illum_src, gN, TPB, 0, stream, chi_next, chi, chi_prev, 1.f / dt2, fs_illum, ng);
+            SWEEP_LAUNCH_ON(sem2d_illum_src, gN, TPB, 0, stream, ux_next, ux, ux_prev, 1.f / dt2, fs_illum, ng);
+            SWEEP_LAUNCH_ON(sem2d_illum_src, gN, TPB, 0, stream, uz_next, uz, uz_prev, 1.f / dt2, fs_illum, ng);
         }
         if (nrec > 0) {
-            sem2d_record<<<gR, TPB, 0, stream>>>(chi_next, rec_G, rec_W, seis_chi, n, nt, nrec, m, ng);
-            sem2d_record<<<gR, TPB, 0, stream>>>(ux_next, rec_G, rec_W, seis_x, n, nt, nrec, m, ng);
-            sem2d_record<<<gR, TPB, 0, stream>>>(uz_next, rec_G, rec_W, seis_z, n, nt, nrec, m, ng);
+            SWEEP_LAUNCH_ON(sem2d_record, gR, TPB, 0, stream, chi_next, rec_G, rec_W, seis_chi, n, nt, nrec, m, ng);
+            SWEEP_LAUNCH_ON(sem2d_record, gR, TPB, 0, stream, ux_next, rec_G, rec_W, seis_x, n, nt, nrec, m, ng);
+            SWEEP_LAUNCH_ON(sem2d_record, gR, TPB, 0, stream, uz_next, rec_G, rec_W, seis_z, n, nt, nrec, m, ng);
         }
         if (save) {
             const size_t o = static_cast<size_t>(n) * ngB;   // (nt, B, ng)

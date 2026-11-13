@@ -98,7 +98,7 @@ Verified constraints (single-rank run of this pattern on one GPU worked; refusal
 | Item | Rule |
 |---|---|
 | Equations | `Acoustic` (2-D), `Acoustic3D`, `AcousticVRZ3D`, `AcousticBorn`, `AcousticBorn3D`, `Elastic`, `Elastic3D` |
-| Backend / memory | `impl='c'` with boundary saving only (`Full()`/`Ckpt()` refused); `storage` `"gpu"` or `"cpu"`, not `"disk"` |
+| Backend / memory | `impl='c'` with boundary saving only (`Full()`/`Ckpt()` refused); `storage` `"gpu"` or `"cpu"`, not `"disk"`. CPU tiles (gloo, the host core) work too, with `storage="gpu"` only |
 | Geometry | `sources` must be 3-D `(1, nsrc, ndim)`; a 2-D `(nshots, ndim)` array raises `ValueError` |
 | Grid | `pad_to_mesh(model, px=...)` pads split axes to a tile multiple (a slightly different problem than unpadded) |
 | Records | each rank returns only the receivers its tile owns (`ddp.own_receiver_indices`) |

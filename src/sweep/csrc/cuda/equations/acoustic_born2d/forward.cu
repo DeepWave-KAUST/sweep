@@ -1,4 +1,5 @@
 #include <cuda_runtime.h>
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 
 #include "acoustic_born2d.h"
@@ -220,7 +221,7 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
                 bs, save_width, 0, ctx);
         }
 
-        add_source<<<source_config.grid, source_config.block>>>(
+        SWEEP_LAUNCH(add_source, source_config.grid, source_config.block,
             bg_view.u_next,
             p.source.data_ptr<float>(),
             p.sources_loc.data_ptr<int>(),
@@ -229,7 +230,7 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
             ctx
         );
 
-        record_kernel<<<record_config.grid, record_config.block>>>(
+        SWEEP_LAUNCH(record_kernel, record_config.grid, record_config.block,
             sc_view.u_next,
             record.data_ptr<float>(),
             p.receivers_loc.data_ptr<int>(),

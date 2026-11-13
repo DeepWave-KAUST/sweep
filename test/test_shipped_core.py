@@ -893,12 +893,15 @@ class TestPrecompileLoadsTheCore:
         monkeypatch.delenv("SWEEP_JIT_FULL", raising=False)
         monkeypatch.setattr(sweep, "_prebuilt_binding_present", lambda: False)
         monkeypatch.setattr(loader, "_lib", None)
+        monkeypatch.setattr(loader, "_libs", {})
         loaded = []
 
-        def fake_core_lib():
+        def fake_core_lib(kind="cuda"):
             loaded.append(jit.core_path())
-            monkeypatch.setattr(loader, "_lib", object())     # what the real one caches
-            return loader._lib
+            lib = object()
+            monkeypatch.setattr(loader, "_lib", lib)          # what the real one caches
+            monkeypatch.setattr(loader, "_libs", {kind: lib})
+            return lib
         monkeypatch.setattr(loader, "core_lib", fake_core_lib)
 
         assert binding.is_compiled() is False
@@ -1106,7 +1109,7 @@ class TestCachedLocalCore:
         (core_dir / "sources.sha256").unlink()
 
         def fake_ninja(cmd, **kw):
-            assert list(cmd[:2]) == ["ninja", "-C"], cmd
+            assert list(cmd[-3:-1]) == ["ninja", "-C"], cmd
             (core_dir / "libsweep_core.so").write_bytes(b"\x7fELF built")
             return subprocess.CompletedProcess(cmd, 0, "", "")
         monkeypatch.setattr(subprocess, "run", fake_ninja)

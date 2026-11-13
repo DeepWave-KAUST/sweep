@@ -791,12 +791,18 @@ def guarded_solver_call(solver, wavelet, sources, receivers, *, models):
     return record
 
 
+def _sync(device):
+    """Wait for the device; a no-op on the CPU (the host core and eager run there)."""
+    if torch.device(device).type == "cuda":
+        torch.cuda.synchronize(device)
+
+
 def run_forward(solver, wavelet, sources, receivers, models_np, device):
     models = tensors_from_models(models_np, [False] * len(models_np), device)
     with torch.no_grad():
         record = guarded_solver_call(solver, wavelet, sources, receivers, models=models)
         record = normalize_record(record, sources.shape[0], receivers.shape[1], wavelet.shape[-1])
-        torch.cuda.synchronize(device)
+        _sync(device)
     if not torch.isfinite(record).all():
         raise RuntimeError("Forward record contains NaN or Inf.")
     return record.detach().cpu()
@@ -809,7 +815,7 @@ def run_gradient(solver, wavelet, sources, receivers, observed, models_np, grad_
     record = normalize_record(record, sources.shape[0], receivers.shape[1], wavelet.shape[-1])
     loss = (record - observed_t).pow(2).mean()
     loss.backward()
-    torch.cuda.synchronize(device)
+    _sync(device)
 
     grads = {}
     for name, tensor, needs_grad in zip(model_names, models, grad_flags):

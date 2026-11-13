@@ -23,9 +23,13 @@ Both need a grid whose per-shot band is not a multiple of 256 cells on some face
 ``_assert_unaligned`` checks, and lossy storage that really differs from fp32
 (``_assert_lossy``); otherwise the bitwise comparisons prove nothing.
 
-The eager backend lays its saved ring out per shot as well; its tests drive the
-ring store directly, on the CPU.
+The host (CPU) core runs the same savers with its own quantize loops, cut per
+shot the same way; it is checked in 2-D with on-device storage (it refuses host
+staging).  The eager backend lays its saved ring out per shot as well; its tests
+drive the ring store directly, on the CPU.
 """
+
+import os
 
 import numpy as np
 import pytest
@@ -49,6 +53,26 @@ from sweep.signal import ricker
 cuda_only = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="impl='c' requires CUDA."
 )
+
+
+def _host_core():
+    if os.environ.get("SWEEP_TEST_HOST_CORE", "1").lower() in ("0", "false", "no", "off"):
+        return False
+    from sweep.backend.c import hostcore
+    return hostcore.available()
+
+
+host_only = pytest.mark.skipif(not _host_core(), reason="no host (CPU) core at hand")
+
+
+def _cases(storages):
+    """(ndim, device, storage): impl='c' on CUDA with every storage, and on the
+    host core in 2-D with on-device storage (``'gpu'``: the compute device's
+    memory).  The host quantize loops do not depend on the dimension, and the 3-D
+    cases take minutes on a CPU runner."""
+    return ([pytest.param(n, "cuda", s, marks=cuda_only, id=f"{n}-cuda-{s}")
+             for n in (2, 3) for s in storages]
+            + [pytest.param(2, "cpu", "gpu", marks=host_only, id="2-cpu-gpu")])
 
 _DT = 1.5e-3
 _BLOCK = 256       # cells per FP32 scale (BOUNDARY_INT8_BLOCK)
@@ -86,23 +110,25 @@ def _problem(ndim):
                 vp0=vp0, vpt=vpt, src=src, rec=rec)
 
 
-def _solver(pb, dtype, storage="gpu", **config):
+def _solver(pb, dtype, storage="gpu", dev="cuda", **config):
     config = {"enabled": True, "storage": storage, "storage_dtype": dtype, **config}
-    return PropTorch(pb["eq"](spatial_order=4, device=torch.device("cuda"), backend="torch"),
-                     shape=pb["shape"], dh=pb["dh"], dt=_DT, impl="c",
-                     boundary_saving_config=config)
+    solver = PropTorch(pb["eq"](spatial_order=4, device=torch.device(dev), backend="torch"),
+                       shape=pb["shape"], dh=pb["dh"], dt=_DT, impl="c", dev=dev,
+                       boundary_saving_config=config)
+    assert solver.impl == "c"
+    return solver
 
 
 _OBS = {}
 
 
-def _observed_shot0(pb):
-    if pb["ndim"] not in _OBS:
+def _observed_shot0(pb, dev):
+    if (pb["ndim"], dev) not in _OBS:
         with torch.no_grad():
-            d = _solver(pb, "fp32")(_wavelet(pb["nt"])[None], pb["src"][:1], pb["rec"][None],
-                                    models=[torch.tensor(pb["vpt"], device="cuda")])
-        _OBS[pb["ndim"]] = d[0].detach().clone()
-    return _OBS[pb["ndim"]]
+            d = _solver(pb, "fp32", dev=dev)(_wavelet(pb["nt"])[None], pb["src"][:1], pb["rec"][None],
+                                             models=[torch.tensor(pb["vpt"], device=dev)])
+        _OBS[pb["ndim"], dev] = d[0].detach().clone()
+    return _OBS[pb["ndim"], dev]
 
 
 def _shots(pb, batch, loud):
@@ -113,18 +139,18 @@ def _shots(pb, batch, loud):
     return w, pb["src"][:batch], np.repeat(pb["rec"][None], batch, axis=0)
 
 
-def _grad_shot0(solver, pb, batch, loud=1.0):
+def _grad_shot0(solver, pb, batch, loud=1.0, dev="cuda"):
     """d/d(vp) of shot 0's misfit alone, run inside a batch of ``batch`` shots."""
-    vp = torch.tensor(pb["vp0"], device="cuda", requires_grad=True)
+    vp = torch.tensor(pb["vp0"], device=dev, requires_grad=True)
     d = solver(*_shots(pb, batch, loud), models=[vp])
-    (d[0] - _observed_shot0(pb)).pow(2).sum().backward()
+    (d[0] - _observed_shot0(pb, dev)).pow(2).sum().backward()
     return vp.grad.detach().cpu().numpy()
 
 
-def _forward_loud(solver, pb):
+def _forward_loud(solver, pb, dev="cuda"):
     """A B=2 forward with boundary saving and no backward: it leaves the last
     step's band of a loud shot 1 in the staging."""
-    vp = torch.tensor(pb["vp0"], device="cuda", requires_grad=True)
+    vp = torch.tensor(pb["vp0"], device=dev, requires_grad=True)
     solver(*_shots(pb, 2, _LOUD), models=[vp])
 
 
@@ -146,32 +172,28 @@ def _rel(ref, got):
     return f"max|diff| / max|ref| = {np.abs(ref - got).max() / np.abs(ref).max():.3e}"
 
 
-@cuda_only
-@pytest.mark.parametrize("storage", ["gpu", "cpu", "disk"])
 @pytest.mark.parametrize("dtype", ["fp32", "int8", "fp16"])
-@pytest.mark.parametrize("ndim", [2, 3])
-def test_shot_gradient_does_not_depend_on_the_batch(ndim, dtype, storage):
+@pytest.mark.parametrize("ndim,dev,storage", _cases(["gpu", "cpu", "disk"]))
+def test_shot_gradient_does_not_depend_on_the_batch(ndim, dtype, dev, storage):
     pb = _problem(ndim)
-    solver = _solver(pb, dtype, storage)
-    alone = _grad_shot0(solver, pb, 1)
+    solver = _solver(pb, dtype, storage, dev)
+    alone = _grad_shot0(solver, pb, 1, dev=dev)
     if dtype != "fp32":
         _assert_unaligned(solver)
-        _assert_lossy(alone, _grad_shot0(_solver(pb, "fp32", storage), pb, 1))
-    batched = _grad_shot0(_solver(pb, dtype, storage), pb, 2, loud=_LOUD)
+        _assert_lossy(alone, _grad_shot0(_solver(pb, "fp32", storage, dev), pb, 1, dev=dev))
+    batched = _grad_shot0(_solver(pb, dtype, storage, dev), pb, 2, loud=_LOUD, dev=dev)
     assert np.array_equal(alone, batched), _rel(alone, batched)
 
 
-@cuda_only
-@pytest.mark.parametrize("storage", ["gpu", "cpu", "disk"])
 @pytest.mark.parametrize("dtype", ["int8", "fp16"])
-@pytest.mark.parametrize("ndim", [2, 3])
-def test_smaller_batch_after_a_larger_one(ndim, dtype, storage):
+@pytest.mark.parametrize("ndim,dev,storage", _cases(["gpu", "cpu", "disk"]))
+def test_smaller_batch_after_a_larger_one(ndim, dtype, dev, storage):
     """B=2, then B=1 on the same propagator, against a fresh propagator's B=1."""
     pb = _problem(ndim)
-    solver = _solver(pb, dtype, storage)
-    _forward_loud(solver, pb)
-    after = _grad_shot0(solver, pb, 1)
-    fresh = _grad_shot0(_solver(pb, dtype, storage), pb, 1)
+    solver = _solver(pb, dtype, storage, dev)
+    _forward_loud(solver, pb, dev)
+    after = _grad_shot0(solver, pb, 1, dev=dev)
+    fresh = _grad_shot0(_solver(pb, dtype, storage, dev), pb, 1, dev=dev)
     assert np.array_equal(after, fresh), _rel(fresh, after)
 
 

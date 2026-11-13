@@ -19,6 +19,7 @@
 #pragma once
 
 #include <cuda_runtime.h>
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 #include <algorithm>
 
@@ -204,7 +205,7 @@ struct Driver {
             actx.x_base = axb;
             actx.x_limit = axe;
             auto alc = fdtd::Wave3D::make(axe - axb, s.ny, s.nz, s.B);
-            acoustic3d_air_clear_kernel<<<alc.grid, alc.block>>>(
+            SWEEP_LAUNCH(acoustic3d_air_clear_kernel, alc.grid, alc.block,
                 view, save_all, u_thist, actx
             );
         }
@@ -239,7 +240,7 @@ struct Driver {
                                   const AcousticWavefieldPointer& view,
                                   const ForwardInputCore& p, int it, int nsrc)
     {
-        add_source_3d<<<s.source_config.grid, s.source_config.block>>>(
+        SWEEP_LAUNCH(add_source_3d, s.source_config.grid, s.source_config.block,
             view.u_next,
             p.source.data_ptr<float>(),
             p.sources_loc.data_ptr<int>(),
@@ -254,7 +255,7 @@ struct Driver {
                        Buf& record, const ForwardInputCore& p,
                        int it, int nrec)
     {
-        record_kernel_3d<<<s.record_config.grid, s.record_config.block>>>(
+        SWEEP_LAUNCH(record_kernel_3d, s.record_config.grid, s.record_config.block,
             view.u_next,
             record.data_ptr<float>(),
             p.receivers_loc.data_ptr<int>(),
@@ -355,7 +356,7 @@ struct Driver {
                                       const BackwardInputCore& p, int it, int nsrc,
                                       BwdWorkspace&)
     {
-        add_source_3d<<<s.record_config.grid, s.record_config.block>>>(
+        SWEEP_LAUNCH(add_source_3d, s.record_config.grid, s.record_config.block,
             adj_view.u_next,
             p.adjoint_source.data_ptr<float>(),
             p.adjoint_sources_loc.data_ptr<int>(),
@@ -372,7 +373,7 @@ struct Driver {
                                        std::vector<Buf>& grads,
                                        int it, int nsrc)
     {
-        accumulate_source_grad_3d<<<s.source_config.grid, s.source_config.block>>>(
+        SWEEP_LAUNCH(accumulate_source_grad_3d, s.source_config.grid, s.source_config.block,
             adjoint.u_now_t.data_ptr<float>(),
             grads[0].data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(),
@@ -389,7 +390,7 @@ struct Driver {
     {
         const float* adjoint_ptr = adjoint.u_now_t.data_ptr<float>();
         if (grads != nullptr) {
-            calculate_grad_3d<<<s.launch_config.grid, s.launch_config.block>>>(
+            SWEEP_LAUNCH(calculate_grad_3d, s.launch_config.grid, s.launch_config.block,
                 forward_ptr, adjoint_ptr,
                 s.vp,
                 (*grads)[1].data_ptr<float>(),
@@ -399,7 +400,7 @@ struct Driver {
             );
         }
         if (rtm_out != nullptr) {
-            accumulate_illumination_3d<<<s.launch_config.grid, s.launch_config.block>>>(
+            SWEEP_LAUNCH(accumulate_illumination_3d, s.launch_config.grid, s.launch_config.block,
                 forward_ptr, nullptr, nullptr,   // the store IS u_tt
                 adjoint_ptr,
                 rtm_out->source_illumination.data_ptr<float>(),
@@ -466,7 +467,7 @@ struct Driver {
     static void bs_illum_tail(const State& s, const SolverContext& ctx,
                               Wavefield& adjoint, RTMOutputCore& illumination)
     {
-        accumulate_illumination_3d<<<s.launch_config.grid, s.launch_config.block>>>(
+        SWEEP_LAUNCH(accumulate_illumination_3d, s.launch_config.grid, s.launch_config.block,
             nullptr, nullptr, nullptr,
             adjoint.u_now_t.data_ptr<float>(),
             /*source_illumination=*/nullptr,
@@ -509,7 +510,7 @@ struct Driver {
         // Strip source cells back to w^{it-1} - s^{it} (the restore wrote the
         // sourced w^{it-1}); see the 2-D twin.  Before the strip imaging, the
         // illumination and the ADCIG, which all read u_next below.
-        sub_source_in_restore_strip_3d<<<s.source_config.grid, s.source_config.block>>>(
+        SWEEP_LAUNCH(sub_source_in_restore_strip_3d, s.source_config.grid, s.source_config.block,
             for_view.u_next,
             p.forward_source.data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(),
@@ -538,7 +539,7 @@ struct Driver {
                               + (wxl + wxh) * (byi > 0 ? byi : 0) * (bzi > 0 ? bzi : 0);
             if (n_strip > 0) {
                 dim3 band_grid((n_strip + 255) / 256, s.B);
-                calculate_grad_utt_3d_band<<<band_grid, 256>>>(
+                SWEEP_LAUNCH(calculate_grad_utt_3d_band, band_grid, 256,
                     forward.u_prev_t.data_ptr<float>(),
                     for_view.u_next,
                     forward.u_now_t.data_ptr<float>(),
@@ -560,7 +561,7 @@ struct Driver {
             // The three time levels calculate_grad_utt_3d_band just used, so
             // boundary saving reports the same pseudo-Hessian the full store
             // does. Its own kernel: no gradient arithmetic is touched.
-            accumulate_illumination_3d<<<s.launch_config.grid, s.launch_config.block>>>(
+            SWEEP_LAUNCH(accumulate_illumination_3d, s.launch_config.grid, s.launch_config.block,
                 forward.u_prev_t.data_ptr<float>(),
                 for_view.u_next,
                 forward.u_now_t.data_ptr<float>(),
@@ -576,14 +577,14 @@ struct Driver {
             int nlag = rtm_out->adcig.size(0);
             int Bloc = rtm_out->adcig.size(1) * rtm_out->adcig.size(2);
             int max_lag = (nlag - 1) / 2;
-            accumulate_adcig_3d<<<s.launch_config.grid, s.launch_config.block>>>(
+            SWEEP_LAUNCH(accumulate_adcig_3d, s.launch_config.grid, s.launch_config.block,
                 for_view.u_next,
                 adjoint.u_now_t.data_ptr<float>(),
                 rtm_out->adcig.data_ptr<float>(),
                 nlag, max_lag, Bloc, s.nx, s.ny, s.nz
             );
         }
-        add_source_3d<<<s.source_config.grid, s.source_config.block>>>(
+        SWEEP_LAUNCH(add_source_3d, s.source_config.grid, s.source_config.block,
             for_view.u_next,
             p.forward_source.data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(),
@@ -675,7 +676,7 @@ struct Driver {
                                   const AcousticWavefieldPointer& view,
                                   const BackwardInputCore& p, int it, int nsrc)
     {
-        add_source_3d<<<s.source_config.grid, s.source_config.block>>>(
+        SWEEP_LAUNCH(add_source_3d, s.source_config.grid, s.source_config.block,
             view.u_next,
             p.forward_source.data_ptr<float>(),
             p.forward_sources_loc.data_ptr<int>(),

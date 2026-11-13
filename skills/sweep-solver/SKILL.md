@@ -1,6 +1,6 @@
 ---
 name: sweep-solver
-description: Writes and debugs Python code that uses the sweep-solver package (import name `sweep`), a differentiable seismic wave-equation engine on PyTorch/JAX. Covers forward modelling of shot gathers, FWI gradients through autograd, RTM / LSRTM (Born) imaging, choosing the equation (acoustic, elastic, VTI/TTI, visco, DAS, Biot), the backend (impl='c' compiled CUDA vs impl='eager' vs PropJax), boundaries (CPML, free surface, topography), gradient-memory options (boundary saving, checkpointing), the spectral-element PropSEM, multi-GPU shot and domain decomposition, the `sweep` CLI and `sweep.datasets`. Use it whenever code imports `sweep`, mentions PropTorch / PropSEM / sweepx / sweep-solver, or asks for finite-difference seismic modelling or inversion with this library, including fixing shape errors, NaNs, wrong gradients or slow runs.
+description: Writes and debugs Python code that uses the sweep-solver package (import name `sweep`), a differentiable seismic wave-equation engine on PyTorch/JAX. Covers forward modelling of shot gathers, FWI gradients through autograd, RTM / LSRTM (Born) imaging, choosing the equation (acoustic, elastic, VTI/TTI, visco, DAS, Biot), the backend (impl='c' compiled core on CUDA or the CPU vs impl='eager' vs PropJax), boundaries (CPML, free surface, topography), gradient-memory options (boundary saving, checkpointing), the spectral-element PropSEM, multi-GPU shot and domain decomposition, the `sweep` CLI and `sweep.datasets`. Use it whenever code imports `sweep`, mentions PropTorch / PropSEM / sweepx / sweep-solver, or asks for finite-difference seismic modelling or inversion with this library, including fixing shape errors, NaNs, wrong gradients or slow runs.
 ---
 
 # sweep-solver
@@ -30,7 +30,11 @@ pip install sweep-solver          # solver only, Python >= 3.9
 - The wheel ships prebuilt CUDA cores for CUDA 12 and 13 and picks the one matching torch's
   CUDA major: `impl='c'` needs no nvcc and no build step. A git clone has no core and builds one
   with nvcc on first use (`python -m sweep.build`).
-- No GPU: everything runs with `impl='eager'` (pure PyTorch, CPU or GPU).
+- On the CPU `impl='c'` runs the host core: the same compiled kernels built for the CPU. The
+  wheel ships it; a git clone builds it once (g++ >= 9 or clang++ >= 10, with OpenMP) on the
+  first CPU run (1-3 min, announced on stderr, then cached; ahead of time:
+  `python -m sweep.build --cpu`).
+  With no such compiler, or for an equation the host core lacks, CPU runs are `impl='eager'`.
 - Check an environment: `python scripts/check_env.py`.
 
 ## Minimal forward + gradient
@@ -52,7 +56,8 @@ vp_true = vp_true.to(device)
 
 eq = Acoustic(spatial_order=4, device=device)          # same device as the propagator
 solver = PropTorch(eq, shape=(nz, nx), dh=dh, dt=dt, abcn=20, device=device)
-# impl=None (default): 'c' (compiled CUDA) on a GPU, 'eager' (pure PyTorch) otherwise
+# impl=None (default): 'c' (the compiled core: CUDA on a GPU, the host core on the CPU)
+# where the device's core and the equation allow it, else 'eager' (pure PyTorch)
 
 t = np.arange(nt) * dt
 wavelet = ricker(t - 0.07, f=15.0).astype(np.float32)       # (nt,), shared by all shots
@@ -77,8 +82,8 @@ else stays.
 
 ## Choose
 
-**Equation by physics** (2-D unless noted; full table with fields and flags in
-`references/equations.md`):
+**Equation by physics** (2-D unless noted; `impl='c'` yes = on CUDA and the CPU, CUDA only = the
+host core lacks it; full table with fields and flags in `references/equations.md`):
 
 | Physics | Class | `models=[...]` order | `impl='c'` | Free surface |
 |---|---|---|---|---|
@@ -86,11 +91,11 @@ else stays.
 | Variable density acoustic | `AcousticVRZ` / `AcousticVRZ3D` (`z` = impedance) | `vp, z` | yes | top |
 | | `Acoustic1st` (velocity-pressure; default `backend='jax'`!) | `vp, rho` | no | **not modelled correctly**, see Pitfalls |
 | Born / LSRTM | `AcousticBorn` / `AcousticBorn3D` | `vp, mp` | yes | top |
-| Elastic Born / LSRTM | `ElasticBorn` (2-D) | `vp, vs, rho, dvp, dvs, drho` | yes | yes (2-D per-edge) |
-| Visco-acoustic (const. Q) | `ViscoAcoustic` | `vp, Q, omega` | yes | yes (2-D per-edge) |
+| Elastic Born / LSRTM | `ElasticBorn` (2-D) | `vp, vs, rho, dvp, dvs, drho` | CUDA only | yes (2-D per-edge) |
+| Visco-acoustic (const. Q) | `ViscoAcoustic` | `vp, Q, omega` | CUDA only | yes (2-D per-edge) |
 | Isotropic elastic | `Elastic` / `Elastic3D` | `vp, vs, rho` | yes | yes (2-D per-edge) |
 | Visco-elastic | `ViscoElastic` | `vp, vs, rho, Qp, Qs` | yes | yes |
-| VTI / TTI acoustic (pure qP) | `AcousticVTI` / `AcousticTTI` | `vp, epsilon, delta[, theta]` | yes | **refused** |
+| VTI / TTI acoustic (pure qP) | `AcousticVTI` / `AcousticTTI` | `vp, epsilon, delta[, theta]` | CUDA only | **refused** |
 | VTI acoustic 1st order | `AcousticVTI1st` / `AcousticVTI1st3D` | `vp, epsilon, delta, rho` | yes | refused |
 | Elastic TTI | `ElasticTTISG` / `ElasticTTISG3D` | `vp0, vs0, rho, epsilon, delta, gamma, theta, phi` | yes | refused |
 | DAS (strain / strain rate) | `DASZhao`, `DASMu` (+`3D`) | `vp, vs, rho` | yes | top |
@@ -101,11 +106,11 @@ else stays.
 
 | Need | Use |
 |---|---|
-| Speed on an NVIDIA GPU, large models, boundary saving to CPU/disk | `PropTorch(..., impl="c")` (CUDA tensors only, FP32, no CPU path) |
-| CPU, no GPU, debugging, wavefield snapshots, custom imaging conditions, double backward, any equation | `PropTorch(..., impl="eager")` |
+| Speed on an NVIDIA GPU or the CPU, large models, boundary saving (staged to CPU/disk on CUDA) | `PropTorch(..., impl="c")`: the CUDA core for CUDA tensors, the host core for CPU tensors; FP32 |
+| Debugging, wavefield snapshots, custom imaging conditions, double backward, any equation | `PropTorch(..., impl="eager")` (CPU or GPU) |
 | JAX transforms (`jax.grad`, `pmap`) | `PropJax` with `Equation(..., backend="jax")` |
 | Curved-mesh topography, spectral elements | `sweep.sem.PropSEM` |
-| Let sweep decide | `impl=None` (default): `'c'` if the GPU, core and equation allow, else `'eager'` |
+| Let sweep decide | `impl=None` (default): `'c'` if the device's core and the equation allow, else `'eager'`; read `solver.impl` |
 
 **Boundaries:** leave `pml_type` unset (each equation knows its CPML). `abcn` (default 50) cells
 of CPML are added on each absorbing face. `free_surface=True` / `"top"` / `["top","left"]` /
@@ -113,7 +118,8 @@ per-face tuple, fixed at construction. See `references/boundaries.md`.
 
 **Gradient memory** (`memory=` from `sweep.propagator.options`): `Full()` (store everything,
 fastest backward), `BoundarySaving(storage="gpu"|"cpu"|"disk", storage_dtype=...)` (default on
-`impl='c'`), `Ckpt(chunks=...)` (default on eager). See `references/gradients.md`.
+`impl='c'`; on a CPU device only `storage="gpu"`, i.e. on the compute device),
+`Ckpt(chunks=...)` (default on eager). See `references/gradients.md`.
 
 ## Conventions
 
@@ -149,8 +155,8 @@ fastest backward), `BoundarySaving(storage="gpu"|"cpu"|"disk", storage_dtype=...
    `x >= nx` or `z < 0` silently lands in the CPML. Convert metres with `round(x / dh)`.
 5. **`impl='c'` ignores `return_wavefield=True`** (returns the record only). Snapshots need
    `impl='eager'` with `memory=Full()` (or `use_ckpt=False`); eager's default checkpointing raises.
-6. **`impl='c'` needs CUDA float32 model tensors** (numpy arrays, CPU tensors and float64 are
-   refused); eager converts. Gradients come back on the model's device.
+6. **`impl='c'` needs float32 torch tensors on the propagator's device** (numpy arrays and
+   float64 are refused); eager converts. Gradients come back on the model's device.
 7. **Gradient calls still waiting for `backward()` each hold boundary storage on `impl='c'`:**
    summing several calls' losses before one `backward()` is exact, but every pending call after
    the first allocates its own boundary / checkpoint store (freed by its backward). Call
@@ -179,8 +185,9 @@ fastest backward), `BoundarySaving(storage="gpu"|"cpu"|"disk", storage_dtype=...
 15. **Stability is not checked** except for `AcousticVTI/TTI` (warning). A too-large `dt` gives
     NaN/inf silently. Run `scripts/stability_check.py`; elastic: use `max(vp)` for stability and
     keep >= ~5 points per minimum S wavelength (rule of thumb).
-16. **`eager_options=` with `impl=None` on a GPU raises** (auto resolves to `'c'`). Pass
-    `impl="eager"` explicitly when you pass eager options; `cuda_options` likewise needs `impl="c"`.
+16. **`eager_options=` with `impl=None` on a GPU raises** (auto resolves to `'c'`); on a CPU
+    device they keep auto on eager. Pass `impl="eager"` explicitly when you pass eager options;
+    `cuda_options` likewise needs `impl="c"`.
 17. **Unknown keyword arguments raise `TypeError`** (constructor and call). `dev=` is a deprecated
     alias of `device=`; `boundary_saving_config={...}` / `MemoryOptions` are deprecated: use
     `memory=`.

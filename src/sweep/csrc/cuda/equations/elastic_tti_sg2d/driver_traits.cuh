@@ -35,6 +35,7 @@
 #pragma once
 
 #include <cuda_runtime.h>
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 #include <algorithm>
 #include <array>
@@ -280,7 +281,7 @@ struct Driver {
                               float* field, const Buf& source,
                               const Buf& sources_loc, int it, int nsrc)
     {
-        add_source<<<s.source_config.grid, s.source_config.block>>>(
+        SWEEP_LAUNCH(add_source, s.source_config.grid, s.source_config.block,
             field,
             source.data_ptr<float>(),
             sources_loc.data_ptr<int>(),
@@ -321,7 +322,7 @@ struct Driver {
                              float* field, Buf& record, int irec,
                              const Buf& receivers_loc, int it, int nrec)
     {
-        record_kernel<<<s.record_config.grid, s.record_config.block>>>(
+        SWEEP_LAUNCH(record_kernel, s.record_config.grid, s.record_config.block,
             field,
             record.select(0, irec).data_ptr<float>(),
             receivers_loc.data_ptr<int>(),
@@ -487,7 +488,7 @@ public:
             if (sfield > 2) continue;                       // vx = 0, vy = 1, vz = 2
             float* adj_field = elastic_tti_sg2d::field_ptr(adj_view, sfield);
             if (adj_field == nullptr) continue;
-            add_body_force_rho_grad_correction<<<s.source_config.grid, s.source_config.block>>>(
+            SWEEP_LAUNCH(add_body_force_rho_grad_correction, s.source_config.grid, s.source_config.block,
                 grads[0].data_ptr<float>(),
                 adj_field,
                 s.models.rho.data_ptr<float>(),
@@ -510,7 +511,7 @@ public:
         for (int irec = 0; irec < receiver_fields.size(); ++irec) {
             float* field = elastic_tti_sg2d::field_ptr(adj_view, receiver_fields[irec]);
             if (field == nullptr) continue;
-            add_source_signed<<<s.record_config.grid, s.record_config.block>>>(
+            SWEEP_LAUNCH(add_source_signed, s.record_config.grid, s.record_config.block,
                 field,
                 p.adjoint_source.select(0, irec).data_ptr<float>(),
                 p.adjoint_sources_loc.data_ptr<int>(),
@@ -556,7 +557,7 @@ public:
         for (int irec = 0; irec < receiver_fields.size(); ++irec) {
             const int field = receiver_fields[irec];
             if (field > 2) continue;                      // stress receiver: no rho term
-            sub_receiver_rho_grad_correction<<<s.record_config.grid, s.record_config.block>>>(
+            SWEEP_LAUNCH(sub_receiver_rho_grad_correction, s.record_config.grid, s.record_config.block,
                 grads[0].data_ptr<float>(),
                 v.now[field],
                 v.next[field],
@@ -660,7 +661,7 @@ public:
         for (int isrc = 0; isrc < source_fields.size(); ++isrc) {
             float* field = elastic_tti_sg2d::field_ptr(for_view, source_fields[isrc]);
             if (field == nullptr) continue;
-            add_source_signed<<<s.source_config.grid, s.source_config.block>>>(
+            SWEEP_LAUNCH(add_source_signed, s.source_config.grid, s.source_config.block,
                 field,
                 p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),
@@ -857,7 +858,7 @@ public:
         for (int isrc = 0; isrc < source_fields.size(); ++isrc) {
             float* field = elastic_tti_sg2d::field_ptr(for_view, source_fields[isrc]);
             if (field == nullptr) continue;
-            add_source<<<s.source_config.grid, s.source_config.block>>>(
+            SWEEP_LAUNCH(add_source, s.source_config.grid, s.source_config.block,
                 field,
                 p.forward_source.data_ptr<float>(),
                 p.forward_sources_loc.data_ptr<int>(),

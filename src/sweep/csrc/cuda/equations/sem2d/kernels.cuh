@@ -38,6 +38,7 @@
 #pragma once
 
 #include "../../../core/device.h"
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 #include "../../../core/sem_input_core.h"
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -293,7 +294,7 @@ __global__ void sem2d_acoustic_cpml_grads_f(
 // stay the pre-tape kernel down to its arithmetic.
 // K##_by_flag is the kernel's table, <false> then <true>.
 #define SEM2D_LAUNCH_WS(wsave, K, grid, block, shm, stream, ...) \
-    K##_by_flag[(wsave) ? 1 : 0]<<<grid, block, shm, stream>>>(__VA_ARGS__)
+    SWEEP_LAUNCH_ON(K##_by_flag[(wsave) ? 1 : 0], grid, block, shm, stream, __VA_ARGS__)
 
 using sem2d_acoustic_cpml_step_newmark_f_fn = void (*)(const float*, const float*,
     const float*, const float*, const float*, const float*, const float*, const float*,
@@ -472,7 +473,7 @@ __global__ void sem2d_acoustic_cpml_newmark(
 // text and --use_fast_math cannot re-contract the surviving expressions.
 // K##_by_flag is the kernel's table, <false> then <true>.
 #define SEM2D_LAUNCH_WT(wt, K, grid, block, shm, stream, ...) \
-    K##_by_flag[(wt) ? 1 : 0]<<<grid, block, shm, stream>>>(__VA_ARGS__)
+    SWEEP_LAUNCH_ON(K##_by_flag[(wt) ? 1 : 0], grid, block, shm, stream, __VA_ARGS__)
 
 // WTAPE: the forward saved w_sum^k (save_w_sum), so this kernel neither
 // recomputes it nor accumulates grad_inv_Mg (which needs the assembled

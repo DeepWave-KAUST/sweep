@@ -1,11 +1,24 @@
 #pragma once
 #include "../../launch/by_order.cuh"
+#include "../../launch/cell_path.h"
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include "../../operators/laplace.cuh"
 #include "../../operators/gradient.cuh"
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
+
+// The indices of one cell, as the acoustic2d kernels decode them, handed to a
+// _cell body (launch/cell_path.h) in one by-value struct rather than as three
+// int parameters (as elastic_tti_2nd2d's CellIndex2): nvcc orders a compare's
+// operands by kind, and a bare int parameter ranks below a load, so the cells'
+// tests on ix / iz (the air test, the imaging boxes) would be emitted with
+// their operands swapped.  A field of a by-value struct is a load, ranked like
+// the kernel's own decoded index, and the split kernels keep their SASS
+// (docs/dev/host_core.md rule 7).  On the host it is free.
+struct Acoustic2dCellIndex {
+    int ix, iz, b;
+};
 
 // Accessor returning (a · psi) at a stencil tap: a is a 1-D profile (neighbour
 // stride 1 along the differencing axis), psi a 2-D field at linear index idx
@@ -446,6 +459,70 @@ using acoustic2nd_adjoint_fused_fn = void (*)(AcousticWavefieldPointer, const fl
     float*, float*, float*, const float*, float*);
 SWEEP_BY_ORDER_DECL(acoustic2nd_adjoint_fused_fn, acoustic2nd_adjoint_fused_by_order);
 
+// One cell of acoustic2nd_nopml: everything after the kernel's guards
+// (launch/cell_path.h).  No PML branch and no air test (the reconstruction
+// updates every cell inside the boundary band); the one run-time test is the
+// fused imaging's.  Interior box (kernels.cu acoustic2nd_nopml_box): the
+// guards' box and, with the imaging on, the imaging test's box inside it;
+// optional output: grad.
+template<int Order, CellPath Path = CellPath::Any>
+__device__ __forceinline__
+void acoustic2nd_nopml_cell(
+    Acoustic2dCellIndex cell,
+    const AcousticWavefieldPointer& wf,
+    const float* __restrict__ vp,
+    const LaplaceParam& lap_ctx,
+    const SolverContext& solver,
+    const float* __restrict__ adj,
+    float* __restrict__ grad,
+    int save_width
+) {
+    const int ix = cell.ix, iz = cell.iz, b = cell.b;
+
+    int spatial_size = solver.nx * solver.nz;
+    int idx = iz * solver.nx + ix;
+
+    auto f = wf.offset(b, spatial_size);
+
+    const float* vp_b     = vp     + b * spatial_size;
+
+    float w_sum = 0.0f;
+
+    float lap_x = laplace<2, Order, X>(f.u_now, ix, 0, iz, lap_ctx);
+    float lap_z = laplace<2, Order, Z>(f.u_now, ix, 0, iz, lap_ctx);
+
+    w_sum = lap_x + lap_z;
+
+    float v  = vp_b[idx];
+    const float u0 = f.u_now[idx];
+    const float up = f.u_prev[idx];
+
+    const float un =
+        2.0f * u0 -
+        up +
+        (v * v) * solver.dt * solver.dt * w_sum;
+    f.u_next[idx] = un;
+
+    if (optional_output<Path>(grad)) {
+        // Physical box minus the restore strips [phys0, phys0 + save_width)
+        // of every non-cut face (cut faces: no strip, box starts at M).
+        const int ix0 = solver.cut_x_lo() ? solver.phys_x0() : solver.phys_x0() + save_width;
+        const int ix1 = solver.cut_x_hi() ? solver.phys_x1() : solver.phys_x1() - save_width;
+        const int iz0 = solver.cut_z_lo() ? solver.phys_z0() : solver.phys_z0() + save_width;
+        const int iz1 = solver.cut_z_hi() ? solver.phys_z1() : solver.phys_z1() - save_width;
+        if (interior_path<Path> || (ix >= ix0 && ix < ix1 && iz >= iz0 && iz < iz1)) {
+            const float* adj_b  = adj  + b * spatial_size;
+            float*       grad_b = grad + b * spatial_size;
+            // Verbatim calculate_grad_utt with this step's operands:
+            // u_forward_now = un (w(it-1)), u_forward_prev = u0 (w(it)),
+            // u_forward_next = up (w(it+1)).
+            float u_tt = (un - 2*u0 + up) / (solver.dt*solver.dt);
+            grad_b[idx] += 2.f * solver.dt * solver.dt * u_tt * adj_b[idx] / v;
+        }
+    }
+
+}
+
 template<int Order>
 __global__ void acoustic2nd_nopml(
     AcousticWavefieldPointer wf,
@@ -488,48 +565,8 @@ __global__ void acoustic2nd_nopml(
     if (ix < bx_lo || ix >= solver.nx - bx_hi || iz < bz_lo || iz >= solver.nz - bz_hi)
         return;
 
-    int spatial_size = solver.nx * solver.nz;
-    int idx = iz * solver.nx + ix;
-
-    auto f = wf.offset(b, spatial_size);
-
-    const float* vp_b     = vp     + b * spatial_size;
-
-    float w_sum = 0.0f;
-
-    float lap_x = laplace<2, Order, X>(f.u_now, ix, 0, iz, lap_ctx);
-    float lap_z = laplace<2, Order, Z>(f.u_now, ix, 0, iz, lap_ctx);
-
-    w_sum = lap_x + lap_z;
-
-    float v  = vp_b[idx];
-    const float u0 = f.u_now[idx];
-    const float up = f.u_prev[idx];
-
-    const float un =
-        2.0f * u0 -
-        up +
-        (v * v) * solver.dt * solver.dt * w_sum;
-    f.u_next[idx] = un;
-
-    if (grad != nullptr) {
-        // Physical box minus the restore strips [phys0, phys0 + save_width)
-        // of every non-cut face (cut faces: no strip, box starts at M).
-        const int ix0 = solver.cut_x_lo() ? solver.phys_x0() : solver.phys_x0() + save_width;
-        const int ix1 = solver.cut_x_hi() ? solver.phys_x1() : solver.phys_x1() - save_width;
-        const int iz0 = solver.cut_z_lo() ? solver.phys_z0() : solver.phys_z0() + save_width;
-        const int iz1 = solver.cut_z_hi() ? solver.phys_z1() : solver.phys_z1() - save_width;
-        if (ix >= ix0 && ix < ix1 && iz >= iz0 && iz < iz1) {
-            const float* adj_b  = adj  + b * spatial_size;
-            float*       grad_b = grad + b * spatial_size;
-            // Verbatim calculate_grad_utt with this step's operands:
-            // u_forward_now = un (w(it-1)), u_forward_prev = u0 (w(it)),
-            // u_forward_next = up (w(it+1)).
-            float u_tt = (un - 2*u0 + up) / (solver.dt*solver.dt);
-            grad_b[idx] += 2.f * solver.dt * solver.dt * u_tt * adj_b[idx] / v;
-        }
-    }
-
+    acoustic2nd_nopml_cell<Order>(Acoustic2dCellIndex{ix, iz, b}, wf, vp, lap_ctx, solver, adj,
+                                  grad, save_width);
 }
 
 using acoustic2nd_nopml_fn = void (*)(AcousticWavefieldPointer, const float*,

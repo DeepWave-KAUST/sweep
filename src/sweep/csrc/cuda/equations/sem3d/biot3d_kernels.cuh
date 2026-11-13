@@ -823,14 +823,14 @@ static __global__ void biot3d_grad_p_T(
 #define BIOT3D_LAUNCH_K(k, KERNEL, grid, block, shmem, stream, ...)                  \
     do {                                                                            \
         switch (k) {                                                                \
-            case 1: KERNEL<1><<<grid, block, shmem, stream>>>(__VA_ARGS__); break;  \
-            case 2: KERNEL<2><<<grid, block, shmem, stream>>>(__VA_ARGS__); break;  \
-            case 3: KERNEL<3><<<grid, block, shmem, stream>>>(__VA_ARGS__); break;  \
-            case 4: KERNEL<4><<<grid, block, shmem, stream>>>(__VA_ARGS__); break;  \
-            case 5: KERNEL<5><<<grid, block, shmem, stream>>>(__VA_ARGS__); break;  \
-            case 6: KERNEL<6><<<grid, block, shmem, stream>>>(__VA_ARGS__); break;  \
-            case 7: KERNEL<7><<<grid, block, shmem, stream>>>(__VA_ARGS__); break;  \
-            default: KERNEL<8><<<grid, block, shmem, stream>>>(__VA_ARGS__); break; \
+            case 1: SWEEP_LAUNCH_ON((KERNEL<1>), grid, block, shmem, stream, __VA_ARGS__); break;  \
+            case 2: SWEEP_LAUNCH_ON((KERNEL<2>), grid, block, shmem, stream, __VA_ARGS__); break;  \
+            case 3: SWEEP_LAUNCH_ON((KERNEL<3>), grid, block, shmem, stream, __VA_ARGS__); break;  \
+            case 4: SWEEP_LAUNCH_ON((KERNEL<4>), grid, block, shmem, stream, __VA_ARGS__); break;  \
+            case 5: SWEEP_LAUNCH_ON((KERNEL<5>), grid, block, shmem, stream, __VA_ARGS__); break;  \
+            case 6: SWEEP_LAUNCH_ON((KERNEL<6>), grid, block, shmem, stream, __VA_ARGS__); break;  \
+            case 7: SWEEP_LAUNCH_ON((KERNEL<7>), grid, block, shmem, stream, __VA_ARGS__); break;  \
+            default: SWEEP_LAUNCH_ON((KERNEL<8>), grid, block, shmem, stream, __VA_ARGS__); break; \
         }                                                                           \
     } while (0)
 

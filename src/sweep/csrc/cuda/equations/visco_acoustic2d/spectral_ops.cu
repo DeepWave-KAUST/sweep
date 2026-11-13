@@ -1,6 +1,7 @@
 // visco_acoustic2d/spectral_ops.cu -- the kernels and launchers declared in
 // spectral_ops.cuh (see its header comment), compiled once.
 #include "spectral_ops.cuh"
+#include "../../launch/launch.h"   // SWEEP_LAUNCH
 
 #include "../../../core/device.h"
 
@@ -122,7 +123,7 @@ void promote(float2* c, const float* x, int64_t n)
 {
     if (n == 0) return;
     check_disjoint("promote", c, n * static_cast<int64_t>(sizeof(float2)), x, float_span(n, 1));
-    promote_kernel<<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(c, x, n);
+    SWEEP_LAUNCH_ON(promote_kernel, grid_for(n), kThreads, 0, sweep::current_stream(), c, x, n);
     SWEEP_KERNEL_LAUNCH_CHECK();
 }
 
@@ -132,14 +133,14 @@ void cmul_grid(float2* out, const float* g, const float2* in, int64_t n, int64_t
     const int64_t out_bytes = n * static_cast<int64_t>(sizeof(float2));
     check_disjoint("cmul_grid", out, out_bytes, g, float_span(ng, 1));
     check_disjoint("cmul_grid", out, out_bytes, in, out_bytes);
-    cmul_grid_kernel<<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(out, g, in, n, ng);
+    SWEEP_LAUNCH_ON(cmul_grid_kernel, grid_for(n), kThreads, 0, sweep::current_stream(), out, g, in, n, ng);
     SWEEP_KERNEL_LAUNCH_CHECK();
 }
 
 void cscale(float2* c, float s, int64_t n)
 {
     if (n == 0) return;
-    cscale_kernel<<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(c, s, n);
+    SWEEP_LAUNCH_ON(cscale_kernel, grid_for(n), kThreads, 0, sweep::current_stream(), c, s, n);
     SWEEP_KERNEL_LAUNCH_CHECK();
 }
 
@@ -147,7 +148,7 @@ void real_copy(float* out, const float2* c, int64_t n)
 {
     if (n == 0) return;
     check_disjoint("real_copy", out, float_span(n, 1), c, n * static_cast<int64_t>(sizeof(float2)));
-    real_copy_kernel<<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(out, c, n);
+    SWEEP_LAUNCH_ON(real_copy_kernel, grid_for(n), kThreads, 0, sweep::current_stream(), out, c, n);
     SWEEP_KERNEL_LAUNCH_CHECK();
 }
 
@@ -157,7 +158,7 @@ void binary(float* out, const float* a, int sa, const float* b, int sb, int64_t 
     if (n == 0) return;
     check_disjoint("binary", out, float_span(n, 1), a, float_span(n, sa));
     check_disjoint("binary", out, float_span(n, 1), b, float_span(n, sb));
-    binary_kernel<Op><<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(out, a, sa, b, sb, n);
+    SWEEP_LAUNCH_ON((binary_kernel<Op>), grid_for(n), kThreads, 0, sweep::current_stream(), out, a, sa, b, sb, n);
     SWEEP_KERNEL_LAUNCH_CHECK();
 }
 
@@ -166,7 +167,7 @@ void inplace(float* y, const float* x, int sx, int64_t n)
 {
     if (n == 0) return;
     check_disjoint("inplace", y, float_span(n, 1), x, float_span(n, sx));
-    inplace_kernel<Op><<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(y, x, sx, n);
+    SWEEP_LAUNCH_ON((inplace_kernel<Op>), grid_for(n), kThreads, 0, sweep::current_stream(), y, x, sx, n);
     SWEEP_KERNEL_LAUNCH_CHECK();
 }
 
@@ -174,14 +175,14 @@ void axpy(float* y, const float* x, int sx, float alpha, int64_t n)
 {
     if (n == 0) return;
     check_disjoint("axpy", y, float_span(n, 1), x, float_span(n, sx));
-    axpy_kernel<<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(y, x, sx, alpha, n);
+    SWEEP_LAUNCH_ON(axpy_kernel, grid_for(n), kThreads, 0, sweep::current_stream(), y, x, sx, alpha, n);
     SWEEP_KERNEL_LAUNCH_CHECK();
 }
 
 void scale(float* y, float s, int64_t n)
 {
     if (n == 0) return;
-    scale_kernel<<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(y, s, n);
+    SWEEP_LAUNCH_ON(scale_kernel, grid_for(n), kThreads, 0, sweep::current_stream(), y, s, n);
     SWEEP_KERNEL_LAUNCH_CHECK();
 }
 
@@ -189,7 +190,7 @@ void zero_halo(float* u, int64_t slabs, int nz, int nx, int M)
 {
     const int64_t n = slabs * static_cast<int64_t>(nz) * nx;
     if (n == 0 || M <= 0) return;
-    zero_halo_kernel<<<grid_for(n), kThreads, 0, sweep::current_stream()>>>(u, slabs, nz, nx, M);
+    SWEEP_LAUNCH_ON(zero_halo_kernel, grid_for(n), kThreads, 0, sweep::current_stream(), u, slabs, nz, nx, M);
     SWEEP_KERNEL_LAUNCH_CHECK();
 }
 

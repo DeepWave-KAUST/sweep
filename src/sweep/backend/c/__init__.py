@@ -1,5 +1,7 @@
-"""sweep's CUDA backend (``impl='c'``): the pure-Python ctypes layer over the
-prebuilt ``libsweep_core.so`` (csrc/core/capi.h).
+"""sweep's compiled backend (``impl='c'``): the pure-Python ctypes layer over
+the prebuilt ``libsweep_core.so`` cores (csrc/core/capi.h) -- the CUDA core for
+CUDA tensors and the host core (the same sources built by g++, :mod:`.hostcore`)
+for CPU tensors, chosen per call from ``models[0].device``.
 
 This replaces the compiled pybind shim (csrc/bindings/module.cpp): the same
 Python surface -- one function per core entry, the stepped runners, the
@@ -8,10 +10,13 @@ boundary session -- reached through the plain C API with ctypes, so after
 the C structs comes from the generated mirror (:mod:`.abi`, contract A); the
 behaviour on top (contract B) is split by concern:
 
-* :mod:`.jit` -- where the core comes from: the shipped core's fit rules, the
-  cached local core, the nvcc build, and the ``SWEEP_JIT_FULL`` pybind
+* :mod:`.jit` -- where the CUDA core comes from: the shipped core's fit rules,
+  the cached local core, the nvcc build, and the ``SWEEP_JIT_FULL`` pybind
   developer path;
-* :mod:`.loader` -- ``core_lib()``: dlopen, the C signatures, the ABI guard;
+* :mod:`.hostcore` -- where the host (CPU) core comes from: the shipped
+  ``lib/cpu`` core, the cached local build, the g++ build; which equations it
+  leaves out;
+* :mod:`.loader` -- ``core_lib(kind)``: dlopen, the C signatures, the ABI guard;
 * :mod:`.adapt` -- ``adapt()``: tensor -> Buf and the input validation;
 * :mod:`.entries` -- the per-entry functions and the per-call stream scope;
 * :mod:`.runners` -- the persistent stepped runners and the boundary session.
@@ -25,7 +30,7 @@ from __future__ import annotations
 
 from . import abi as _abi
 from .entries import _core_stream_for, _entry_table, _make_entry, visco_acoustic2d_fft_workspace_bytes
-from .loader import _load_lock, core_lib
+from .loader import _load_lock, any_core_lib
 from .runners import BackwardRunner, BoundarySession, ForwardRunner, _make_runner_factory
 
 # The equations with a persistent stepped runner in the core; the rest must
@@ -53,14 +58,16 @@ def sem_namespace() -> dict:
 
 def namespace() -> dict:
     """Everything ``sweep._C`` exposes, keyed by its old pybind name (cached;
-    built once under the loader's ``_load_lock``)."""
+    built once under the loader's ``_load_lock``).  The entry table is read
+    from whichever core loads (both export the same one; the loader checks
+    when the second arrives); each entry picks its core per call."""
     global _ns
     if _ns is not None:
         return _ns
     with _load_lock:
         if _ns is not None:
             return _ns
-        lib = core_lib()
+        lib = any_core_lib()
         ns, ids = {}, {}
         for i, (name, kind) in enumerate(_entry_table(lib)):
             ns[name] = _make_entry(lib, i, name, kind)

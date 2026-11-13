@@ -113,8 +113,10 @@ loss = L2Loss()(syn, observed)  # both are (B, nt, nrec, nfield)
 
     Torch-family propagator facade. `backend="torch", impl="eager"` uses the
     Python/Torch implementation, while `backend="torch", impl="c"`
-    dispatches to the prebuilt CUDA core through the `sweep.backend.c` ctypes
-    layer (CUDA tensors only).
+    dispatches to the compiled core through the `sweep.backend.c` ctypes
+    layer: the prebuilt CUDA core for CUDA tensors, the host core for CPU
+    tensors (explicit `impl="c"` only; see
+    [The host (CPU) core](../../dev/host_core.md)).
 
     !!! info "Default memory strategy by impl"
         - `impl="eager"` (and `PropJax`) → chunked checkpointing, i.e.
