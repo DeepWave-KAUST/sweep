@@ -63,6 +63,12 @@ and this project adheres to
   call (up to 7.5e-3 of the gradient).  Only the call's own shots are
   quantized now, and the saver checks each face's batch, cells per shot and
   scale layout separately and names the one that disagrees.
+- The staged-copy bounds check (`SWEEP_BOUNDARY_BOUNDS=1`) took a boundary
+  buffer's size from its element count. After a larger batch the buffers are
+  narrowed to the call's shots and keep the larger batch's step pitch, so a
+  host-staged smaller batch stopped with "boundary staging out of range"
+  although its copies stayed inside the buffer. A copy is now bounded by the
+  buffer's outermost extent.
 - The 2-D `AcousticVRZ` boundary-saving backward (`impl='c'`) reconstructs the
   row next to a domain-decomposition cut face. The reverse step skipped the
   outer row of the physical box on every face, but a cut face has no saved
