@@ -28,7 +28,7 @@ This PDE restates [`Acoustic`](../api/equations/acoustic.md), and the generated
 class reproduces it bit for bit, record and gradient, in 2-D and (with
 `build(ndim=3)`) against `Acoustic3D`: with and without a free surface, per
 edge, on a topography, with `EagerOptions(cpml_strips=True)`, compiled or not,
-with `Full()` or `BoundarySaving()`.
+with `Full()`, `Ckpt()` or `BoundarySaving()`.
 
 ## Writing a PDE
 
@@ -47,9 +47,13 @@ with `Full()` or `BoundarySaving()`.
 Coefficients are sympy expressions of models, coefficients and numbers, with
 `sqrt`, `exp`, `log`, the trigonometric and hyperbolic functions and `Abs`
 available (`sympy.sqrt(1 + 2 * delta)`). The left-hand side may carry a factor
-(`Eq(m * p.dt2, laplace(p))`); it is divided out. A coefficient written inline
-is computed at every step; a `Coefficient` once per run, in the class's
-`prepare_models`, which the propagator calls before the time loop.
+(`Eq(m * p.dt2, laplace(p))`); it is divided out. A `Coefficient` is computed
+once per run, in the class's `prepare_models`, which the propagator calls
+before the time loop. A coefficient written inline is computed in the step,
+together with `dt` where the step multiplies by it (`vp**2 * dt**2`,
+`dt/rho`): once per rollout in an uncompiled run (once per segment when
+checkpointing), as the shipped equations compute theirs, and at every step in
+a compiled run.
 
 A system couples any number of fields. A pseudo-acoustic VTI system, for
 example:
@@ -102,7 +106,10 @@ MyElastic = PDE([
 ], name="MyElastic").build(ndim=2)
 ```
 
-This restates [`Elastic`](../api/equations/elastic.md) bit for bit. The
+This restates [`Elastic`](../api/equations/elastic.md): uncompiled, the record
+and the `vp` and `vs` gradients bit for bit, the `rho` gradient to about 1e-8,
+because `Elastic` computes `dt / rho` twice, for `vz` and for `vx`, and the
+generated step once for both. The
 pressure-velocity system of [`Acoustic1st`](../api/equations/acoustic1st.md)
 places its velocities half a cell before the pressure node:
 
@@ -229,7 +236,9 @@ sub-step, its derivatives, then per equation the CPML corrections of its
 derivatives (along z, y, x), the second derivatives of its dissipative terms
 (`separable_d2_2d/3d`) and its update. Autograd accumulates gradients in
 the order the graph was built, so another order of the same operations would
-move an uncompiled gradient by about 1e-7.
+move an uncompiled gradient by about 1e-7. The products of models and `dt`
+go through `once` (`sweep.equations._invariants`), keyed by their text, so an
+uncompiled rollout computes each once, as the shipped equations do.
 
 | Generated | From |
 | --- | --- |
@@ -254,17 +263,17 @@ in [Extending](extending.md#part-2-adding-a-compiled-cuda-kernel-implc).
 
 | Check | Result |
 | --- | --- |
-| `p.dt2 = vp**2 laplace(p)` vs `Acoustic` / `Acoustic3D` | bit for bit, record and gradient, 54 configurations on CPU and CUDA |
+| `p.dt2 = vp**2 laplace(p)` vs `Acoustic` / `Acoustic3D` | bit for bit, record and gradient: 15 configurations uncompiled on CPU and on CUDA; `Full()`, `Ckpt()` and `BoundarySaving()`, compiled or not, on CUDA |
 | Coupled VTI system, finite differences (canonical 48 x 56 case, fp32) | error falls as h² down to the fp32 floor, ~1e-3 |
 | Coupled VTI system, `BoundarySaving` vs `Full()` | 2e-5 to 9e-5 (`Acoustic` on the same case: 1.4e-5) |
-| Restated `Acoustic1st` and 2-D `Elastic`, uncompiled | bit for bit, record and gradient: spatial orders 4 and 8, with and without `cpml_strips`, `Full()` and `BoundarySaving()` |
-| The same, compiled | `Acoustic1st` bit for bit; `Elastic` record bit for bit, gradients 8e-8 to 2.3e-7 |
-| Restated 3-D `Elastic` | record bit for bit, gradients 5e-8 to 8.4e-7 |
+| Restated `Acoustic1st` and 2-D `Elastic`, uncompiled | bit for bit, record and gradient: spatial orders 4 and 8, with and without `cpml_strips`, `Full()`, `Ckpt()` and `BoundarySaving()`; but the `Elastic` `rho` gradient with `Full()` and `Ckpt()`, 1.1e-8 to 1.4e-8 (see above) |
+| The same, compiled | `Acoustic1st` bit for bit with `Full()` and `Ckpt()`, gradients to 6e-8 with `BoundarySaving()`; `Elastic` record bit for bit, gradients 3e-8 to 9.6e-8 |
+| Restated 3-D `Elastic` | record bit for bit; gradients 1.8e-8 to 3.7e-7 with `Full()`, `Ckpt()` and uncompiled `BoundarySaving()`, compiled or not; compiled with `BoundarySaving()` 7.6e-5 to 2.9e-4, the size of either class's own boundary-saving error (1.2e-4 to 3e-4 from its `Full()` gradient, the shipped class's too) |
 | Elliptic anisotropic first-order acoustics, finite differences (canonical case, fp32) | error falls as h² down to the fp32 floor, 6e-5 to 2e-3 |
 | Heat conduction, an impulse vs the heat kernel (8th order, `kappa dt / h^2 = 0.05`) | 2-D 7.7e-4 at t = 40 h²/κ, falling as dt (orders 4 and 8); 3-D 2.4e-3 at t = 20 h²/κ; the heat conserved to 5e-6 |
 | Unsteady Stokes, a Gaussian vortex vs Lamb-Oseen (8th order, `nu dt / h^2 = 0.05`) | vorticity 3.6e-4 by the time the core area has quadrupled, half that at dt / 2; circulation to 1e-6; p stays at 1e-5 of rho v_max² |
 | Stokes and heat gradients, finite differences (fp32) | `nu` 3.3e-5, `c` 3.2e-5, `kappa` 5.3e-5; `rho` 2.5e-4, its weak data sensitivity at the fp32 floor |
-| Stokes and heat, `Ckpt()` and `cpml_strips` vs `Full()` | bit for bit, record and gradient; compiled 1.6e-7 to 5.5e-7 |
+| Stokes and heat, `cpml_strips` and `Ckpt()` vs `Full()` | `cpml_strips` bit for bit, record and gradient; `Ckpt()` record bit for bit, gradients to 2.5e-7 (each checkpointed segment computes the step's products of models and `dt` anew, as for the shipped equations); compiled 1.5e-7 to 1.1e-6 |
 | `torch.compile(fullgraph=True)` | one graph per step |
 
 The restated 3-D `Elastic` takes its derivatives and CPML corrections in an
@@ -281,17 +290,23 @@ from run to run, for the shipped equations as well.
 
 ## Memory
 
-A restated `Acoustic` / `Acoustic3D` needs the same CUDA memory as the shipped
-class, in 2-D and 3-D: the same memory held for the backward pass and, to within
-0.1 MB, the same peak, compiled or not, with `Full()`, checkpointing and
-boundary saving.
+Peak CUDA memory of a forward and backward pass, measured on an A100 (one
+shot; 200 x 400 in 2-D, 72³ in 3-D; `abcn=12`), compiled or not, with
+`Full()`, checkpointing and boundary saving:
 
-So do the restated first-order equations, to within one wavefield (1 MB in the
-2-D runs measured, 200 x 400 with two shots; 3.5 MB in the 3-D ones), compiled
-or not, with `Full()`, checkpointing and boundary saving: `Acoustic1st`, the
-2-D `Elastic` (whose generated class also drops the two memory fields the
-shipped one carries unused) and the 3-D `Elastic`. The generated step frees a
-sub-step's derivatives at its end, and computes a sum of derivatives that
-several equations read once per sub-step (the 3-D divergence), as the shipped
-steps do: written out in every equation, autograd would keep a copy of the sum
-per equation, 7 % more memory in a `Full()` 3-D run.
+- A restated `Acoustic` / `Acoustic3D` peaks at the shipped class's memory, to
+  the byte in 2-D and to within 0.5 MB (0.14 of a wavefield) in 3-D.
+- A restated `Acoustic1st` or 2-D `Elastic` peaks at no more than the shipped
+  one: `Acoustic1st` up to one wavefield less, the 2-D `Elastic` 2 to 6 less
+  (its generated class also drops the two memory fields the shipped one
+  carries unused).
+- The restated 3-D `Elastic` peaks within half a wavefield of the shipped one
+  with `Full()` and uncompiled checkpointing. With strip-held CPML memory, the
+  3-D default, it needs 4 wavefields more under boundary saving and 4 to 8 more
+  under compiled checkpointing; with `cpml_strips=False`, 9 less and the same.
+
+The generated step frees a sub-step's derivatives at its end, and computes a
+sum of derivatives that several equations read once per sub-step (the 3-D
+divergence), as the shipped steps do: written out in every equation, autograd
+would keep a copy of the sum per equation, 7 % more memory in a `Full()` 3-D
+run.

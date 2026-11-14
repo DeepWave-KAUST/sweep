@@ -3,8 +3,8 @@
 They hold what does not depend on the PDE: the operator set-up, the default
 source / receiver fields and the free surface. The second-order set-up mirrors
 :class:`~sweep.equations.Acoustic` (2-D) and :class:`~sweep.equations.Acoustic3D`
-(3-D), first-derivative kernels included: the fixed stencil on a 2-D CUDA
-device, ``torch.gradient`` otherwise. The first-order one is
+(3-D), first-derivative kernels included: the fixed stencil of the FD order in
+2-D on every device, ``torch.gradient`` in 3-D. The first-order one is
 :class:`~sweep.equations.base.FirstOrderEquation`'s staggered-grid operator, as
 :class:`~sweep.equations.Acoustic1st` and :class:`~sweep.equations.Elastic` use,
 plus, for a dissipative term, the second-order equations' separable second
@@ -50,7 +50,7 @@ class SymbolicSecondOrderEquation(SecondOrderEquation):
         _torch_only(type(self), backend)
         super().__init__(spatial_order, device, backend, dim=self.NDIM)
         self.init_separable_laplace()
-        if self.NDIM == 2 and "cuda" in str(device):
+        if self.NDIM == 2:
             self.init_grad_kernels()
 
     @property

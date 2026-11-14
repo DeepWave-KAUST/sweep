@@ -158,12 +158,14 @@ and this project adheres to
   `dt <= h**2 / (2 * ndim * nu)` at spatial order 2, 0.62 times that at order
   8); such a class refuses boundary saving, naming the terms, and runs with
   `Full()` and `Ckpt()`. `Coefficient("mu", rho * vs**2)` is computed once per run
-  (`prepare_models`). Anything else raises when the PDE is built. Restating
-  `Acoustic` / `Acoustic3D` reproduces them bit for bit, record and gradient,
-  with the same peak memory; restating `Acoustic1st` and the 2-D `Elastic` bit
-  for bit uncompiled, the 3-D `Elastic` record bit for bit and gradients to
-  ~1e-7. Docs page *Symbolic PDEs*; `test/test_symbolic_pde.py`,
-  `test/test_symbolic_first_order.py`.
+  (`prepare_models`); the step's products of models and `dt` (`dt/rho`) once
+  per uncompiled rollout, as in the shipped equations. Anything else raises
+  when the PDE is built. Restating `Acoustic` / `Acoustic3D` reproduces them bit
+  for bit, record and gradient, with the same peak memory; restating
+  `Acoustic1st` bit for bit uncompiled, the 2-D `Elastic` too but for its `rho`
+  gradient (~1e-8: it computes `dt / rho` twice), the 3-D `Elastic` record bit
+  for bit and gradients to ~4e-7. Docs page *Symbolic PDEs*;
+  `test/test_symbolic_pde.py`, `test/test_symbolic_first_order.py`.
 - **Agent Skill for AI coding assistants** in `skills/sweep-solver/`
   ([agentskills.io](https://agentskills.io) format): a `SKILL.md` entry point
   plus on-demand references (equations, propagators, boundaries, gradients,

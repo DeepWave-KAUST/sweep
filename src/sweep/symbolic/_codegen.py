@@ -3,8 +3,9 @@
 The step is written the way the hand-written equations write theirs
 (``sweep.equations.acoustic`` / ``acoustic3d`` for second-order fields,
 ``acoustic1st`` / ``elastic`` for staggered first-order systems): the same
-operators, the same CPML call, the same order of operations, so a PDE that
-restates a shipped equation reproduces it bit for bit.
+operators, the same CPML call, the same order of operations, the same
+products of models and ``dt`` made once per rollout, so a PDE that restates a
+shipped equation reproduces it bit for bit.
 """
 from __future__ import annotations
 
@@ -53,11 +54,21 @@ class _TorchPrinter(StrPrinter):
 _printer = _TorchPrinter()
 
 
+def _once(text):
+    """``text``, a product of models, coefficients, ``dt`` and numbers, made once
+    per rollout by ``sweep.equations._invariants.once``, as the shipped
+    equations make theirs (``vp**2 * dt**2``, ``dt / rho``). The key is the
+    text: the same product in several equations is one tensor."""
+    return f"once(invariants, {text!r}, lambda: {text})"
+
+
 def _coef_times(coef, rest):
-    """``coef * dt**2 * rest`` with ``coef`` printed at multiplication precedence."""
+    """``coef * dt**2 * rest`` with ``coef`` printed at multiplication
+    precedence and ``coef * dt**2`` made once per rollout."""
     if coef == 1:
         return f"dt**2 * {rest}"
-    return f"{_printer.parenthesize(coef, PRECEDENCE['Mul'])} * dt**2 * {rest}"
+    c = f"{_printer.parenthesize(coef, PRECEDENCE['Mul'])} * dt**2"
+    return f"{_once(c) if coef.free_symbols else c} * {rest}"
 
 
 class Names:
@@ -249,6 +260,7 @@ def generate(name, low, *, free_surface, pml, doc):
         "import torch  # noqa: F401  (elementary functions in coefficients)",
         "",
         "from sweep.equations._cpml import cpml_axis_update  # noqa: F401",
+        "from sweep.equations._invariants import once  # noqa: F401",
         "from sweep.equations.fields import FieldSpec, ModelSpec",
         "from sweep.symbolic._runtime import SymbolicSecondOrderEquation",
         "",
@@ -262,6 +274,7 @@ def generate(name, low, *, free_surface, pml, doc):
         f"    DEFAULT_SOURCE_FIELDS = {tuple(src_fields[:1])!r}",
         f"    DEFAULT_RECEIVER_FIELDS = {tuple(rec_fields[:1])!r}",
         '    default_pml_type = "cpmlr"',
+        "    takes_invariants = True",
         *[f"    {fl}" for fl in flags],
         "",
         "    MODEL_SPECS = (",
@@ -272,7 +285,7 @@ def generate(name, low, *, free_surface, pml, doc):
         "    )",
         "",
         *_prepare_models(low),
-        "    def func(self, wavefields, models, dt, h, b, **kwargs):",
+        "    def func(self, wavefields, models, dt, h, b, invariants=None, **kwargs):",
         *[f"        {line}" for line in body],
         "",
     ]
@@ -314,13 +327,16 @@ def dissipative_terms(low):
     return tuple(out)
 
 
-def _first_update(up, shared):
+def _first_update(up, shared, cache=True):
     """``f = f + dt * RHS``, its products associated as the shipped equations
     associate theirs: one coefficient goes with ``dt`` (``dt/rho * (...)``,
     ``rho*vp**2*dt * (...)``), several are summed inside ``dt * (...)``.
     ``shared``: the sums of derivatives computed once for the sub-step. The
     dissipative terms come last, each a coefficient times its second
-    derivatives (``nu*(_lapz_vx + _lapx_vx)``)."""
+    derivatives (``nu*(_lapz_vx + _lapx_vx)``). With ``cache``, a product of
+    models and ``dt`` is made once per rollout (``dt/rho``, ``2*mu``; a bare
+    model or coefficient is used as it is); the sub-steps of boundary saving,
+    run at ``-dt``, make theirs in place."""
     f = str(up.field)
 
     def _sum(derivs):
@@ -341,18 +357,26 @@ def _first_update(up, shared):
             dtc = f"dt/{_printer.parenthesize(den, PRECEDENCE['Mul'])}"
         else:
             dtc = f"{_printer.parenthesize(c, PRECEDENCE['Mul'], strict=True)}*dt"
+        if cache and c != 1 and c.free_symbols:
+            dtc = _once(dtc)
         return f"{f} = {f} {sign} {dtc} * {s}"
     parts = []
     for k, (c, s) in enumerate(items):
         neg = c.could_extract_minus_sign()
         if neg:
             c = -c
-        term = s if c == 1 else f"{_printer.parenthesize(c, PRECEDENCE['Mul'], strict=True)}*{s}"
+        if c == 1:
+            term = s
+        else:
+            text = _printer.parenthesize(c, PRECEDENCE['Mul'], strict=True)
+            if cache and c.free_symbols and not c.is_Symbol:
+                text = _once(text)
+            term = f"{text}*{s}"
         parts.append(("-" if neg else "") + term if k == 0 else (" - " if neg else " + ") + term)
     return f"{f} = {f} + dt * ({''.join(parts)})"
 
 
-def _substep_lines(sub, use_cpml, counter, ndim, free=True):
+def _substep_lines(sub, use_cpml, counter, ndim, free=True, cache=True):
     """One sub-step: its derivatives, then per update its CPML corrections and
     the update. A sum of derivatives that several updates read (the divergence
     of the 3-D stresses) is computed once, before the first of them: written
@@ -389,7 +413,7 @@ def _substep_lines(sub, use_cpml, counter, ndim, free=True):
         if laps:
             lines.append(f"{', '.join(laps)} = self.separable_d2_{ndim}d({up.field}, self.laplace_kernels, "
                          f"{spacings})")
-        lines.append(_first_update(up, shared))
+        lines.append(_first_update(up, shared, cache))
         if laps:
             lines.append(f"del {', '.join(laps)}")
     temps = [_dname(d) for d in sub.taken] + list(names.values())
@@ -443,7 +467,8 @@ def generate_first_order(name, low, *, pml, doc):
             subs += [f"def _sub{k}(wavefields, models, dt, h):",
                      f"    {_unpack(phys)} = wavefields[:{len(phys)}]",
                      *[f"    {line}" for line in _model_lines(low)],
-                     *[f"    {line}" for line in _substep_lines(sub, False, itertools.count(), ndim, free=False)],
+                     *[f"    {line}" for line in _substep_lines(sub, False, itertools.count(), ndim, free=False,
+                                                           cache=False)],
                      f"    return [{', '.join(phys)}, *wavefields[{len(phys)}:]]",
                      ""]
         subs.append(f"return [{', '.join(f'_sub{k}' for k in range(len(low.substeps)))}]")
@@ -466,6 +491,7 @@ def generate_first_order(name, low, *, pml, doc):
         "import torch  # noqa: F401  (elementary functions in coefficients)",
         "",
         "from sweep.equations._cpml import cpml_update  # noqa: F401",
+        "from sweep.equations._invariants import once  # noqa: F401",
         "from sweep.equations.fields import FieldSpec, ModelSpec",
         "from sweep.symbolic._runtime import SymbolicFirstOrderEquation",
         "",
@@ -478,6 +504,7 @@ def generate_first_order(name, low, *, pml, doc):
         f"    DEFAULT_SOURCE_FIELDS = {tuple(src_fields[:1])!r}",
         f"    DEFAULT_RECEIVER_FIELDS = {tuple(rec_fields[:1])!r}",
         *([f"    DISSIPATIVE_TERMS = {dissipative!r}"] if dissipative else []),
+        "    takes_invariants = True",
         "",
         "    MODEL_SPECS = (",
         *[f"        {m}," for m in _model_specs(low)],
@@ -487,7 +514,7 @@ def generate_first_order(name, low, *, pml, doc):
         "    )",
         "",
         *_prepare_models(low),
-        "    def func(self, wavefields, models, dt, h, b, **kwargs):",
+        "    def func(self, wavefields, models, dt, h, b, invariants=None, **kwargs):",
         *[f"        {line}" for line in body],
         *substeps,
         "",

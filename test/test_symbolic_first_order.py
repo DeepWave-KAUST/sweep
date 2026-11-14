@@ -4,10 +4,14 @@
   and gradient, uncompiled: spatial orders 4 and 8, with and without
   strip-held CPML memory, and under eager boundary saving (the generated
   interior sub-steps). The generated step takes the derivatives, the CPML
-  corrections and the updates in their order.
-* The restated equations peak at no more CUDA memory than the shipped ones.
+  corrections and the updates in their order, and makes the same products of
+  models and dt once per rollout. One exception: the 2-D Elastic makes dt/rho
+  twice, under the names of the density at vz and at vx, the generated step
+  once, so its rho gradient moves by rounding.
+* Uncompiled with Full(), the restated equations peak at no more CUDA memory
+  than the shipped ones.
 * The 3-D Elastic writes its statements in another order, which the generator
-  does not follow: the records agree bit for bit, the gradients to ~1e-7.
+  does not follow: the records agree bit for bit, the gradients to a few 1e-7.
 * The step compiles in one graph. Compiled, a gradient moves by ~1e-7: Inductor
   orders the backward by the operand order of each sum, and sympy keeps a sum
   in its canonical order rather than as written.
@@ -20,8 +24,9 @@
 * Dissipative terms (``kappa * laplace(T)``, the viscous terms of the unsteady
   Stokes system): an impulse diffuses as the heat kernel, a Gaussian vortex as
   Lamb-Oseen's; the step matches one written out by hand; the gradient matches
-  finite differences; checkpointing and strip-held CPML memory reproduce
-  ``Full()`` bit for bit, and boundary saving is refused.
+  finite differences; strip-held CPML memory reproduces ``Full()`` bit for bit,
+  checkpointing the record bit for bit and the gradient to rounding; boundary
+  saving is refused.
 
 Uncompiled CUDA runs need ``cudnn.deterministic`` (see test_symbolic_pde.py).
 """
@@ -154,6 +159,14 @@ def _rel(a, b):
 
 BITWISE = [(kind, order, strips) for kind in ("acoustic1st", "elastic") for order in (4, 8)
            for strips in (False, True)]
+# The uncompiled step makes its products of models and dt once per rollout
+# (sweep.equations._invariants), the generated one under the product's text:
+# Elastic makes dt/rho under two names, for vz and for vx (rho_z, rho_x, both
+# rho), the generated step once for both. The rho gradient then accumulates
+# through one node instead of two: 1.1e-8 .. 1.4e-8 (A100). Boundary saving
+# rebuilds the gradient from the interior sub-steps, which make dt/rho in place
+# in both, and stays bit for bit.
+ROUNDED_GRADIENTS = {"elastic": {2}}
 
 
 @pytest.mark.parametrize("kind, order, strips", BITWISE,
@@ -161,8 +174,11 @@ BITWISE = [(kind, order, strips) for kind in ("acoustic1st", "elastic") for orde
 def test_restated_first_order_is_bitwise(kind, order, strips):
     (d_ref, g_ref), (d_gen, g_gen) = _both(kind, order, strips=strips)
     assert torch.equal(d_ref, d_gen)
-    for a, b in zip(g_ref, g_gen):
-        assert torch.equal(a, b)
+    for k, (a, b) in enumerate(zip(g_ref, g_gen)):
+        if k in ROUNDED_GRADIENTS.get(kind, ()):
+            assert _rel(b, a) <= 1e-7
+        else:
+            assert torch.equal(a, b)
 
 
 @pytest.mark.parametrize("kind", ["acoustic1st", "elastic"])
@@ -201,7 +217,8 @@ def test_restated_first_order_peak_memory(kind):
 
 
 def test_restated_elastic3d():
-    # Measured: gradients 5e-8 .. 8.4e-7 relative (A100, Ada; Full and boundary saving).
+    # Measured (A100): gradients 5.7e-8 .. 3.7e-7 relative with Full, 7.6e-8 ..
+    # 1.9e-7 with boundary saving.
     (d_ref, g_ref), (d_gen, g_gen) = _both("elastic3d")
     assert torch.equal(d_ref, d_gen)
     for a, b in zip(g_ref, g_gen):
@@ -545,11 +562,18 @@ def test_dissipative_memory_modes():
         return d.detach(), [m.grad for m in models]
 
     d_ref, g_ref = run()
-    for kw in (dict(memory=Ckpt()), dict(strips=True)):
-        d, g = run(**kw)
-        assert torch.equal(d, d_ref), kw
-        for a, b in zip(g, g_ref):
-            assert torch.equal(a, b), kw
+    d, g = run(strips=True)
+    assert torch.equal(d, d_ref)
+    for a, b in zip(g, g_ref):
+        assert torch.equal(a, b)
+    # Each checkpointed segment makes the step's products of models and dt
+    # anew (sweep.equations._invariants), as for the shipped equations: the
+    # gradient accumulates through one node per segment instead of one per
+    # rollout. Measured: up to 2.5e-7 (A100).
+    d, g = run(memory=Ckpt())
+    assert torch.equal(d, d_ref)
+    for a, b in zip(g, g_ref):
+        assert _rel(a, b) <= 1e-6
     with pytest.raises(NotImplementedError, match=r"dissipative terms nu\*laplace\(vx\), nu\*laplace\(vz\) do not allow"):
         run(memory=BoundarySaving(storage="gpu"))
 
