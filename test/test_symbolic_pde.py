@@ -107,6 +107,30 @@ def test_restated_acoustic_is_bitwise(ndim, order, fs, strips, topography):
     assert torch.equal(g_ref, g_gen)
 
 
+def _run_per_shot(cls, batch=2):
+    """Two shots, each with its own 2-D model ``(B, nz, nx)``."""
+    shape, nt = SHAPES[2], 150
+    solver = PropTorch(cls(4, device=DEV), shape=shape, dh=DH, dt=DT, nt=nt, dev=DEV, impl="eager",
+                       abcn=12, memory=Full(), eager_options=EagerOptions(use_compile=False))
+    g = torch.Generator().manual_seed(0)
+    model = (2000 + 300 * torch.rand((batch, *shape), generator=g)).to(DEV).requires_grad_(True)
+    src = np.array([[20, 6], [40, 6]])
+    rec = np.array([[[ix, 3] for ix in range(2, 62, 3)]] * batch)
+    d = solver(ricker(nt, DT, fm=12.0, delay=0.08), src, rec, models=[model])
+    d.square().sum().backward()
+    return d.detach(), model.grad
+
+
+def test_per_shot_batched_models_match_acoustic():
+    gen = ACOUSTIC.build(2)
+    assert gen.supports_batched_models and not ACOUSTIC.build(3).supports_batched_models
+    d_ref, g_ref = _run_per_shot(Acoustic)
+    d_gen, g_gen = _run_per_shot(gen)
+    assert d_gen.shape[0] == 2 and g_gen.shape == g_ref.shape
+    assert torch.equal(d_ref, d_gen)
+    assert torch.equal(g_ref, g_gen)
+
+
 def _peak_bytes(cls, ndim):
     """Peak CUDA memory of an uncompiled Full() forward + backward, free
     surface on, above what was allocated before it."""

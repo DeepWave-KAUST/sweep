@@ -157,7 +157,8 @@ and this project adheres to
   with the second-order stencil and no CPML (stable for
   `dt <= h**2 / (2 * ndim * nu)` at spatial order 2, 0.62 times that at order
   8); such a class refuses boundary saving, naming the terms, and runs with
-  `Full()` and `Ckpt()`. `Coefficient("mu", rho * vs**2)` is computed once per run
+  `Full()` and `Ckpt()`. A 2-D generated class takes per-shot batched models,
+  `(B, nz, nx)`, as `Acoustic` and `Elastic` do. `Coefficient("mu", rho * vs**2)` is computed once per run
   (`prepare_models`); the step's products of models and `dt` (`dt/rho`) once
   per uncompiled rollout, as in the shipped equations. Anything else raises
   when the PDE is built. Restating `Acoustic` / `Acoustic3D` reproduces them bit

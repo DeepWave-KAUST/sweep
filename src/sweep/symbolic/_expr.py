@@ -67,8 +67,9 @@ class Coefficient(_Declared):
 
     ``Coefficient("mu", rho * vs**2)`` is computed once per run, before the
     time loop, in declaration order (a coefficient may use earlier ones), and
-    the equations use it by name. A coefficient written inline is computed
-    again at every step instead.
+    the equations use it by name. A coefficient written inline is computed in
+    the step: once per rollout in an uncompiled run (once per segment when
+    checkpointing), at every step in a compiled run.
     """
 
     def __new__(cls, name, expr, **kwargs):

@@ -249,7 +249,10 @@ def generate(name, low, *, free_surface, pml, doc):
         body.append(f"del {', '.join(temps)}")
     body.append(f"return self._free_surface_out(({', '.join(out)},))")
 
-    flags = []
+    # Per-shot batched models (B, nz, nx): the eager layout inserts the channel
+    # axis and the step is plain broadcasting; the propagator admits the layout
+    # in 2-D only, as for the shipped Acoustic and Elastic.
+    flags = [f"supports_batched_models = {ndim == 2}"]
     if free_surface is not None:
         flags.append(f"supports_per_edge_free_surface = {ndim == 2}")
         flags.append("supports_image_topography = True")
@@ -505,6 +508,7 @@ def generate_first_order(name, low, *, pml, doc):
         f"    DEFAULT_RECEIVER_FIELDS = {tuple(rec_fields[:1])!r}",
         *([f"    DISSIPATIVE_TERMS = {dissipative!r}"] if dissipative else []),
         "    takes_invariants = True",
+        f"    supports_batched_models = {ndim == 2}",
         "",
         "    MODEL_SPECS = (",
         *[f"        {m}," for m in _model_specs(low)],

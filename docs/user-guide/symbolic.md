@@ -28,7 +28,9 @@ This PDE restates [`Acoustic`](../api/equations/acoustic.md), and the generated
 class reproduces it bit for bit, record and gradient, in 2-D and (with
 `build(ndim=3)`) against `Acoustic3D`: with and without a free surface, per
 edge, on a topography, with `EagerOptions(cpml_strips=True)`, compiled or not,
-with `Full()`, `Ckpt()` or `BoundarySaving()`.
+with `Full()`, `Ckpt()` or `BoundarySaving()`. Like the shipped `Acoustic` and
+`Elastic`, a 2-D generated class takes a batch of shots with a model per shot,
+`(B, nz, nx)`, as well as one model shared by the batch.
 
 ## Writing a PDE
 
@@ -270,6 +272,7 @@ in [Extending](extending.md#part-2-adding-a-compiled-cuda-kernel-implc).
 | The same, compiled | `Acoustic1st` bit for bit with `Full()` and `Ckpt()`, gradients to 6e-8 with `BoundarySaving()`; `Elastic` record bit for bit, gradients 3e-8 to 9.6e-8 |
 | Restated 3-D `Elastic` | record bit for bit; gradients 1.8e-8 to 3.7e-7 with `Full()`, `Ckpt()` and uncompiled `BoundarySaving()`, compiled or not; compiled with `BoundarySaving()` 7.6e-5 to 2.9e-4, the size of either class's own boundary-saving error (1.2e-4 to 3e-4 from its `Full()` gradient, the shipped class's too) |
 | Elliptic anisotropic first-order acoustics, finite differences (canonical case, fp32) | error falls as h² down to the fp32 floor, 6e-5 to 2e-3 |
+| Per-shot batched models, `(B, nz, nx)`, two shots, uncompiled | restated `Acoustic` and `Elastic` as the hand-written class: record bit for bit, gradients bit for bit but the `Elastic` `rho` gradient (1.3e-8); each shot vs its own single-shot run: record bit for bit, gradients 2e-9 to 5e-7 (the batched backward accumulates in another order) |
 | Heat conduction, an impulse vs the heat kernel (8th order, `kappa dt / h^2 = 0.05`) | 2-D 7.7e-4 at t = 40 h²/κ, falling as dt (orders 4 and 8); 3-D 2.4e-3 at t = 20 h²/κ; the heat conserved to 5e-6 |
 | Unsteady Stokes, a Gaussian vortex vs Lamb-Oseen (8th order, `nu dt / h^2 = 0.05`) | vorticity 3.6e-4 by the time the core area has quadrupled, half that at dt / 2; circulation to 1e-6; p stays at 1e-5 of rho v_max² |
 | Stokes and heat gradients, finite differences (fp32) | `nu` 3.3e-5, `c` 3.2e-5, `kappa` 5.3e-5; `rho` 2.5e-4, its weak data sensitivity at the fp32 floor |

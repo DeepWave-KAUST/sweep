@@ -125,23 +125,28 @@ KINDS = {
 }
 
 
-def _run(eq, ndim, src_type, rec_type, memory=None, strips=False, **compile_kw):
+def _run(eq, ndim, src_type, rec_type, memory=None, strips=False, batch=1, **compile_kw):
+    """``batch > 1``: that many shots, each with its own model ``(B, *shape)``."""
     shape, nt = SHAPES[ndim], NT[ndim]
     solver = PropTorch(eq, shape=shape, dh=DH, dt=DT, nt=nt, dev=DEV, impl="eager", abcn=12,
                        memory=Full() if memory is None else memory, source_type=src_type,
                        receiver_type=rec_type,
                        eager_options=EagerOptions(cpml_strips=strips, **{"use_compile": False, **compile_kw}))
     g = torch.Generator().manual_seed(0)
-    vp = 2000 + 600 * torch.rand(shape, generator=g)
+    mshape = shape if batch == 1 else (batch, *shape)
+    vp = 2000 + 600 * torch.rand(mshape, generator=g)
     models = [vp]
     if len(eq.model_specs) == 3:
-        models.append(vp / 1.9 + 50 * torch.rand(shape, generator=g))
-    models.append(1800 + 400 * torch.rand(shape, generator=g))
+        models.append(vp / 1.9 + 50 * torch.rand(mshape, generator=g))
+    models.append(1800 + 400 * torch.rand(mshape, generator=g))
     models = [m.to(DEV).requires_grad_(True) for m in models]
     if ndim == 2:
         src, rec = np.array([[20, 6]]), np.array([[[ix, 3] for ix in range(2, 62, 3)]])
     else:
         src, rec = np.array([[14, 10, 5]]), np.array([[[ix, iy, 2] for ix in range(2, 26, 4) for iy in (4, 15)]])
+    if batch > 1:
+        src = np.array([[20 + 10 * b, 6] for b in range(batch)])
+        rec = np.repeat(rec, batch, axis=0)
     d = solver(ricker(nt, DT, fm=12.0, delay=0.08), src, rec, models=models)
     d.square().sum().backward()
     return d.detach(), [m.grad for m in models]
@@ -179,6 +184,52 @@ def test_restated_first_order_is_bitwise(kind, order, strips):
             assert _rel(b, a) <= 1e-7
         else:
             assert torch.equal(a, b)
+
+
+def _run_shots(eq, src_type, rec_type, models, src, rec):
+    """A 2-D run on the given models and geometry: record and model gradients."""
+    solver = PropTorch(eq, shape=SHAPES[2], dh=DH, dt=DT, nt=NT[2], dev=DEV, impl="eager", abcn=12,
+                       memory=Full(), source_type=src_type, receiver_type=rec_type,
+                       eager_options=EagerOptions(use_compile=False))
+    models = [m.detach().clone().requires_grad_(True) for m in models]
+    d = solver(ricker(NT[2], DT, fm=12.0, delay=0.08), src, rec, models=models)
+    d.square().sum().backward()
+    return d.detach(), [m.grad for m in models]
+
+
+@pytest.mark.parametrize("kind", ["acoustic1st", "elastic"])
+def test_per_shot_batched_models(kind):
+    """Two shots with their own models, (B, nz, nx): shot b is the single-shot
+    run on model b, and, where the hand-written class takes batched models too
+    (Elastic), the hand-written batched run."""
+    hand, gen, _, src_type, rec_type = KINDS[kind]
+    assert gen.supports_batched_models and not KINDS["elastic3d"][1].supports_batched_models
+    g = torch.Generator().manual_seed(0)
+    shape, batch = SHAPES[2], 2
+    vp = 2000 + 600 * torch.rand((batch, *shape), generator=g)
+    models = [vp] + ([vp / 1.9 + 50 * torch.rand((batch, *shape), generator=g)] if kind == "elastic" else [])
+    models.append(1800 + 400 * torch.rand((batch, *shape), generator=g))
+    models = [m.to(DEV) for m in models]
+    src = np.array([[20, 6], [30, 6]])
+    rec = np.repeat(np.array([[[ix, 3] for ix in range(2, 62, 3)]]), batch, axis=0)
+    d, grads = _run_shots(gen(4, device=DEV), src_type, rec_type, models, src, rec)
+    assert d.shape[0] == batch and all(gr.shape == (batch, *shape) for gr in grads)
+    for b in range(batch):
+        d_b, grads_b = _run_shots(gen(4, device=DEV), src_type, rec_type, [m[b] for m in models], src[b:b + 1], rec[b:b + 1])
+        assert torch.equal(d[b], d_b[0])
+        # The record is bit for bit; the model gradient of the batched run is
+        # accumulated by the backward of a batch of two, in another order than
+        # the single shot's: 2e-9 .. 5e-7 relative (CPU).
+        for gr, gr_b in zip(grads, grads_b):
+            assert _rel(gr[b], gr_b) <= 2e-6
+    if getattr(hand(4), "supports_batched_models", False):
+        d_ref, grads_ref = _run_shots(hand(4), src_type, rec_type, models, src, rec)
+        assert torch.equal(d_ref, d)
+        for k, (a, b) in enumerate(zip(grads_ref, grads)):
+            if k in ROUNDED_GRADIENTS.get(kind, ()):
+                assert _rel(b, a) <= 1e-7
+            else:
+                assert torch.equal(a, b)
 
 
 @pytest.mark.parametrize("kind", ["acoustic1st", "elastic"])
