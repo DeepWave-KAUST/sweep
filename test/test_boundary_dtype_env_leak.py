@@ -94,26 +94,23 @@ def test_storage_dtype_does_not_leak_across_instances(monkeypatch):
     assert cos > 0.99, f"int8 boundary gradient diverged unexpectedly (cos={cos})"
 
 
-@pytest.mark.skipif(not _binding_ready(), reason="CUDA + compiled sweep._C required")
-def test_shell_env_override_is_preserved(monkeypatch):
-    """A user-set SWEEP_BOUNDARY_DTYPE (global override) must survive a run --
-    the propagator no longer clobbers it."""
+@pytest.mark.parametrize("name,value", [
+    ("SWEEP_BOUNDARY_DTYPE", "bf16"),
+    ("SWEEP_BOUNDARY_DTYPE", "fp32"),      # even the old default: the name is retired
+    ("SWEEP_BOUNDARY_DTYPE", ""),
+    ("SWEEP_FP16_BOUNDARY", "1"),
+])
+def test_retired_env_is_refused_at_construction(monkeypatch, name, value):
+    """The environment used to set the storage dtype of the default ring.  A
+    setting that changes the numbers belongs in the config, so a set variable
+    is an error when the propagator is built -- on every backend, before any
+    core is loaded (eager on the CPU here), whatever the value."""
     from sweep.equations import Acoustic
     from sweep.propagator.torch import PropTorch
 
-    monkeypatch.setenv(K, "bf16")
-    dev = "cuda"
-    nz, nx, nt, dt = 40, 48, 60, 0.0015
-    vp = np.full((nz, nx), 2000.0, dtype=np.float32)
-    sources = np.array([[nx // 2, nz // 4]], dtype=np.int32)
-    receivers = np.stack([np.arange(2, nx - 2, 4, dtype=np.int32),
-                          np.full(len(range(2, nx - 2, 4)), 2, dtype=np.int32)], -1)[None]
-    wav = torch.zeros(nt, device=dev)
-    wav[5] = 1.0
-    solver = PropTorch(Acoustic(spatial_order=4, device=dev, backend="torch"),
-                       backend="torch", impl="c", shape=(nz, nx), dev=dev, dh=(10.0, 10.0),
-                       dt=dt, source_type=["h1"], receiver_type=["h1"], abcn=20,
-                       pml_type="cpmlr", nt=nt, B=1, allow_growth=True)
-    m = torch.tensor(vp, device=dev, requires_grad=True)
-    solver(wav, sources.copy(), receivers.copy(), models=[m]).pow(2).mean().backward()
-    assert os.environ.get(K) == "bf16", "user SWEEP_BOUNDARY_DTYPE override was clobbered"
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match=rf"{name} is no longer read.*storage_dtype"):
+        PropTorch(Acoustic(spatial_order=4, device="cpu", backend="torch"),
+                  backend="torch", impl="eager", shape=(40, 48), dev="cpu", dh=(10.0, 10.0),
+                  dt=0.0015, source_type=["h1"], receiver_type=["h1"], abcn=20,
+                  pml_type="cpmlr", nt=60, B=1, allow_growth=True)

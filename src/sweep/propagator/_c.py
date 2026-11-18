@@ -19,6 +19,7 @@ from sweep.memory.shape import Layout
 from sweep.core.arguments import validate_memory_strategy
 from sweep.propagator._call_params import CompiledCallParams
 from sweep.propagator.base import PropBase
+from sweep.propagator.options import refuse_retired_boundary_dtype_env
 from sweep.equations._edges import is_top_only_or_none
 from sweep.utils.torch import EdgePadding
 from sweep.scalars import fd_coefficients, staggered_grid_coes
@@ -26,26 +27,21 @@ from sweep.equations.base import FirstOrderEquation
 
 
 def _resolve_boundary_dtype(boundary_dtype=None):
-    """The boundary storage dtype a run allocates.
+    """The boundary storage dtype a run allocates: the explicit Python kwarg
+    (``BoundaryOptions.storage_dtype`` / ``boundary_saving_config
+    ['storage_dtype']``), else ``fp32``.
 
-    Precedence: explicit Python kwarg (from BoundaryOptions /
-    boundary_saving_config dict) wins over the SWEEP_BOUNDARY_DTYPE env
-    var (the documented global override), which wins over the legacy
-    SWEEP_FP16_BOUNDARY=1 gate, which wins over the ``fp32`` default.
-    This only decides what dtype to ALLOCATE the boundary buffers in; we
-    deliberately do NOT write the choice back into os.environ.  The C++
-    saver derives the storage dtype from the buffer tensors it is handed
+    This only decides what dtype to ALLOCATE the boundary buffers in.  The
+    C++ saver derives the storage dtype from the buffer tensors it is handed
     (see csrc/.../boundary/saver.cuh), so a per-instance storage_dtype
     cannot leak into later default-config propagators in the same process.
+    The environment no longer takes part: the retired SWEEP_BOUNDARY_DTYPE /
+    SWEEP_FP16_BOUNDARY are refused, not read
+    (options.refuse_retired_boundary_dtype_env).
     """
+    refuse_retired_boundary_dtype_env()
     if boundary_dtype is None:
-        _env_dtype = os.environ.get('SWEEP_BOUNDARY_DTYPE', '').strip().lower()
-        if _env_dtype in ('fp32', 'fp16', 'bf16', 'int8'):
-            boundary_dtype = _env_dtype
-        elif os.environ.get('SWEEP_FP16_BOUNDARY', '') in ('1', 'true', 'yes', 'on'):
-            boundary_dtype = 'fp16'
-        else:
-            boundary_dtype = 'fp32'
+        boundary_dtype = 'fp32'
     if boundary_dtype not in ('fp32', 'fp16', 'bf16', 'int8'):
         raise ValueError(f"boundary_dtype must be 'fp32'/'fp16'/'bf16'/'int8', got {boundary_dtype!r}")
     return boundary_dtype

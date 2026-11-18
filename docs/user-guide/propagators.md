@@ -649,13 +649,14 @@ gradient: 2.2 to 1.3 GB for 8 acoustic shots on 1000² under boundary saving,
 
 A few knobs stay out of the API because the right value depends on the
 machine, not on the problem. All are read once per run. None changes the
-physics, but one changes the numbers: a lossy `SWEEP_BOUNDARY_DTYPE`
-(fp16/bf16/int8).
+numbers: a setting that does belongs in the propagator's config, where it is
+recorded with the run. The boundary storage dtype used to be one
+(`SWEEP_BOUNDARY_DTYPE`, `SWEEP_FP16_BOUNDARY`); it is
+`BoundarySaving(storage_dtype=...)` now, and a set variable is an error.
 
 | Variable | Effect |
 | --- | --- |
 | `SWEEP_DD_DISABLE_OVERLAP=1` | Domain decomposition: serial step-then-exchange instead of the overlapped forward (see [Domain decomposition](parallel.md)). |
-| `SWEEP_BOUNDARY_DTYPE` | `impl="c"`: `storage_dtype` of the implicit default ring only (no memory knob passed). Any `BoundarySaving(...)` carries `storage_dtype="fp32"` unless set, so it always wins. |
 | `SWEEP_DATASETS_CACHE` | Where `sweep.datasets` caches downloads (see [Datasets](datasets.md)). |
 | `SWEEP_JIT_FULL=1` | Developer path: compile the pybind shim against your torch instead of using the ctypes layer over the prebuilt core. |
 | `SWEEP_CORE=<path>/libsweep_core.so` | Use a custom CUDA core; its `core.json` sidecar gets the same fit check as the shipped one. |

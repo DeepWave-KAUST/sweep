@@ -852,6 +852,14 @@ and this project adheres to
   `SWEEP_LAUNCH(kernel, grid, block, args...)`.
 
 ### Removed
+- The `SWEEP_BOUNDARY_DTYPE` and `SWEEP_FP16_BOUNDARY` environment variables.
+  They set the storage dtype of the implicit default boundary ring on
+  `impl='c'`, the one setting in the environment that changed the numbers
+  (fp16/bf16/int8 storage is lossy), and a misspelt name or value fell back
+  to fp32 unnoticed. The dtype is `memory=BoundarySaving(storage_dtype=...)`
+  (or `boundary_saving_config['storage_dtype']`), as it has been since the
+  option existed; the default ring is fp32. Either variable set in the
+  environment is now an error when a propagator is built, on every backend.
 - Scripts under `test/` that are not tests: 85 standalone files that no test, CI job,
   gate script, doc or notebook ran -- the `test/efficiency/` benchmarks, one-off
   gradient, DD and memory diagnostics, the SEM smoke scripts and the early SPECFEM2D
