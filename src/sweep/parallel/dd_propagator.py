@@ -201,6 +201,10 @@ class ModelParallel:
     do).  ``mesh`` is the :class:`MeshTopology` (x-cut ``py=1``; 3-D may add a
     y-cut ``py>1`` — see :func:`sweep.parallel.balanced_grid`).
 
+    ``halo`` is the transport of the per-step halo strips: ``"nccl"``
+    (default) or ``"ipc"`` (CUDA peer-to-peer through torch symmetric memory,
+    single node; see :mod:`sweep.parallel.fast_halo`).  Same values either way.
+
     ``overlap`` (default True) lets the acoustic / VRZ forward run each step's
     halo exchange on a comm stream while the interior computes, where the cut
     geometry allows it.  ``overlap=False`` takes the serial step-then-exchange
@@ -208,7 +212,19 @@ class ModelParallel:
     validated against, and a production escape hatch.  It used to be
     ``SWEEP_DD_DISABLE_OVERLAP=1`` in the environment; a set one is refused."""
 
-    def __init__(self, prop, mesh: MeshTopology, *, overlap: bool = True) -> None:
+    def __init__(self, prop, mesh: MeshTopology, *, halo: str = "nccl",
+                 overlap: bool = True) -> None:
+        # How the halo strips travel between tiles each step. ``"nccl"``:
+        # torch.distributed batch_isend_irecv on the tile group (any backend,
+        # any number of nodes). ``"ipc"``: CUDA peer-to-peer through torch
+        # symmetric memory -- the sender writes straight into the neighbour's
+        # receive buffer and signals it on the stream, no torch.distributed
+        # call per step; bit-identical, single-node CUDA tile groups only, and
+        # it refuses (rather than falls back) where it cannot run. Checked here
+        # so a typo fails at construction, and again across the tile group when
+        # the first exchanger set is built (every rank must pass the same value).
+        from sweep.parallel.fast_halo import check_transport_name
+        self.halo = check_transport_name(halo)
         # A switch between two schedules belongs in the config, where it is
         # recorded with the run and a misspelling is refused; a set variable
         # must not go unnoticed either.
@@ -508,7 +524,7 @@ class ModelParallel:
         from sweep.parallel.fast_halo import FastHaloSet
         cur = getattr(self, attr)
         if cur is None:
-            cur = {ax: FastHaloSet(self.mesh, self.M, (ax,))
+            cur = {ax: FastHaloSet(self.mesh, self.M, (ax,), self.halo)
                    for ax in self.axes}
             setattr(self, attr, cur)
         return cur

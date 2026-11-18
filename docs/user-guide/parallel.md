@@ -180,6 +180,17 @@ against like — the example scripts' `--check` mode does exactly that.
   bit-exact reference for the overlap and a production escape hatch. (It
   used to be `SWEEP_DD_DISABLE_OVERLAP=1` in the environment; a set variable
   is an error now.)
+- `ModelParallel(prop, topo, halo="ipc")` sends the halo strips by CUDA
+  peer-to-peer through torch symmetric memory instead of NCCL
+  `batch_isend_irecv` (the default, `halo="nccl"`): each sender copies its
+  strip straight into the neighbour's receive buffer and signals it on the
+  stream, so no `torch.distributed` call is made per step. Results are
+  bit-identical. It needs CUDA tiles, a torch with
+  `torch.distributed._symmetric_memory` (2.9 tested) and every rank of a tile
+  group on one node with peer access between the GPUs; otherwise the first
+  DD run raises instead of falling back. Every rank must pass the same value.
+  On two A100s the per-step cost of 2-D problems dropped by 40-60 %; 3-D
+  problems are compute-bound and gain a few per cent at most.
 
 ## Boundary storage under DD
 

@@ -157,6 +157,14 @@ and this project adheres to
   refused. Docs: `docs/api/equations/pseudoelastic_p.md`; notebook 62
   (`Elastic` vs `PseudoelasticP` snapshots on a three-layer model; acoustic vs
   pure P-mode on a shear-only interface).
+- `ModelParallel(prop, mesh, halo="ipc")`: the domain-decomposition halo
+  strips can travel by CUDA peer-to-peer through torch symmetric memory
+  instead of NCCL `batch_isend_irecv`. The sender writes straight into the
+  neighbour's receive buffer and signals it on the stream, so no
+  `torch.distributed` call is made per step; results are bit-identical. On
+  two A100s the per-step cost of 2-D problems dropped by 40-60 % (3-D ones
+  are compute-bound and gain a few per cent). Single-node CUDA tile groups
+  only; it refuses, rather than falls back, where it cannot run.
 - **Agent Skill for AI coding assistants** in `skills/sweep-solver/`
   ([agentskills.io](https://agentskills.io) format): a `SKILL.md` entry point
   plus on-demand references (equations, propagators, boundaries, gradients,
