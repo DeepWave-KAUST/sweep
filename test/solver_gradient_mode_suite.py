@@ -1066,16 +1066,8 @@ def run_case(spec: SolverSpec, scenario: ScenarioSpec, modes: list[str], args, r
 
     rows = []
     for mode in modes:
-        # FP16/BF16 PoC: toggle env vars per mode so subsequent forward()
-        # picks up the right storage dtype.  Reset before each iter.
-        os.environ.pop("SWEEP_FP16_BOUNDARY", None)
-        os.environ.pop("SWEEP_BOUNDARY_DTYPE", None)
-        if mode == "bs_gpu_fp16":
-            os.environ["SWEEP_BOUNDARY_DTYPE"] = "fp16"
-        elif mode == "bs_gpu_bf16":
-            os.environ["SWEEP_BOUNDARY_DTYPE"] = "bf16"
-        elif mode == "bs_gpu_int8":
-            os.environ["SWEEP_BOUNDARY_DTYPE"] = "int8"
+        # The storage dtype of a bs_*_fp16 / _bf16 / _int8 mode reaches the
+        # solver as BoundaryOptions.storage_dtype (build_cuda_options).
         started = time.time()
         row = {
             "solver": spec.key,

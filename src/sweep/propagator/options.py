@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 from dataclasses import asdict, dataclass, fields, is_dataclass
 from sweep.core.arguments import warn_deprecated_spelling
 from typing import Any
@@ -370,6 +371,28 @@ def _drop_none(value: Any) -> Any:
     return value
 
 
+# Retired: these used to set the storage dtype of the implicit default boundary
+# ring from the environment.  A setting that changes the numbers belongs in the
+# propagator's config, where it is recorded with the run and a misspelling is
+# refused; in the environment a misspelt name or value fell back to fp32
+# unnoticed.  A set one must not go unnoticed either, so it is an error.
+_RETIRED_BOUNDARY_DTYPE_ENV = ("SWEEP_BOUNDARY_DTYPE", "SWEEP_FP16_BOUNDARY")
+
+
+def refuse_retired_boundary_dtype_env():
+    """Raise if a retired boundary-dtype environment variable is set.
+
+    Called where every propagator resolves its gradient-memory mode
+    (:func:`resolve_memory_strategy`), so the error comes at construction on
+    every backend, and again where ``impl='c'`` allocates its ring."""
+    for k in _RETIRED_BOUNDARY_DTYPE_ENV:
+        if k in os.environ:
+            raise ValueError(
+                f"{k} is no longer read. The boundary storage dtype is part of the "
+                "propagator's config: memory=BoundarySaving(storage_dtype='fp16' | "
+                "'bf16' | 'int8'); the default ring is fp32. Unset it.")
+
+
 def resolve_memory_strategy(impl, memory=None, use_ckpt=None, boundary_saving_config=None):
     """Resolve the three-way gradient-memory mode: 'full' | 'boundary' | 'ckpt'.
 
@@ -390,6 +413,7 @@ def resolve_memory_strategy(impl, memory=None, use_ckpt=None, boundary_saving_co
     ('boundary' for impl='c', 'ckpt' otherwise) applies only when no
     gradient-memory knob was passed at all.
     """
+    refuse_retired_boundary_dtype_env()
     requests = {}
     exclude = set()
 

@@ -20,8 +20,6 @@ torch = pytest.importorskip("torch")
 
 from sweep.propagator.options import BoundaryOptions  # noqa: E402
 
-K = "SWEEP_BOUNDARY_DTYPE"
-
 # Every (storage, storage_dtype) combination must be accepted.
 SUPPORTED = [
     ("gpu", "fp32"), ("gpu", "fp16"), ("gpu", "bf16"), ("gpu", "int8"),
@@ -52,14 +50,13 @@ def _binding_ready():
 
 
 @pytest.mark.skipif(not _binding_ready(), reason="CUDA + compiled sweep._C required")
-def test_dict_and_env_staged_dtype_at_forward(monkeypatch):
-    """Dict / env config bypasses ``BoundaryOptions.__post_init__`` -- the
+def test_dict_staged_dtype_at_forward():
+    """Dict config bypasses ``BoundaryOptions.__post_init__`` -- the
     ``_ensure_boundary_buffers`` chokepoint must accept every staged dtype
     (fp32/fp16/bf16/int8) on both cpu and disk and produce a finite gradient."""
     from sweep.equations import Acoustic
     from sweep.propagator.torch import PropTorch
 
-    monkeypatch.delenv(K, raising=False)
     dev = "cuda"
     nz, nx, nt, dt = 40, 48, 60, 0.0015
     vp = np.full((nz, nx), 2000.0, dtype=np.float32)
@@ -86,13 +83,6 @@ def test_dict_and_env_staged_dtype_at_forward(monkeypatch):
                           boundary_saving_config={"enabled": True, "storage": storage,
                                                   "storage_dtype": dtype, "transfer_interval": 8}, **common)
             assert torch.isfinite(fwd(s)).all(), f"{storage}/{dtype} produced a non-finite gradient"
-
-    # Env override pushing int8 onto cpu storage must also run (no rejection).
-    monkeypatch.setenv(K, "int8")
-    s_env = PropTorch(eq(), backend="torch", impl="c",
-                      boundary_saving_config={"enabled": True, "storage": "cpu", "transfer_interval": 8}, **common)
-    assert torch.isfinite(fwd(s_env)).all()
-    monkeypatch.delenv(K, raising=False)
 
 
 @pytest.mark.skipif(not _binding_ready(), reason="CUDA + compiled sweep._C required")
