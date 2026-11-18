@@ -517,6 +517,14 @@ and this project adheres to
   min.
 
 ### Changed
+- **`ModelParallel(prop, mesh, overlap=...)`** chooses between the overlapped
+  forward (each step's halo exchange on a comm stream while the interior
+  computes; the default, where the cut geometry allows it) and the serial
+  step-then-exchange loop (`overlap=False`), bit-identical and the reference
+  the overlapped loop is validated against. It was `SWEEP_DD_DISABLE_OVERLAP=1`
+  in the environment, where a misspelt name kept the overlap unnoticed; a set
+  variable is now an error at construction. `test_dd_two_rank_cpu.py` runs each
+  case under both and holds them to the same record and gradient.
 - **`impl='auto'` on a CPU device runs the host core** when the equation is
   built into it; it was always eager.  The core is resolved as for an
   explicit `impl='c'`, and as a CUDA source install resolves its core: the

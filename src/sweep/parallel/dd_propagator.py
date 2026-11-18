@@ -199,9 +199,26 @@ class ModelParallel:
     is a config carrier, not the compute object (constructing it is cheap — the
     big buffers are allocated lazily at forward, which only the per-tile solvers
     do).  ``mesh`` is the :class:`MeshTopology` (x-cut ``py=1``; 3-D may add a
-    y-cut ``py>1`` — see :func:`sweep.parallel.balanced_grid`)."""
+    y-cut ``py>1`` — see :func:`sweep.parallel.balanced_grid`).
 
-    def __init__(self, prop, mesh: MeshTopology) -> None:
+    ``overlap`` (default True) lets the acoustic / VRZ forward run each step's
+    halo exchange on a comm stream while the interior computes, where the cut
+    geometry allows it.  ``overlap=False`` takes the serial step-then-exchange
+    loop instead: bit-identical, the reference the overlapped loop is
+    validated against, and a production escape hatch.  It used to be
+    ``SWEEP_DD_DISABLE_OVERLAP=1`` in the environment; a set one is refused."""
+
+    def __init__(self, prop, mesh: MeshTopology, *, overlap: bool = True) -> None:
+        # A switch between two schedules belongs in the config, where it is
+        # recorded with the run and a misspelling is refused; a set variable
+        # must not go unnoticed either.
+        if "SWEEP_DD_DISABLE_OVERLAP" in os.environ:
+            raise ValueError(
+                "SWEEP_DD_DISABLE_OVERLAP is no longer read: the serial step-then-exchange "
+                "forward is ModelParallel(prop, mesh, overlap=False). Unset it.")
+        if not isinstance(overlap, bool):
+            raise TypeError(f"overlap must be True or False, got {overlap!r}")
+        self.overlap = overlap
         # Read the global-problem spec off the single-domain propagator.
         # dh/dt are stored as buffer tensors (dh per-axis); recover plain Python
         # for the per-tile prop (scalar dh when the spacing is uniform).
@@ -401,15 +418,13 @@ class ModelParallel:
         # when no source sits in a cut strip (checked per-call in forward).
         # Not gated on the device: a CPU tile takes the same phased loop, minus
         # the stream (see _run_dd_loop_overlapped).
-        # SWEEP_DD_DISABLE_OVERLAP=1 forces the serial step-then-exchange path —
-        # the bit-exact reference for validating the overlap, and a production
+        # overlap=False takes the serial step-then-exchange path instead — the
+        # bit-exact reference for validating the overlap, and a production
         # safety escape hatch.
         self._comm_stream = None
         self._comm_evt = None
-        _disable_overlap = os.environ.get("SWEEP_DD_DISABLE_OVERLAP", "") not in ("", "0")
-        self._overlap_ok = (self.world > 1 and self.cut_mask != 0
-                            and (self.cut_mask & ~0x3) == 0
-                            and not _disable_overlap)
+        self._overlap_ok = (self.overlap and self.world > 1 and self.cut_mask != 0
+                            and (self.cut_mask & ~0x3) == 0)
 
         self._captured = False
         # Two-stage capture. ``bp`` -- and every adjoint-side buffer derived from
@@ -1454,7 +1469,7 @@ class ModelParallel:
         computes just the cut strips, the shipment starts on the comm stream,
         phase 2 computes the strict complement over it, and the join happens
         before the next step's phase 1. Bit-identical to the serial loop -- the
-        strips carry the same values either way -- so ``SWEEP_DD_DISABLE_OVERLAP``
+        strips carry the same values either way -- so ``overlap=False``
         selecting the serial variant is a usable reference, not a fallback.
         On a CPU device the same phases run without the stream.
         """
