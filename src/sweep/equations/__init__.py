@@ -62,6 +62,7 @@ from . import (
     elastic_tti_sg,
     elastic_tti_sg3d,
     elastic_vrr,
+    pseudoelastic_p,
     qP_tariq,
     qP_vti,
     visco_acoustic,

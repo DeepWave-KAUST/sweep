@@ -143,6 +143,18 @@ and this project adheres to
   as well; GPU results are unchanged bit for bit.
 
 ### Added
+- `PseudoelasticP` (alias `PureP`): the pseudoelastic pure P-mode wave
+  equation of Sun and Alkhalifah (2021, Geophysics 86, T469), 2-D, eager
+  only. `Elastic`'s staggered-grid step with the particle velocity projected
+  onto its curl-free part after every velocity update (two 2-D FFTs each
+  way), so it carries no S wave and no conversions and runs on the P-wave
+  grid, while the PP reflections keep the elastic amplitude variation with
+  angle through the shear modulus in the stress update. The projector is
+  built from the exact symbol of the stencil, so with `vs = 0` it reproduces
+  `Elastic` to round-off; with `free_surface=True` the grid is mirrored about
+  the surface inside the projection (needs water along the surface row).
+  Boundary saving, per-edge free surfaces, topography and `impl='c'` are
+  refused. Docs: `docs/api/equations/pseudoelastic_p.md`.
 - **Agent Skill for AI coding assistants** in `skills/sweep-solver/`
   ([agentskills.io](https://agentskills.io) format): a `SKILL.md` entry point
   plus on-demand references (equations, propagators, boundaries, gradients,

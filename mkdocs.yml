@@ -218,6 +218,7 @@ nav:
           - Elastic: api/equations/elastic.md
           - Elastic3D: api/equations/elastic3d.md
           - ElasticBorn: api/equations/elastic_born.md
+          - PseudoelasticP: api/equations/pseudoelastic_p.md
           - ViscoElastic: api/equations/visco_elastic.md
           - ElasticTTI: api/equations/elastic_tti.md
           - ElasticTTISG: api/equations/elastic_tti_sg.md
