@@ -135,6 +135,7 @@ nav:
               - examples/wavefields/index.md
               - DAS: notebooks/04_das_zhao_vs_mu.ipynb
               - Elastic: notebooks/06_wavefield_elastic.ipynb
+              - Pseudoelastic pure P-mode: notebooks/62_wavefield_pseudoelastic_p.ipynb
               - Elastic vector-reflectivity: notebooks/16_elastic_vector_reflectivity.ipynb
               - Topography (irregular FS): notebooks/15_wavefield_topography.ipynb
               - Per-edge free surface (4 faces): notebooks/24_wavefield_per_edge_free_surface.ipynb
@@ -218,6 +219,7 @@ nav:
           - Elastic: api/equations/elastic.md
           - Elastic3D: api/equations/elastic3d.md
           - ElasticBorn: api/equations/elastic_born.md
+          - PseudoelasticP: api/equations/pseudoelastic_p.md
           - ViscoElastic: api/equations/visco_elastic.md
           - ElasticTTI: api/equations/elastic_tti.md
           - ElasticTTISG: api/equations/elastic_tti_sg.md

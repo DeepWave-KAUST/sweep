@@ -29,6 +29,20 @@ solver settings change the wavefield.
 
     [:material-notebook-outline: Open notebook](../../notebooks/06_wavefield_elastic.ipynb)
 
+-   ![Wavefield pseudoelastic pure P-mode](../../figures/gallery/62_wavefield_pseudoelastic_p.png){ loading=lazy }
+
+    **Wavefield · Pseudoelastic pure P-mode**
+
+    ---
+
+    `PseudoelasticP`: the elastic equations with the velocity projected onto
+    its curl-free part every step (Sun & Alkhalifah 2021) — no S wave, no
+    conversions, the PP reflections of `Elastic`. Snapshots next to `Elastic`
+    on a three-layer model, and next to the acoustic equation on a
+    shear-only interface, where only the pure P-mode reflects.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/62_wavefield_pseudoelastic_p.ipynb)
+
 -   ![Elastic vector reflectivity](../../figures/gallery/16_elastic_vector_reflectivity.png){ loading=lazy }
 
     **Elastic vector reflectivity**
