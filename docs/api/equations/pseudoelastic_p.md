@@ -76,6 +76,10 @@ free surfaces and topography are refused.
 - No S waves: data windows dominated by converted waves (e.g. the vertical
   geophone of ocean-bottom nodes at late times) are not modelled.
 
+[Notebook 62](../../notebooks/62_wavefield_pseudoelastic_p.ipynb) shows
+`Elastic` and `PseudoelasticP` snapshots side by side on a three-layer model,
+and the acoustic equation against the pure P-mode on a shear-only interface.
+
 Reference: B. Sun and T. Alkhalifah, 2021, Pseudoelastic pure P-mode wave
 equation, *Geophysics* 86(6), T469–T485,
 [10.1190/geo2021-0084.1](https://doi.org/10.1190/geo2021-0084.1).

@@ -154,7 +154,9 @@ and this project adheres to
   `Elastic` to round-off; with `free_surface=True` the grid is mirrored about
   the surface inside the projection (needs water along the surface row).
   Boundary saving, per-edge free surfaces, topography and `impl='c'` are
-  refused. Docs: `docs/api/equations/pseudoelastic_p.md`.
+  refused. Docs: `docs/api/equations/pseudoelastic_p.md`; notebook 62
+  (`Elastic` vs `PseudoelasticP` snapshots on a three-layer model; acoustic vs
+  pure P-mode on a shear-only interface).
 - **Agent Skill for AI coding assistants** in `skills/sweep-solver/`
   ([agentskills.io](https://agentskills.io) format): a `SKILL.md` entry point
   plus on-demand references (equations, propagators, boundaries, gradients,
