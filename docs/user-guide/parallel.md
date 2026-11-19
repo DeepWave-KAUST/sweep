@@ -175,9 +175,11 @@ against like — the example scripts' `--check` mode does exactly that.
   separate `rtm()` entry. Encoded supershots (a `(nsrc, nt)` wavelet) *are*
   supported: each tile keeps the rows of the sources it owns
   (`test/dd_encoded_check.py`).
-- `SWEEP_DD_DISABLE_OVERLAP=1` forces the serial step-then-exchange path —
-  the bit-exact reference for the comm/compute-overlap forward and a
-  production escape hatch.
+- `ModelParallel(prop, topo, overlap=False)` takes the serial
+  step-then-exchange path instead of the comm/compute-overlap forward — the
+  bit-exact reference for the overlap and a production escape hatch. (It
+  used to be `SWEEP_DD_DISABLE_OVERLAP=1` in the environment; a set variable
+  is an error now.)
 
 ## Boundary storage under DD
 

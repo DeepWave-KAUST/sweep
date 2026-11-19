@@ -10,6 +10,12 @@ Both ranks run with no GPU visible and the source mid tile 0, so the
 overlapped loop is the one that runs (asserted).  The gathered record and the
 summed tile gradients must equal the single-domain propagator's.
 
+The 2-D case also runs with ``overlap=False``: the serial step-then-exchange
+loop must be the one that runs then (the overlapped one not at all), and it
+must give the same record and gradient -- the two schedules are bit-identical
+by construction, and this is the test that holds them to it.  (The 3-D case
+takes minutes per run on the CPU; one schedule of it is enough.)
+
 DD steps its tiles with ``impl='c'``; where that cannot run on the CPU (no host
 core in this build) the test skips.
 """
@@ -17,6 +23,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import time
 import traceback
 import warnings
 
@@ -34,6 +41,10 @@ WORLD = 2
 DT, NT, DH, SO, ABCN = 0.0015, 90, 10.0, 4, 12
 #: Global shapes, cut in half along x.  AcousticVRZ3D is the case that failed.
 SHAPES = {"Acoustic": (48, 64), "AcousticVRZ3D": (24, 20, 32)}
+#: (equation, overlap) runs; the ranks take minutes per run on the CPU.
+CASES = [("Acoustic", True), ("Acoustic", False), ("AcousticVRZ3D", True)]
+#: For every run of both ranks together; a hang is reported after this.
+DEADLINE_S = 900
 
 
 def _prop(name):
@@ -85,11 +96,11 @@ def _adjoint(shape):
     return torch.randn(shape, generator=torch.Generator().manual_seed(7)) * 1e-3
 
 
-def _dd_case(name, rank):
+def _dd_case(name, rank, overlap):
     from sweep.parallel import MeshTopology, ModelParallel
 
     topo = MeshTopology(py=1, px=WORLD, shot_groups=1, world_size=WORLD, rank=rank)
-    ddp = ModelParallel(_prop(name), topo)
+    ddp = ModelParallel(_prop(name), topo, overlap=overlap)
     models = _models(name)
     src, rec = _geometry(name)
     syn = ddp(_wavelet(), src, rec, models=models)
@@ -102,7 +113,7 @@ def _dd_case(name, rank):
     return {"record": ddp.gather_record(syn.detach()), "grads": grads}
 
 
-def _worker(rank, init_file, out_dir, names):
+def _worker(rank, init_file, out_dir, cases):
     from sweep.parallel import ModelParallel
 
     ran = []
@@ -116,56 +127,66 @@ def _worker(rank, init_file, out_dir, names):
     dist.init_process_group("gloo", init_method=f"file://{init_file}", world_size=WORLD,
                             rank=rank, timeout=datetime.timedelta(seconds=120))
     try:
-        for name in names:
+        for name, overlap in cases:
             ran.clear()
             try:
-                res = _dd_case(name, rank)
+                res = _dd_case(name, rank, overlap)
                 res["overlapped"] = len(ran)
             except Exception:
                 res = {"error": traceback.format_exc()}
-            torch.save(res, os.path.join(out_dir, f"{name}.rank{rank}.pt"))
+            torch.save(res, os.path.join(out_dir, _result_name(name, overlap, rank)))
             dist.barrier()
     finally:
         dist.destroy_process_group()
 
 
+def _result_name(name, overlap, rank):
+    return f"{name}.overlap{int(overlap)}.rank{rank}.pt"
+
+
 @pytest.fixture(scope="module")
 def dd_runs(tmp_path_factory):
-    """Both equations through one spawn of the two ranks: ``(out_dir, names)``."""
-    names = [n for n in SHAPES if _host_core_serves(n)]
-    if not names:
+    """Every case through one spawn of the two ranks: ``(out_dir, cases)``."""
+    served = {n for n in SHAPES if _host_core_serves(n)}
+    cases = [(n, ov) for n, ov in CASES if n in served]
+    if not cases:
         pytest.skip("impl='c' does not run on the CPU in this build (no host core)")
     out = tmp_path_factory.mktemp("dd_two_rank_cpu")
     ctx = mp.get_context("spawn")
-    procs = [ctx.Process(target=_worker, args=(r, str(out / "store"), str(out), names))
+    procs = [ctx.Process(target=_worker, args=(r, str(out / "store"), str(out), cases))
              for r in range(WORLD)]
     with pytest.MonkeyPatch.context() as mpatch:
         mpatch.setenv("CUDA_VISIBLE_DEVICES", "")     # the ranks see no GPU
         for p in procs:
             p.start()
+    deadline = time.monotonic() + DEADLINE_S
     for p in procs:
-        p.join(timeout=300)
+        p.join(timeout=max(0.0, deadline - time.monotonic()))
     hung = [p for p in procs if p.is_alive()]
     for p in hung:
         p.terminate()
     if hung:
-        pytest.fail(f"{len(hung)} rank(s) did not finish in 300 s")
+        pytest.fail(f"{len(hung)} rank(s) did not finish in {DEADLINE_S} s")
     codes = [p.exitcode for p in procs]
     if any(codes):
         pytest.fail(f"rank exit codes {codes}")
-    return out, names
+    return out, cases
 
 
-@pytest.mark.parametrize("name", list(SHAPES))
-def test_two_rank_cpu_dd_matches_single_domain(dd_runs, name):
-    out, names = dd_runs
-    if name not in names:
+@pytest.mark.parametrize("name,overlap", CASES,
+                         ids=[f"{n}-{'overlap' if ov else 'serial'}" for n, ov in CASES])
+def test_two_rank_cpu_dd_matches_single_domain(dd_runs, name, overlap):
+    out, cases = dd_runs
+    if (name, overlap) not in cases:
         pytest.skip(f"the host core does not run {name}")
-    res = [torch.load(out / f"{name}.rank{r}.pt") for r in range(WORLD)]
+    res = [torch.load(out / _result_name(name, overlap, r)) for r in range(WORLD)]
+    want_overlapped = 1 if overlap else 0
     for r, x in enumerate(res):
         if "error" in x:
             pytest.fail(f"rank {r}:\n{x['error']}", pytrace=False)
-        assert x["overlapped"] == 1, f"rank {r} did not take the overlapped forward"
+        assert x["overlapped"] == want_overlapped, (
+            f"rank {r}: the overlapped forward ran {x['overlapped']} time(s) with "
+            f"overlap={overlap}, expected {want_overlapped}")
 
     models = _models(name)
     src, rec = _geometry(name)
