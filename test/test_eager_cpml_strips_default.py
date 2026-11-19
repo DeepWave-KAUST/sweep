@@ -99,7 +99,8 @@ def test_2d_default_keeps_the_full_grid(name):
 # Every 2-D equation with strip-held fields, on the strips when asked
 # (EagerOptions(cpml_strips=True)).  Model values per name (a 2% random variation on each).
 STRIP_EQUATIONS_2D = ("Acoustic", "Acoustic1st", "AcousticBorn", "AcousticVTI1st", "Biot", "DASMu", "DASZhao",
-                      "Elastic", "ElasticBorn", "ElasticCurvilinear", "ElasticTTISG", "ElasticVRR", "ViscoElastic")
+                      "Elastic", "ElasticBorn", "ElasticCurvilinear", "ElasticTTISG", "ElasticVRR", "PseudoelasticP",
+                      "ViscoElastic")
 VALUES = {"vp": 2200, "vs": 1200, "rho": 2100, "vp0": 2200, "vs0": 1200, "epsilon": 0.08, "delta": 0.03,
           "gamma": 0.05, "theta": 0.25, "phi": 0.15, "Qp": 60, "Qs": 40, "mp": 0.01, "dvp": 20, "dvs": 10,
           "drho": 10, "Rp_x": 0.01, "Rp_z": 0.01, "Rs_x": 0.01, "Rs_z": 0.01}
