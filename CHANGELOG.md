@@ -1425,6 +1425,14 @@ and this project adheres to
   forward, so a second forward -- `torch.no_grad()` included -- gave the
   pending backward a wrong gradient with no error.  It now raises
   `RuntimeError`; call `backward()` after each forward.
+- `PropTorch(impl='c')` refuses a model that is not float32 with a `TypeError`
+  naming it (`models[0] ('vp') is torch.float64`), in every memory mode. A
+  float64 or int64 model used to fail deep in the core with a message about the
+  "boundary storage tag", a float16 or bfloat16 one aborted the process, and an
+  int32 one was read as float bits and gave a wrong record. `impl='eager'`
+  still casts models to float32. A `ModelParallel` whose first call is refused
+  this way no longer keeps the refused dtype: it used to rebuild its one-time
+  capture in float64 on every later call, float32 models included.
 
 ## [0.3.6] - 2026-10-29
 
