@@ -1192,6 +1192,18 @@ and this project adheres to
   `AcousticAniso(method='alkhalifah', symmetry='tti')` now raises
   `NotImplementedError` and the `AcousticTTIAlkhalifah` alias is gone: the
   class has no tilt parameter, so both silently solved the VTI equation.
+- **The second-derivative stencil sums to zero in float32.** Its coefficients
+  were rounded to float32 one by one, so `c0 + 2 sum(c_k)` was 7.45e-8 at 4th
+  order (up to 1.2e-7 at other orders): a term `v^2 (sum / h^2) u` in every
+  second-order acoustic equation, whose effect grows like `1 / (k h)^2`, so
+  records stopped converging on fine grids -- 2-D, 300 m from a 10 Hz source,
+  against the analytic solution: 1.8e-4 at `dh` 2.5 m, then 6.4e-4 at 1.25 m
+  and 2.6e-3 at 0.625 m.  The last coefficient now takes the float32
+  remainder (it moves by less than 6e-8), the same values in eager's kernels,
+  the coefficients `impl='c'` is handed (`scalars.second_derivative_coefficients_fp32`)
+  and the constants of its order 4, 6 and 8 kernels: 4.2e-5 at 1.25 m and
+  1.8e-5 at 0.625 m (eager 4.1e-5 and 1.3e-5), with every kernel's registers
+  unchanged.  At ~20 points per wavelength records move by 1e-5.
 - `PropSEM(memory=BoundarySaving(storage_dtype='fp16'))` is refused on both
   backends. The eager ring stored a plain fp16 cast, which flushes the SEM's
   small field values to zero: 2-D elastic gradients came out 15% and 2-D
