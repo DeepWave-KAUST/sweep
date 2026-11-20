@@ -177,7 +177,7 @@ __global__ void __launch_bounds__(256) vrz3d_adj_shell(
     const float* lam = f.u_now;
     const float dt2 = solver.dt * solver.dt;
 
-    const float* lc = lap_ctx.coeff;
+    const float* lc = lap_ctx.coeff;    // [c0 (centre, unused), c1..cM]
     const float* gc = grad_ctx.coeff;
     const float invdx2 = 1.0f / (lap_ctx.dx * lap_ctx.dx);
     const float invdy2 = 1.0f / (lap_ctx.dy * lap_ctx.dy);
@@ -203,7 +203,8 @@ __global__ void __launch_bounds__(256) vrz3d_adj_shell(
     if (ax_on) {
         const float ax_ = cpml.ax[ix], bx_ = cpml.bx[ix];
         const float gtmpx0 = bx_ * f.zetax[idx] + (1.0f + bx_) * gw0;
-        Lx_gl = -lc[0] * ((1.0f + bx_) * gtmpx0);
+        const float lx0 = (1.0f + bx_) * gtmpx0;   // centre tap, difference form
+        Lx_gl = 0.0f;
         float Dx_gq = 0.0f;
         #pragma unroll
         for (int k = 1; k <= halo; ++k) {
@@ -214,7 +215,7 @@ __global__ void __launch_bounds__(256) vrz3d_adj_shell(
             float bp = cpml.bx[nixp], bm = cpml.bx[nixm];
             float dbp = Pp ? cpml.dbxdx[nixp] : 0.0f, dbm = Pm ? cpml.dbxdx[nixm] : 0.0f;
             float ap  = Pp ? cpml.ax[nixp]    : 0.0f, am  = Pm ? cpml.ax[nixm]    : 0.0f;
-            Lx_gl += lc[k] * ((1.0f + bp) * tp + (1.0f + bm) * tm);
+            Lx_gl += lc[k] * (tap_diff((1.0f + bp) * tp, lx0) + tap_diff((1.0f + bm) * tm, lx0));
             Dx_gg += gc[k] * ((bp * f.psix[np] + dbp * tp + (1.0f + bp) * Cx_b[np] * dt2 * lam[np])
                             - (bm * f.psix[nm] + dbm * tm + (1.0f + bm) * Cx_b[nm] * dt2 * lam[nm]));
             Dx_gq += gc[k] * (ap * tp - am * tm);
@@ -226,10 +227,10 @@ __global__ void __launch_bounds__(256) vrz3d_adj_shell(
             zetax_out[oidx] = ax_ * (f.zetax[idx] + gw0);
         }
     } else {
-        Lx_gl = -lc[0] * gw0;
+        Lx_gl = 0.0f;
         #pragma unroll
         for (int k = 1; k <= halo; ++k) {
-            Lx_gl += lc[k] * (VRZ_GW(idx + k) + VRZ_GW(idx - k));
+            Lx_gl += lc[k] * (tap_diff(VRZ_GW(idx + k), gw0) + tap_diff(VRZ_GW(idx - k), gw0));
             Dx_gg += gc[k] * (Cx_b[idx + k] * dt2 * lam[idx + k] - Cx_b[idx - k] * dt2 * lam[idx - k]);
         }
         Lx_gl *= invdx2; Dx_gg *= invdx;
@@ -240,7 +241,8 @@ __global__ void __launch_bounds__(256) vrz3d_adj_shell(
     if (ay_on) {
         const float ay_ = cpml.ay[iy], by_ = cpml.by[iy];
         const float gtmpy0 = by_ * f.zetay[idx] + (1.0f + by_) * gw0;
-        Ly_gl = -lc[0] * ((1.0f + by_) * gtmpy0);
+        const float ly0 = (1.0f + by_) * gtmpy0;   // centre tap, difference form
+        Ly_gl = 0.0f;
         float Dy_gq = 0.0f;
         #pragma unroll
         for (int k = 1; k <= halo; ++k) {
@@ -251,7 +253,7 @@ __global__ void __launch_bounds__(256) vrz3d_adj_shell(
             float bp = cpml.by[niyp], bm = cpml.by[niym];
             float dbp = Pp ? cpml.dbydy[niyp] : 0.0f, dbm = Pm ? cpml.dbydy[niym] : 0.0f;
             float ap  = Pp ? cpml.ay[niyp]    : 0.0f, am  = Pm ? cpml.ay[niym]    : 0.0f;
-            Ly_gl += lc[k] * ((1.0f + bp) * tp + (1.0f + bm) * tm);
+            Ly_gl += lc[k] * (tap_diff((1.0f + bp) * tp, ly0) + tap_diff((1.0f + bm) * tm, ly0));
             Dy_gg += gc[k] * ((bp * f.psiy[np] + dbp * tp + (1.0f + bp) * Cy_b[np] * dt2 * lam[np])
                             - (bm * f.psiy[nm] + dbm * tm + (1.0f + bm) * Cy_b[nm] * dt2 * lam[nm]));
             Dy_gq += gc[k] * (ap * tp - am * tm);
@@ -263,10 +265,10 @@ __global__ void __launch_bounds__(256) vrz3d_adj_shell(
             zetay_out[oidx] = ay_ * (f.zetay[idx] + gw0);
         }
     } else {
-        Ly_gl = -lc[0] * gw0;
+        Ly_gl = 0.0f;
         #pragma unroll
         for (int k = 1; k <= halo; ++k) {
-            Ly_gl += lc[k] * (VRZ_GW(idx + k * sy) + VRZ_GW(idx - k * sy));
+            Ly_gl += lc[k] * (tap_diff(VRZ_GW(idx + k * sy), gw0) + tap_diff(VRZ_GW(idx - k * sy), gw0));
             Dy_gg += gc[k] * (Cy_b[idx + k * sy] * dt2 * lam[idx + k * sy]
                             - Cy_b[idx - k * sy] * dt2 * lam[idx - k * sy]);
         }
@@ -278,7 +280,8 @@ __global__ void __launch_bounds__(256) vrz3d_adj_shell(
     if (az_on) {
         const float az_ = cpml.az[iz], bz_ = cpml.bz[iz];
         const float gtmpz0 = bz_ * f.zetaz[idx] + (1.0f + bz_) * gw0;
-        Lz_gl = -lc[0] * ((1.0f + bz_) * gtmpz0);
+        const float lz0 = (1.0f + bz_) * gtmpz0;   // centre tap, difference form
+        Lz_gl = 0.0f;
         float Dz_gq = 0.0f;
         #pragma unroll
         for (int k = 1; k <= halo; ++k) {
@@ -289,7 +292,7 @@ __global__ void __launch_bounds__(256) vrz3d_adj_shell(
             float bp = cpml.bz[nizp], bm = cpml.bz[nizm];
             float dbp = Pp ? cpml.dbzdz[nizp] : 0.0f, dbm = Pm ? cpml.dbzdz[nizm] : 0.0f;
             float ap  = Pp ? cpml.az[nizp]    : 0.0f, am  = Pm ? cpml.az[nizm]    : 0.0f;
-            Lz_gl += lc[k] * ((1.0f + bp) * tp + (1.0f + bm) * tm);
+            Lz_gl += lc[k] * (tap_diff((1.0f + bp) * tp, lz0) + tap_diff((1.0f + bm) * tm, lz0));
             Dz_gg += gc[k] * ((bp * f.psiz[np] + dbp * tp + (1.0f + bp) * Cz_b[np] * dt2 * lam[np])
                             - (bm * f.psiz[nm] + dbm * tm + (1.0f + bm) * Cz_b[nm] * dt2 * lam[nm]));
             Dz_gq += gc[k] * (ap * tp - am * tm);
@@ -301,10 +304,10 @@ __global__ void __launch_bounds__(256) vrz3d_adj_shell(
             zetaz_out[oidx] = az_ * (f.zetaz[idx] + gw0);
         }
     } else {
-        Lz_gl = -lc[0] * gw0;
+        Lz_gl = 0.0f;
         #pragma unroll
         for (int k = 1; k <= halo; ++k) {
-            Lz_gl += lc[k] * (VRZ_GW(idx + k * sz) + VRZ_GW(idx - k * sz));
+            Lz_gl += lc[k] * (tap_diff(VRZ_GW(idx + k * sz), gw0) + tap_diff(VRZ_GW(idx - k * sz), gw0));
             Dz_gg += gc[k] * (Cz_b[idx + k * sz] * dt2 * lam[idx + k * sz]
                             - Cz_b[idx - k * sz] * dt2 * lam[idx - k * sz]);
         }

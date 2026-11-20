@@ -478,9 +478,9 @@ __global__ void acoustic_vrz3nd_adjoint(
         const float* aqx_b = aqx + b * spatial_size;
         const float* aqy_b = aqy + b * spatial_size;
         const float* aqz_b = aqz + b * spatial_size;
-        float lap_x = laplace<3, Order, X>(aq0_b, ix, iy, iz, lap_ctx);
-        float lap_y = laplace<3, Order, Y>(aq0_b, ix, iy, iz, lap_ctx);
-        float lap_z = laplace<3, Order, Z>(aq0_b, ix, iy, iz, lap_ctx);
+        float lap_x = laplace_diff<3, Order, X>(aq0_b, ix, iy, iz, lap_ctx);
+        float lap_y = laplace_diff<3, Order, Y>(aq0_b, ix, iy, iz, lap_ctx);
+        float lap_z = laplace_diff<3, Order, Z>(aq0_b, ix, iy, iz, lap_ctx);
         float gx = gradient<3, Order, X>(aqx_b, ix, iy, iz, grad_ctx);
         float gy = gradient<3, Order, Y>(aqy_b, ix, iy, iz, grad_ctx);
         float gz = gradient<3, Order, Z>(aqz_b, ix, iy, iz, grad_ctx);
@@ -493,9 +493,9 @@ __global__ void acoustic_vrz3nd_adjoint(
     const float* z_b = z + b * spatial_size;
     const float* inv_z_b = inv_z + b * spatial_size;
 
-    float lap_x = laplace<3, Order, X>(f.u_now, ix, iy, iz, lap_ctx);
-    float lap_y = laplace<3, Order, Y>(f.u_now, ix, iy, iz, lap_ctx);
-    float lap_z = laplace<3, Order, Z>(f.u_now, ix, iy, iz, lap_ctx);
+    float lap_x = laplace_diff<3, Order, X>(f.u_now, ix, iy, iz, lap_ctx);
+    float lap_y = laplace_diff<3, Order, Y>(f.u_now, ix, iy, iz, lap_ctx);
+    float lap_z = laplace_diff<3, Order, Z>(f.u_now, ix, iy, iz, lap_ctx);
 
     float dudx = gradient<3, Order, X>(f.u_now, ix, iy, iz, grad_ctx);
     float dudy = gradient<3, Order, Y>(f.u_now, ix, iy, iz, grad_ctx);

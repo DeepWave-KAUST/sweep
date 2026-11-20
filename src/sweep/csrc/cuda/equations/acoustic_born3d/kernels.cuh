@@ -343,7 +343,7 @@ __device__ __forceinline__ void acoustic_born3d_adjoint_exact_cell(
     auto f = wf.offset(b, sp);
     const float* g_b = v2l + b * sp;
     const float dt2 = solver.dt * solver.dt;
-    const float* lc = lap_ctx.coeff;     // [c0 (centre, applied as -lc[0]), c1..cM]
+    const float* lc = lap_ctx.coeff;     // [c0 (centre, unused: difference form), c1..cM]
     const float* gc = grad_ctx_x.coeff;  // [_, c1..cM] (antisymmetric)
 
     // Does the tap range [i - M, i + M] meet a band face's in_cpml cells?
@@ -358,9 +358,9 @@ __device__ __forceinline__ void acoustic_born3d_adjoint_exact_cell(
     if (!xfull && !yfull && !zfull) {
         // No tap in the CPML: L* = lap(v^2 . lambda), the transpose of the
         // forward v^2 . lap (compile-time stencils, one dt^2 at the end).
-        float lap_x = laplace<3, Order, X>(g_b, ix, iy, iz, lap_ctx);
-        float lap_y = laplace<3, Order, Y>(g_b, ix, iy, iz, lap_ctx);
-        float lap_z = laplace<3, Order, Z>(g_b, ix, iy, iz, lap_ctx);
+        float lap_x = laplace_diff<3, Order, X>(g_b, ix, iy, iz, lap_ctx);
+        float lap_y = laplace_diff<3, Order, Y>(g_b, ix, iy, iz, lap_ctx);
+        float lap_z = laplace_diff<3, Order, Z>(g_b, ix, iy, iz, lap_ctx);
         f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + dt2 * (lap_x + lap_y + lap_z);
         return;
     }
@@ -374,7 +374,8 @@ __device__ __forceinline__ void acoustic_born3d_adjoint_exact_cell(
             const float a_ = A[I];                                                                       \
             const float da = gradient<2, Order, X>(A, I, 0, 0, GCTX);                                    \
             const float gtmp0 = B_[I] * ZETA[idx] + (1.0f + B_[I]) * BORN3_GW(idx);                     \
-            Lacc = -lc[0] * ((1.0f + B_[I]) * gtmp0);                                                    \
+            const float l0 = (1.0f + B_[I]) * gtmp0;   /* centre tap, difference form */                 \
+            Lacc = 0.0f;                                                                                 \
             float Dgq = 0.0f;                                                                            \
             _Pragma("unroll")                                                                            \
             for (int k = 1; k <= (Order > 0 ? M_static : 16); ++k) {                                     \
@@ -382,7 +383,8 @@ __device__ __forceinline__ void acoustic_born3d_adjoint_exact_cell(
                 const int np = idx + k * STRIDE, nm = idx - k * STRIDE, ip = I + k, im = I - k;          \
                 const float tp = B_[ip] * ZETA[np] + (1.0f + B_[ip]) * BORN3_GW(np);                    \
                 const float tm = B_[im] * ZETA[nm] + (1.0f + B_[im]) * BORN3_GW(nm);                    \
-                Lacc += lc[k] * ((1.0f + B_[ip]) * tp + (1.0f + B_[im]) * tm);                           \
+                Lacc += lc[k] * (tap_diff((1.0f + B_[ip]) * tp, l0)                                      \
+                                 + tap_diff((1.0f + B_[im]) * tm, l0));                                  \
                 Dgg += gc[k] * ((B_[ip] * PSI[np] + DB[ip] * tp) - (B_[im] * PSI[nm] + DB[im] * tm));    \
                 Dgq += gc[k] * (A[ip] * tp - A[im] * tm);                                                \
             }                                                                                            \
@@ -390,7 +392,7 @@ __device__ __forceinline__ void acoustic_born3d_adjoint_exact_cell(
             PSIN[idx] = a_ * PSI[idx] + da * gtmp0 - Dgq;                                                \
             ZETAN[idx] = a_ * (ZETA[idx] + BORN3_GW(idx));                                              \
         } else {                                                                                         \
-            Lacc = dt2 * laplace<3, Order, AXIS>(g_b, ix, iy, iz, lap_ctx);                              \
+            Lacc = dt2 * laplace_diff<3, Order, AXIS>(g_b, ix, iy, iz, lap_ctx);                         \
         }                                                                                                \
         L_OUT = Lacc; DGG_OUT = Dgg;                                                                     \
     }

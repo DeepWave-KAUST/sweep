@@ -314,7 +314,7 @@ __device__ __forceinline__ void acoustic_born2nd_adjoint_exact_cell(
     auto f = wf.offset(b, sp);
     const float* g_b = v2l + b * sp;
     const float dt2 = solver.dt * solver.dt;
-    const float* lc = lap_ctx.coeff;     // [c0 (centre, applied as -lc[0]), c1..cM]
+    const float* lc = lap_ctx.coeff;     // [c0 (centre, unused: difference form), c1..cM]
     const float* gc = grad_ctx_x.coeff;  // [_, c1..cM] (antisymmetric)
     const float invdx2 = 1.0f / (lap_ctx.dx * lap_ctx.dx);
     const float invdz2 = 1.0f / (lap_ctx.dz * lap_ctx.dz);
@@ -331,8 +331,8 @@ __device__ __forceinline__ void acoustic_born2nd_adjoint_exact_cell(
     if (!xfull && !zfull) {
         // No tap in the CPML: L* = lap(v^2 . lambda), the transpose of the
         // forward v^2 . lap (compile-time stencils, one dt^2 at the end).
-        float lap_x = laplace<2, Order, X>(g_b, ix, 0, iz, lap_ctx);
-        float lap_z = laplace<2, Order, Z>(g_b, ix, 0, iz, lap_ctx);
+        float lap_x = laplace_diff<2, Order, X>(g_b, ix, 0, iz, lap_ctx);
+        float lap_z = laplace_diff<2, Order, Z>(g_b, ix, 0, iz, lap_ctx);
         f.u_next[idx] = 2.0f * f.u_now[idx] - f.u_prev[idx] + dt2 * (lap_x + lap_z);
         return;
     }
@@ -346,14 +346,16 @@ __device__ __forceinline__ void acoustic_born2nd_adjoint_exact_cell(
         const float ax_ = cpml.ax[ix];
         const float daxdx = gradient<2, Order, X>(cpml.ax, ix, 0, 0, grad_ctx_x);
         const float gtmpx0 = BORN_GTMP_X(idx, ix);
-        Lx = -lc[0] * ((1.0f + cpml.bx[ix]) * gtmpx0);
+        const float lx0 = (1.0f + cpml.bx[ix]) * gtmpx0;   // centre tap, difference form
+        Lx = 0.0f;
         float Dx_gq = 0.0f;
         #pragma unroll
         for (int k = 1; k <= (Order > 0 ? M_static : 16); ++k) {
             if (Order <= 0 && k > halo) break;
             const int np = idx + k, nm = idx - k, nixp = ix + k, nixm = ix - k;
             const float tp = BORN_GTMP_X(np, nixp), tm = BORN_GTMP_X(nm, nixm);
-            Lx += lc[k] * ((1.0f + cpml.bx[nixp]) * tp + (1.0f + cpml.bx[nixm]) * tm);
+            Lx += lc[k] * (tap_diff((1.0f + cpml.bx[nixp]) * tp, lx0)
+                         + tap_diff((1.0f + cpml.bx[nixm]) * tm, lx0));
             Dx_gg += gc[k] * ((cpml.bx[nixp] * f.psix[np] + cpml.dbxdx[nixp] * tp)
                             - (cpml.bx[nixm] * f.psix[nm] + cpml.dbxdx[nixm] * tm));
             Dx_gq += gc[k] * (cpml.ax[nixp] * tp - cpml.ax[nixm] * tm);
@@ -362,7 +364,7 @@ __device__ __forceinline__ void acoustic_born2nd_adjoint_exact_cell(
         f.psixn[idx] = ax_ * f.psix[idx] + daxdx * gtmpx0 - Dx_gq;
         f.zetaxn[idx] = ax_ * (f.zetax[idx] + BORN_GW(idx));
     } else {
-        Lx = dt2 * laplace<2, Order, X>(g_b, ix, 0, iz, lap_ctx);
+        Lx = dt2 * laplace_diff<2, Order, X>(g_b, ix, 0, iz, lap_ctx);
     }
 
     float Lz, Dz_gg = 0.0f;
@@ -370,14 +372,16 @@ __device__ __forceinline__ void acoustic_born2nd_adjoint_exact_cell(
         const float az_ = cpml.az[iz];
         const float dazdz = gradient<2, Order, X>(cpml.az, iz, 0, 0, grad_ctx_z);
         const float gtmpz0 = BORN_GTMP_Z(idx, iz);
-        Lz = -lc[0] * ((1.0f + cpml.bz[iz]) * gtmpz0);
+        const float lz0 = (1.0f + cpml.bz[iz]) * gtmpz0;   // centre tap, difference form
+        Lz = 0.0f;
         float Dz_gq = 0.0f;
         #pragma unroll
         for (int k = 1; k <= (Order > 0 ? M_static : 16); ++k) {
             if (Order <= 0 && k > halo) break;
             const int np = idx + k * sz, nm = idx - k * sz, nizp = iz + k, nizm = iz - k;
             const float tp = BORN_GTMP_Z(np, nizp), tm = BORN_GTMP_Z(nm, nizm);
-            Lz += lc[k] * ((1.0f + cpml.bz[nizp]) * tp + (1.0f + cpml.bz[nizm]) * tm);
+            Lz += lc[k] * (tap_diff((1.0f + cpml.bz[nizp]) * tp, lz0)
+                         + tap_diff((1.0f + cpml.bz[nizm]) * tm, lz0));
             Dz_gg += gc[k] * ((cpml.bz[nizp] * f.psiz[np] + cpml.dbzdz[nizp] * tp)
                             - (cpml.bz[nizm] * f.psiz[nm] + cpml.dbzdz[nizm] * tm));
             Dz_gq += gc[k] * (cpml.az[nizp] * tp - cpml.az[nizm] * tm);
@@ -386,7 +390,7 @@ __device__ __forceinline__ void acoustic_born2nd_adjoint_exact_cell(
         f.psizn[idx] = az_ * f.psiz[idx] + dazdz * gtmpz0 - Dz_gq;
         f.zetazn[idx] = az_ * (f.zetaz[idx] + BORN_GW(idx));
     } else {
-        Lz = dt2 * laplace<2, Order, Z>(g_b, ix, 0, iz, lap_ctx);
+        Lz = dt2 * laplace_diff<2, Order, Z>(g_b, ix, 0, iz, lap_ctx);
     }
     #undef BORN_GW
     #undef BORN_GTMP_X
