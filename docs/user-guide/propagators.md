@@ -425,6 +425,74 @@ absorbing axis grows by `2(M + 1)` cells.  It cannot be combined with
 `topography=` yet.  `impl="c"` needs no buffer, and the eager default `Ckpt()`
 is exact without one.  `AcousticVRR` has no compiled kernel: when its outermost
 cells matter, use the buffer or `Ckpt()`.
+### Second derivatives (Hessian-vector products)
+
+A Hessian-vector product by double backward (`torch.autograd.grad(..., create_graph=True)`,
+then a second `grad`) needs the first backward on the autograd tape. Only the uncompiled
+eager step has that: `impl="eager"` with `memory=Full()` or `Ckpt()` and
+`EagerOptions(use_compile=False)`, with `torch.backends.cudnn.allow_tf32 = False` on
+Ampere and later GPUs. The tape holds every step of the forward and of the first backward,
+so this route is for small models. `impl="c"`, `BoundarySaving()`, the compiled eager step,
+`ModelParallel` and registered gradient-mode imaging conditions raise a `RuntimeError`
+under `create_graph=True`. The qP equations (`AcousticVTI`, `AcousticTTI` and their Born
+pair) refuse a second derivative in every `s_gradient` mode, because it is off the tape
+(`'adjoint'`, which refuses `create_graph=True`), NaN in float32 (`'exact'`) or not a
+Hessian (`'frozen'`); `'exact'` and `'frozen'` keep their `create_graph=True` gradient for
+a derivative with respect to the residual (J h by a double vjp, as a Gauss-Newton solver
+takes it).
+
+At production size, compute the product from first derivatives, which run with every
+`impl` and memory strategy:
+
+| Product | How | Cost |
+| --- | --- | --- |
+| $\mathbf H\mathbf h$, to $O(\varepsilon^2)$ | `(g(m + eps*h) - g(m - eps*h)) / (2*eps)` | two gradients |
+| $\mathbf J^{\mathsf T}\mathbf J\mathbf h$ (Gauss-Newton), exact | Born record of `h` (e.g. `AcousticBorn`, `mp = 2*h/vp`) as `grad_outputs` of a gradient | one Born forward, one gradient |
+| $\mathbf H\mathbf h$, exact | gradient of $\langle \mathbf d(\mathbf m), \mathbf s\rangle + \langle \mathbf J(\mathbf m)\mathbf h, \mathbf r\rangle$ with $\mathbf s = \mathbf J\mathbf h$ and the residual $\mathbf r$ held fixed; `J(m) h` is the Born record with `mp = 2*h/m` computed from the model tensor | one Born forward, one forward, their gradients |
+
+The last route is the second-order adjoint method written as first derivatives: it needs the
+Born equation to return the gradient of its background model (`AcousticBorn` with
+`impl="c"` in `Full()` or `BoundarySaving()`, or any eager Born equation), and it runs with
+the compiled eager step as well.
+
+### Jacobian-vector products (forward mode)
+
+Forward-mode AD carries a direction `h` through the uncompiled eager step with
+`memory=Full()`: pass the models as dual tensors, and the tangent of the record is
+$\mathbf J\mathbf h$, the Born record of `h`, for any eager equation and without a Born
+equation:
+
+```python
+import torch.autograd.forward_ad as fwAD
+
+with torch.no_grad(), fwAD.dual_level():
+    record = prop(wavelet, sources, receivers, models=[fwAD.make_dual(vp, h)])
+    d, jh = fwAD.unpack_dual(record)          # the record and J h
+```
+
+It keeps no autograd tape, so its memory is about twice that of the forward; the
+uncompiled dual step took 11 to 17 times as long as a plain forward on a V100. With the
+models also requiring grad (drop `torch.no_grad()`), the gradient of
+$\langle \mathbf d, \mathbf s\rangle + \langle \mathbf J(\mathbf m)\mathbf h, \mathbf r\rangle$
+with $\mathbf s = \mathbf J\mathbf h$ held fixed in the first term and the residual
+$\mathbf r$ in the second is the exact $\mathbf H\mathbf h$ from first derivatives. The
+compiled step, `Ckpt()`, `BoundarySaving()`, `impl="c"`, `ModelParallel`, `PropSEM`,
+registered gradient-mode imaging conditions and the qP equations in their `'adjoint'` and
+`'frozen'` modes refuse a dual tensor with a `RuntimeError` (the compiled steps used to
+return a tangent of zero; the `'frozen'` tangent would be the linearisation with S_n held
+fixed). qP equations carry J h with `s_gradient='exact'`. `ViscoAcoustic`'s Q tangent
+holds the fractional exponent fixed, as its gradient does.
+
+Forward mode, like a difference of gradients, differentiates the gradient the propagator
+returns. On the two outermost model cells that gradient is the cropped one (the model is
+edge-replicated into the PML, `EdgePadding`, and its backward crops), and double backward
+gives a different, non-symmetric product there; keep a direction off those cells when
+the routes are compared.
+
+The
+[Hessian-vector products notebook](../notebooks/46_hessian_vector_product.ipynb)
+compares the routes, shows how to choose `eps`, and assembles the full Hessian of a small
+model with the exact first-order route.
 
 ### Boundary tail truncation (`BoundarySaving.tail_steps`)
 

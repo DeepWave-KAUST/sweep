@@ -64,6 +64,7 @@ from sweep.parallel.routing import (
     partition_global_coords,
 )
 from sweep.propagator.options import BoundarySaving
+from sweep.propagator._second_order import has_tangent, refuse_create_graph, refuse_forward_ad
 from sweep.parallel.pml import dd_cut_face_mask
 from sweep.propagator.torch import PropTorch, _device_type
 from sweep.propagator._stepped import (
@@ -155,7 +156,14 @@ class _DDForward(torch.autograd.Function):
         return rec.detach().clone()
 
     @staticmethod
+    def jvp(ctx, *tangents):
+        refuse_forward_ad("Domain decomposition (ModelParallel)",
+                          "its compiled kernels propagate no tangent field")
+
+    @staticmethod
     def backward(ctx, grad_record):
+        refuse_create_graph("Domain decomposition (ModelParallel)",
+                            "its backward is the compiled DD adjoint")
         ddp = ctx.ddp
         # _run_adjoint's contract is the raw CUDA layout and stays that way; the
         # conversion belongs at this boundary, mirroring _c.Wrapper.backward.
@@ -1108,6 +1116,12 @@ class ModelParallel:
                 "ModelParallel does not return the wavelet gradient: the domain-decomposed "
                 "backward returns the model gradients only. Detach the wavelet, or take that "
                 "gradient from a single-domain PropTorch run.")
+        # A dual tensor (forward-mode AD) that does not require grad takes the
+        # plain stepped forward below, whose kernels carry no tangent: the record
+        # came back with the tangent dropped. Refused here, on every path.
+        if has_tangent(wavelet, *(models or ())):
+            refuse_forward_ad("Domain decomposition (ModelParallel)",
+                              "its compiled kernels propagate no tangent field")
         # ``torch.is_grad_enabled()`` is part of the predicate because
         # ``requires_grad`` is a TENSOR property, blind to grad mode: without it
         # a caller who writes ``with torch.no_grad(): ddp(..., models=[vp])``

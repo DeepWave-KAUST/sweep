@@ -18,6 +18,7 @@ from sweep.memory.torch import Allocator
 from sweep.memory.shape import Layout
 from sweep.core.arguments import validate_memory_strategy
 from sweep.propagator._call_params import CompiledCallParams
+from sweep.propagator._second_order import refuse_create_graph, refuse_forward_ad
 from sweep.propagator.base import PropBase
 from sweep.propagator.options import refuse_retired_boundary_dtype_env
 from sweep.equations._edges import is_top_only_or_none
@@ -502,8 +503,14 @@ class Wrapper(torch.autograd.Function):
         return syn
     
     @staticmethod
+    def jvp(ctx, *tangents):
+        refuse_forward_ad("impl='c'", "its compiled kernels propagate no tangent field")
+
+    @staticmethod
     def backward(ctx, adjoint_source):
 
+        refuse_create_graph("impl='c'", "its backward is the compiled adjoint, which autograd "
+                            "cannot differentiate again")
         if not hasattr(ctx, "cp"):
             # The end of this function releases the params object -- wavefields,
             # PML profiles, the forward source -- at the earliest point it can,

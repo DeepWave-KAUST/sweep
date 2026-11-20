@@ -23,6 +23,38 @@ def stop_gradient(x):
     return jax.lax.stop_gradient(x)
 
 
+# Why the qP equations refuse a second derivative in every s_gradient mode, and
+# whether their create_graph=True gradient is still a first-order graph (it is
+# for 'frozen' and 'exact', whose double-vjp J h a Gauss-Newton solver takes);
+# the eager propagator reads it through ``second_derivative_refusal``.
+_NO_SECOND_DERIVATIVE = {
+    "adjoint": ("its s_gradient='adjoint' step is differentiated by a hand-written adjoint "
+                "off the autograd tape", False),
+    "frozen": ("s_gradient='frozen' holds S_n fixed, so its gradient is not the derivative of "
+               "the forward and differentiating it again gives no Hessian", True),
+    "exact": ("the second derivative of S_n = N / (D + 1e-26) overflows float32 where the "
+              "wavefield is quiet (D ~ 0) and comes back as NaN", True),
+}
+
+
+def qp_second_derivative_refusal(equation):
+    return _NO_SECOND_DERIVATIVE[equation.s_gradient]
+
+
+# Why a forward-mode tangent is not J h in a mode: 'adjoint' has no forward-mode
+# counterpart, and 'frozen' would carry the linearisation with S_n held fixed.
+_NO_FORWARD_MODE = {
+    "adjoint": "its s_gradient='adjoint' step is differentiated by a hand-written adjoint with no "
+               "forward-mode counterpart",
+    "frozen": "s_gradient='frozen' holds S_n fixed, so its tangent would be the frozen "
+              "linearisation, not J h",
+}
+
+
+def qp_forward_mode_refusal(equation):
+    return _NO_FORWARD_MODE.get(equation.s_gradient)
+
+
 def check_s_gradient(value, backend="torch"):
     if value not in S_GRADIENTS:
         raise ValueError(f"s_gradient must be one of {S_GRADIENTS}, got {value!r}")
@@ -198,6 +230,12 @@ class _AdjointSRhs:
 
                 @staticmethod
                 def backward(ctx, grad):
+                    # create_graph=True and a dual tensor are refused on the input
+                    # side of the rollout (second_derivative_refusal,
+                    # forward_mode_refusal), not here: raising in this per-step node
+                    # left the rest of the backward queued and the interpreter
+                    # aborted at exit, and a custom jvp on this Function would break
+                    # the compiled graph (Dynamo does not trace one).
                     sk, vp2dt2, *models = (t.detach() for t in ctx.saved_tensors)
                     need = ctx.needs_input_grad
                     grad = grad.detach()
@@ -470,6 +508,12 @@ class AcousticVTI(SecondOrderEquation):
 
     def c_eq_aux(self, prop):
         return s_gradient_aux(self)
+
+    def second_derivative_refusal(self):
+        return qp_second_derivative_refusal(self)
+
+    def forward_mode_refusal(self):
+        return qp_forward_mode_refusal(self)
 
     def check_stability(self, models, dt, spacing):
         """Warn once when ``dt`` breaks the scheme's stability condition

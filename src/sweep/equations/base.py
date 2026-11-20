@@ -117,6 +117,21 @@ class WaveEquation:
     # per rollout (``sweep.equations._invariants.once``).  Defaults to False:
     # the propagator then calls ``func`` without it.
     takes_invariants = False
+    def second_derivative_refusal(self):
+        """``None``, or ``(why, keeps_first_order_graph)`` when autograd cannot
+        differentiate this equation's eager derivative again: ``why`` says why,
+        and ``keeps_first_order_graph`` whether its ``create_graph=True``
+        gradient is still a valid first-order graph.  The eager propagator then
+        refuses ``create_graph=True`` outright (False), or only a second
+        derivative with respect to the models or the wavelet (True: the graph
+        still serves Jacobian-vector products), instead of returning one that
+        is wrong, NaN or off the tape."""
+        return None
+
+    def forward_mode_refusal(self):
+        """``None``, or why a forward-mode tangent through this equation's eager
+        step is not J h (the eager propagator then refuses a dual tensor)."""
+        return None
 
     # Whether this equation's eager ``func`` honours a *per-edge* free surface
     # (``self.fs_faces``: a free surface on any subset of the 2*ndim faces, each

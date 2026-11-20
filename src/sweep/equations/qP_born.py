@@ -121,6 +121,12 @@ class _QPBorn(SecondOrderEquation):
     def c_eq_aux(self, prop):
         return _vti.s_gradient_aux(self)
 
+    def second_derivative_refusal(self):
+        return _vti.qp_second_derivative_refusal(self)
+
+    def forward_mode_refusal(self):
+        return _vti.qp_forward_mode_refusal(self)
+
     def check_stability(self, models, dt, spacing):
         """Warn once when ``dt`` breaks the scheme's stability condition
         (:func:`~sweep.equations.qP_vti.qp_stability_ratio`); ``PropTorch`` calls it before every forward."""

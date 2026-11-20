@@ -124,9 +124,26 @@ def _gsls_strength_function():
         def forward(ctx, Q, fit):
             ctx.fit = fit
             ctx.save_for_backward(Q)
+            ctx.save_for_forward(Q)
             q = 1.0 / Q.double()
             d = _horner(fit.D, q)
             return tuple((q * _horner(n, q) / d).to(Q.dtype) for n in fit.N)
+
+        @staticmethod
+        def jvp(ctx, Q_tangent, fit_tangent):
+            # d tau_l = tau_l'(q) dq with dq = -q^2 dQ, the backward's derivative
+            (Q,) = ctx.saved_tensors
+            fit = ctx.fit
+            q = 1.0 / Q.double()
+            d = _horner(fit.D, q)
+            dd = _horner(fit.dD, q)
+            dq = -(q * q) * Q_tangent.double()
+            out = []
+            for n_c, dn_c in zip(fit.N, fit.dN):
+                n = _horner(n_c, q)
+                dtau = (n + q * _horner(dn_c, q)) / d - q * n * dd / (d * d)
+                out.append((dtau * dq).to(Q.dtype))
+            return tuple(out)
 
         @staticmethod
         def backward(ctx, *grads):

@@ -17,6 +17,9 @@ from sweep.equations._cpml import StripLayout
 from sweep.receivers.torch import ReceiverTorch, gather_flat
 from sweep.sources.torch import SourceTorch, scatter_source
 from sweep.utils.torch import EdgePadding
+from sweep.propagator._second_order import (DIFFERENCE_ALTERNATIVES, JVP_ALTERNATIVES,
+                                            CreateGraphGuard, has_tangent, refuse_create_graph,
+                                            refuse_forward_ad, refuse_second_derivative)
 from sweep.propagator._eager_boundary_saving import _EagerBoundarySavingMixin
 from sweep.propagator._torch_eager_custom_grad import _CustomGradientMixin
 
@@ -259,6 +262,27 @@ def _raise_dynamo_recompile_limit(target=32):
         if getattr(cfg, name) < target:
             setattr(cfg, name, target)
 
+
+
+class _CatSteps(torch.autograd.Function):
+    """``torch.cat`` of the steps' record blocks along time whose backward hands
+    every block a contiguous gradient.  A slice of the record's gradient is
+    not, and the compiled step's backward (AOTAutograd) restrides a tangent
+    that is not in the layout it traced with an in-place copy, which under
+    ``create_graph=True`` torch 2.15 refuses ("a leaf Variable that requires
+    grad is being used in an in-place operation") before the backward reaches
+    the ``CreateGraphGuard`` and its own error.  Contiguous, the tangent is
+    taken as is, and the rollout's backward costs what it did (the copies
+    replace AOTAutograd's)."""
+
+    @staticmethod
+    def forward(ctx, *blocks):
+        ctx.sizes = [b.shape[1] for b in blocks]
+        return torch.cat(blocks, dim=1)
+
+    @staticmethod
+    def backward(ctx, grad):
+        return tuple(g.contiguous() for g in grad.split(ctx.sizes, dim=1))
 
 class _PropTorchEager(
     PropBase, torch.nn.Module, _CustomGradientMixin, _EagerBoundarySavingMixin
@@ -552,6 +576,96 @@ class _PropTorchEager(
             elif default[name]:
                 extras[name] = True
         return extras
+    def _guard_create_graph(self, tensors):
+        """Route the tensors that require grad (the padded models, the wavelet)
+        through a ``CreateGraphGuard`` when the eager derivative cannot be
+        differentiated again.  A backward reaches the guard last, so it can
+        refuse there:
+
+        * ``create_graph=True`` outright when the gradient comes back off the
+          tape: the compiled step (AOTAutograd builds its backward without a
+          double backward, and its own error does not say that the uncompiled
+          step has one -- every named backend but 'eager' goes through
+          AOTAutograd; a backend callable is left to torch's own error), eager
+          boundary saving, and an equation whose derivative is off the tape
+          (the qP ``s_gradient='adjoint'`` step);
+        * only a second derivative with respect to these tensors when the
+          equation's ``create_graph=True`` gradient is still a valid first-order
+          graph (qP 'exact' and 'frozen': it still gives J h by a derivative with
+          respect to the residual, which never comes back through the guard)."""
+        if not torch.is_grad_enabled():
+            return tensors
+        idx = [i for i, t in enumerate(tensors) if t.requires_grad]
+        if not idx:
+            return tensors
+        refusal = getattr(self.equation, "second_derivative_refusal", None)
+        refusal = refusal() if callable(refusal) else None
+        backend = self.compile_backend
+        aot = backend is None or (isinstance(backend, str) and backend != "eager")
+        compiled = self.use_compile and aot
+        boundary = getattr(self, "_eager_bs", False)
+        if refusal is None and not compiled and not boundary:
+            return tensors
+        owner = weakref.ref(self)
+        name = type(self.equation).__name__
+
+        def check(ctx):
+            if refusal is not None:
+                why, keeps_first_order_graph = refusal
+                if not keeps_first_order_graph:
+                    refuse_create_graph(name, why, instead=DIFFERENCE_ALTERNATIVES)
+                elif getattr(ctx, "differentiated", False):
+                    refuse_second_derivative(name, why)
+                elif torch.is_grad_enabled():
+                    ctx.differentiated = True
+            if boundary:
+                refuse_create_graph(
+                    "impl='eager' with memory=BoundarySaving()",
+                    "its backward reconstructs each step's input from the saved boundary and "
+                    "re-runs the step on detached copies")
+            prop = owner()
+            if compiled and prop is not None and prop.use_compile:
+                refuse_create_graph(
+                    "impl='eager' with torch.compile",
+                    "AOTAutograd builds the compiled step's backward without a double backward",
+                    instead="Pass eager_options=EagerOptions(use_compile=False) (with memory=Full() "
+                            "or Ckpt()): the uncompiled step is twice-differentiable.")
+
+        guarded = CreateGraphGuard.apply(check, *[tensors[i] for i in idx])
+        tensors = list(tensors)
+        for i, t in zip(idx, guarded):
+            tensors[i] = t
+        return tensors
+
+    def _refuse_forward_ad(self, wavelet, models, custom_gradient):
+        """A dual tensor (forward-mode AD) is carried by the uncompiled step on
+        the full tape; the other paths refuse it instead of dropping its tangent
+        (the compiled step returned a tangent of zero)."""
+        if not has_tangent(wavelet, *(models or ())):
+            return
+        instead = JVP_ALTERNATIVES
+        refusal = getattr(self.equation, "forward_mode_refusal", None)
+        refusal = refusal() if callable(refusal) else None
+        if refusal is not None:
+            what, why = type(self.equation).__name__, refusal
+            instead = ("A qP equation carries J h with s_gradient='exact' through the uncompiled "
+                       "step with memory=Full().")
+        elif custom_gradient:
+            what, why = ("A registered gradient-mode imaging condition",
+                         "it replaces the model derivative with a hook-accumulated gradient")
+            instead = ("Remove it (clear_gradients()) to carry the tangent through autograd; "
+                       + JVP_ALTERNATIVES)
+        elif self.use_compile:
+            what, why = ("impl='eager' with torch.compile",
+                         "the compiled step drops the tangent (it would come back as zero)")
+        elif self.use_ckpt:
+            what, why = "impl='eager' with memory=Ckpt()", "torch.utils.checkpoint has no forward-mode AD"
+        elif getattr(self, "_eager_bs", False):
+            what, why = ("impl='eager' with memory=BoundarySaving()",
+                         "the backward reconstructs the forward off the tape")
+        else:
+            return
+        refuse_forward_ad(what, why, instead=instead)
 
     def _no_compile(self, why):
         """This torch cannot compile the step (``why``): run uncompiled, and
@@ -875,12 +989,20 @@ class _PropTorchEager(
                     state, block, n = advance(state, t, end)
                     blocks.append(block)
                     t += n
-                return tuple(state), torch.cat(blocks, dim=1)
+                return tuple(state), self._cat_blocks(blocks)
 
             wavefield, chunk_record = ckpt_torch(checkpoint_chunk, *wavefield, *models, use_reentrant=False)
             wavefield = list(wavefield)
             chunk_records.append(chunk_record)
         return wavefield, torch.cat(chunk_records, dim=1)
+
+    def _cat_blocks(self, blocks):
+        """The record from the steps' blocks: through ``_CatSteps`` when the
+        steps compile (their backward wants contiguous tangents, see there),
+        ``torch.cat`` otherwise."""
+        if self.use_compile:
+            return _CatSteps.apply(*blocks)
+        return torch.cat(blocks, dim=1)
 
     def _rollout_full(self, wavefield, runtime_models, wavelet_steps, src, rec,
                       receivers, nt, adj, return_wavefield, snapshots, snapshot_lookup):
@@ -915,7 +1037,7 @@ class _PropTorchEager(
         # through it, so the record alone cost O(nt^2) backward traffic:
         # 2*nt*|record|, which is 64 GB per shot at nt=4000 with 500 receivers.
         # Concatenating makes it 2*|record|.
-        return wavefield, torch.cat(blocks, dim=1)
+        return wavefield, self._cat_blocks(blocks)
 
     def forward(
         self,
@@ -952,6 +1074,9 @@ class _PropTorchEager(
         # forward modelling on the full tape only, and refuses the rest. A
         # call that records no such gradient takes the standard path.
         registered = self._registered_recording(models)
+        # a dual tensor is refused whenever such a condition is registered,
+        # whether or not this call records its gradient
+        self._refuse_forward_ad(wavelet, models, bool(self._registered_indices("gradient")))
         if registered:
             self._refuse_custom_gradient_call(adj, return_wavefield)
             return self._custom_gradient_forward(
@@ -974,6 +1099,7 @@ class _PropTorchEager(
 
         shape_wavefield = (batch_size, 1) + self._runtime_shape()
         wavelet = self._as_device_tensor(wavelet, dtype=torch.float32)
+        (wavelet,) = self._guard_create_graph([wavelet])
         # One contiguous view per step: the compiled step takes a step's sample
         # as an input, and a strided one would specialize the compiled code on
         # nt.  A clone, not .contiguous(): for one shot the time-major (nt, 1)
@@ -1016,6 +1142,7 @@ class _PropTorchEager(
             [self._as_device_tensor(para, dtype=torch.float32) for para in models])
         models = [EdgePadding.apply(para, self._runtime_padding()) for para in models]
         self.models_padded = models
+        models = self._guard_create_graph(models)
         # Insert a singleton channel axis for per-shot batched models so each
         # shot propagates in its own model; shared models pass through unchanged
         # (keeping the shared path bit-exact). Done after storing models_padded
