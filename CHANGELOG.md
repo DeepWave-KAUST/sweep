@@ -176,15 +176,32 @@ and this project adheres to
   gradients (two forwards for J h) with every other impl and memory strategy and
   with `ModelParallel`, whose ranks take one step; `route="double_backward"` or
   `"difference"` forces one. One H h on a 100 x 200 grid with 1000 steps (4
-  shots, V100) took 70 s and 7.6 GiB by double backward, 28 s and 5.5 GiB by
-  reverse over forward (2.3e-6 off the exact product), 3.0 s and 119 MiB as a
-  difference with the eager defaults (compiled step, `Ckpt()`; 1.1e-3 off) and
+  shots, V100) took 7.3 s and 5.3 GiB by double backward, 27 s and 3.3 GiB by
+  reverse over forward (2.8e-6 off the exact product), 0.95 s and 127 MiB as a
+  difference with the eager defaults (compiled step, `Ckpt()`; 2.1e-3 off) and
   0.13 s and 7 MiB with `impl='c'` and boundary saving (1.3e-3 off). The qP
   equations refuse the Gauss-Newton and Hessian-vector products and differences
   (new `curvature_refusal()` and `difference_refusal()` hooks): where epsilon
   differs from delta their record and gradient are not smooth functions of the
   model, and the `'exact'` gradient moves by tens of percent between float32
   and float64.
+- **`sweep.autodiff.hessian_vector_products`: K Hessian-vector products in one
+  call**, the directions stacked on a leading axis. Where the equation takes a
+  model per shot (the 2-D `Acoustic`, `Elastic`, ...), they run as copies of the
+  survey, each with its own models, so one forward and one double backward (one
+  dual forward for `'forward'`, one gradient for `'difference'`, also with
+  `impl='c'`) give all K; `batch` bounds the copies per call. All 600 columns
+  of the Hessian of a 20 x 30 model (one shot, 400 steps, V100) took 12 s by
+  double backward with `batch=150`, against 2.9 s a column one call at a time
+  (29 min) and 0.58 s with `is_grads_batched=True` (5.8 min: its legacy vmap
+  loops per direction inside the convolutions' derivatives), and 0.55 s as
+  `impl='c'` differences. New `sweep.operators.torch.slice_stencils()`: inside
+  it the uncompiled step runs its stencils as the shifted slices
+  `torch.compile` runs, the same values; a double backward then holds a graph
+  three to four times smaller at 1.4 to 1.7 times the time (the 600 columns:
+  19 s and 1.6 GiB against 12 s and 6.0 GiB at `batch=150`, 9.8 s and 3.1 GiB
+  at `batch=300`), for a batch of directions that memory bounds. Nothing
+  switches to it by itself.
 - **Forward-mode AD (Jacobian-vector products) through `impl='eager'`.** With
   `memory=Full()` and `EagerOptions(use_compile=False)`, models passed as dual
   tensors (`torch.autograd.forward_ad.make_dual(vp, h)`) give the record's
@@ -207,15 +224,16 @@ and this project adheres to
   every mode (its scattered field takes S_n from its own gradient, so at mp = 0
   a tangent would propagate it elliptically). `ViscoAcoustic`'s Q tangent holds
   the fractional exponent fixed, as its gradient does.
-- **Notebook 46, Hessian-vector products**: the exact product by double
-  backward (eager, uncompiled), the difference of two `impl='c'` boundary-saving
-  gradients, the Gauss-Newton product from an `AcousticBorn` record, and the
-  exact product as a first-order gradient of the Born system, which runs with
-  `impl='c'` and boundary saving (and with the compiled eager step) at about the
-  cost of two gradients, against minutes and gigabytes for the double backward
-  on the same model. It also assembles the full Hessian of a small model with
-  that route. The user guide (*Propagators*, "Second derivatives") and the
-  Agent Skill describe the routes.
+- **Notebook 46, Hessian-vector products**, with `sweep.autodiff`: the exact
+  product by double backward (eager, uncompiled) and in forward mode (reverse
+  over forward), the difference of two `impl='c'` boundary-saving gradients with
+  a scan of `rel_step`, the Gauss-Newton product, and the exact product as a
+  first-order gradient of the Born system, which runs with `impl='c'` and
+  boundary saving (and with the compiled eager step) at about the cost of two
+  gradients: a fraction of a second against seconds and gigabytes for the double
+  backward on the same model. It assembles the full Hessian and the Gauss-Newton
+  matrix of a small model with `hessian_vector_products`. The user guide
+  (*Propagators*, "Second derivatives") and the Agent Skill describe the routes.
 - **Agent Skill for AI coding assistants** in `skills/sweep-solver/`
   ([agentskills.io](https://agentskills.io) format): a `SKILL.md` entry point
   plus on-demand references (equations, propagators, boundaries, gradients,

@@ -16,7 +16,10 @@ each from one call, choosing among the routes a propagator can run:
     forward).
 ``'double_backward'``
     H h only: the gradient taken with ``create_graph=True`` and differentiated
-    again.  Exact; the uncompiled eager step, ``Full()`` or ``Ckpt()``.
+    again.  Exact; the uncompiled eager step, ``Full()`` or ``Ckpt()``.  Its
+    graph holds the forward and the first backward; inside
+    :func:`sweep.operators.torch.slice_stencils` it holds 3-4x less (the
+    stencils as shifted slices), at 1.4-1.7x the time.
 ``'difference'``
     Central differences, ``(g(m + e h) - g(m - e h)) / (2 e)`` for H h and
     ``(F(m + e h) - F(m - e h)) / (2 e)`` for J h: two gradients or two
@@ -58,9 +61,21 @@ a direction on that ring they give ``C H E h``, which is not symmetric, while
 ``'double_backward'`` gives the symmetric ``C H C^T h``.  Keep directions off
 the outermost ring when the routes are compared or when a solver needs a
 symmetric operator.
+
+:func:`hessian_vector_products` takes K directions at once (Hessian columns,
+probing vectors) and runs them as copies of the survey in one call, where the
+equation takes a model per shot.  Batching through PyTorch's vmap
+(``torch.autograd.grad(..., is_grads_batched=True)``,
+``torch.autograd.functional.hessian(..., vectorize=True)``) does not batch the
+eager step: its legacy vmap has no batching rule for the convolutions'
+derivatives (nor for ``copy_``, ``zeros_like``, ``index_select``), so it loops
+per direction inside them.
 """
+
+import numpy as np
 import torch
 import torch.autograd.forward_ad as fwAD
+
 
 ROUTES = ("auto", "forward", "double_backward", "difference")
 
@@ -271,3 +286,148 @@ def gauss_newton_vector_product(propagator, wavelet, sources, receivers, models,
         ms = _variables(models, directions)
         record = propagator(wavelet, sources, receivers, models=ms)
         return _grad(record, ms, directions, grad_outputs=w)
+
+
+def _stacked(models, directions):
+    """The models, the directions -- ``(K, *model.shape)`` each, cast to their
+    model's dtype and device, or None for a model held fixed -- and K."""
+    models = list(models)
+    directions = list(directions)
+    if len(directions) != len(models):
+        raise ValueError(f"directions has {len(directions)} entries for {len(models)} models; "
+                         "give one stack of directions per model (None for a model held fixed).")
+    k = None
+    for i, (m, h) in enumerate(zip(models, directions)):
+        if not isinstance(m, torch.Tensor):
+            raise TypeError(f"models[{i}] must be a tensor, got {type(m).__name__}.")
+        if h is None:
+            continue
+        if h.dim() != m.dim() + 1 or tuple(h.shape[1:]) != tuple(m.shape):
+            raise ValueError(f"directions[{i}] has shape {tuple(h.shape)}; give (K, *{tuple(m.shape)}), "
+                             f"K directions of models[{i}] stacked on a leading axis.")
+        if k is not None and h.shape[0] != k:
+            raise ValueError(f"directions[{i}] stacks {h.shape[0]} directions, an earlier one {k}.")
+        k = h.shape[0]
+    if k is None:
+        raise ValueError("every direction is None: there is nothing to differentiate along.")
+    if k == 0:
+        raise ValueError("the directions stack no direction (K = 0).")
+    directions = [None if h is None else h.detach().to(device=m.device, dtype=m.dtype)
+                  for m, h in zip(models, directions)]
+    return models, directions, k
+
+
+def _survey(propagator, wavelet, sources, receivers, models):
+    """``(copies, S)``: ``copies(n)`` is the wavelet, sources and receivers of n
+    copies of the survey, copy after copy, and S its shots -- or None where one
+    call cannot give each copy its own models: the propagator is not a
+    ``PropTorch`` whose equation takes a model per shot, a model is per shot
+    already, or the wavelet is neither shared nor per shot nor per source."""
+    from sweep.propagator.torch import PropTorch
+
+    if not isinstance(propagator, PropTorch) or not getattr(propagator.equation, "supports_batched_models", False):
+        return None
+    if any(m.dim() != propagator.ndim for m in models):
+        return None
+    src = sources if isinstance(sources, torch.Tensor) else np.asarray(sources)
+    rec = receivers if isinstance(receivers, torch.Tensor) else np.asarray(receivers)
+    shots = int(src.shape[0])
+    per_source = shots * (int(src.shape[1]) if src.ndim == 3 else 1)
+    w = wavelet if isinstance(wavelet, torch.Tensor) else np.asarray(wavelet)
+    if rec.shape[0] != shots or (w.ndim > 1 and w.shape[0] not in (1, shots, per_source)):
+        return None
+
+    def tile(x, n):
+        reps = (n,) + (1,) * (x.ndim - 1)
+        return x.repeat(*reps) if isinstance(x, torch.Tensor) else np.tile(x, reps)
+
+    def copies(n):
+        return (tile(w, n) if w.ndim > 1 and w.shape[0] != 1 else wavelet), tile(src, n), tile(rec, n)
+    return copies, shots
+
+
+def _shot_models(models, leaves, n, shots):
+    """Each of n copies' models, one per shot: a leaf ``(n, *shape)`` for a
+    model with directions, the model itself for one held fixed."""
+    return [(m.detach().expand(n, *m.shape) if leaf is None else leaf).repeat_interleave(shots, dim=0)
+            for m, leaf in zip(models, leaves)]
+
+
+def _copies_loss(loss, record, n):
+    """The sum of each of the n copies' loss."""
+    value = sum(loss(d) for d in record.reshape(n, -1, *record.shape[1:]).unbind(0))
+    if value.dim() != 0:
+        raise ValueError(f"loss must return a scalar, got shape {tuple(value.shape)}.")
+    return value
+
+
+def _hvp_copies(propagator, copies, shots, models, directions, loss, route, rel_step):
+    """H h along n stacked directions, from one call on n copies of the survey
+    (2 n for 'difference')."""
+    n = next(h.shape[0] for h in directions if h is not None)
+    if route == "difference":
+        steps = [_step(propagator, models, [None if h is None else h[k] for h in directions], rel_step)
+                 for k in range(n)]
+        es = [torch.tensor(steps, dtype=m.dtype, device=m.device).view(n, *([1] * m.dim())) for m in models]
+        leaves = [None if h is None else torch.cat([m.detach() + e * h, m.detach() - e * h]).requires_grad_(True)
+                  for m, h, e in zip(models, directions, es)]
+        w, src, rec = copies(2 * n)
+        record = propagator(w, src, rec, models=_shot_models(models, leaves, 2 * n, shots))
+        gs = _grad(_copies_loss(loss, record, 2 * n), leaves, directions)
+        return [None if g is None else (g[:n] - g[n:]) / (2 * e) for g, e in zip(gs, es)]
+    leaves = [None if h is None else m.detach().expand(n, *m.shape).clone().requires_grad_(True)
+              for m, h in zip(models, directions)]
+    w, src, rec = copies(n)
+    ms = _shot_models(models, leaves, n, shots)
+    if route == "double_backward":
+        value = _copies_loss(loss, propagator(w, src, rec, models=ms), n)
+        gs = _grad(value, leaves, directions, create_graph=True)
+        inner = sum((g * h).sum() for g, h in zip(gs, directions) if h is not None)
+        return _grad(inner, leaves, directions)
+    tangents = [None if h is None else h.repeat_interleave(shots, dim=0) for h in directions]
+    d, s = _forward_dual(propagator, w, src, rec, ms, tangents)
+    (y,) = torch.autograd.grad(_copies_loss(loss, d, n), d, create_graph=True)
+    psi = (s * y.detach()).sum()
+    if y.requires_grad:
+        psi = psi + (y * s.detach()).sum()
+    return _grad(psi, leaves, directions)
+
+
+def hessian_vector_products(propagator, wavelet, sources, receivers, models, directions, loss, *,
+                            route="auto", rel_step=1e-2, batch=None):
+    """``H h`` along K directions at once: ``directions`` holds, per model, the
+    K directions stacked on a leading axis, ``(K, *model.shape)`` (``None`` for
+    a model held fixed), and so does each returned product -- what calling
+    :func:`hessian_vector_product` once per direction returns, stacked.
+
+    Where the equation takes a model per shot (``supports_batched_models``,
+    e.g. the 2-D ``Acoustic`` and ``Elastic``) and the models are shared,
+    ``batch`` directions (all K by default) run as copies of the survey, each
+    with its own models, in one call: one forward and one double backward for
+    the lot (one dual forward for ``'forward'``, one gradient of 2 * batch
+    copies for ``'difference'``, on every impl).  A copy holds what one survey
+    holds, so ``batch`` bounds the memory.  Elsewhere the directions run one
+    after another.
+    """
+    models, directions, k = _stacked(models, directions)
+    _refuse(propagator, "curvature_refusal", "Hessian-vector product")
+    route = _route(route, propagator, ROUTES)
+    if route == "difference":
+        _refuse(propagator, "difference_refusal", "product by central differences")
+    batch = k if batch is None else int(batch)
+    if batch < 1:
+        raise ValueError(f"batch must be a positive number of directions, got {batch}.")
+    survey = _survey(propagator, wavelet, sources, receivers, models)
+    chunks = []
+    for start in range(0, k, batch):
+        part = [None if h is None else h[start:start + batch] for h in directions]
+        if survey is None:
+            each = [hessian_vector_product(propagator, wavelet, sources, receivers, models,
+                                           [None if h is None else h[j] for h in part], loss,
+                                           route=route, rel_step=rel_step)
+                    for j in range(min(batch, k - start))]
+            chunks.append([None if h is None else torch.stack([e[i] for e in each]) for i, h in enumerate(part)])
+        else:
+            with torch.enable_grad():
+                chunks.append(_hvp_copies(propagator, *survey, models, part, loss, route, rel_step))
+    return [None if h is None else torch.cat([c[i] for c in chunks]) for i, h in enumerate(directions)]

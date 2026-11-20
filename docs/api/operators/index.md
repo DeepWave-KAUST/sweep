@@ -33,3 +33,7 @@ You usually do **not** instantiate these directly:
 ## RSGDerivative
 
 ::: sweep.operators.RSGDerivative
+
+## slice_stencils
+
+::: sweep.operators.torch.slice_stencils

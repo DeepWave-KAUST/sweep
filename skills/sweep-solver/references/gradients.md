@@ -265,9 +265,26 @@ is read with `solver.imaging(wavelet, sources, receivers, models=..., observed=o
   holds a model fixed: no gradient taken (impl='c' ElasticBorn / qP Born backgrounds need
   this), `None` returned; directions are cast to the model's dtype. 'auto' never picks
   double backward (exact on uncompiled `Ckpt` too). V100, 100x200, nt 1000, 4 shots, one H h:
-  double backward 70 s / 7.6 GiB, reverse over forward 28 s, difference 6 s (uncompiled
-  `Full`) / 3 s, 119 MiB (eager defaults) / 0.13 s (c).
+  double backward 7.3 s / 5.3 GiB, reverse over forward 27 s / 3.3 GiB, difference 5.4 s
+  (uncompiled `Full`) / 0.95 s, 127 MiB (eager defaults) / 0.13 s (c).
+- Many directions: `hessian_vector_products(prop, w, src, rec, [vp], [dirs], loss, route=...,
+  batch=B)` with `dirs` of shape `(K, *vp.shape)` returns the K products stacked. Where the
+  equation takes a model per shot (2-D Acoustic, Elastic, ElasticBorn, ViscoAcoustic, Biot) and
+  the models are shared, B directions run as copies of the survey in one call (one forward and
+  one double backward; one dual forward for 'forward'; one gradient of 2B copies for
+  'difference', any impl), else one call per direction; B bounds the memory. All 600 columns of
+  a 20x30 Hessian (1 shot, 400 steps, V100): 29 min one call per column, 12 s / 6 GiB double
+  backward with B=150, 0.55 s impl='c' differences. `torch.autograd.grad(..., is_grads_batched=True)` and
+  `functional.hessian(vectorize=True)` loop per direction inside the eager step (PyTorch's
+  legacy vmap has no batching rule for its convolution derivatives).
+- `with sweep.operators.torch.slice_stencils():` runs the uncompiled step's stencils as shifted
+  slices (same values). A double backward inside it holds 3-4x less memory at 1.4-1.7x the time
+  of the convolutions at the same batch (600 columns: 19 s / 1.6 GiB against 12 s / 6.0 GiB at
+  B=150; 9.8 s / 3.1 GiB at B=300): use it to raise `batch` when memory is the limit. Nothing
+  switches to it by itself; it carries no forward-mode tangent.
 - Reusing one eager propagator while an earlier graph is alive (e.g. `create_graph=True`,
   then more forwards, then the Hv) works: each call starts from fresh zeros.
 - Keep `h` off the outermost ring when checking against differences (Section 5).
-- Notebook `46_hessian_vector_product.ipynb` compares the routes and assembles a small full Hessian.
+- Notebook `46_hessian_vector_product.ipynb` compares the routes with `sweep.autodiff`, scans
+  `rel_step`, and assembles a small full Hessian and Gauss-Newton matrix with
+  `hessian_vector_products`.

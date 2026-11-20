@@ -1,3 +1,4 @@
+import contextlib
 import importlib
 
 import torch
@@ -65,6 +66,8 @@ setattr(torch.Tensor, _TAPS_ATTR, None)
 
 # A/B switch: False keeps the conv under torch.compile as well.
 SLICE_STENCILS_UNDER_COMPILE = True
+# > 0 inside slice_stencils(): the uncompiled step takes the slices too.
+_slices_forced = 0
 
 def _resolve_is_compiling(torch_mod=torch):
     """The "is Dynamo tracing this?" probe: ``torch.compiler.is_compiling``, or
@@ -112,9 +115,34 @@ def register_stencil(kernel):
 
 
 def _compiled_taps(kernel):
-    if not (SLICE_STENCILS_UNDER_COMPILE and _is_compiling()) or not isinstance(kernel, torch.Tensor):
+    if not isinstance(kernel, torch.Tensor):
         return None
-    return kernel._sweep_taps   # _TAPS_ATTR, spelled out: see above
+    if _slices_forced or (SLICE_STENCILS_UNDER_COMPILE and _is_compiling()):
+        return kernel._sweep_taps   # _TAPS_ATTR, spelled out: see above
+    return None
+
+
+@contextlib.contextmanager
+def slice_stencils():
+    """Build the uncompiled step's stencils as shifted slices -- what
+    ``torch.compile`` runs -- instead of ``conv2d`` / ``conv3d``.  The values
+    are the same.  For a graph that is differentiated twice (a double
+    backward, ``sweep.autodiff``'s ``route="double_backward"``) the slices
+    hold 3-4x less memory and take 1.4-1.7x the time of the convolutions,
+    whose backward keeps the kernel alone (``_StencilConv``): one H h on
+    100 x 200 cells, 4 shots and 1000 steps (``Acoustic``, V100) took 7.6 s
+    and 5.2 GiB with the convolutions, 11.0 s and 1.5 GiB inside this
+    context; 64 batched directions on 20 x 30 cells 0.055 s against 0.076 s a
+    direction, 2.5 GiB against 0.66 GiB.  So it is for a double backward whose
+    batch of directions is bound by memory; nothing takes it by itself.  A
+    plain gradient and forward mode run slower as slices (more kernels), and
+    the slices carry no forward-mode tangent."""
+    global _slices_forced
+    _slices_forced += 1
+    try:
+        yield
+    finally:
+        _slices_forced -= 1
 
 
 def _apply_taps(u, taps):
