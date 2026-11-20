@@ -133,6 +133,18 @@ class WaveEquation:
         step is not J h (the eager propagator then refuses a dual tensor)."""
         return None
 
+    def curvature_refusal(self):
+        """``None``, or why no route gives this equation's Gauss-Newton or
+        Hessian-vector products reliably (``sweep.autodiff`` then refuses
+        them)."""
+        return None
+
+    def difference_refusal(self):
+        """``None``, or why central differences of this equation's record or
+        gradient do not converge to their derivative (``sweep.autodiff`` then
+        refuses its ``'difference'`` route)."""
+        return None
+
     # Whether this equation's eager ``func`` honours a *per-edge* free surface
     # (``self.fs_faces``: a free surface on any subset of the 2*ndim faces, each
     # with its own PML thickness) rather than only the historical top-only

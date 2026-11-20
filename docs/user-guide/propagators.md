@@ -438,8 +438,13 @@ under `create_graph=True`. The qP equations (`AcousticVTI`, `AcousticTTI` and th
 pair) refuse a second derivative in every `s_gradient` mode, because it is off the tape
 (`'adjoint'`, which refuses `create_graph=True`), NaN in float32 (`'exact'`) or not a
 Hessian (`'frozen'`); `'exact'` and `'frozen'` keep their `create_graph=True` gradient for
-a derivative with respect to the residual (J h by a double vjp, as a Gauss-Newton solver
-takes it).
+a derivative with respect to the residual, as a Gauss-Newton solver takes it (J h by a
+double vjp for `'exact'`, the linearisation with S_n held fixed for `'frozen'`). A difference
+of their gradients is no substitute: S_n depends on the direction of a field's own gradient,
+which turns abruptly where that gradient nearly vanishes, so where epsilon differs from delta
+the record and the gradient are not smooth functions of the model, and central differences
+converge only at steps of about 1e-5 of the model or below, where float32 round-off
+dominates.
 
 At production size, compute the product from first derivatives, which run with every
 `impl` and memory strategy:
@@ -477,17 +482,62 @@ $\langle \mathbf d, \mathbf s\rangle + \langle \mathbf J(\mathbf m)\mathbf h, \m
 with $\mathbf s = \mathbf J\mathbf h$ held fixed in the first term and the residual
 $\mathbf r$ in the second is the exact $\mathbf H\mathbf h$ from first derivatives. The
 compiled step, `Ckpt()`, `BoundarySaving()`, `impl="c"`, `ModelParallel`, `PropSEM`,
-registered gradient-mode imaging conditions and the qP equations in their `'adjoint'` and
-`'frozen'` modes refuse a dual tensor with a `RuntimeError` (the compiled steps used to
-return a tangent of zero; the `'frozen'` tangent would be the linearisation with S_n held
-fixed). qP equations carry J h with `s_gradient='exact'`. `ViscoAcoustic`'s Q tangent
-holds the fractional exponent fixed, as its gradient does.
+registered gradient-mode imaging conditions, `AcousticVTI` and `AcousticTTI` in their
+`'adjoint'` and `'frozen'` modes and their Born pair in every mode refuse a dual tensor with
+a `RuntimeError` (the compiled steps used to return a tangent of zero; the `'frozen'` tangent
+would be the linearisation with S_n held fixed; the Born pair's scattered field takes S_n
+from its own gradient, so at mp = 0 a tangent would propagate it elliptically).
+`AcousticVTI` and `AcousticTTI` carry J h with `s_gradient='exact'`. `ViscoAcoustic`'s Q
+tangent holds the fractional exponent fixed, as its gradient does.
+
+`sweep.autodiff` wraps these routes in one call each, `jacobian_vector_product`,
+`gauss_newton_vector_product` and `hessian_vector_product`, for any twice-differentiable
+loss of the record. `route="auto"` (the default) takes forward mode where the propagator
+carries a tangent and a central difference of two gradients (or forwards) everywhere else,
+so the same call runs with `impl="c"`, boundary saving and `ModelParallel`:
+
+```python
+from sweep.autodiff import hessian_vector_product
+
+loss = lambda d: 0.5 * ((d - d_obs) ** 2).sum()
+(hv,) = hessian_vector_product(prop, wavelet, sources, receivers, [vp], [h], loss)
+```
+
+A `None` direction holds a model fixed: it is not perturbed, no gradient is taken of it
+(`impl="c"` `ElasticBorn` and the qP Born pair refuse a background model that requires one,
+as `AcousticBorn` does under checkpointing) and its entry of the result is `None`.
+Directions are cast to their model's dtype and device. The difference step changes no model
+by more than `rel_step` (default 1e-2) of its peak, an all-zero model (LSRTM's zero
+reflectivity) counting as 1; under `ModelParallel` every rank takes the step of the whole
+model. `"auto"` takes forward mode, which is exact, where the propagator carries a tangent
+(the uncompiled step with `Full()`), and differences everywhere else, also on the uncompiled
+step with `Ckpt()`, where `route="double_backward"` is exact too. One H h on a 100 x 200 grid
+with 1000 steps (4 shots, V100, `Acoustic`):
+
+| Route | Time | Peak memory | Off the exact product |
+| --- | --- | --- | --- |
+| double backward, uncompiled eager, `Full()` | 70 s | 7.6 GiB | (reference) |
+| reverse over forward, uncompiled eager, `Full()` (`"auto"`) | 28 s | 5.5 GiB | 2.3e-6 |
+| difference, uncompiled eager, `Full()` | 6.1 s | 2.8 GiB | 1.6e-3 |
+| difference, eager defaults: compiled step, `Ckpt()` (`"auto"`) | 3.0 s | 119 MiB | 1.1e-3 |
+| difference, `impl="c"`, boundary saving (`"auto"`) | 0.13 s | 7 MiB | 1.3e-3 |
+
+On a direction that touches the outermost ring (a gradient does), a difference is about
+1e-2 off double backward whatever the step (below). The qP equations refuse the curvature
+products and differences (their `curvature_refusal()` and `difference_refusal()`): where
+epsilon differs from delta their record and gradient are not smooth functions of the model,
+and the `'exact'` gradient, the Gauss-Newton product's J^T, moves by tens of percent between
+float32 and float64. J h of `AcousticVTI` and `AcousticTTI` along a smooth direction still
+holds by forward mode with `s_gradient='exact'` (float32 within 0.5% of float64); the Born
+pair refuses a tangent (above), and for LSRTM its record with mp = h is the Born operator
+applied to h, the mp gradient its adjoint.
 
 Forward mode, like a difference of gradients, differentiates the gradient the propagator
-returns. On the two outermost model cells that gradient is the cropped one (the model is
-edge-replicated into the PML, `EdgePadding`, and its backward crops), and double backward
-gives a different, non-symmetric product there; keep a direction off those cells when
-the routes are compared.
+returns. On the outermost ring of model cells that gradient is the cropped one (the model is
+edge-replicated into the PML, `EdgePadding`, and its backward crops), so for a direction on
+that ring forward mode and differences give a product that is not symmetric, while double
+backward gives the symmetric one; keep directions off that ring when the routes are
+compared or when a solver needs a symmetric operator.
 
 The
 [Hessian-vector products notebook](../notebooks/46_hessian_vector_product.ipynb)

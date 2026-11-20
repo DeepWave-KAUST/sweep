@@ -18,7 +18,8 @@ from sweep.memory.torch import Allocator
 from sweep.memory.shape import Layout
 from sweep.core.arguments import validate_memory_strategy
 from sweep.propagator._call_params import CompiledCallParams
-from sweep.propagator._second_order import refuse_create_graph, refuse_forward_ad
+from sweep.propagator._second_order import (HESSIAN_ALTERNATIVES, refuse_create_graph,
+                                            refuse_forward_ad, substitute_for)
 from sweep.propagator.base import PropBase
 from sweep.propagator.options import refuse_retired_boundary_dtype_env
 from sweep.equations._edges import is_top_only_or_none
@@ -332,6 +333,7 @@ class Wrapper(torch.autograd.Function):
         # it leaking back into the caller's params object.
         spacing = cp.spacing
         dt = cp.dt
+        ctx.create_graph_instead = cp.create_graph_instead or HESSIAN_ALTERNATIVES
         use_checkpoint = cp.use_checkpoint
         use_recursive_checkpoint = cp.use_recursive_checkpoint
         use_boundary_saving = cp.use_boundary_saving
@@ -510,7 +512,8 @@ class Wrapper(torch.autograd.Function):
     def backward(ctx, adjoint_source):
 
         refuse_create_graph("impl='c'", "its backward is the compiled adjoint, which autograd "
-                            "cannot differentiate again")
+                            "cannot differentiate again",
+                            instead=getattr(ctx, "create_graph_instead", HESSIAN_ALTERNATIVES))
         if not hasattr(ctx, "cp"):
             # The end of this function releases the params object -- wavefields,
             # PML profiles, the forward source -- at the earliest point it can,
@@ -2217,6 +2220,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     forward_workspace=forward_workspace,
                     derived_model_nvar_forward=self._derived_model_count("forward"),
                     derived_model_nvar_backward=derived_model_nvar_backward,
+                    create_graph_instead=substitute_for(self.equation, HESSIAN_ALTERNATIVES),
                     forward_state_shapes=forward_state_shapes,
                     bs_replay_shapes=bs_replay_shapes,
                     u_allt_shape=self._history_shape(batch_size),

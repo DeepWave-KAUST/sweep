@@ -54,9 +54,18 @@ def refuse_second_derivative(what, why, instead=DIFFERENCE_ALTERNATIVES):
     derivative with respect to its inputs is not a Hessian."""
     raise RuntimeError(
         f"{what} is not twice-differentiable: {why}. Its create_graph=True gradient "
-        f"serves first-order uses (differentiating it with respect to the residual "
-        f"gives J h, as a Gauss-Newton solver does), but a second derivative with "
-        f"respect to the models or the wavelet is refused. {instead}")
+        f"serves first-order uses (differentiating it with respect to the residual, "
+        f"as a Gauss-Newton solver does), but a second derivative with respect to "
+        f"the models or the wavelet is refused. {instead}")
+
+
+def substitute_for(equation, default):
+    """What a refusal recommends instead: ``default``, unless the equation says
+    a difference of its gradients does not converge either (its
+    ``difference_refusal``)."""
+    refusal = getattr(equation, "difference_refusal", None)
+    why = refusal() if callable(refusal) else None
+    return default if why is None else f"A difference of gradients is no substitute here: {why}."
 
 
 def refuse_forward_ad(what, why, instead=JVP_ALTERNATIVES):
