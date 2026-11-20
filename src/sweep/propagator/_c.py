@@ -22,7 +22,7 @@ from sweep.propagator.base import PropBase
 from sweep.propagator.options import refuse_retired_boundary_dtype_env
 from sweep.equations._edges import is_top_only_or_none
 from sweep.utils.torch import EdgePadding
-from sweep.scalars import fd_coefficients, staggered_grid_coes
+from sweep.scalars import fd_coefficients, second_derivative_coefficients_fp32, staggered_grid_coes
 from sweep.equations.base import FirstOrderEquation
 
 
@@ -1009,12 +1009,11 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
     def _build_fd_coefficients(self, M):
         lap_coes = torch.zeros(M + 1, dtype=torch.float32, device=self.dev)
 
-        coes = fd_coefficients(2, 2 * M)
-        lap_coes[1:] = torch.from_numpy(coes).to(self.dev).float()
-        # Summed in fp64 and rounded once, as eager's kernel centre
-        # (generate_convolution_kernel): the fp32 sum of the rounded
-        # coefficients is one ulp off at orders 8 and 10.
-        lap_coes[0] = float(2 * coes.sum())
+        # The float32 stencil eager's kernel holds (generate_convolution_kernel):
+        # lap_coes[0] = 2 * sum(lap_coes[1:]) exactly, zero on a constant field.
+        c0, coes = second_derivative_coefficients_fp32(2 * M)
+        lap_coes[1:] = torch.from_numpy(coes).to(self.dev)
+        lap_coes[0] = float(-c0)
 
         # First-order CUDA equations use staggered-grid forward/backward
         # derivatives (`sgradient`), so their first-derivative coefficients

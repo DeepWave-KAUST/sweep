@@ -103,7 +103,10 @@ struct LaplaceGPU<4, ND, Direction> {
     {
         constexpr float c0 = 5.f / 2.f;
         constexpr float c1 = 4.f / 3.f;
-        constexpr float c2 = -1.f / 12.f;
+        // The last coefficient is what makes c0 = 2 (c1 + ... + cM) exact in fp32, so the
+        // stencil is zero on a constant field; it differs from its fraction by < 6e-8
+        // (sweep.scalars.second_derivative_coefficients_fp32 holds the same values).
+        constexpr float c2 = 0.5f * c0 - c1;                     // -1/12
 
         constexpr int stride_x = 1;
 
@@ -165,7 +168,7 @@ struct LaplaceGPU<6, ND, Direction> {
         constexpr float c0 = 49.f / 18.f;
         constexpr float c1 = 3.f  / 2.f;
         constexpr float c2 = -3.f / 20.f;
-        constexpr float c3 = 1.f  / 90.f;
+        constexpr float c3 = (0.5f * c0 - c1) - c2;              // 1/90, see order 4
 
         constexpr int stride_x = 1;
 
@@ -231,7 +234,7 @@ struct LaplaceGPU<8, ND, Direction> {
         constexpr float c1 = 8.f   / 5.f;
         constexpr float c2 = -1.f  / 5.f;
         constexpr float c3 = 8.f   / 315.f;
-        constexpr float c4 = -1.f  / 560.f;
+        constexpr float c4 = ((0.5f * c0 - c1) - c2) - c3;       // -1/560, see order 4
 
         constexpr int stride_x = 1;
 
