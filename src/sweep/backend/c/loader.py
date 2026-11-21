@@ -72,6 +72,11 @@ def _declare(lib, path: str = "<core>") -> None:
     sig("sweep_visco_fft_workspace_bytes", [c_int64, c_int64, c_int64], c_size_t)
     sig("sweep_layout_count", [], c_int64)
     sig("sweep_layout_probe", [c_int64], c_int64)
+    sig("sweep_nvcomp_load", [c_char_p, c_char_p, c_int], c_int)
+    sig("sweep_nvcomp_loaded", [], c_int)
+    sig("sweep_nvcomp_piece_bytes", [], c_int64)
+    sig("sweep_nvcomp_max_piece_out", [c_int, c_char_p, c_int], c_int64)
+    sig("sweep_nvcomp_decompress_temp_bytes", [c_int, c_char_p, c_int], c_int64)
 
 
 def _probe_name(i: int) -> str:

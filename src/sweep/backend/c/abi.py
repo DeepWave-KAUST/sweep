@@ -16,7 +16,7 @@ shim packs them into the ctypes structs per call.
 import ctypes
 from ctypes import POINTER, Structure, c_bool, c_char_p, c_double, c_float, c_int32, c_int64, c_uint32, c_void_p
 
-ABI_VERSION = 4   # SWEEP_CORE_ABI_VERSION, csrc/core/capi.h
+ABI_VERSION = 5   # SWEEP_CORE_ABI_VERSION, csrc/core/capi.h
 BUF_MAX_DIMS = 8         # core/buf.h
 SWEEP_MAX_GRADS = 32     # core/outputs.h
 # BoundaryDtype (core/dtype.h, parsed): the tag in Buf.dtype_
@@ -125,6 +125,7 @@ class ForwardInputCore(Structure):
         ("boundary_cpu", BufList),
         ("boundary_gpu", BufList),
         ("boundary_staging", BufList),
+        ("boundary_compress", BufList),
         ("boundary_disk_files", CStrList),
         ("checkpoints", BufList),
         ("checkpoint_steps", Buf),
@@ -179,6 +180,7 @@ class BackwardInputCore(Structure):
         ("boundary_cpu", BufList),
         ("boundary_gpu", BufList),
         ("boundary_staging", BufList),
+        ("boundary_compress", BufList),
         ("boundary_disk_files", CStrList),
         ("models", BufList),
         ("adjoint_source", Buf),
@@ -2521,6 +2523,7 @@ FIELDS = {
         ("boundary_cpu", "BufList", []),
         ("boundary_gpu", "BufList", []),
         ("boundary_staging", "BufList", []),
+        ("boundary_compress", "BufList", []),
         ("boundary_disk_files", "CStrList", []),
         ("checkpoints", "BufList", []),
         ("checkpoint_steps", "Buf", None),
@@ -2572,6 +2575,7 @@ FIELDS = {
         ("boundary_cpu", "BufList", []),
         ("boundary_gpu", "BufList", []),
         ("boundary_staging", "BufList", []),
+        ("boundary_compress", "BufList", []),
         ("boundary_disk_files", "CStrList", []),
         ("models", "BufList", []),
         ("adjoint_source", "Buf", None),
@@ -4882,6 +4886,7 @@ LAYOUT_PROBE = [
     ("ForwardInputCore", "boundary_cpu"),
     ("ForwardInputCore", "boundary_gpu"),
     ("ForwardInputCore", "boundary_staging"),
+    ("ForwardInputCore", "boundary_compress"),
     ("ForwardInputCore", "boundary_disk_files"),
     ("ForwardInputCore", "checkpoints"),
     ("ForwardInputCore", "checkpoint_steps"),
@@ -4932,6 +4937,7 @@ LAYOUT_PROBE = [
     ("BackwardInputCore", "boundary_cpu"),
     ("BackwardInputCore", "boundary_gpu"),
     ("BackwardInputCore", "boundary_staging"),
+    ("BackwardInputCore", "boundary_compress"),
     ("BackwardInputCore", "boundary_disk_files"),
     ("BackwardInputCore", "models"),
     ("BackwardInputCore", "adjoint_source"),

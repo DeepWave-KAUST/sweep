@@ -140,6 +140,12 @@ class CUDALayoutSpec:
     # backward for steady-state / frequency-selection FWI).  Declared here so
     # the driver refuses tail_steps by declaration instead of by class name.
     supports_boundary_tail_steps: bool = False
+    # The compiled forward and backward_bs run the boundary ring through the
+    # shared template drivers (csrc/cuda/common/eq_driver.cuh / sg_driver.cuh),
+    # which carry the nvCOMP ring compression (BoundarySaving(compress=...)).
+    # The hand-written drivers refuse it in C++ as well; this flag is what lets
+    # the propagator say so before allocating anything.
+    supports_boundary_compress: bool = False
     # Declarative CUDA wavefield bind order (see ``slot_table.py``).  Optional:
     # equations without one keep the legacy path, where every count above is
     # declared by hand and the matching index tuples live in

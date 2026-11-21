@@ -386,6 +386,8 @@ def _normalize_cuda_memory_kwargs(merged, equation=None):
             "disk_async_read",
             "storage_dtype",
             "tail_steps",
+            "compress",
+            "compress_budget",
         ):
             if key in boundary:
                 boundary_config[key] = boundary[key]

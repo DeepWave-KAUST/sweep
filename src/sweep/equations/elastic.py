@@ -263,6 +263,7 @@ class Elastic(FirstOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            supports_boundary_compress=True,
             record_shape=record_multi(),
             save_all_shape=history_fields(2),   # vx, vz
             base_nvar=5,

@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define SWEEP_CORE_ABI_VERSION 4
+#define SWEEP_CORE_ABI_VERSION 5
 SWEEP_CAPI int sweep_core_abi_version(void);
 
 // Layout probe for the ctypes mirror (sweep/_core_abi.py): sizeof / offsetof
@@ -255,6 +255,17 @@ SWEEP_CAPI void sweep_set_stream(void* stream);
 SWEEP_CAPI void* sweep_get_stream(void);
 
 SWEEP_CAPI size_t sweep_visco_fft_workspace_bytes(int64_t B, int64_t nz, int64_t nx);
+
+// nvCOMP for BoundarySaving(compress='bitcomp'): dlopen ``path`` (a
+// libnvcomp.so.6) once per process -- 0, or -1 with the message in err.  The
+// two queries size the Python-owned workspace from the library's own answers:
+// the bytes of one uncompressed piece, and the 8-aligned bound on one
+// compressed piece for a ring of ``elem_size``-byte elements (needs the load).
+SWEEP_CAPI int sweep_nvcomp_load(const char* path, char* err, int err_cap);
+SWEEP_CAPI int sweep_nvcomp_loaded(void);
+SWEEP_CAPI int64_t sweep_nvcomp_piece_bytes(void);
+SWEEP_CAPI int64_t sweep_nvcomp_max_piece_out(int elem_size, char* err, int err_cap);
+SWEEP_CAPI int64_t sweep_nvcomp_decompress_temp_bytes(int max_pieces, char* err, int err_cap);
 
 #ifdef __cplusplus
 }

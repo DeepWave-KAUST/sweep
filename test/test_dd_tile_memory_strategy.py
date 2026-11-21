@@ -8,7 +8,7 @@ the legacy dict route accepted into a construction error -- including a gpu
 baseline that sets the staging knobs for every storage, the reference a DD
 bit-exactness gate compares against.
 
-No GPU and no process group: the method reads five attributes off ``self``.
+No GPU and no process group: the method reads six attributes off ``self``.
 """
 import pytest
 
@@ -19,9 +19,10 @@ from sweep.propagator.options import BoundarySaving
 class _Inherited:
     """Stands in for a ModelParallel that inherited these knobs."""
 
-    def __init__(self, storage, *, ti=64, ring=1, pinned=True, tail=0, dtype="fp32"):
+    def __init__(self, storage, *, ti=64, ring=1, pinned=True, tail=0, dtype="fp32", cfg=None):
         self._bstorage, self._bdtype = storage, dtype
         self._bti, self._bring, self._bpinned, self._btail = ti, ring, pinned, tail
+        self._bcfg = dict(cfg or {})
 
 
 def _strategy(storage, **kw):
@@ -52,3 +53,14 @@ def test_disk_storage_carries_the_batching_but_not_pinned_memory():
 def test_tail_steps_survives_every_storage(storage):
     assert _strategy(storage, tail=120).tail_steps == 120
     assert _strategy(storage, tail=0).tail_steps is None
+
+
+@pytest.mark.parametrize("storage", ["gpu", "cpu"])
+def test_compress_and_its_budget_reach_every_tile(storage):
+    s = _strategy(storage, cfg={"compress": "bitcomp", "compress_budget": 0.4})
+    assert (s.compress, s.compress_budget) == ("bitcomp", 0.4)
+
+
+def test_disk_compress_needs_no_budget():
+    s = _strategy("disk", ti=16, ring=2, cfg={"compress": "bitcomp", "disk_async_read": True})
+    assert s.compress == "bitcomp" and s.disk_async_read

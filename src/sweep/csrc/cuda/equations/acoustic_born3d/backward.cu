@@ -867,17 +867,18 @@ void run_bs_imaging(
     // allocate an nvar-wavefield copy on every call (in host memory on the
     // staged path).
     EffectiveBoundarySaver boundary_saver;
+    SWEEP_CHECK(p.boundary_compress.empty(), "boundary compression (BoundarySaving(compress=...)) is not implemented on this driver");
     bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
     if (staged_boundary) {
         boundary_saver.allocate(
             true, 3, rwi ? 2 : 1, ctx, vp, save_width, 2,
             true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu,
-            p.u_last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging
+            p.u_last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging, p.boundary_compress
         );
     } else {
         boundary_saver.allocate(
             true, 3, rwi ? 2 : 1, ctx, vp, save_width, 2,
-            true, true, 1, {}, p.boundary_gpu, p.u_last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging
+            true, true, 1, {}, p.boundary_gpu, p.u_last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging, p.boundary_compress
         );
         if (p.boundary_gpu.empty())
             boundary_saver.load_from_vector(p.u_boundary, vp);

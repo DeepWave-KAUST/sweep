@@ -26,6 +26,7 @@ struct ForwardInputCore {
     BufList boundary_cpu;   // Bind from python
     BufList boundary_gpu;   // Bind from python
     BufList boundary_staging;   // Bind from python: FP32 one-timestep bands the scaled (int8/fp16) store quantizes from, Layout.staging_shapes
+    BufList boundary_compress;   // Bind from python: the nvCOMP workspace of BoundarySaving(compress=...), empty = off (boundary/saver.cuh bind_compress)
     CStrList boundary_disk_files;   // Bind from python
     BufList checkpoints;   // Bind from python
     Buf checkpoint_steps;
@@ -78,6 +79,7 @@ struct BackwardInputCore {
     BufList boundary_cpu;   // Bind from python
     BufList boundary_gpu;   // Bind from python
     BufList boundary_staging;   // Bind from python: see ForwardInput::boundary_staging
+    BufList boundary_compress;   // Bind from python: see ForwardInput::boundary_compress
     CStrList boundary_disk_files;   // Bind from python
     BufList models;
     Buf adjoint_source;

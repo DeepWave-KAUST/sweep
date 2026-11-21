@@ -322,6 +322,7 @@ class ModelParallel:
                 f"memory=BoundarySaving(...) (storage='gpu' is the default, "
                 f"'cpu' stages the ring to the host) and wrap that.")
         _bcfg = getattr(prop, "boundary_saving_config", None) or {}
+        self._bcfg = dict(_bcfg)
         self._bstorage = _bcfg.get("storage", "gpu")
         self._bdtype = _bcfg.get("storage_dtype", "fp32")
         # Boundary tail truncation (BoundaryOptions.tail_steps) is inherited
@@ -805,10 +806,12 @@ class ModelParallel:
         # ring_buffers then overlap nothing and storage='cpu' degenerates into
         # one un-overlapped PCIe round trip per step.  Handing the SAME session
         # to every step lets the copy issued in step ``it`` still be in flight
-        # while step ``it+1`` computes.  Only built for staged storage; the
-        # VRAM path is untouched (session stays None -> old behaviour).
+        # while step ``it+1`` computes.  Only built for staged storage -- which
+        # a compressed gpu ring is too: its chunks are compressed on the copy
+        # stream and a per-call runtime would flush the open chunk every step.
+        # The plain VRAM path is untouched (session stays None -> old behaviour).
         self._bsession = None
-        if self._bstorage != "gpu":
+        if self._bstorage != "gpu" or self._bcfg.get("compress"):
             try:
                 from sweep import _C as _sweep_C
                 self._bsession = _sweep_C.BoundarySession()
@@ -973,6 +976,28 @@ class ModelParallel:
         self.illum = [torch.zeros_like(self.bp.models[0])
                       for _ in range(self._illum_nvar)]
         self.bp.illum_out = self.illum
+
+    def boundary_compress_report(self):
+        """This rank's :func:`sweep.propagator._c.compress_report` of the
+        tile's compressed boundary store (``BoundarySaving(compress='bitcomp')``),
+        None without one or before the first call.  The store lives on the
+        captured tile params, not on the wrapped propagator, so read it here:
+        ``peak_ratio`` / ``budget_needed`` are the fullest segment of the last
+        call (what ``compress_budget`` must cover), ``ratio`` the chunks in
+        the arena now (after a backward: the first segment)."""
+        fp = getattr(self, "fp", None)
+        if fp is None or not fp.boundary_compress:
+            return None
+        from sweep.propagator._c import compress_report
+        impl = self.prop._backend_impl
+        return compress_report(list(fp.boundary_compress), list(fp.boundary_gpu), impl.ndim, impl.dev)
+
+    @property
+    def last_boundary_compress_ratio(self):
+        """uncompressed / packed bytes of the fullest segment the last call
+        kept packed on this rank (see :meth:`boundary_compress_report`), or None."""
+        rep = self.boundary_compress_report()
+        return None if rep is None else rep["peak_ratio"]
 
     def __call__(self, *args, **kwargs):
         """Alias for :meth:`forward` so a ``ModelParallel`` can be invoked like
@@ -1170,6 +1195,13 @@ class ModelParallel:
         # empty placeholder, because use_boundary_saving was never on)
         if self.bp is not None:
             self.bp.boundary_gpu = list(self.fp.boundary_gpu)
+            # the rest of the store travels with the ring: the staged faces
+            # and scales (storage='cpu'/'disk'), the fp32 staging of a scaled
+            # dtype, and the compression workspace (whose live-chunk flags
+            # and arena the backward reads)
+            self.bp.boundary_cpu = list(self.fp.boundary_cpu)
+            self.bp.boundary_staging = list(self.fp.boundary_staging)
+            self.bp.boundary_compress = list(self.fp.boundary_compress)
             self.bp.u_last_two = self.fp.last_two
         # Return the SINGLE-CARD layout, (B, nt, nrec, nfield). The raw buffer
         # stays raw -- eq_driver.cuh TORCH_CHECKs record_out contiguous with
@@ -1684,6 +1716,14 @@ class ModelParallel:
             kwargs["ring_buffers"] = self._bring
         if self._bstorage == "cpu":
             kwargs["pinned_memory"] = self._bpinned
+        if self._bstorage == "disk":
+            kwargs["disk_async_read"] = bool(self._bcfg.get("disk_async_read", False))
+        # Ring compression (BoundarySaving.compress), inherited per tile like the
+        # dtype; its budget only where a storage reads it.
+        if self._bcfg.get("compress"):
+            kwargs["compress"] = self._bcfg["compress"]
+            if self._bstorage != "disk":
+                kwargs["compress_budget"] = float(self._bcfg.get("compress_budget", 0.75))
         return BoundarySaving(**kwargs)
 
     @property
