@@ -143,6 +143,35 @@ and this project adheres to
   as well; GPU results are unchanged bit for bit.
 
 ### Added
+- Domain decomposition of the eager propagator: `ModelParallel(prop, mesh,
+  exchange_steps=...)` with an `impl="eager"` propagator runs one tile per
+  rank -- x strips in 2-D, an x/y tile grid in 3-D -- by autograd alone -- each tile is the single-domain eager
+  rollout on its owned columns plus a halo, and every `exchange_steps` steps
+  a differentiable exchange (one NCCL message per neighbour, called directly)
+  replaces the halo with the neighbour's columns, so `loss.backward()` gives
+  the model and the wavelet gradients on the full tape or under chunk
+  checkpointing. Which state tensors a tile exchanges, and how wide a halo it
+  needs, are probed from the step's dependency structure at the first call,
+  and a self-check compares the tiles with the global grid; grid-shaped
+  tensors on the equation (CPML profiles, topography rows, a new equation's
+  own) are cut per tile, so any equation whose step is local in x is admitted
+  without DD code of its own, and one that is not is refused with the reason.
+  The step's backward must be additive in the cotangent (checked): the qP
+  equations' default `s_gradient='adjoint'` is refused, `'frozen'` and
+  `'exact'` are admitted; `ViscoAcoustic` and `PseudoelasticP` are refused as
+  non-local; every other FD equation is admitted.
+  The call and the gradient semantics are the stepped `ModelParallel`'s
+  (global models replicated: this rank's tile of the gradient, zero
+  elsewhere; or each rank's tile of the models), plus the wavelet gradient,
+  complete on every rank. Weak-scaling efficiency on 4 V100s: 3-D acoustic
+  128³-176³ per GPU 101-109% against a single domain with a PML on every face
+  (a tile pays its outer pads only; 4-21% more per computed cell), 2-D
+  acoustic 1000² 83-90% and elastic 800² 81-89% with `exchange_steps` 8-16
+  (`docs/user-guide/parallel.md`). Refused: boundary saving, the CPML strips
+  layout, custom gradients. `balance=True` (off by default) cuts the tiles so
+  each computes the same width, pad included; 3-5% faster on 4 V100s with a
+  32-cell pad, no gain or a 3% loss otherwise.
+  `sweep.parallel.eager_dd`, `sweep.parallel.nccl_direct`; `test/test_eager_dd.py`.
 - `PseudoelasticP` (alias `PureP`): the pseudoelastic pure P-mode wave
   equation of Sun and Alkhalifah (2021, Geophysics 86, T469), 2-D, eager
   only. `Elastic`'s staggered-grid step with the particle velocity projected
