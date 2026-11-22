@@ -85,7 +85,7 @@ def pkg(tmp_path, monkeypatch):
     (headers / "cuda_runtime_api.h").write_text("")
     (headers / "crt").mkdir()
     (headers / "crt" / "host_defines.h").write_text("")   # a second wheel (nvidia-cuda-nvcc) ships this one
-    monkeypatch.setattr(jit, "_nvidia_pip_includes", lambda: [str(headers)])
+    monkeypatch.setattr(jit, "_nvidia_pip_includes", lambda major=None: [str(headers)])
     import torch
     monkeypatch.setattr(torch.version, "cuda", "12.8")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
@@ -282,14 +282,14 @@ class TestCanCompile:
         _ship(pkg / "lib" / "cu12", _sidecar())
         monkeypatch.delenv("SWEEP_JIT_FULL", raising=False)
         monkeypatch.setattr(jit, "_find_cuda_home", lambda: None)
-        monkeypatch.setattr(jit, "_nvidia_pip_includes", lambda: [])
+        monkeypatch.setattr(jit, "_nvidia_pip_includes", lambda major=None: [])
         ok, why = jit.can_compile()
         assert ok, why
 
     def test_a_toolkit_supplies_the_headers_instead(self, pkg, monkeypatch):
         _ship(pkg / "lib" / "cu12", _sidecar())
         monkeypatch.setattr(jit, "_find_cuda_home", lambda: "/opt/cuda")
-        monkeypatch.setattr(jit, "_nvidia_pip_includes", lambda: [])
+        monkeypatch.setattr(jit, "_nvidia_pip_includes", lambda major=None: [])
         ok, why = jit.can_compile()
         assert ok, why
 
@@ -484,7 +484,7 @@ class TestTwoShippedCores:
         torch, the unsuffixed CUDA 13 line under a cu13 torch."""
         monkeypatch.setenv("SWEEP_JIT_FULL", "1")
         monkeypatch.setattr(jit, "_find_cuda_home", lambda: None)
-        monkeypatch.setattr(jit, "_nvidia_pip_includes", lambda: [])
+        monkeypatch.setattr(jit, "_nvidia_pip_includes", lambda major=None: [])
         _torch_cuda(monkeypatch, "13.0")
         ok, why = jit.can_compile()
         assert not ok and "pip install nvidia-cuda-runtime nvidia-cuda-nvcc," in why, why
@@ -566,12 +566,13 @@ class TestPipCudaLayouts:
         assert jit._tag_major("cuda_nvcc") is None
         assert jit._tag_major("cufft") is None
 
-    def test_cu13_layout_headers_and_libs(self, site):
+    def test_cu13_layout_headers_and_libs(self, site, monkeypatch):
         """cuda_runtime_api.h and crt/host_defines.h come from two wheels under
         CUDA 12 but land in the one ``nvidia/cu13/include`` under CUDA 13; the
         lib glob reaches ``nvidia/cu13/lib``; a pip CUDA_HOME of that layout
         has its include dir where a toolkit would."""
         root, _ = site
+        _torch_cuda(monkeypatch, "13.0")
         inc = root / "cu13" / "include"
         (inc / "crt").mkdir(parents=True)
         (root / "cu13" / "lib").mkdir()
@@ -583,6 +584,34 @@ class TestPipCudaLayouts:
         assert jit._nvidia_pip_includes() == [str(inc)]
         assert jit._nvidia_pip_libs() == [str(root / "cu13" / "lib")]
         assert jit._toolkit_includes(str(root / "cu13")) == [str(inc)]
+
+    def test_mixed_install_reaches_only_the_build_majors_libs(self, site, monkeypatch, tmp_path):
+        """torch cu12 with the cu13 wheels beside it (another package pulled them in):
+        the core's link line must not reach ``nvidia/cu13/lib``, whose
+        ``libcudart_static.a`` -- CUDA 13's runtime -- linked into a core a CUDA 12
+        nvcc compiled is refused by a CUDA 12 driver on every call ("CUDA driver
+        version is insufficient for CUDA runtime version"); a cu13 build the
+        reverse; the per-component CUDA 12 drawers stay for either."""
+        root, nvcc = site
+        for d in ("cu13", "cuda_runtime", "cufft"):
+            (root / d / "lib").mkdir(parents=True)
+            (root / d / "include").mkdir(parents=True)
+        (root / "cu13" / "include" / "crt").mkdir()
+        for h in ("cuda_runtime_api.h", "crt/host_defines.h"):
+            (root / "cu13" / "include" / h).write_text("")
+        libs = lambda m: [Path(p).parent.name for p in jit._nvidia_pip_libs(m)]  # noqa: E731
+        assert libs(None) == ["cu13", "cuda_runtime", "cufft"]
+        assert libs(12) == ["cuda_runtime", "cufft"]
+        assert libs(13) == ["cu13", "cuda_runtime", "cufft"]
+        assert [Path(p).parent.name for p in jit._nvidia_pip_includes(12)] == ["cuda_runtime", "cufft"]
+        _torch_cuda(monkeypatch, "12.8")
+        assert jit._pip_cuda_runtime_headers() is False       # cu13's headers do not count for cu12
+        cu12 = nvcc("cuda_nvcc", (12, 9))
+        cu13 = nvcc("cu13", (13, 0))
+        line = jit._core_ninja(tmp_path, [], [], str(cu12))
+        assert "nvidia/cu13/lib" not in line and "nvidia/cufft/lib" in line
+        line = jit._core_ninja(tmp_path, [], [], str(cu13))
+        assert "nvidia/cu13/lib" in line
 
     def test_cu12_layout_headers_span_two_wheels(self, site):
         root, _ = site
@@ -831,7 +860,7 @@ class TestLoadWithAShippedCore:
         # a .cu in the staged list must be dropped, not compiled, as before
         monkeypatch.setattr(jit, "_stage", lambda _b: (shim + [str(stage / "k.cu")], [str(stage)]))
         monkeypatch.setattr(jit, "_find_cuda_home", lambda: None)
-        monkeypatch.setattr(jit, "_nvidia_pip_libs", lambda: [])
+        monkeypatch.setattr(jit, "_nvidia_pip_libs", lambda major=None: [])
         monkeypatch.setattr(jit, "_module", None)
         monkeypatch.setenv("PATH", os.environ.get("PATH", ""))    # load() prepends; restore after
         monkeypatch.setenv("TORCH_EXTENSIONS_DIR", str(tmp_path))
@@ -1114,7 +1143,7 @@ class TestCachedLocalCore:
             return subprocess.CompletedProcess(cmd, 0, "", "")
         monkeypatch.setattr(subprocess, "run", fake_ninja)
         monkeypatch.setattr(jit, "_ensure_ninja_on_path", lambda: None)
-        monkeypatch.setattr(jit, "_nvidia_pip_libs", lambda: [])
+        monkeypatch.setattr(jit, "_nvidia_pip_libs", lambda major=None: [])
 
         out = _REAL_BUILD_CORE(build_dir, [str(csrc / "cuda/common/k.cu")], [str(csrc)],
                                str(tmp_path / "cuda"), verbose=False)
@@ -1130,7 +1159,7 @@ class TestCachedLocalCore:
         monkeypatch.setattr(subprocess, "run",
                             lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", "nvcc: boom"))
         monkeypatch.setattr(jit, "_ensure_ninja_on_path", lambda: None)
-        monkeypatch.setattr(jit, "_nvidia_pip_libs", lambda: [])
+        monkeypatch.setattr(jit, "_nvidia_pip_libs", lambda major=None: [])
         with pytest.raises(RuntimeError, match="boom"):
             _REAL_BUILD_CORE(build_dir, [str(csrc / "cuda/common/k.cu")], [str(csrc)],
                              str(tmp_path / "cuda"), verbose=False)
