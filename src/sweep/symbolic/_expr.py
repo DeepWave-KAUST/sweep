@@ -183,6 +183,32 @@ class Field(_Declared):
         return D1(self, Str("x"))
 
 
+# LaTeX for the names a seismic system usually declares. ``PDE.latex(symbols=)``
+# overrides or extends them; any other name prints as sympy prints it (a Greek
+# name such as ``epsilon``, ``kappa`` or ``nu`` as the Greek letter).
+LATEX_NAMES = {
+    "vp": "v_{p}", "vs": "v_{s}", "rho": r"\rho", "lam": r"\lambda", "mu": r"\mu",
+    "eps": r"\epsilon", "vx": "v_{x}", "vy": "v_{y}", "vz": "v_{z}",
+    "sxx": r"\sigma_{xx}", "syy": r"\sigma_{yy}", "szz": r"\sigma_{zz}",
+    "sxy": r"\sigma_{xy}", "sxz": r"\sigma_{xz}", "syz": r"\sigma_{yz}",
+}
+
+
+def latex_names(exprs, symbols=None):
+    """The ``symbol_names`` of :func:`sympy.latex` for the declared symbols in
+    ``exprs``: :data:`LATEX_NAMES` updated by ``symbols``, a mapping from a
+    name (or the declared object) to its LaTeX."""
+    names = dict(LATEX_NAMES)
+    for key, value in (symbols or {}).items():
+        names[key.name if isinstance(key, sympy.Symbol) else str(key)] = value
+    out = {}
+    for e in exprs:
+        for s in sympy.sympify(e).free_symbols:
+            if s.name in names:
+                out[s] = names[s.name]
+    return out
+
+
 class _Op(sympy.Function):
     """An unevaluated derivative of a field."""
 
@@ -274,5 +300,10 @@ class Eq:
     def __repr__(self):
         return f"Eq({self.lhs}, {self.rhs})"
 
+    def latex(self, symbols=None):
+        """``lhs = rhs`` as LaTeX; ``symbols`` as in :meth:`PDE.latex`."""
+        names = latex_names([self.lhs, self.rhs], symbols)
+        return f"{sympy.latex(self.lhs, symbol_names=names, long_frac_ratio=2)} = {sympy.latex(self.rhs, symbol_names=names, long_frac_ratio=2)}"
+
     def _repr_latex_(self):
-        return f"$\\displaystyle {sympy.latex(self.lhs)} = {sympy.latex(self.rhs)}$"
+        return f"$\\displaystyle {self.latex()}$"

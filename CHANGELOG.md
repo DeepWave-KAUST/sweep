@@ -158,7 +158,9 @@ and this project adheres to
   `dt <= h**2 / (2 * ndim * nu)` at spatial order 2, 0.62 times that at order
   8); such a class refuses boundary saving, naming the terms, and runs with
   `Full()` and `Ckpt()`. A 2-D generated class takes per-shot batched models,
-  `(B, nz, nx)`, as `Acoustic` and `Elastic` do. `Coefficient("mu", rho * vs**2)` is computed once per run
+  `(B, nz, nx)`, as `Acoustic` and `Elastic` do. `PDE.latex()` prints the
+  system, and its coefficients' definitions, as LaTeX (`vp` as `v_p`, `sxz`
+  as `\sigma_{xz}`, overridable). `Coefficient("mu", rho * vs**2)` is computed once per run
   (`prepare_models`); the step's products of models and `dt` (`dt/rho`) once
   per uncompiled rollout, as in the shipped equations. Anything else raises
   when the PDE is built. Restating `Acoustic` / `Acoustic3D` reproduces them bit

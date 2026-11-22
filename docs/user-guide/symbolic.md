@@ -222,6 +222,26 @@ derivative of another field, a derivative between fields at the same position
 field is updated. A `y` derivative or a `y` stagger raises at
 `build(ndim=2)`.
 
+## The system as LaTeX
+
+`PDE.latex()` returns the system as an `aligned` environment, one equation
+per line in the order written, followed by the definition of each
+`Coefficient` (`coefficients=False` leaves them out); a notebook displays a
+`PDE` or an `Eq` this way. The usual seismic names print as their symbols,
+`vp` as `v_p`, `rho` as `\rho`, `lam` and `mu` as the Lamé letters, `vx` as
+`v_x`, `sxz` as `\sigma_{xz}`, a Greek name (`epsilon`, `delta`, `kappa`) as
+the letter; `symbols=` overrides or extends that, by name or by the declared
+object:
+
+```python
+print(Acoustic.latex())
+# \begin{aligned}
+# \frac{\partial^{2} p}{\partial t^{2}} &= v_{p}^{2} \nabla^{2} p
+# \end{aligned}
+
+MyElastic.latex(symbols={"lam2mu": "M"})   # the P-wave modulus, M = λ + 2μ
+```
+
 ## The generated class
 
 `build(ndim)` writes the class as Python source and executes it.

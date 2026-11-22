@@ -131,6 +131,18 @@ def test_per_shot_batched_models_match_acoustic():
     assert torch.equal(g_ref, g_gen)
 
 
+def test_latex():
+    assert ACOUSTIC.latex() == ("\\begin{aligned}\n"
+                                "\\frac{\\partial^{2} p}{\\partial t^{2}} &= v_{p}^{2} \\nabla^{2} p\n"
+                                "\\end{aligned}")
+    assert ACOUSTIC._repr_latex_() == f"${ACOUSTIC.latex()}$"
+    assert ACOUSTIC.equations[0].latex() == "\\frac{\\partial^{2} p}{\\partial t^{2}} = v_{p}^{2} \\nabla^{2} p"
+    tex = VTI.latex(symbols={"p": r"\phi", vp: "c"})
+    assert tex.count(" \\\\\n") == 1
+    assert "\\frac{\\partial^{2} \\phi}{\\partial t^{2}} &= " in tex and "c^{2} \\sqrt{2 \\delta + 1}" in tex
+    assert "\\left(2 \\epsilon + 1\\right)" in tex and "vp" not in tex
+
+
 def _peak_bytes(cls, ndim):
     """Peak CUDA memory of an uncompiled Full() forward + backward, free
     surface on, above what was allocated before it."""

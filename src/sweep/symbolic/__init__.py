@@ -42,7 +42,7 @@ import types
 import sympy
 
 from ._codegen import generate, generate_first_order
-from ._expr import Coefficient, Eq, Field, Model, laplace
+from ._expr import Coefficient, Eq, Field, Model, laplace, latex_names
 from ._lower import LoweredFirst, lower
 
 __all__ = ["Coefficient", "Eq", "Field", "Model", "PDE", "laplace"]
@@ -148,9 +148,33 @@ class PDE:
         with open(path, "w") as fh:
             fh.write(self.source(ndim))
 
+    def latex(self, *, coefficients=True, symbols=None):
+        """The system as LaTeX: an ``aligned`` environment, one equation per
+        line in the order written, then the definition of each
+        ``Coefficient`` the equations use (``coefficients=False`` leaves them
+        out). Wrap it in ``$`` for a notebook (what the notebook display does)
+        or paste it into a document.
+
+        Args:
+            symbols: LaTeX for declared names, ``{"vp": "c", "p": r"\\phi"}``
+                (the declared object may be the key), overriding the defaults
+                in :data:`sweep.symbolic._expr.LATEX_NAMES`: ``vp`` prints as
+                ``v_{p}``, ``rho`` as ``\\rho``, ``lam`` and ``mu`` as the Lamé
+                letters, ``vx`` as ``v_{x}``, ``sxz`` as ``\\sigma_{xz}``; a
+                Greek name (``epsilon``, ``delta``, ``kappa``) as sympy prints
+                it, any other name as written.
+        """
+        coefs = list(self.lower(3).coefficients) if coefficients else []
+        exprs = [e.lhs for e in self.equations] + [e.rhs for e in self.equations]
+        names = latex_names(exprs + coefs + [c.expr for c in coefs], symbols)
+        rows = [f"{sympy.latex(e.lhs, symbol_names=names, long_frac_ratio=2)} &= {sympy.latex(e.rhs, symbol_names=names, long_frac_ratio=2)}"
+                for e in self.equations]
+        rows += [f"{sympy.latex(c, symbol_names=names, long_frac_ratio=2)} &= {sympy.latex(c.expr, symbol_names=names, long_frac_ratio=2)}"
+                 for c in coefs]
+        return "\\begin{aligned}\n" + " \\\\\n".join(rows) + "\n\\end{aligned}"
+
     def __repr__(self):
         return f"PDE({self.equations!r}, name={self.name!r})"
 
     def _repr_latex_(self):
-        rows = [f"{sympy.latex(e.lhs)} &= {sympy.latex(e.rhs)}" for e in self.equations]
-        return "$\\begin{aligned}" + r" \\ ".join(rows) + "\\end{aligned}$"
+        return f"${self.latex()}$"

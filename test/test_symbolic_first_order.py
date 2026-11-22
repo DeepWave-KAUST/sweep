@@ -186,6 +186,16 @@ def test_restated_first_order_is_bitwise(kind, order, strips):
             assert torch.equal(a, b)
 
 
+def test_latex_lists_coefficients():
+    pde = elastic2d_pde()
+    tex = pde.latex()
+    assert "\\frac{\\partial \\sigma_{xz}}{\\partial t} &= \\mu \\left(" in tex
+    assert "\\frac{1}{\\rho} \\left(" in tex                     # not a fraction of fractions
+    assert "\\mu &= \\rho v_{s}^{2}" in tex and "\\lambda &= \\rho \\left(v_{p}^{2} - 2 v_{s}^{2}\\right)" in tex
+    assert tex.count(" \\\\\n") == 4 + len(pde.lower(2).coefficients)
+    assert pde.latex(coefficients=False).count(" \\\\\n") == 4
+
+
 def _run_shots(eq, src_type, rec_type, models, src, rec):
     """A 2-D run on the given models and geometry: record and model gradients."""
     solver = PropTorch(eq, shape=SHAPES[2], dh=DH, dt=DT, nt=NT[2], dev=DEV, impl="eager", abcn=12,
