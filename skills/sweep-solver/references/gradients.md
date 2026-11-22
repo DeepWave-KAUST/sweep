@@ -66,6 +66,7 @@ The backward needs the forward wavefield. Choose how it is kept with
 | `BoundarySaving(storage="cpu", pinned_memory=True)` / `"disk"` | ring in host RAM / files | slower | | `disk_dir=`, `disk_async_read=True` for disk; `impl='c'` on a CPU device refuses both (its ring is already in RAM) |
 | `BoundarySaving(storage_dtype="bf16"\|"fp16"\|"int8")` | 2x / ~2x / ~4x smaller ring | | | lossy: perturbs the gradient; validate before use |
 | `BoundarySaving(tail_steps=K)` | last K steps only | shorter backward | | `impl='c'` `Acoustic`/`Acoustic3D` only, steady-state (frequency-selection) losses only |
+| `BoundarySaving(compress="bitcomp")` | ring packed losslessly per chunk (nvCOMP Bitcomp) | same per-step time | `impl='c'` template drivers | gradient bit-identical to the same `storage_dtype`; packed ring 28-52 % of int8, 33-60 % of fp32 (Marmousi2 elastic / Overthrust); `compress_budget` sizes the gpu/cpu arena; needs `nvidia-nvcomp-cu12` or `SWEEP_NVCOMP_LIB` |
 | `Ckpt(mode="chunk", chunks=100)` | checkpoints every `chunks` steps | recomputes | eager / PropJax | `storage="cpu"` keeps checkpoints on the host (c on CUDA) |
 | `Ckpt(mode="recursive", count=n)` | fixed `n` checkpoints | most recompute | | `impl='c'` only |
 

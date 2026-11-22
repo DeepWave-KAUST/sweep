@@ -1,7 +1,8 @@
 # HPC
 
-Memory strategies, compressed boundary storage, the eager and compiled backends
-side by side, one shot per GPU, and one model split across GPUs.
+Memory strategies, compressed boundary storage (low-precision and nvCOMP), the
+eager and compiled backends side by side, one shot per GPU, and one model split
+across GPUs.
 
 <div class="grid cards" markdown>
 
@@ -30,6 +31,19 @@ side by side, one shot per GPU, and one model split across GPUs.
     convergence, plus a runtime GPU-memory breakdown.
 
     [:material-notebook-outline: Open notebook](../../notebooks/19_fwi_boundary_dtype.ipynb)
+
+-   ![Boundary ring compression](../../figures/gallery/35_boundary_ring_compression.png){ loading=lazy }
+
+    **Boundary ring · nvCOMP compression**
+
+    ---
+
+    `BoundarySaving(compress="bitcomp")` packs every chunk of the saved
+    boundary losslessly on the copy stream. The same gradient bit for bit,
+    the packed bytes per `storage_dtype`, what `compress_budget` buys on
+    device storage, and when the per-step cost hides.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/35_boundary_ring_compression.ipynb)
 
 -   ![eager vs c](../../figures/gallery/33_eager_vs_c.png){ loading=lazy }
 

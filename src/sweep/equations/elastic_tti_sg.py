@@ -251,6 +251,7 @@ class ElasticTTISG(ElasticTTI):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            supports_boundary_compress=True,
             record_shape=record_multi(),
             save_all_shape=history_fields(8),   # all 8 physical fields
             base_nvar=8,

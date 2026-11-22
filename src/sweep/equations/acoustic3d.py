@@ -144,6 +144,7 @@ class Acoustic3D(SecondOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            supports_boundary_compress=True,
             record_shape=record_single(),
             save_all_shape=history_plain(),
             # Checkpoint backward (csrc/cuda/common/eq_driver.cuh

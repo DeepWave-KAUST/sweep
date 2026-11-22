@@ -32,6 +32,7 @@ struct ForwardInput {
     std::vector<torch::Tensor> boundary_cpu; // Bind from python
     std::vector<torch::Tensor> boundary_gpu; // Bind from python
     std::vector<torch::Tensor> boundary_staging; // Bind from python: FP32 one-timestep bands the scaled (int8/fp16) store quantizes from, Layout.staging_shapes
+    std::vector<torch::Tensor> boundary_compress; // Bind from python: the nvCOMP workspace of BoundarySaving(compress=...), empty = off (boundary/saver.cuh bind_compress)
     std::vector<std::string> boundary_disk_files; // Bind from python
     std::vector<torch::Tensor> checkpoints; // Bind from python
     torch::Tensor checkpoint_steps;
@@ -226,6 +227,7 @@ struct BackwardInput {
     std::vector<torch::Tensor> boundary_cpu; // Bind from python
     std::vector<torch::Tensor> boundary_gpu; // Bind from python
     std::vector<torch::Tensor> boundary_staging; // Bind from python: see ForwardInput::boundary_staging
+    std::vector<torch::Tensor> boundary_compress; // Bind from python: see ForwardInput::boundary_compress
     std::vector<std::string> boundary_disk_files; // Bind from python
 
     // models

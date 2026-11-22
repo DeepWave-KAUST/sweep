@@ -15,6 +15,7 @@
 #include "disk_io.cuh"
 #include "kernels.cuh"
 #include "types.cuh"
+#include "nvcomp_shim.cuh"
 
 // The storage dtype of a bound boundary buffer is its descriptor's tag (the
 // adapter computed it from the tensor at conversion time).
@@ -140,6 +141,24 @@ struct EffectiveBoundarySaver {
     Buf left_staging_t, right_staging_t;
     Buf front_staging_t, back_staging_t;
     Buf bottom_staging_t, top_staging_t;
+
+    // Lossless compression of the ring (BoundarySaving(compress='bitcomp')):
+    // the Python-owned workspace, bound from ``boundary_compress`` in the
+    // order _c.py::_allocate_boundary_store packs it (all uint8 byte buffers;
+    // the C++ side reinterprets them).  Empty list = no compression.  See
+    // runtime.cuh (the chunk flow) and nvcomp_shim.cuh (the device tables).
+    bool compress = false;
+    Buf comp_tab;          // device  (R+1, 6, max_pieces) int64: the per-slot piece tables
+    Buf comp_status;       // device  (R+1, max_pieces) int32: nvcomp statuses
+    Buf comp_status_host;  // pinned  mirror of comp_status
+    Buf comp_index_dev;    // device  (nchunks, 2 + max_pieces) int64: per-chunk [offset, total, sizes...]
+    Buf comp_index_host;   // pinned  mirror; the offset column is host-filled
+    Buf comp_stats_host;   // pinned  8 int64: [packed bytes, raw bytes, chunks landed, ...]
+    Buf comp_bound;        // device  (R, cap): the compressor's per-piece output
+    Buf comp_pack;         // device  (R, cap): the packed chunk (fwd) / the fetched chunk (bwd)
+    Buf comp_persist;      // gpu: device arena; cpu: pinned arena; disk: pinned (R, cap) stage
+    Buf comp_temp;         // device  scratch the decompressor asks for
+    Buf comp_cfg;          // host    8 int64 the propagator fills: [0] the step ring's length (nt_saved)
 
     bool enabled = false;
     bool allocated_ = false;   // allocate() binds once per saver
@@ -449,7 +468,8 @@ struct EffectiveBoundarySaver {
         const Buf& last_two,
         bool use_pinned_memory_,
         int tangent_pad,
-        const BufList& boundary_staging
+        const BufList& boundary_staging,
+        const BufList& boundary_compress
     )
     {
         // One binding per saver: the Buf members describe the FIRST binding, and
@@ -586,6 +606,46 @@ struct EffectiveBoundarySaver {
         // pass — full-precision matters here even when boundary buffers go
         // FP16 (PoC choice; can be relaxed later).
         allocate_last_two(ctx, last_two_nvar, last_two);
+
+        bind_compress(boundary_compress);
+    }
+
+    // The compression workspace (see the members above).  A driver that took
+    // the gpu-direct allocate branch while Python bound a workspace would save
+    // into the full-nt buffer and never compress: refused here, loudly, since
+    // the config said compress.
+    inline void bind_compress(const BufList& bufs)
+    {
+        compress = !bufs.empty();
+        if (!compress) return;
+        SWEEP_CHECK(bufs.size() == 11,
+                    "boundary_compress expects 11 workspace tensors "
+                    "(tab, status, status_host, index_dev, index_host, stats_host, bound, pack, "
+                    "persist, temp, cfg), got ", bufs.size());
+        SWEEP_CHECK(!store_on_gpu,
+                    "boundary compression needs the staged (ring) allocate branch; this driver "
+                    "took the gpu-direct one (staged_boundary must include !p.boundary_compress.empty()).");
+        comp_tab = bufs[0];
+        comp_status = bufs[1];
+        comp_status_host = bufs[2];
+        comp_index_dev = bufs[3];
+        comp_index_host = bufs[4];
+        comp_stats_host = bufs[5];
+        comp_bound = bufs[6];
+        comp_pack = bufs[7];
+        comp_persist = bufs[8];
+        comp_temp = bufs[9];
+        comp_cfg = bufs[10];
+        SWEEP_CHECK(comp_cfg.numel() >= 64, "boundary_compress cfg must hold 8 int64");
+        for (int i = 0; i < 11; ++i)
+            SWEEP_CHECK(bufs[i].defined() && bufs[i].dtype() == BoundaryDtype::INT8 && bufs[i].element_size() == 1,
+                        "boundary_compress[", i, "] must be a uint8 byte buffer");
+        for (int i : {0, 1, 3, 6, 7, 9})
+            SWEEP_CHECK(sweep::on_compute_device(bufs[i]),
+                        "boundary_compress[", i, "] must live on the compute device");
+        for (int i : {2, 4, 5, 10})
+            SWEEP_CHECK(!sweep::on_compute_device(bufs[i]),
+                        "boundary_compress[", i, "] must be a pinned host buffer");
     }
 
     GeneralBoundaryPointer view()
@@ -782,11 +842,15 @@ struct EffectiveBoundarySaver {
     // ``cpu_start`` indexes the persistent/staging scale buffer (== the
     // main buffer's ``start``/``stage_start``); ``gpu_start`` indexes the
     // ring.  es = 4 (scales are always FP32).
+    // ``to_persistent`` overrides the direction the kind implies: the compressed
+    // gpu arena keeps its persistent scales on the DEVICE, so its flush is a
+    // DeviceToDevice copy ring -> persistent and its load the reverse.
     inline void copy_int8_scales(int cpu_start, int len, int gpu_start,
-                                 cudaMemcpyKind kind, cudaStream_t stream)
+                                 cudaMemcpyKind kind, cudaStream_t stream,
+                                 int to_persistent = -1)
     {
         const size_t es = sizeof(float);
-        const bool d2h = (kind == cudaMemcpyDeviceToHost);
+        const bool d2h = to_persistent < 0 ? (kind == cudaMemcpyDeviceToHost) : (to_persistent != 0);
         if (dim == 2) {
             size_t top_var_block = top_scale_t.stride(0);
             size_t top_time_block = top_scale_t.stride(1);
@@ -1063,16 +1127,26 @@ struct EffectiveBoundarySaver {
         meta->right = boundary_byte_ptr(right_t, (int64_t)stage_start * left_time_block);
         cudaLaunchHostFunc(stream, write_boundary_disk_2d_callback, meta);
 
-        if (is_scaled) {
-            // Scaled (int8/fp16): flush the FP32 scale ring -> cpu scale staging (D2H), then
-            // write the scale to its own files (paths[4..7]) via a second meta
-            // reusing the same dtype-agnostic disk-write callback (es=4).
+        if (is_scaled)
+            flush_scales_to_disk_2d(start, len, paths, 4, stream, gpu_start, stage_start);
+    }
+
+    // Scaled (int8/fp16): flush the FP32 scale ring -> cpu scale staging (D2H),
+    // then write the scale to its own files (paths[base..base+3]) via a meta
+    // reusing the dtype-agnostic disk-write callback (es=4).  Shared by the
+    // plain disk path (base 4, after the payload files) and the compressed one
+    // (base 1, after the single packed payload file).
+    inline void flush_scales_to_disk_2d(int start, int len, const std::vector<std::string>& paths,
+                                        size_t base, cudaStream_t stream, int gpu_start, int stage_start)
+    {
+        SWEEP_CHECK(paths.size() >= base + 4, "2D disk boundary: expected 4 scale file paths from index ", base);
+        {
             copy_int8_scales(stage_start, len, gpu_start, cudaMemcpyDeviceToHost, stream);
             size_t s_es = sizeof(float);
             size_t s_top_time = top_scale_t.stride(1);
             size_t s_left_time = left_scale_t.stride(1);
             auto* smeta = new BoundaryDisk2DMeta();
-            smeta->paths = {paths[4], paths[5], paths[6], paths[7]};
+            smeta->paths = {paths[base], paths[base + 1], paths[base + 2], paths[base + 3]};
             smeta->top_elems = (size_t)len * s_top_time;
             smeta->left_elems = (size_t)len * s_left_time;
             smeta->start_top_offset = (size_t)start * s_top_time;
@@ -1184,10 +1258,16 @@ struct EffectiveBoundarySaver {
         meta->right = boundary_byte_ptr(right_t, (int64_t)left_stage_offset);
         cudaLaunchHostFunc(stream, write_boundary_disk_3d_callback, meta);
 
-        if (is_scaled) {
-            // INT8: flush FP32 scale ring -> cpu scale staging (D2H), then
-            // write scale to its own files (paths[6..11]) via a second meta
-            // reusing the dtype-agnostic 3D disk-write callback (es=4).
+        if (is_scaled)
+            flush_scales_to_disk_3d(start, len, paths, 6, stream, gpu_start, stage_start);
+    }
+
+    // 3-D twin of flush_scales_to_disk_2d: scale files are paths[base..base+5].
+    inline void flush_scales_to_disk_3d(int start, int len, const std::vector<std::string>& paths,
+                                        size_t base, cudaStream_t stream, int gpu_start, int stage_start)
+    {
+        SWEEP_CHECK(paths.size() >= base + 6, "3D disk boundary: expected 6 scale file paths from index ", base);
+        {
             copy_int8_scales(stage_start, len, gpu_start, cudaMemcpyDeviceToHost, stream);
             size_t s_top_block = top_scale_t.stride(0);
             size_t s_front_block = front_scale_t.stride(0);
@@ -1199,7 +1279,7 @@ struct EffectiveBoundarySaver {
             size_t s_front_stage = (size_t)stage_start * nvar * s_front_block;
             size_t s_left_stage = (size_t)stage_start * nvar * s_left_block;
             auto* smeta = new BoundaryDisk3DMeta();
-            smeta->paths = {paths[6], paths[7], paths[8], paths[9], paths[10], paths[11]};
+            smeta->paths = {paths[base], paths[base + 1], paths[base + 2], paths[base + 3], paths[base + 4], paths[base + 5]};
             smeta->top_elems = s_top_elems;
             smeta->front_elems = s_front_elems;
             smeta->left_elems = s_left_elems;
@@ -1290,9 +1370,17 @@ struct EffectiveBoundarySaver {
             );
         }
 
-        if (is_scaled) {
-            // Scaled (int8/fp16): read the FP32 per-block scale files (paths[4..7]) into the
-            // cpu scale staging; load_cpu_to_gpu then copies it to the ring.
+        if (is_scaled)
+            load_scales_from_disk_2d(start, len, paths, 4, stage_start);
+    }
+
+    // Scaled (int8/fp16): read the FP32 per-block scale files (paths[base..base+3])
+    // into the cpu scale staging; load_cpu_to_gpu then copies it to the ring.
+    inline void load_scales_from_disk_2d(int start, int len, const std::vector<std::string>& paths,
+                                         size_t base, int stage_start)
+    {
+        SWEEP_CHECK(paths.size() >= base + 4, "2D disk boundary: expected 4 scale file paths from index ", base);
+        {
             size_t s_top_time = top_scale_t.stride(1);
             size_t s_left_time = left_scale_t.stride(1);
             size_t s_top_elems = (size_t)len * s_top_time;
@@ -1309,13 +1397,13 @@ struct EffectiveBoundarySaver {
             char* s_left_dst = boundary_byte_ptr(left_scale_t, (int64_t)stage_start * s_left_time);
             char* s_right_dst = boundary_byte_ptr(right_scale_t, (int64_t)stage_start * s_left_time);
             for (int v = 0; v < nvar; ++v) {
-                read_boundary_file_chunk(paths[4], (size_t)v * s_top_file_var + s_top_off,
+                read_boundary_file_chunk(paths[base], (size_t)v * s_top_file_var + s_top_off,
                                          s_top_dst + (size_t)v * s_top_var * ses, s_top_elems, ses);
-                read_boundary_file_chunk(paths[5], (size_t)v * s_top_file_var + s_top_off,
+                read_boundary_file_chunk(paths[base + 1], (size_t)v * s_top_file_var + s_top_off,
                                          s_bottom_dst + (size_t)v * s_top_var * ses, s_top_elems, ses);
-                read_boundary_file_chunk(paths[6], (size_t)v * s_left_file_var + s_left_off,
+                read_boundary_file_chunk(paths[base + 2], (size_t)v * s_left_file_var + s_left_off,
                                          s_left_dst + (size_t)v * s_left_var * ses, s_left_elems, ses);
-                read_boundary_file_chunk(paths[7], (size_t)v * s_left_file_var + s_left_off,
+                read_boundary_file_chunk(paths[base + 3], (size_t)v * s_left_file_var + s_left_off,
                                          s_right_dst + (size_t)v * s_left_var * ses, s_left_elems, ses);
             }
         }
@@ -1367,9 +1455,25 @@ struct EffectiveBoundarySaver {
         readers.emplace_back(read_one, paths[4], left_offset, (void*)boundary_byte_ptr(left_t, (int64_t)left_stage_offset), left_elems);
         readers.emplace_back(read_one, paths[5], left_offset, (void*)boundary_byte_ptr(right_t, (int64_t)left_stage_offset), left_elems);
 
-        if (is_scaled) {
-            // Scaled (int8/fp16): read the FP32 per-block scale files (paths[6..11]) into the
-            // cpu scale staging in parallel; es=4 (main reads use the payload's element size).
+        for (auto& reader : readers)
+            reader.join();
+        if (read_error)
+            std::rethrow_exception(read_error);
+        if (is_scaled)
+            load_scales_from_disk_3d(start, len, paths, 6, stage_start);
+    }
+
+    // Scaled (int8/fp16): read the FP32 per-block scale files (paths[base..base+5])
+    // into the cpu scale staging, one thread per file; es=4.
+    inline void load_scales_from_disk_3d(int start, int len, const std::vector<std::string>& paths,
+                                         size_t base, int stage_start)
+    {
+        SWEEP_CHECK(paths.size() >= base + 6, "3D disk boundary: expected 6 scale file paths from index ", base);
+        std::exception_ptr read_error = nullptr;
+        std::mutex read_error_mutex;
+        std::vector<std::thread> readers;
+        readers.reserve(6);
+        {
             const size_t ses = sizeof(float);
             auto read_one_scale = [&](std::string path, size_t offset, void* dst, size_t elems) {
                 try {
@@ -1392,12 +1496,12 @@ struct EffectiveBoundarySaver {
             size_t s_top_stage = (size_t)stage_start * nvar * s_top_block;
             size_t s_front_stage = (size_t)stage_start * nvar * s_front_block;
             size_t s_left_stage = (size_t)stage_start * nvar * s_left_block;
-            readers.emplace_back(read_one_scale, paths[6], s_top_off, (void*)boundary_byte_ptr(top_scale_t, (int64_t)s_top_stage), s_top_elems);
-            readers.emplace_back(read_one_scale, paths[7], s_top_off, (void*)boundary_byte_ptr(bottom_scale_t, (int64_t)s_top_stage), s_top_elems);
-            readers.emplace_back(read_one_scale, paths[8], s_front_off, (void*)boundary_byte_ptr(front_scale_t, (int64_t)s_front_stage), s_front_elems);
-            readers.emplace_back(read_one_scale, paths[9], s_front_off, (void*)boundary_byte_ptr(back_scale_t, (int64_t)s_front_stage), s_front_elems);
-            readers.emplace_back(read_one_scale, paths[10], s_left_off, (void*)boundary_byte_ptr(left_scale_t, (int64_t)s_left_stage), s_left_elems);
-            readers.emplace_back(read_one_scale, paths[11], s_left_off, (void*)boundary_byte_ptr(right_scale_t, (int64_t)s_left_stage), s_left_elems);
+            readers.emplace_back(read_one_scale, paths[base], s_top_off, (void*)boundary_byte_ptr(top_scale_t, (int64_t)s_top_stage), s_top_elems);
+            readers.emplace_back(read_one_scale, paths[base + 1], s_top_off, (void*)boundary_byte_ptr(bottom_scale_t, (int64_t)s_top_stage), s_top_elems);
+            readers.emplace_back(read_one_scale, paths[base + 2], s_front_off, (void*)boundary_byte_ptr(front_scale_t, (int64_t)s_front_stage), s_front_elems);
+            readers.emplace_back(read_one_scale, paths[base + 3], s_front_off, (void*)boundary_byte_ptr(back_scale_t, (int64_t)s_front_stage), s_front_elems);
+            readers.emplace_back(read_one_scale, paths[base + 4], s_left_off, (void*)boundary_byte_ptr(left_scale_t, (int64_t)s_left_stage), s_left_elems);
+            readers.emplace_back(read_one_scale, paths[base + 5], s_left_off, (void*)boundary_byte_ptr(right_scale_t, (int64_t)s_left_stage), s_left_elems);
         }
 
         for (auto& reader : readers)

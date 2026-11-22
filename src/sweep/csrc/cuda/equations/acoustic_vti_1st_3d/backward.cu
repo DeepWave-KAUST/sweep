@@ -557,6 +557,7 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
     // staged path).
     EffectiveBoundarySaver boundary_saver;
     int save_width = solver.M + 1;
+    SWEEP_CHECK(p.boundary_compress.empty(), "boundary compression (BoundarySaving(compress=...)) is not implemented on this driver");
     bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
     if (staged_boundary) {
         boundary_saver.allocate(
@@ -564,14 +565,14 @@ BackwardOutputCore backward_bs_core(const BackwardInputCore& in)
             save_width, /*last_two_nvar=*/1, /*override_storage=*/true,
             /*store_on_gpu_override=*/false, p.transfer_interval,
             p.boundary_cpu, p.boundary_gpu, /*last_two=*/p.u_last_two,
-            p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging);
+            p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging, p.boundary_compress);
     } else {
         boundary_saver.allocate(
             /*use_bs=*/true, /*dim=*/3, /*nvar=*/5, solver, vp_t,
             save_width, /*last_two_nvar=*/1, /*override_storage=*/true,
             /*store_on_gpu_override=*/true, /*transfer_interval=*/1,
             /*boundary_cpu=*/{}, p.boundary_gpu, /*last_two=*/p.u_last_two,
-            p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging);
+            p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging, p.boundary_compress);
         if (p.boundary_gpu.empty() && !p.u_boundary.empty())
             boundary_saver.load_from_vector(p.u_boundary, vp_t);
     }

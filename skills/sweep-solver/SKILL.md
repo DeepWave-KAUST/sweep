@@ -118,7 +118,8 @@ per-face tuple, fixed at construction. See `references/boundaries.md`.
 
 **Gradient memory** (`memory=` from `sweep.propagator.options`): `Full()` (store everything,
 fastest backward), `BoundarySaving(storage="gpu"|"cpu"|"disk", storage_dtype=...)` (default on
-`impl='c'`; on a CPU device only `storage="gpu"`, i.e. on the compute device),
+`impl='c'`; on a CPU device only `storage="gpu"`, i.e. on the compute device; `compress="bitcomp"`
+packs the saved ring losslessly with nvCOMP on `impl='c'`, needs `nvidia-nvcomp-cu12`),
 `Ckpt(chunks=...)` (default on eager). See `references/gradients.md`.
 
 ## Conventions

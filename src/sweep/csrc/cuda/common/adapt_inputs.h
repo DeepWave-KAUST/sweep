@@ -113,6 +113,7 @@ inline ForwardInputCore adapt_input(const ForwardInput& in, InputArena& ar)
     c.boundary_cpu = ar.list_of(in.boundary_cpu);
     c.boundary_gpu = ar.list_of(in.boundary_gpu);
     c.boundary_staging = ar.list_of(in.boundary_staging);
+    c.boundary_compress = ar.list_of(in.boundary_compress);
     c.boundary_disk_files = ar.cstrs_of(in.boundary_disk_files);
     c.checkpoints = ar.list_of(in.checkpoints);
     c.checkpoint_steps = ar.host_buf_of(in.checkpoint_steps);
@@ -168,6 +169,7 @@ inline BackwardInputCore adapt_input(const BackwardInput& in, InputArena& ar)
     c.boundary_cpu = ar.list_of(in.boundary_cpu);
     c.boundary_gpu = ar.list_of(in.boundary_gpu);
     c.boundary_staging = ar.list_of(in.boundary_staging);
+    c.boundary_compress = ar.list_of(in.boundary_compress);
     c.boundary_disk_files = ar.cstrs_of(in.boundary_disk_files);
     c.models = ar.list_of(in.models);
     c.adjoint_source = buf_of(in.adjoint_source);

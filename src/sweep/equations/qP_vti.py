@@ -584,6 +584,7 @@ def qp_cuda_layout():
       in the absorbing layer sees the true forward state.
     """
     return CUDALayoutSpec(
+        supports_boundary_compress=True,
         record_shape=record_single(),
         save_all_shape=history_fields(5),
         base_nvar=3,

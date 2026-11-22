@@ -8,6 +8,7 @@
 #include <exception>
 #include <memory>
 #include <string>
+#include "boundary/nvcomp_shim.cuh"
 #include "../../core/capi.h"
 #include "../../core/check.h"
 #include "../../core/compute_device.h"
@@ -638,6 +639,27 @@ size_t sweep_visco_fft_workspace_bytes(int64_t B, int64_t nz, int64_t nx)
 {
     try { return visco_acoustic2d::fft_workspace_bytes(B, nz, nx); }
     catch (...) { return 0; }
+}
+
+int sweep_nvcomp_load(const char* path, char* err, int err_cap)
+{
+    return guarded([&] { sweep_nvcomp::load(path); }, err, err_cap);
+}
+int sweep_nvcomp_loaded(void) { return sweep_nvcomp::loaded() ? 1 : 0; }
+int64_t sweep_nvcomp_piece_bytes(void) { return sweep_nvcomp::kPieceBytes; }
+int64_t sweep_nvcomp_max_piece_out(int elem_size, char* err, int err_cap)
+{
+    int64_t out = -1;
+    int rc = guarded([&] { out = sweep_nvcomp::max_compressed_piece_bytes(elem_size); }, err, err_cap);
+    return rc == 0 ? out : -1;
+}
+int64_t sweep_nvcomp_decompress_temp_bytes(int max_pieces, char* err, int err_cap)
+{
+    int64_t out = -1;
+    int rc = guarded([&] {
+        out = sweep_nvcomp::decompress_temp_bytes(max_pieces, static_cast<int64_t>(max_pieces) * sweep_nvcomp::kPieceBytes);
+    }, err, err_cap);
+    return rc == 0 ? out : -1;
 }
 
 }  // extern "C"

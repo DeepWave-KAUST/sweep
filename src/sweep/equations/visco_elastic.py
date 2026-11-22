@@ -592,6 +592,7 @@ class ViscoElastic(FirstOrderEquation):
             return shapes
 
         return CUDALayoutSpec(
+            supports_boundary_compress=True,
             record_shape=record_multi(),
             save_all_shape=save_all_shape,
             # vx, vz, sxx, szz, sxz + the memory variables (full grid); the ten

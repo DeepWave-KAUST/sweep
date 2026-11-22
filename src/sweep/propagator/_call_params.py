@@ -113,6 +113,9 @@ class CompiledCallParams:
     # from and dequantizes into (Layout.staging_shapes). () for fp32/bf16
     # storage, which never stages.
     boundary_staging: tuple = ()
+    # The nvCOMP workspace of BoundarySaving(compress='bitcomp'), flat byte
+    # buffers in saver.cuh bind_compress order; () when not compressing.
+    boundary_compress: tuple = ()
     boundary_disk_files: tuple = ()
     # Whether this call runs a backward, decided by the caller before
     # Wrapper.apply from grad mode and the inputs' requires_grad: inside the

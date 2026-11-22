@@ -251,6 +251,7 @@ class AcousticVRZ(SecondOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            supports_boundary_compress=True,
             record_shape=record_single(),
             # chunk_forward, (steps + 2, B, 1, grid): U_{start-1}, the replayed
             # segment's pressure, U_end -- the p_tt imaging reads neighbours.

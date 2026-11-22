@@ -464,6 +464,7 @@ void Vrz3dBackwardBsRunner::setup()
     // reach inside reconstructed cells, so the shell stays at M+1.
     save_width = p.M + 1;
     boundary_offset = -p.M;
+    SWEEP_CHECK(p.boundary_compress.empty(), "boundary compression (BoundarySaving(compress=...)) is not implemented on this driver");
     staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
     // Must match Python boundary_tangent_pad (= so//2 = M for VRZ) so the FP32
     // staging matches the persistent int8 buffers' cells per shot; see the
@@ -477,13 +478,13 @@ void Vrz3dBackwardBsRunner::setup()
         boundary_saver.allocate(
             true, 3, 1, ctx, vp, save_width, 2,
             true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu,
-            last_two_bound, p.use_pinned_memory, boundary_tangent_pad, p.boundary_staging
+            last_two_bound, p.use_pinned_memory, boundary_tangent_pad, p.boundary_staging, p.boundary_compress
         );
     } else {
         boundary_saver.allocate(
             true, 3, 1, ctx, vp, save_width, 2,
             true, true, 1, {}, p.boundary_gpu, last_two_bound,
-            p.use_pinned_memory, boundary_tangent_pad, p.boundary_staging
+            p.use_pinned_memory, boundary_tangent_pad, p.boundary_staging, p.boundary_compress
         );
         if (p.boundary_gpu.empty())
             boundary_saver.load_from_vector(p.u_boundary, vp);

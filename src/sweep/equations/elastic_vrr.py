@@ -591,6 +591,7 @@ class ElasticVRR(FirstOrderEquation):
         # so there are no p(t+1) carriers, and the chunked ckpt mode -- whose
         # only carriers would be the cross-chunk p(t+1) -- adds none.
         return CUDALayoutSpec(
+            supports_boundary_compress=True,
             record_shape=record_multi(),
             save_all_shape=history_fields(2),   # px, pz
             base_nvar=5,

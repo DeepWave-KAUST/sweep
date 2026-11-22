@@ -357,6 +357,7 @@ Tail truncation has a legacy dict spelling too — `boundary_saving_config=
 | Boundary saving (GPU, CPU or disk ring) | both | `BoundarySaving(storage=..., storage_dtype=..., ...)` |
 | Asynchronous disk prefetch | both (always on for `impl="eager"`) | `BoundarySaving(storage="disk", disk_async_read=True, ...)` |
 | Boundary tail truncation (steady-state / freqsel objectives) | `impl="c"` acoustic | `BoundarySaving(tail_steps=...)` |
+| Lossless compression of the boundary ring (nvCOMP Bitcomp) | `impl="c"`, template-driver equations | `BoundarySaving(compress="bitcomp", ...)` |
 | Chunked checkpointing | both | `Ckpt(mode="chunk", chunks=...)` |
 | Recursive (fixed-budget) checkpointing | `impl="c"` | `Ckpt(mode="recursive", count=...)` |
 | `torch.compile` on the eager step | `impl="eager"` | `EagerOptions(use_compile=True, ...)` |
@@ -631,6 +632,91 @@ memory=BoundarySaving(storage="gpu", tail_steps=n_probe + margin)
   waiting in an exchange).  The truncated DD gradient is bit-exact against
   the truncated single-domain gradient on fp32 boundaries
   (`test/test_dd_tail_two_tile.py`, `test/dd_tail_nccl_check.py`).
+
+### Boundary ring compression (`BoundarySaving.compress`) {#bs-compress}
+
+`compress="bitcomp"` runs every chunk of the saved boundary through nvCOMP's
+lossless Bitcomp coder on the copy stream, and keeps the packed bytes instead
+of the chunk: in a device arena (`storage="gpu"`), a pinned host arena
+(`storage="cpu"`) or one sparse file (`storage="disk"`).  It is lossless, so
+the gradient is **bit-identical** to the same `storage_dtype` without it
+(`test/test_boundary_compress.py` asserts `torch.equal` on every storage);
+what changes is bytes, and it composes with `storage_dtype`:
+
+```python
+memory=BoundarySaving(storage="gpu", storage_dtype="int8",
+                      compress="bitcomp", compress_budget=0.6)
+```
+
+- **What it saves.**  Packed bytes as a fraction of the ring (measured, one
+  shot, `transfer_interval=16`):
+
+  | problem | int8 | fp16 | bf16 | fp32 |
+  | --- | --- | --- | --- | --- |
+  | Overthrust crop, 3-D acoustic, 100x160x160, 800 steps | 52 % | 54 % | 51 % | 60 % |
+  | SEG/EAGE Salt crop, 3-D acoustic, 100x160x160, 800 steps | 37 % | 43 % | 46 % | 52 % |
+  | Marmousi2 at 25 m, 2-D elastic (five fields), 2000 steps | 28 % | 28 % | 29 % | 33 % |
+
+  `storage_dtype="int8"` is itself 25 % of fp32, so int8 + compress is 7-14 %
+  of an fp32 ring.  The coder is told the element width, which is why an fp32
+  ring packs at all (its exponents are smooth).  The ratio of a run is
+  `propagator.last_boundary_compress_ratio` (uncompressed / packed) and
+  `propagator.boundary_compress_report()` gives it per face.
+- **`compress_budget`** (`storage="gpu"` / `"cpu"` only): the arena is
+  allocated up front at this fraction of the uncompressed ring (plus the
+  int8 / fp16 scales, which ride along uncompressed), since the packed size
+  is only known as the forward runs; the bytes a run saves are
+  `1 - compress_budget` of the ring, not the ratio it happens to reach.  A run
+  that overflows it raises, naming the live set that did not fit and the
+  budget it needed.  The disk file is sparse and takes no budget.
+- **What the arena holds, and how to set the budget.**  With a ring as
+  long as the record every chunk stays: the arena holds the whole forward
+  packed, and `compress_budget = 1 / ratio` fits.  A ring refilled per
+  segment (`ModelParallel(segment_steps=K)`: the ring is `K + 1` steps and
+  the forward overwrites it) holds only the chunks the ring still covers,
+  at most `ceil((K + 1) / transfer_interval) + 1`; older chunks are
+  evicted and the arena is allocated circularly, which can waste up to one
+  packed chunk at the wrap.  The budget therefore multiplies that live
+  window plus one chunk, so `1 / ratio` of the *live set* fits here too.
+  Read the budget off a run instead of guessing it:
+  `propagator.boundary_compress_report()` returns, besides the per-face
+  bytes of the chunks in the arena *now* (`ratio`), the fullest live set the
+  last call held at any time (`peak_ratio`, `peak_bytes`: for a segmented
+  ring the forward's last segment or whichever refill packed worst, since
+  the backward replays the segments in reverse and leaves the first,
+  quietest one in the arena) and `budget_needed`, the `compress_budget`
+  that set needed without margin; set about 10 % more.
+  `propagator.last_boundary_compress_ratio` is `peak_ratio`.  Under
+  `ModelParallel` the store lives on the captured tile params, so call
+  `ddp.boundary_compress_report()` / `ddp.last_boundary_compress_ratio` on
+  the wrapper (per rank; ranks differ, take the lowest ratio).  Each chunk's
+  index row records the steps it was compressed with, so segment ends need
+  not align with `transfer_interval`.
+- **Chunking.**  The chunk is `transfer_interval` steps (the ring's slot);
+  with `storage="gpu"` the knobs `transfer_interval` / `ring_buffers` apply
+  as on the staged storages and default to 16 / 2.  `storage="disk"` needs
+  `disk_async_read=True` (the packed chunks are fetched by the reader
+  thread).  Cost: compressing a chunk is one batched kernel on the copy
+  stream per `transfer_interval` steps; it overlaps the next chunk's
+  compute, and the per-step save / restore kernels are untouched.
+- **When it pays.**  The chunk kernels hide behind compute only when there
+  is compute to hide behind.  Measured per-step cost of `compress` (forward
+  with saving + backward, int8 ring, RTX 6000 Ada): a step of 0.06-0.14 ms
+  (small 2-D grids, a 48x64x64 3-D box) pays 2-8 %, a 0.5 ms step
+  (100x160x160) about 1 %, a step of 1.8 ms and up (160x256x256 and
+  larger) 0.3 % or less.  Use it where the ring is what limits the problem
+  size, not on a small model that fits anyway.
+- **Dependency.**  The library is loaded at run time from the
+  `nvidia-nvcomp-cu12` wheel (`import nvidia.libnvcomp`) or
+  `SWEEP_NVCOMP_LIB=/path/to/libnvcomp.so.6`; nothing falls back, a missing
+  library raises `ImportError`.
+- Scope: `impl="c"` on a CUDA device, the equations on the shared template
+  drivers (Acoustic 2-D/3-D, Elastic 2-D/3-D, the staggered TTI and VRR
+  families, DASMu, AcousticVTI, ViscoElastic; `cuda_layout.supports_boundary_compress`).
+  The hand-written drivers, the eager backend and the host core raise
+  `NotImplementedError` rather than ignoring the option.  `ModelParallel`
+  inherits it per tile like `storage_dtype`.  Worked example:
+  [Compress the saved boundary with nvCOMP](../notebooks/35_boundary_ring_compression.ipynb).
 
 ## Several time steps per compiled call {#steps-per-call}
 
