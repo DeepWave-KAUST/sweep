@@ -205,6 +205,7 @@ nav:
               - Heat equation: notebooks/80_symbolic_heat.ipynb
               - Unsteady Stokes: notebooks/81_symbolic_stokes.ipynb
               - Lossy radar · conductivity: notebooks/82_symbolic_lossy_gpr.ipynb
+              - Damped acoustic · telegraph: notebooks/83_symbolic_damped_acoustic.ipynb
           - Sensitivity & resolution:
               - examples/sensitivity/index.md
               - Acoustic · radiation (Vp, ρ): notebooks/20_radiation_acoustic.ipynb

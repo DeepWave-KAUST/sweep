@@ -5,7 +5,15 @@ A second-order field ``f`` with ``f_tt = RHS`` steps as
     f_next = 2 f - f_prev + dt**2 * RHS
 
 and RHS must be linear in the fields, each term a model-only coefficient times
-either a second derivative along one axis or a field itself. The terms are
+either a second derivative along one axis or a field itself. A damping term
+``s * f.dt`` in ``f``'s own equation (``p.dt2 = vp**2 * laplace(p) - b * p.dt``)
+takes the centred difference ``(f_next - f_prev) / (2 dt)``; solved for
+``f_next``,
+
+    f_next = (2 f - (1 + s dt/2) f_prev + dt**2 * RHS) / (1 - s dt/2),
+
+second order in ``dt``, and for ``s <= 0`` stable under the undamped step's
+time-step bound. The terms are
 gathered per field into groups of axes that share a coefficient, so that
 ``vp**2 * laplace(p)`` and ``vp**2 * (p.dz2 + p.dx2)`` lower to the same
 ``vp**2 * (d2z + d2x)``.
@@ -76,11 +84,13 @@ class Group:
 
 @dataclass(frozen=True)
 class Update:
-    """``field_next = 2 field - field_prev + dt**2 * (groups + local + high)``."""
+    """``field_next = 2 field - field_prev + dt**2 * (groups + local + high)``,
+    with a damping ``damping * field.dt`` taken centred in time."""
     field: Field
     groups: tuple
     local: tuple          # ((coef, field), ...)
     high: tuple = ()      # Groups of derivatives of order 4, 6, ...
+    damping: sympy.Expr = sympy.S.Zero
 
 
 @dataclass(frozen=True)
@@ -93,6 +103,11 @@ class Lowered:
     d2: tuple             # ((field, axis), ...) second derivatives taken
     high: tuple = ()      # ((field, axis, order), ...) derivatives of order 4, 6, ... taken
 
+    @property
+    def damped(self):
+        """``((field, s), ...)`` of the fields with a damping ``s * f.dt``."""
+        return tuple((u.field, u.damping) for u in self.updates if u.damping != 0)
+
 
 def _solve_for_dt(eq):
     """``(field, order, rhs)`` of ``Eq(f.dt<order>, ...)`` solved for the time derivative."""
@@ -100,11 +115,19 @@ def _solve_for_dt(eq):
     dts = expr.atoms(Dt)
     if not dts:
         raise ValueError(f"{eq}: no time derivative; each equation advances one field, e.g. Eq(p.dt2, ...)")
-    orders = {d.order for d in dts}
-    if len(orders) > 1:
-        raise NotImplementedError(
-            f"{eq}: {' and '.join(sorted(map(str, dts)))} -- a first time derivative next to "
-            "a second one (no damping terms in f.dt) is not supported")
+    second = [d for d in dts if d.order == 2]
+    if second and len(dts) > 1:
+        # f.dt next to f.dt2: a damping of f, which the second-order lowering
+        # takes from the right-hand side.
+        if len(second) > 1:
+            raise ValueError(f"{eq}: more than one second time derivative ({', '.join(map(str, second))})")
+        others = [d for d in dts if d.order == 1 and d.field != second[0].field]
+        if others:
+            raise NotImplementedError(
+                f"{eq}: {', '.join(map(str, others))} next to {second[0]} -- a first time "
+                f"derivative of another field is not supported; only {second[0].field}.dt, "
+                f"a damping of {second[0].field} itself, may stand next to {second[0]}")
+        dts = set(second)
     if len(dts) > 1:
         raise ValueError(f"{eq}: more than one time derivative ({', '.join(map(str, dts))})")
     dt = dts.pop()
@@ -176,7 +199,9 @@ def _decompose(eq, rhs, ndim):
     of the bare fields, with RHS == their sum."""
     axes = axes_of(ndim)
     for op in rhs.atoms(Dt):
-        raise NotImplementedError(f"{eq}: {op} on the right-hand side is not supported")
+        raise NotImplementedError(
+            f"{eq}: {op} on the right-hand side is not supported; a first time derivative "
+            "may only be the field's own (a damping f.dt in f's equation)")
     for op in rhs.atoms(D1):
         raise NotImplementedError(
             f"{eq}: first spatial derivative {op} in a second-order equation, which takes "
@@ -263,6 +288,7 @@ def _lower_second_order(solved, ndim, models):
     out, used, d2_taken, high_taken = [], set(), [], []
     for field in fields:
         eq, rhs = updates[field]
+        rhs, damping = _split_damping(eq, field, rhs)
         d2, high, local = _decompose(eq, rhs, ndim)
         for f, *_ in (*d2, *high):
             if f not in updates:
@@ -270,7 +296,7 @@ def _lower_second_order(solved, ndim, models):
         for f in local:
             if f not in updates:
                 raise ValueError(f"{eq}: field {f} has no equation of its own")
-        for c in (*d2.values(), *high.values(), *local.values()):
+        for c in (*d2.values(), *high.values(), *local.values(), damping):
             used |= c.free_symbols
         groups = []
         for f in fields:
@@ -285,12 +311,26 @@ def _lower_second_order(solved, ndim, models):
             groups += [Group(c, f, tuple(a)) for c, a in by_coef.items()]
         local_terms = tuple((local[f], f) for f in fields if f in local and local[f] != 0)
         high_groups = _high_groups(high, fields, axes, high_taken)
-        out.append(Update(field, tuple(groups), local_terms, high_groups))
+        out.append(Update(field, tuple(groups), local_terms, high_groups, damping))
 
     model_order, coefs = _models_and_coefficients(used, models)
     d2_taken.sort(key=lambda fa: (fa[0]._order, axes.index(fa[1])))
     high_taken.sort(key=lambda t: (t[0]._order, t[2], axes.index(t[1])))
     return Lowered(ndim, fields, model_order, coefs, tuple(out), tuple(d2_taken), tuple(high_taken))
+
+
+def _split_damping(eq, field, rhs):
+    """``(rest, s)`` with ``rhs == rest + s * field.dt``, ``s`` model-only."""
+    dt = Dt(field, 1)
+    if not rhs.has(dt):
+        return rhs, sympy.S.Zero
+    D = sympy.Dummy("Dt1")
+    e = sympy.expand(rhs.xreplace({dt: D}))
+    s = sympy.diff(e, D)
+    if s.has(D) or _fields_and_ops(s):
+        raise ValueError(f"{eq}: not linear in the fields ({dt} is multiplied by a field or a derivative)")
+    _check_coefficient(eq, dt, s)
+    return sympy.expand(e - s * D), s
 
 
 def _high_groups(high, fields, axes, taken):

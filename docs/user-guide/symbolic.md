@@ -43,7 +43,7 @@ equations this way, each in a notebook that animates its wavefield.
 | `Coefficient("mu", rho * vs**2)` | a coefficient derived from the models, computed once per run before the time loop |
 | `Field("p", source=, receiver=, aliases=, description=)` | a second-order wavefield; its name is what `source_type` / `receiver_type` take |
 | `Field("vx", time_order=1, stagger="x", ...)` | a field of a first-order system, half a cell after the node along x (see below) |
-| `p.dt2`, `vx.dt` | second / first time derivative |
+| `p.dt2`, `vx.dt` | second / first time derivative (`p.dt` next to `p.dt2`: a damping, see below) |
 | `p.dz2`, `p.dy2`, `p.dx2` | second derivative along one axis (second-order fields; in a first-order system, of the field itself: a dissipative term) |
 | `laplace(p)` | sum of the second derivatives over every axis of the build |
 | `vx.dz`, `vx.dy`, `vx.dx` | first derivative along one axis (first-order systems) |
@@ -74,6 +74,35 @@ VTI = PDE([
     Eq(q.dt2, vp**2 * sympy.sqrt(1 + 2 * delta) * p.dx2 + vp**2 * q.dz2),
 ], name="VTI", free_surface="zero").build(ndim=2)
 ```
+
+### Damping
+
+A second-order equation may carry its own field's first time derivative times
+a model-only coefficient, on either side: `p.dt2 + eta * p.dt = ...` is the
+damping `s * p.dt` with `s = -eta`. `p.dt` is the centred difference
+`(p_next - p_prev) / (2 dt)`, so the step becomes
+
+```text
+p_next = (2 p - (1 + s dt/2) p_prev + dt^2 R) / (1 - s dt/2)
+```
+
+with `R` the rest of the right-hand side: second order in `dt`, and for
+`s <= 0` stable under the undamped equation's time-step bound. It writes a
+sponge or Rayleigh damping, the telegraph equation (a conductive medium in
+the second-order form) and a damped Klein-Gordon equation:
+
+```python
+eta = Model("eta")
+
+Damped = PDE([Eq(p.dt2 + eta * p.dt, vp**2 * laplace(p))],
+             name="DampedAcoustic").build(ndim=2)
+```
+
+At `eta = 0` both factors are exactly 1 and the class reproduces the undamped
+one bit for bit. The term gets no CPML correction. A damping makes the step
+lossy, so the class refuses `BoundarySaving()` and names the terms
+(`DAMPING_TERMS`). The first time derivative of another field (`q.dt` in
+`p`'s equation) is refused.
 
 ## First-order systems
 
@@ -294,7 +323,8 @@ term. Mixed derivatives (`u.dx.dz`) are not supported yet.
 
 - Second-order-in-time fields; the right-hand side linear in the fields, each
   term a model-only coefficient times a second derivative along one axis or
-  times a field.
+  times a field; a damping, a model-only coefficient times the field's own
+  first time derivative (centred in time, no boundary saving).
 - First-order systems; each right-hand side a model-only coefficient times
   first derivatives of the other fields, or a sum of such terms, plus
   dissipative terms: a model-only coefficient times second derivatives of the
@@ -316,7 +346,8 @@ term. Mixed derivatives (`u.dx.dz`) are not supported yet.
 
 Everything else raises when the `PDE` is constructed, with the reason: first
 derivatives in a second-order equation, a system mixing first- and
-second-order fields, damping terms (`f.dt` next to `f.dt2`), terms nonlinear in
+second-order fields, the first time derivative of another field (`q.dt` in
+`p`'s equation), terms nonlinear in
 the fields, terms without a field (sources are injected by the propagator),
 symbols that are neither models nor coefficients, a field used without its own
 equation, mixed derivatives, odd derivatives of order 3 or higher in a
@@ -411,6 +442,9 @@ in [Extending](extending.md#part-2-adding-a-compiled-cuda-kernel-implc).
 | Standard linear solid, a Gaussian pressure at rest vs the exact solution (8th order, fp64, `ts = 2`) | 7.0e-4 at dt 0.2, 1.8e-4 at dt 0.1 (second order); at `ts = 0.05`, eight times below dt 0.4, 6.7e-3, still second order |
 | Restated GSLS `ViscoElastic` (1 and 3 mechanisms) | record 6.3e-7, gradients 0.9e-7 to 8.3e-7 (`vp`, `vs`, `rho`, `Qp`, `Qs`): the same scheme, products associated differently |
 | Zener `Ckpt()`, a coupling alone with `BoundarySaving()`, vs `Full()` | records bit for bit; gradients up to 1.2e-6 (`Ckpt()`), 1.1e-6 (`BoundarySaving()`) |
+| Damped line `p_tt + eta p_t = p_xx`, a Gaussian at rest vs the exact solution (8th order, fp64, `eta = 0.05`) | 8.5e-4 at dt 0.2, 2.1e-4 at dt 0.1 (second order) |
+| Damped acoustic class at `eta = 0` vs the undamped class | record and gradient bit for bit |
+| Damped acoustic `Ckpt()` vs `Full()`, with and without a free surface | records bit for bit; gradients to 1e-5 |
 | `torch.compile(fullgraph=True)` | one graph per step |
 
 The restated 3-D `Elastic` takes its derivatives and CPML corrections in an

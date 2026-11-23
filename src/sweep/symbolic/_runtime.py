@@ -26,6 +26,20 @@ def _torch_only(cls, backend):
             f"{cls.__name__}: backend={backend!r}; generated equations run on 'torch' only")
 
 
+def _refuse_lossy_boundary_saving(cls, lossy):
+    """Eager boundary saving rebuilds the wavefield by running the step
+    backwards in time, which a dissipative or damping term does not allow."""
+    if lossy:
+        raise NotImplementedError(
+            f"{cls.__name__} cannot use boundary saving: it rebuilds the wavefield by "
+            f"stepping backwards in time, which the dissipative or damping term"
+            f"{'s' if len(lossy) > 1 else ''} {', '.join(lossy)} do"
+            f"{'' if len(lossy) > 1 else 'es'} not allow: stepped backwards, "
+            "a diffusion or a damping amplifies every round-off error instead of damping it, and "
+            "the gradient would be wrong. Use memory=Full() or memory=Ckpt().")
+    return True
+
+
 def _high_order_stencils(eq, device):
     """``{(order, stagger): Derivative}`` for the derivatives of order 3 and
     higher the step takes, at the equation's FD accuracy."""
@@ -41,6 +55,8 @@ class SymbolicSecondOrderEquation(SecondOrderEquation):
     DEFAULT_RECEIVER_FIELDS = ()
     # ((order, stagger), ...) of the derivatives of order 3 and higher.
     HIGH_ORDER_STENCILS = ()
+    # The damping terms (``b*p.dt``) as text; empty without one.
+    DAMPING_TERMS = ()
 
     _fs_active = False
     # Appended by the propagator to its refusal of a topography on a PDE built
@@ -62,6 +78,11 @@ class SymbolicSecondOrderEquation(SecondOrderEquation):
         if self.NDIM == 2:
             self.init_grad_kernels()
         self._dn = _high_order_stencils(self, device)
+
+    # See SymbolicFirstOrderEquation.supports_boundary_saving_eager.
+    @property
+    def supports_boundary_saving_eager(self):
+        return _refuse_lossy_boundary_saving(type(self), self.DAMPING_TERMS)
 
     @property
     def default_source_fields(self):
@@ -144,16 +165,7 @@ class SymbolicFirstOrderEquation(FirstOrderEquation):
     # does not have).
     @property
     def supports_boundary_saving_eager(self):
-        lossy = self.DISSIPATIVE_TERMS + self.DAMPING_TERMS
-        if lossy:
-            raise NotImplementedError(
-                f"{type(self).__name__} cannot use boundary saving: it rebuilds the wavefield by "
-                f"stepping backwards in time, which the dissipative or damping term"
-                f"{'s' if len(lossy) > 1 else ''} {', '.join(lossy)} do"
-                f"{'' if len(lossy) > 1 else 'es'} not allow: stepped backwards, "
-                "a diffusion or a damping amplifies every round-off error instead of damping it, and "
-                "the gradient would be wrong. Use memory=Full() or memory=Ckpt().")
-        return True
+        return _refuse_lossy_boundary_saving(type(self), self.DISSIPATIVE_TERMS + self.DAMPING_TERMS)
 
     @property
     def default_source_fields(self):

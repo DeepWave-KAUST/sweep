@@ -304,7 +304,7 @@ def test_undeclared_free_surface_is_refused():
 @pytest.mark.parametrize("equations, error, match", [
     ([Eq(p.dt2, vp**2 * p.dx)], NotImplementedError, "first spatial derivative"),
     ([Eq(p.dt, vp * p.dx2)], ValueError, "declared with time_order=2"),
-    ([Eq(p.dt2, vp**2 * laplace(p) - 0.1 * p.dt)], NotImplementedError, "no damping terms"),
+    ([Eq(p.dt2, vp**2 * laplace(p) - 0.1 * q.dt)], NotImplementedError, "first time derivative of another field"),
     ([Eq(p.dt2, p * p.dx2)], ValueError, "not linear"),
     ([Eq(p.dt2, vp**2 * laplace(p) + vp)], ValueError, "contains no field"),
     ([Eq(p.dt2, sympy.Symbol("c") * laplace(p))], ValueError, "neither a Model, a Coefficient nor a number"),
@@ -312,7 +312,7 @@ def test_undeclared_free_surface_is_refused():
     ([Eq(p.dt2, vp**2 * laplace(p)), Eq(p.dt2, vp**2 * p.dx2)], ValueError, "more than one equation"),
     ([Eq(vp, laplace(p))], ValueError, "no time derivative"),
     ([Eq(q.dt2, vp**2 * laplace(q))], ValueError, "no field has source=True"),
-], ids=["d1", "dt1", "damping", "nonlinear", "source-term", "unknown-symbol", "orphan-field",
+], ids=["d1", "dt1", "other-dt", "nonlinear", "source-term", "unknown-symbol", "orphan-field",
         "two-equations", "no-dt", "no-source"])
 def test_unsupported_pde_is_refused(equations, error, match):
     with pytest.raises(error, match=match):

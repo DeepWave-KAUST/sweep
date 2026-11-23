@@ -158,4 +158,14 @@ batch of shots on a 2-D grid and animates the wavefield. The
 
     [:material-notebook-outline: Open notebook](../../notebooks/82_symbolic_lossy_gpr.ipynb)
 
+-   ![Damped acoustic · telegraph](../../figures/gallery/83_symbolic_damped_acoustic.png){ loading=lazy }
+
+    **Damped acoustic · telegraph**
+
+    ---
+
+    `p_tt + η p_t = c² ∇²p`, the damping centred in time; two dampings in one batch.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/83_symbolic_damped_acoustic.ipynb)
+
 </div>

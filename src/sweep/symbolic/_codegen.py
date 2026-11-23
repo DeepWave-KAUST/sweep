@@ -256,7 +256,10 @@ def generate(name, low, *, free_surface, pml, doc):
         for c, g in up.local:
             terms.append(_coef_times(c, str(g)))
         terms += [_coef_times(g.coef, hsums[id(g)]) for g in up.high]
-        rhs = f"2 * {f} - {nm.prev(f)}" + "".join(f" + {t}" for t in terms)
+        if up.damping == 0:
+            rhs = f"2 * {f} - {nm.prev(f)}" + "".join(f" + {t}" for t in terms)
+        else:
+            rhs = _damped_second(f, nm.prev(f), up.damping, terms)
         body.append(f"_{f}_next = {rhs}")
 
     out = []
@@ -301,6 +304,7 @@ def generate(name, low, *, free_surface, pml, doc):
         f"    DEFAULT_RECEIVER_FIELDS = {tuple(rec_fields[:1])!r}",
         *([f"    HIGH_ORDER_STENCILS = {tuple(sorted({(n, None) for _, _, n in low.high}))!r}"]
           if low.high else []),
+        *([f"    DAMPING_TERMS = {damping_terms(low)!r}"] if low.damped else []),
         '    default_pml_type = "cpmlr"',
         "    takes_invariants = True",
         *[f"    {fl}" for fl in flags],
@@ -318,6 +322,21 @@ def generate(name, low, *, free_surface, pml, doc):
         "",
     ]
     return "\n".join(lines)
+
+
+def damping_terms(low):
+    """The damping terms ``s * f.dt`` of a second-order system as text."""
+    return tuple(f"{sympy.sstr(s * sympy.Symbol(f'{f}.dt'))}" for f, s in low.damped)
+
+
+def _damped_second(f, prev, damping, terms):
+    """``f_tt = R + s f_t`` with ``f_t`` centred, ``(f_next - f_prev) / (2 dt)``:
+    ``f_next = (2 f - (1 + s dt/2) f_prev + dt**2 R) / (1 - s dt/2)``; the two
+    factors are made once per rollout."""
+    half = damping * _DT / 2
+    a = _once(_printer.doprint(1 / (1 - half)))
+    b = _once(_printer.doprint(1 + half))
+    return f"{a} * (2 * {f} - {b} * {prev}" + "".join(f" + {t}" for t in terms) + ")"
 
 
 # ---- first-order (staggered-grid) systems --------------------------------------

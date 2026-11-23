@@ -201,6 +201,12 @@ and this project adheres to
   attenuation can now be written: the GSLS system of `ViscoElastic` reproduces
   it to float32 round-off, record and gradients. A damping refuses
   `BoundarySaving()`. `test/test_symbolic_local_terms.py`.
+- **`sweep.symbolic`: damping in second-order equations.** `p.dt2 + eta *
+  p.dt = ...`: the field's own first time derivative times a model-only
+  coefficient, taken centred in time (second order in `dt`). Sponge and
+  Rayleigh damping, the telegraph equation. At `eta = 0` the class is the
+  undamped one bit for bit. A damping refuses `BoundarySaving()`.
+  `test/test_symbolic_second_order_damping.py`.
 - **Agent Skill for AI coding assistants** in `skills/sweep-solver/`
   ([agentskills.io](https://agentskills.io) format): a `SKILL.md` entry point
   plus on-demand references (equations, propagators, boundaries, gradients,

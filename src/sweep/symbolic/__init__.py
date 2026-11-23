@@ -18,8 +18,9 @@ Supported so far:
 
 * second-order-in-time fields whose right-hand side is linear in the fields,
   each term a model-only coefficient times a second derivative along one axis
-  (``p.dz2``, ``p.dx2``, ``laplace(p)``) or times a field; any number of
-  coupled fields; CPML on every second derivative; a pressure-release free
+  (``p.dz2``, ``p.dx2``, ``laplace(p)``) or times a field, plus a damping
+  ``s * p.dt`` of the field itself (centred in time; refuses boundary
+  saving); any number of coupled fields; CPML on every second derivative; a pressure-release free
   surface (flat, per edge in 2-D, or image-method topography);
 * first-order staggered-grid systems (``Field(time_order=1, stagger=...)``,
   ``Eq(vx.dt, ...)``): each right-hand side a model-only coefficient times
