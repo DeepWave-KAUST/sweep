@@ -16,7 +16,7 @@ from sympy.core.symbol import Str
 from sympy.printing.precedence import PRECEDENCE
 from sympy.printing.str import StrPrinter
 
-from ._expr import D2, Lap
+from ._expr import D2, Dn, Lap
 from ._lower import axes_of
 
 _TORCH_FUNCS = {"sqrt": "sqrt", "exp": "exp", "log": "log", "sin": "sin", "cos": "cos",
@@ -91,6 +91,16 @@ class Names:
 
 def _q(s):
     return repr(s)
+
+
+def _dn_call(field, axis, order, stagger, spacing):
+    """The call of a derivative of order 3 or higher: the class's
+    ``sweep.operators.Derivative`` of that order and stagger (``self._dn``)."""
+    return f"self._dn[{order}, {stagger!r}]({field}, {axis!r}, {spacing})"
+
+
+def _high_name(field, axis, order):
+    return f"_d{order}{axis}_{field}"
 
 
 def _unpack(names):
@@ -183,9 +193,9 @@ def generate(name, low, *, free_surface, pml, doc):
         state += [f"_{n(f, ax)}" for n in (nm.psi, nm.zeta) for f, ax in nm.cpml]
     body.append(f"{', '.join(state)} = wavefields")
     body += _model_lines(low)
-    if low.d2:
+    if low.d2 or low.high:
         body.append(f"{sp} = self._spacings_{ndim}d(h)")
-        if use_cpml:
+        if use_cpml and low.d2:
             prof = ", ".join(f"_a{ax}, _b{ax}, _db{ax}" for ax in axes)
             body.append(f"{prof} = self.b")
 
@@ -228,11 +238,24 @@ def generate(name, low, *, free_surface, pml, doc):
             body.append(f"    self.gradient, self.grad_kernels, _src_{f})")
         body += [f"{sums[id(g)]} += {d2_of(f, ax)}" for g in multi if g.field == f and ax in g.axes]
 
+    # Even derivatives of order 4 and higher: centred, without CPML, a group of
+    # several axes summed into ``_v<k>``.
+    for f, ax, n in low.high:
+        temps.append(_high_name(f, ax, n))
+        body.append(f"{_high_name(f, ax, n)} = {_dn_call(f, ax, n, None, f'_h{ax}')}")
+    high = [g for up in low.updates for g in up.high]
+    hsums = {id(g): _high_name(g.field, g.axes[0], g.order) for g in high}
+    for k, g in enumerate(g for g in high if len(g.axes) > 1):
+        hsums[id(g)] = f"_v{k}"
+        temps.append(f"_v{k}")
+        body.append(f"_v{k} = {' + '.join(_high_name(g.field, ax, g.order) for ax in g.axes)}")
+
     for up in low.updates:
         f = up.field
         terms = [_coef_times(g.coef, sums[id(g)]) for g in up.groups]
         for c, g in up.local:
             terms.append(_coef_times(c, str(g)))
+        terms += [_coef_times(g.coef, hsums[id(g)]) for g in up.high]
         rhs = f"2 * {f} - {nm.prev(f)}" + "".join(f" + {t}" for t in terms)
         body.append(f"_{f}_next = {rhs}")
 
@@ -276,6 +299,8 @@ def generate(name, low, *, free_surface, pml, doc):
         f"    SYMBOLIC_PML = {pml!r}",
         f"    DEFAULT_SOURCE_FIELDS = {tuple(src_fields[:1])!r}",
         f"    DEFAULT_RECEIVER_FIELDS = {tuple(rec_fields[:1])!r}",
+        *([f"    HIGH_ORDER_STENCILS = {tuple(sorted({(n, None) for _, _, n in low.high}))!r}"]
+          if low.high else []),
         '    default_pml_type = "cpmlr"',
         "    takes_invariants = True",
         *[f"    {fl}" for fl in flags],
@@ -298,7 +323,7 @@ def generate(name, low, *, free_surface, pml, doc):
 # ---- first-order (staggered-grid) systems --------------------------------------
 
 def _dname(d):
-    return f"_d{d.axis}_{d.field}"
+    return f"_d{d.axis}_{d.field}" if d.order == 1 else f"_d{d.order}{d.axis}_{d.field}"
 
 
 def _mname(d):
@@ -314,8 +339,14 @@ def _lap_name(field, ax):
     return f"_lap{ax}_{field}"
 
 
+def _group_name(group, ax):
+    """The derivative of a dissipative group along ``ax``: the separable second
+    derivative, or a higher even one."""
+    return _lap_name(group.field, ax) if group.order == 2 else _high_name(group.field, ax, group.order)
+
+
 def _lap_sum(group):
-    names = [_lap_name(group.field, ax) for ax in group.axes]
+    names = [_group_name(group, ax) for ax in group.axes]
     return names[0] if len(names) == 1 else f"({' + '.join(names)})"
 
 
@@ -325,7 +356,10 @@ def dissipative_terms(low):
     axes = axes_of(low.ndim)
     out = []
     for field, g in low.dissipative:
-        op = Lap(field) if g.axes == axes else sympy.Add(*[D2(field, Str(ax)) for ax in g.axes])
+        if g.order == 2:
+            op = Lap(field) if g.axes == axes else sympy.Add(*[D2(field, Str(ax)) for ax in g.axes])
+        else:
+            op = sympy.Add(*[Dn(field, Str(ax), g.order) for ax in g.axes])
         out.append(str(g.coef * op))
     return tuple(out)
 
@@ -391,8 +425,12 @@ def _substep_lines(sub, use_cpml, counter, ndim, free=True, cache=True):
     correction, and freed after it."""
     axes = axes_of(ndim)
     spacings = ", ".join(f"_h{ax}" for ax in axes)
-    lines = [f"{_dname(d)} = pd.{d.axis}_{'forward' if d.forward else 'backward'}({d.field})"
-             for d in sub.taken]
+    lines = []
+    for d in sub.taken:
+        side = "forward" if d.forward else "backward"
+        call = (f"pd.{d.axis}_{side}({d.field})" if d.order == 1
+                else _dn_call(d.field, d.axis, d.order, side, f"pd._spacing[{d.axis!r}]"))
+        lines.append(f"{_dname(d)} = {call}")
     sums = [t.derivs for up in sub.updates for t in up.terms if len(t.derivs) > 1]
     names = {}
     for derivs in sums:
@@ -401,7 +439,7 @@ def _substep_lines(sub, use_cpml, counter, ndim, free=True, cache=True):
     done, shared = set(), {}
     for up in sub.updates:
         for d in (up.derivs if use_cpml else ()):
-            if d in done:
+            if d in done or d.order > 1:          # no CPML above first order
                 continue
             done.add(d)
             prof = f"_a{d.axis}h, _b{d.axis}h" if d.half else f"_a{d.axis}, _b{d.axis}"
@@ -412,13 +450,17 @@ def _substep_lines(sub, use_cpml, counter, ndim, free=True, cache=True):
             if t.derivs in names and t.derivs not in shared:
                 shared[t.derivs] = names[t.derivs]
                 lines.append(f"{names[t.derivs]} = {' + '.join(_dname(d) for d in t.derivs)}")
-        laps = [_lap_name(up.field, ax) for ax in axes] if up.d2 else []
+        laps = [_lap_name(up.field, ax) for ax in axes] if any(g.order == 2 for g in up.d2) else []
         if laps:
             lines.append(f"{', '.join(laps)} = self.separable_d2_{ndim}d({up.field}, self.laplace_kernels, "
                          f"{spacings})")
+        highs = [(g.order, ax) for g in up.d2 if g.order > 2 for ax in g.axes]
+        for n, ax in highs:
+            lines.append(f"{_high_name(up.field, ax, n)} = {_dn_call(up.field, ax, n, None, f'_h{ax}')}")
         lines.append(_first_update(up, shared, cache))
-        if laps:
-            lines.append(f"del {', '.join(laps)}")
+        dead = laps + [_high_name(up.field, ax, n) for n, ax in highs]
+        if dead:
+            lines.append(f"del {', '.join(dead)}")
     temps = [_dname(d) for d in sub.taken] + list(names.values())
     if free and temps:
         lines.append(f"del {', '.join(temps)}")
@@ -429,8 +471,10 @@ def generate_first_order(name, low, *, pml, doc):
     ndim = low.ndim
     axes = axes_of(ndim)
     use_cpml = pml == "cpml"
-    mem = low.derivs if use_cpml else ()
+    mem = tuple(d for d in low.derivs if d.order == 1) if use_cpml else ()
     dissipative = dissipative_terms(low)
+    stencils = sorted({(d.order, "forward" if d.forward else "backward") for d in low.derivs if d.order > 1}
+                      | {(g.order, None) for _, g in low.dissipative if g.order > 2}, key=repr)
 
     specs = []
     for f in low.fields:
@@ -507,6 +551,7 @@ def generate_first_order(name, low, *, pml, doc):
         f"    DEFAULT_SOURCE_FIELDS = {tuple(src_fields[:1])!r}",
         f"    DEFAULT_RECEIVER_FIELDS = {tuple(rec_fields[:1])!r}",
         *([f"    DISSIPATIVE_TERMS = {dissipative!r}"] if dissipative else []),
+        *([f"    HIGH_ORDER_STENCILS = {tuple(stencils)!r}"] if stencils else []),
         "    takes_invariants = True",
         f"    supports_batched_models = {ndim == 2}",
         "",

@@ -15,6 +15,7 @@ from __future__ import annotations
 from sweep.equations._free_surface import zero_above_topo
 from sweep.equations.base import FirstOrderEquation, SecondOrderEquation
 from sweep.equations.utils import zero_top_halo_fields
+from sweep.operators.derivative import Derivative
 from sweep.operators.factory import LaplaceGradientOps
 from sweep.scalars import generate_convolution_kernel
 
@@ -25,6 +26,12 @@ def _torch_only(cls, backend):
             f"{cls.__name__}: backend={backend!r}; generated equations run on 'torch' only")
 
 
+def _high_order_stencils(eq, device):
+    """``{(order, stagger): Derivative}`` for the derivatives of order 3 and
+    higher the step takes, at the equation's FD accuracy."""
+    return {(n, st): Derivative(n, eq.so, eq.NDIM, st, device=device) for n, st in eq.HIGH_ORDER_STENCILS}
+
+
 class SymbolicSecondOrderEquation(SecondOrderEquation):
     NDIM = 2
     # "zero" (pressure release on every field) or None (no free surface).
@@ -32,6 +39,8 @@ class SymbolicSecondOrderEquation(SecondOrderEquation):
     SYMBOLIC_PML = "cpml"
     DEFAULT_SOURCE_FIELDS = ()
     DEFAULT_RECEIVER_FIELDS = ()
+    # ((order, stagger), ...) of the derivatives of order 3 and higher.
+    HIGH_ORDER_STENCILS = ()
 
     _fs_active = False
     # Appended by the propagator to its refusal of a topography on a PDE built
@@ -52,6 +61,7 @@ class SymbolicSecondOrderEquation(SecondOrderEquation):
         self.init_separable_laplace()
         if self.NDIM == 2:
             self.init_grad_kernels()
+        self._dn = _high_order_stencils(self, device)
 
     @property
     def default_source_fields(self):
@@ -95,6 +105,7 @@ class SymbolicFirstOrderEquation(FirstOrderEquation):
     # The dissipative (viscous, diffusive) terms of the PDE as text,
     # ("nu*laplace(vx)", ...); empty for a lossless system.
     DISSIPATIVE_TERMS = ()
+    HIGH_ORDER_STENCILS = ()
     default_pml_type = "cpmls"
     # Appended by the propagator to its refusal of a topography.
     image_topography_hint = "A first-order PDE takes no free surface yet."
@@ -120,6 +131,7 @@ class SymbolicFirstOrderEquation(FirstOrderEquation):
             LaplaceGradientOps.__init__(self, backend=backend)
             self.kf = generate_convolution_kernel
             self.init_separable_laplace()
+        self._dn = _high_order_stencils(self, device)
 
     # Eager boundary saving rebuilds the wavefield by running the step
     # backwards in time. A property rather than the flag the shipped

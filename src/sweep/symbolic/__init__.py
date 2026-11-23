@@ -28,6 +28,10 @@ Supported so far:
   coefficient times second derivatives of the field itself
   (``nu * laplace(vx)``, ``kappa * T.dz2``), stepped forward in time (Euler)
   without CPML. A class with such a term refuses boundary saving;
+* derivatives of order 3 and higher along one axis (``u.dx4``, ``v.dx3``,
+  ``u.deriv("x", 4)``), without CPML: even orders in second-order equations;
+  odd orders of the other fields and even orders of the field itself in
+  first-order systems;
 * ``Coefficient``: model-derived coefficients computed once per run.
 
 Anything else raises when the PDE is constructed.

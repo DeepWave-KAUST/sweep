@@ -179,6 +179,19 @@ and this project adheres to
   `StaggeredDerivative`; mixed derivatives compose (`d.dz(d.dx(u))`). It runs
   as a conv uncompiled and as fused slices under `torch.compile`, with no
   absorbing layer. `test/test_fd_derivative.py`.
+- **`sweep.symbolic`: derivatives of order 3 and higher.** `u.dx3`, `u.dz4`,
+  `u.deriv("x", 4)` or a chain (`u.dx2.dx2`), taken with
+  `sweep.operators.Derivative` where the result lands on the field updated. A
+  second-order equation takes even orders of any field (a plate's flexural
+  waves, `u_tt = -kappa * (u.dx4 + u.dz4)`). A first-order system takes odd
+  orders of the other fields as staggered differences, and even orders of the
+  field itself as dissipative terms (hyperdiffusion). None gets a CPML
+  correction. Odd derivatives in a second-order equation, odd derivatives of a
+  first-order field in its own equation (Airy, KdV) and mixed derivatives
+  raise. Against their Fourier solutions, flexural waves converge as `dt**2`
+  and hyperdiffusion as `dt`. The flexural gradient matches finite differences.
+  `Ckpt()` and `BoundarySaving()` work, and the step compiles as one graph.
+  `test/test_symbolic_high_order.py`.
 - **Agent Skill for AI coding assistants** in `skills/sweep-solver/`
   ([agentskills.io](https://agentskills.io) format): a `SKILL.md` entry point
   plus on-demand references (equations, propagators, boundaries, gradients,

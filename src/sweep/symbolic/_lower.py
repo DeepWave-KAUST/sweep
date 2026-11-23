@@ -21,6 +21,21 @@ from the field's position to the position of the field it updates (see
 ``f`` before its update (forward Euler). Such a term is dissipative: the step
 can no longer be run backwards in time.
 
+Derivatives of order 3 and higher (``u.dx4``, ``v.dx3``) are admitted where
+their result lands on the field they update, and are taken with
+:class:`sweep.operators.Derivative` without a CPML correction:
+
+* a second-order equation takes even orders of any field (``u.dx4``), centred
+  on the shared grid, like its second derivatives;
+* a first-order equation takes odd orders of the other fields as staggered
+  differences, like its first derivatives (``v.dx3``), and even orders of its
+  own field as dissipative terms (``-kappa * u.dx4``, a hyperdiffusion).
+
+An odd derivative in a second-order equation, or of a first-order field in its
+own equation (``u.dx3`` in ``u.dt``, the Airy / KdV term), would need a centred
+odd stencil, which does not land between grid points and leaves odd and even
+points decoupled, and forward Euler is unstable for it; both are refused.
+
 Anything else is refused here, before code is written.
 """
 from __future__ import annotations
@@ -30,7 +45,7 @@ from dataclasses import dataclass
 import sympy
 from sympy.core.symbol import Str
 
-from ._expr import AXES, D1, D2, Coefficient, Dt, Field, Lap, Model
+from ._expr import AXES, D1, D2, Coefficient, Dn, Dt, Field, Lap, Model
 
 
 def axes_of(ndim):
@@ -43,18 +58,20 @@ def axes_of(ndim):
 
 @dataclass(frozen=True)
 class Group:
-    """``coef * (d2 field / d axes[0]^2 + ...)``, axes in z, y, x order."""
+    """``coef * (d^order field / d axes[0]^order + ...)``, axes in z, y, x order."""
     coef: sympy.Expr
     field: Field
     axes: tuple
+    order: int = 2
 
 
 @dataclass(frozen=True)
 class Update:
-    """``field_next = 2 field - field_prev + dt**2 * (groups + local)``."""
+    """``field_next = 2 field - field_prev + dt**2 * (groups + local + high)``."""
     field: Field
     groups: tuple
     local: tuple          # ((coef, field), ...)
+    high: tuple = ()      # Groups of derivatives of order 4, 6, ...
 
 
 @dataclass(frozen=True)
@@ -65,6 +82,7 @@ class Lowered:
     coefficients: tuple   # Coefficients the step uses, declaration order
     updates: tuple        # one per field, same order
     d2: tuple             # ((field, axis), ...) second derivatives taken
+    high: tuple = ()      # ((field, axis, order), ...) derivatives of order 4, 6, ... taken
 
 
 def _solve_for_dt(eq):
@@ -102,7 +120,7 @@ def _solve_for_dt(eq):
 
 
 def _fields_and_ops(expr):
-    return expr.atoms(D1, D2, Dt, Lap) | {s for s in expr.free_symbols if isinstance(s, Field)}
+    return expr.atoms(D1, D2, Dn, Dt, Lap) | {s for s in expr.free_symbols if isinstance(s, Field)}
 
 
 def _check_coefficient(eq, atom, c):
@@ -144,7 +162,8 @@ def _models_and_coefficients(symbols, models=None):
 
 
 def _decompose(eq, rhs, ndim):
-    """``{(field, axis): coef}`` of the second derivatives and ``{field: coef}``
+    """``{(field, axis): coef}`` of the second derivatives, ``{(field, axis,
+    order): coef}`` of the even ones of order 4 and higher and ``{field: coef}``
     of the bare fields, with RHS == their sum."""
     axes = axes_of(ndim)
     for op in rhs.atoms(Dt):
@@ -160,13 +179,19 @@ def _decompose(eq, rhs, ndim):
             raise TypeError(f"{eq}: {lap} is not the Laplacian of a Field")
         laps[lap] = sympy.Add(*[D2(lap.field, Str(ax)) for ax in axes])
     rhs = rhs.xreplace(laps)
-    d2s = sorted(rhs.atoms(D2), key=sympy.default_sort_key)
+    for op in rhs.atoms(Dn):
+        if op.order % 2:
+            raise NotImplementedError(
+                f"{eq}: {op}, an odd derivative in a second-order equation: its centred stencil "
+                "leaves odd and even grid points decoupled. Second-order fields take even "
+                "derivatives (f.dx2, f.dx4); odd ones belong to a staggered first-order system")
+    d2s = sorted(rhs.atoms(D2, Dn), key=sympy.default_sort_key)
     for op in d2s:
         if not isinstance(op.field, Field):
             raise TypeError(f"{eq}: {op} is not a derivative of a Field")
         if op.axis not in axes:
             raise ValueError(f"{eq}: {op} is a {op.axis}-derivative in a {ndim}-D build")
-    holes = {op: sympy.Dummy(f"D2_{op.field}_{op.axis}") for op in d2s}
+    holes = {op: sympy.Dummy(f"D{op.order}_{op.field}_{op.axis}") for op in d2s}
     e = rhs.xreplace(holes)
     fields = sorted((s for s in e.free_symbols if isinstance(s, Field)), key=sympy.default_sort_key)
     holes.update({f: sympy.Dummy(f"F_{f}") for f in fields})
@@ -187,14 +212,15 @@ def _decompose(eq, rhs, ndim):
     for atom, c in coefs.items():
         _check_coefficient(eq, atom, c)
 
-    d2 = {}
-    local = {}
+    d2, high, local = {}, {}, {}
     for atom, c in coefs.items():
         if isinstance(atom, D2):
             d2[(atom.field, atom.axis)] = c
+        elif isinstance(atom, Dn):
+            high[(atom.field, atom.axis, atom.order)] = c
         else:
             local[atom] = c
-    return d2, local
+    return d2, high, local
 
 
 def lower(equations, ndim, models=None):
@@ -225,17 +251,17 @@ def _lower_second_order(solved, ndim, models):
     updates = _by_field(solved)
     fields = tuple(sorted(updates, key=lambda f: f._order))
 
-    out, used, d2_taken = [], set(), []
+    out, used, d2_taken, high_taken = [], set(), [], []
     for field in fields:
         eq, rhs = updates[field]
-        d2, local = _decompose(eq, rhs, ndim)
-        for (f, _), c in d2.items():
+        d2, high, local = _decompose(eq, rhs, ndim)
+        for f, *_ in (*d2, *high):
             if f not in updates:
                 raise ValueError(f"{eq}: field {f} has no equation of its own")
         for f in local:
             if f not in updates:
                 raise ValueError(f"{eq}: field {f} has no equation of its own")
-        for c in (*d2.values(), *local.values()):
+        for c in (*d2.values(), *high.values(), *local.values()):
             used |= c.free_symbols
         groups = []
         for f in fields:
@@ -249,11 +275,31 @@ def _lower_second_order(solved, ndim, models):
                     d2_taken.append((f, ax))
             groups += [Group(c, f, tuple(a)) for c, a in by_coef.items()]
         local_terms = tuple((local[f], f) for f in fields if f in local and local[f] != 0)
-        out.append(Update(field, tuple(groups), local_terms))
+        high_groups = _high_groups(high, fields, axes, high_taken)
+        out.append(Update(field, tuple(groups), local_terms, high_groups))
 
     model_order, coefs = _models_and_coefficients(used, models)
     d2_taken.sort(key=lambda fa: (fa[0]._order, axes.index(fa[1])))
-    return Lowered(ndim, fields, model_order, coefs, tuple(out), tuple(d2_taken))
+    high_taken.sort(key=lambda t: (t[0]._order, t[2], axes.index(t[1])))
+    return Lowered(ndim, fields, model_order, coefs, tuple(out), tuple(d2_taken), tuple(high_taken))
+
+
+def _high_groups(high, fields, axes, taken):
+    """``{(field, axis, order): coef}`` as Groups of the axes that share a
+    coefficient, per field and order; records each derivative in ``taken``."""
+    groups = []
+    for f in fields:
+        for n in sorted({n for g, _, n in high if g == f}):
+            by_coef = {}
+            for ax in axes:
+                c = high.get((f, ax, n))
+                if c is None or c == 0:
+                    continue
+                by_coef.setdefault(c, []).append(ax)
+                if (f, ax, n) not in taken:
+                    taken.append((f, ax, n))
+            groups += [Group(c, f, tuple(a), n) for c, a in by_coef.items()]
+    return tuple(groups)
 
 
 # ---- first-order (staggered-grid) systems --------------------------------------
@@ -269,6 +315,7 @@ class Deriv:
     axis: str
     forward: bool
     half: bool
+    order: int = 1        # 3, 5, ...: a staggered difference of that order, no CPML
 
 
 @dataclass(frozen=True)
@@ -318,14 +365,16 @@ class LoweredFirst:
 
 def _axis_key(axes):
     """Sort key of a derivative: x, y, z (the order in which the sums are written)."""
-    return lambda d: (-axes.index(d.axis), d.field._order)
+    return lambda d: (-axes.index(d.axis), d.field._order, d.order)
 
 
 def _split_dissipative(eq, field, rhs, axes, ndim):
-    """``(rest, groups)``: the second derivatives of ``field`` itself split off
-    ``rhs`` as Groups of the axes that share a coefficient (z, y, x order), and
-    what remains of ``rhs``, its terms kept as written. A second derivative of
-    another field is refused: it would not land on ``field``'s position."""
+    """``(rest, groups)``: the even derivatives of ``field`` itself (second, and
+    fourth or higher) split off ``rhs`` as Groups of the axes that share a
+    coefficient (z, y, x order, one order per Group), and what remains of
+    ``rhs``, its terms kept as written. An even derivative of another field is
+    refused: it would not land on ``field``'s position; so is an odd derivative
+    of order 3 or higher of ``field`` itself."""
     for op in rhs.atoms(Dt):
         raise NotImplementedError(f"{eq}: {op} on the right-hand side is not supported")
     laps = {}
@@ -334,19 +383,26 @@ def _split_dissipative(eq, field, rhs, axes, ndim):
             raise TypeError(f"{eq}: {lap} is not the Laplacian of a Field")
         laps[lap] = sympy.Add(*[D2(lap.field, Str(ax)) for ax in axes])
     rhs = rhs.xreplace(laps)
-    ops = sorted(rhs.atoms(D2), key=sympy.default_sort_key)
+    for op in rhs.atoms(Dn):
+        if op.order % 2 and op.field == field:
+            raise NotImplementedError(
+                f"{eq}: {op}, an odd derivative of {field} in its own equation (a dispersive "
+                "term, as in the Airy or KdV equation): it would need a centred odd stencil, "
+                "which leaves odd and even grid points decoupled, and forward Euler is unstable "
+                "for it. Odd derivatives of the other fields are taken as staggered differences")
+    ops = sorted([op for op in rhs.atoms(D2, Dn) if op.order % 2 == 0], key=sympy.default_sort_key)
     for op in ops:
         if not isinstance(op.field, Field):
             raise TypeError(f"{eq}: {op} is not a derivative of a Field")
         if op.field != field:
             raise NotImplementedError(
-                f"{eq}: {op} -- a first-order equation takes second derivatives of its own field "
+                f"{eq}: {op} -- a first-order equation takes even derivatives of its own field "
                 f"only (a viscous or diffusive term such as nu*laplace({field}))")
         if op.axis not in axes:
             raise ValueError(f"{eq}: {op} is a {op.axis}-derivative in a {ndim}-D build")
     if not ops:
         return rhs, ()
-    holes = {op: sympy.Dummy(f"D2_{op.field}_{op.axis}") for op in ops}
+    holes = {op: sympy.Dummy(f"D{op.order}_{op.field}_{op.axis}") for op in ops}
     e = rhs.xreplace(holes)
     slots = set(holes.values())
     coefs = {}
@@ -356,14 +412,17 @@ def _split_dissipative(eq, field, rhs, axes, ndim):
             raise ValueError(f"{eq}: not linear in the derivatives ({op} is multiplied by a field "
                              "or a derivative)")
         _check_coefficient(eq, op, c)
-        coefs[op.axis] = c
-    by_coef = {}
-    for ax in axes:
-        c = coefs.get(ax)
-        if c is not None and c != 0:
-            by_coef.setdefault(c, []).append(ax)
+        coefs[(op.order, op.axis)] = c
+    groups = []
+    for n in sorted({n for n, _ in coefs}):
+        by_coef = {}
+        for ax in axes:
+            c = coefs.get((n, ax))
+            if c is not None and c != 0:
+                by_coef.setdefault(c, []).append(ax)
+        groups += [Group(c, field, tuple(a), n) for c, a in by_coef.items()]
     rest = e.xreplace({s: 0 for s in slots})
-    return rest, tuple(Group(c, field, tuple(a)) for c, a in by_coef.items())
+    return rest, tuple(groups)
 
 
 def _first_order_terms(eq, rhs, dissipative=False):
@@ -372,11 +431,11 @@ def _first_order_terms(eq, rhs, dissipative=False):
     of derivatives), or term by term when it is not of that form. ``rhs`` is
     what :func:`_split_dissipative` left; ``dissipative``: it split off terms,
     so ``rhs`` may be empty (pure diffusion)."""
-    ops = sorted(rhs.atoms(D1), key=sympy.default_sort_key)
+    ops = sorted(rhs.atoms(D1, Dn), key=sympy.default_sort_key)
     for op in ops:
         if not isinstance(op.field, Field):
             raise TypeError(f"{eq}: {op} is not a derivative of a Field")
-    holes = {op: sympy.Dummy(f"D1_{op.field}_{op.axis}") for op in ops}
+    holes = {op: sympy.Dummy(f"D{op.order}_{op.field}_{op.axis}") for op in ops}
     e = rhs.xreplace(holes)
     bare = sorted((s for s in e.free_symbols if isinstance(s, Field)), key=sympy.default_sort_key)
     if bare:
@@ -402,12 +461,12 @@ def _first_order_terms(eq, rhs, dissipative=False):
     for t in sympy.Add.make_args(rhs):
         c, g = t.as_independent(*ops, as_Add=False)
         parts = sympy.Add.make_args(g)
-        if all(isinstance(p, D1) for p in parts) and len(set(parts)) == len(parts):
+        if all(isinstance(p, (D1, Dn)) for p in parts) and len(set(parts)) == len(parts):
             terms.append((c, parts))
             continue
         for tt in sympy.Add.make_args(sympy.expand(t)):         # not a plain sum: term by term
             cc, gg = tt.as_independent(*ops, as_Add=False)
-            if not isinstance(gg, D1):
+            if not isinstance(gg, (D1, Dn)):
                 raise ValueError(f"{eq}: not linear in the derivatives ({tt})")
             terms.append((cc, (gg,)))
     for c, parts in terms:
@@ -429,11 +488,11 @@ def _deriv(eq, target, op, axes, ndim):
     if step == 0:
         raise NotImplementedError(
             f"{eq}: {source} and {target} sit at the same {ax} position -- a collocated "
-            f"first derivative is not supported; stagger one of them along {ax}")
+            f"odd derivative is not supported; stagger one of them along {ax}")
     if abs(step) != 1:
         raise ValueError(f"{eq}: {source} and {target} sit a whole cell apart along {ax}; "
                          "a staggered difference spans half a cell")
-    return Deriv(source, ax, step > 0, target.position(ax) != 0)
+    return Deriv(source, ax, step > 0, target.position(ax) != 0, op.order)
 
 
 def lower_first_order(solved, ndim, models=None):
@@ -484,18 +543,18 @@ def lower_first_order(solved, ndim, models=None):
             merged[c] = tuple(sorted(merged.get(c, ()) + derivs, key=_axis_key(axes)))
         terms = sorted((Term(c, d) for c, d in merged.items()), key=lambda t: _axis_key(axes)(t.derivs[0]))
         reads = sorted({d for t in terms for d in t.derivs},
-                       key=lambda d: (axes.index(d.axis), d.field._order))
+                       key=lambda d: (axes.index(d.axis), d.field._order, d.order))
         by_field[field] = (eq, FirstUpdate(field, tuple(terms), tuple(reads), d2))
 
     # One derivative of a field along an axis: one difference, one CPML memory.
     seen = {}
     for _, up in by_field.values():
         for d in up.derivs:
-            other = seen.setdefault((d.field, d.axis), d)
+            other = seen.setdefault((d.field, d.axis, d.order), d)
             if other != d:
                 raise NotImplementedError(
-                    f"{d.field}.d{d.axis} is taken at two positions (forward and backward "
-                    "differences); stagger the fields that read it alike")
+                    f"{d.field}.d{d.axis}{'' if d.order == 1 else d.order} is taken at two positions "
+                    "(forward and backward differences); stagger the fields that read it alike")
 
     substeps, run, written, read = [], [], set(), set()
     for eq, field, _, _ in solved:
@@ -513,17 +572,17 @@ def lower_first_order(solved, ndim, models=None):
     for run in substeps:
         taken = []
         for up in sorted(run, key=lambda u: u.field._order):
-            for d in sorted(up.derivs, key=lambda d: (d.field._order, axes.index(d.axis))):
+            for d in sorted(up.derivs, key=lambda d: (d.field._order, axes.index(d.axis), d.order)):
                 if d not in taken:
                     taken.append(d)
         for d in taken:
             if d in taken_all:
                 raise NotImplementedError(
-                    f"{d.field}.d{d.axis} is read in two sub-steps, before and after {d.field} "
-                    "is updated; order the equations so that it is read in one")
+                    f"{d.field}.d{d.axis}{'' if d.order == 1 else d.order} is read in two sub-steps, "
+                    f"before and after {d.field} is updated; order the equations so that it is read in one")
         taken_all |= set(taken)
         out.append(SubStep(tuple(run), tuple(taken)))
 
     model_order, coefs = _models_and_coefficients(used, models)
-    derivs = sorted(taken_all, key=lambda d: (d.field._order, -axes.index(d.axis)))
+    derivs = sorted(taken_all, key=lambda d: (d.field._order, -axes.index(d.axis), d.order))
     return LoweredFirst(ndim, fields, model_order, coefs, tuple(out), tuple(derivs))

@@ -192,6 +192,57 @@ rebuilds the wavefield exactly that way, so the class has no
 (`DISSIPATIVE_TERMS`), instead of returning a wrong gradient. `Full()` and
 `Ckpt()` run as usual.
 
+### Higher derivatives
+
+A derivative of order 3 or higher along one axis is written `u.dx3`, `u.dz4`,
+`u.deriv("x", 4)` or as a chain, `u.dx2.dx2`. It is taken with
+`sweep.operators.Derivative` (Fornberg weights at the class's `spatial_order`)
+where its result lands on the field it updates:
+
+- **Second-order equations take even orders of any field.** The stencil is
+  centred on the shared grid, like the second derivatives. A plate's flexural
+  waves, for example:
+
+```python
+kappa = Model("kappa")
+u = Field("u", source=True, receiver=True)
+Flexural = PDE([Eq(u.dt2, -kappa * (u.dx4 + u.dz4))], name="Flexural").build(ndim=2)
+```
+
+- **First-order systems take odd orders of the other fields.** They are
+  staggered differences, like the first derivatives:
+  `Eq(p.dt, -rho * c**2 * (vx.dx - beta * vx.dx3))` adds a dispersive correction
+  to long waves.
+- **A first-order field takes even orders of itself as dissipative terms.** For
+  example `-beta * T.dx4`, a hyperdiffusion. Like `nu * laplace(v)`, such a
+  term is stepped with forward Euler, and its class refuses boundary saving.
+
+None of these derivatives gets a CPML correction. In the absorbing layer the
+term runs unstretched, so a wave that a fourth derivative carries reaches the
+edge of the padded grid and reflects there. Make the grid large enough, or
+keep the term small next to the absorbed ones.
+
+The explicit step is stable only for a time step below a bound set by `S_n`,
+the largest value of the order-`n` stencil, reached at the Nyquist wavenumber.
+For a fourth derivative, `S_4` is 16 at spatial order 2, 26.7 at order 4, 34.1
+at order 6 and 39.7 at order 8. With equal spacings `h` and one coefficient on
+every axis:
+
+```text
+u_tt = -kappa * sum(u.d<ax>4)   (leapfrog):      dt <= 2 h^2 / sqrt(ndim * S_4 * kappa)
+T_t  = -beta  * sum(T.d<ax>4)   (forward Euler): dt <= 2 h^4 / (ndim * S_4 * beta)
+```
+
+At order 8 in 2-D, `kappa = 1` and `h = 1`, the first bound is a time step of
+0.224. A fourth derivative along x alone has `ndim = 1`.
+
+Two kinds of term are refused. An odd derivative in a second-order equation is
+one. An odd derivative of a first-order field in its own equation is the
+other, such as the `u_xxx` of the Airy or KdV equation. Both would need a
+centred odd stencil, which returns zero for the sawtooth `(-1)**i` and so lets
+odd and even points evolve apart, and forward Euler is unstable for such a
+term. Mixed derivatives (`u.dx.dz`) are not supported yet.
+
 ### What is supported
 
 - Second-order-in-time fields; the right-hand side linear in the fields, each
@@ -201,6 +252,9 @@ rebuilds the wavefield exactly that way, so the class has no
   first derivatives of the other fields, or a sum of such terms, plus
   dissipative terms: a model-only coefficient times second derivatives of the
   field itself, explicit in time, without CPML, and no boundary saving.
+- Derivatives of order 3 and higher along one axis (`u.dx4`, `v.dx3`), without
+  CPML: even orders in second-order equations; in first-order systems odd
+  orders of the other fields and even orders of the field itself (dissipative).
 - 2-D and 3-D, any even `spatial_order`.
 - `pml="cpml"` (default): C-PML on every spatial derivative, the updates the
   shipped equations use (`cpmlr` for second-order fields, `cpmls` for
@@ -215,9 +269,11 @@ derivatives in a second-order equation, a system mixing first- and
 second-order fields, damping terms (`f.dt` next to `f.dt2`), terms nonlinear in
 the fields, terms without a field (sources are injected by the propagator),
 symbols that are neither models nor coefficients, a field used without its own
-equation; in a first-order system also a free surface, a field without a
+equation, mixed derivatives, odd derivatives of order 3 or higher in a
+second-order equation; in a first-order system also a free surface, a field without a
 derivative on a right-hand side (damping and coupling terms), a second
-derivative of another field, a derivative between fields at the same position
+derivative of another field, an odd derivative of order 3 or higher of the field
+itself, a derivative between fields at the same position
 (collocated) or a whole cell apart, and a derivative read before and after its
 field is updated. A `y` derivative or a `y` stagger raises at
 `build(ndim=2)`.
@@ -297,6 +353,10 @@ in [Extending](extending.md#part-2-adding-a-compiled-cuda-kernel-implc).
 | Unsteady Stokes, a Gaussian vortex vs Lamb-Oseen (8th order, `nu dt / h^2 = 0.05`) | vorticity 3.6e-4 by the time the core area has quadrupled, half that at dt / 2; circulation to 1e-6; p stays at 1e-5 of rho v_max² |
 | Stokes and heat gradients, finite differences (fp32) | `nu` 3.3e-5, `c` 3.2e-5, `kappa` 5.3e-5; `rho` 2.5e-4, its weak data sensitivity at the fp32 floor |
 | Stokes and heat, `cpml_strips` and `Ckpt()` vs `Full()` | `cpml_strips` bit for bit, record and gradient; `Ckpt()` record bit for bit, gradients to 2.5e-7 (each checkpointed segment computes the step's products of models and `dt` anew, as for the shipped equations); compiled 1.5e-7 to 1.1e-6 |
+| Flexural waves `u_tt = -u_xxxx`, a Gaussian at rest vs its Fourier solution (8th order, fp64) | 8.8e-5 at dt 0.2, 1.9e-5 at dt 0.1 (second order in time) |
+| Hyperdiffusion `T_t = -T_xxxx`, the same (8th order, fp64) | 2.2e-5 at dt 0.02, 1.1e-5 at dt 0.01 (first order); grows without bound just above `2 h^4 / S_4` |
+| Flexural gradient, finite differences (fp32) | `kappa` 3.6e-4, at the fp32 floor of the finite difference |
+| Flexural and dispersive long waves, `Ckpt()` and `BoundarySaving()` vs `Full()` | records bit for bit; gradients 2.5e-7 to 7.3e-7 (`Ckpt()`), 4.3e-6 to 8.6e-6 (`BoundarySaving()`) |
 | `torch.compile(fullgraph=True)` | one graph per step |
 
 The restated 3-D `Elastic` takes its derivatives and CPML corrections in an

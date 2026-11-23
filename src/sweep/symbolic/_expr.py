@@ -2,7 +2,7 @@
 
 Models, coefficients and fields are sympy symbols, so coefficients are ordinary
 sympy expressions (``vp**2 * (1 + 2*eps)``). Derivatives are unevaluated
-function atoms (``D2(p, x)``, ``D1(vx, x)``, ``Lap(p)``, ``Dt(p, 2)``): sympy
+function atoms (``D2(p, x)``, ``D1(vx, x)``, ``Dn(u, x, 4)``, ``Lap(p)``, ``Dt(p, 2)``): sympy
 keeps them intact through ``expand`` and ``diff``, and the lowering reads them
 back off the expression. ``laplace`` stays one atom until the dimension is known
 at ``build``.
@@ -182,6 +182,31 @@ class Field(_Declared):
     def dx(self):
         return D1(self, Str("x"))
 
+    def deriv(self, axis, order=1):
+        """The ``order``-th derivative along ``axis`` (``"z"``, ``"y"``, ``"x"``):
+        ``u.deriv("x", 4)`` is ``u.dx4``, ``u.deriv("x")`` is ``u.dx``. (Not
+        ``diff``, which is sympy's own differentiation.)"""
+        return _derivative(self, axis, order)
+
+    def __getattr__(self, name):
+        # u.dx3, u.dz4, ...: derivatives of order 3 and higher (dx, dx2 are properties).
+        if len(name) > 2 and name[0] == "d" and name[1] in AXES and name[2:].isdigit():
+            return _derivative(self, name[1], int(name[2:]))
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
+
+
+def _derivative(field, axis, order):
+    """The canonical atom of ``d^order field / d axis^order``: ``D1``, ``D2`` or ``Dn``."""
+    if axis not in AXES:
+        raise ValueError(f"axis must be 'z', 'y' or 'x', got {axis!r}")
+    if not isinstance(order, int) or isinstance(order, bool) or order < 1:
+        raise ValueError(f"a derivative order is an integer >= 1, got {order!r}")
+    if order == 1:
+        return D1(field, Str(axis))
+    if order == 2:
+        return D2(field, Str(axis))
+    return Dn(field, Str(axis), order)
+
 
 # LaTeX for the names a seismic system usually declares. ``PDE.latex(symbols=)``
 # overrides or extends them; any other name prints as sympy prints it (a Greek
@@ -219,6 +244,55 @@ class _Op(sympy.Function):
         return self.args[0]
 
 
+class _Spatial(_Op):
+    """A spatial derivative along one axis. Another derivative along the same
+    axis raises its order (``u.dx2.dx`` is ``u.dx3``); one along another axis, a
+    mixed derivative, is not supported yet."""
+
+    @property
+    def axis(self):
+        return str(self.args[1])
+
+    @property
+    def order(self):
+        return 1
+
+    def _then(self, axis, order):
+        if axis != self.axis:
+            raise NotImplementedError(
+                f"{self}.d{axis}{'' if order == 1 else order}: mixed derivatives (along {self.axis} "
+                f"and {axis}) are not "
+                "supported yet; derivatives of any order along one axis are")
+        return _derivative(self.field, axis, self.order + order)
+
+    @property
+    def dz(self):
+        return self._then("z", 1)
+
+    @property
+    def dy(self):
+        return self._then("y", 1)
+
+    @property
+    def dx(self):
+        return self._then("x", 1)
+
+    @property
+    def dz2(self):
+        return self._then("z", 2)
+
+    @property
+    def dy2(self):
+        return self._then("y", 2)
+
+    @property
+    def dx2(self):
+        return self._then("x", 2)
+
+    def deriv(self, axis, order=1):
+        return self._then(axis, order)
+
+
 class Dt(_Op):
     """``d^n f / dt^n``; args ``(field, n)``."""
 
@@ -236,12 +310,12 @@ class Dt(_Op):
         return r"\frac{\partial^{%d} %s}{\partial t^{%d}}" % (n, f, n)
 
 
-class D2(_Op):
+class D2(_Spatial):
     """``d^2 f / d axis^2``; args ``(field, axis)``."""
 
     @property
-    def axis(self):
-        return str(self.args[1])
+    def order(self):
+        return 2
 
     def _sympystr(self, printer):
         return f"{printer._print(self.args[0])}.d{self.axis}2"
@@ -250,18 +324,32 @@ class D2(_Op):
         return r"\frac{\partial^{2} %s}{\partial %s^{2}}" % (printer._print(self.args[0]), self.axis)
 
 
-class D1(_Op):
+class D1(_Spatial):
     """``d f / d axis``; args ``(field, axis)``."""
-
-    @property
-    def axis(self):
-        return str(self.args[1])
 
     def _sympystr(self, printer):
         return f"{printer._print(self.args[0])}.d{self.axis}"
 
     def _latex(self, printer):
         return r"\frac{\partial %s}{\partial %s}" % (printer._print(self.args[0]), self.axis)
+
+
+class Dn(_Spatial):
+    """``d^n f / d axis^n`` for ``n >= 3``; args ``(field, axis, n)``. Written
+    ``u.dx3``, ``u.deriv("x", 4)`` or ``u.dx2.dx2``."""
+
+    nargs = 3
+
+    @property
+    def order(self):
+        return int(self.args[2])
+
+    def _sympystr(self, printer):
+        return f"{printer._print(self.args[0])}.d{self.axis}{self.order}"
+
+    def _latex(self, printer):
+        n = self.order
+        return r"\frac{\partial^{%d} %s}{\partial %s^{%d}}" % (n, printer._print(self.args[0]), self.axis, n)
 
 
 class Lap(sympy.Function):
