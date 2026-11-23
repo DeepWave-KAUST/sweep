@@ -21,6 +21,15 @@ from the field's position to the position of the field it updates (see
 ``f`` before its update (forward Euler). Such a term is dissipative: the step
 can no longer be run backwards in time.
 
+A first-order RHS may also carry fields without a derivative, each times a
+model-only coefficient. ``s * f`` in ``f``'s own equation (a damping, a
+relaxation ``-f / tau``) is stepped with the trapezoidal rule, stable for any
+``dt`` when ``s <= 0``. ``c * g``, another field at ``f``'s position (a
+coupling), is read at the time centre of ``f``'s step: its current value when
+``g`` is updated in another sub-step of the leapfrog, the mean of its values
+before and after its update when ``g`` is updated earlier in the same sub-step
+(``g`` updated later in the same sub-step is refused).
+
 Derivatives of order 3 and higher (``u.dx4``, ``v.dx3``) are admitted where
 their result lands on the field they update, and are taken with
 :class:`sweep.operators.Derivative` without a CPML correction:
@@ -337,6 +346,19 @@ class FirstUpdate:
     terms: tuple
     derivs: tuple
     d2: tuple = ()
+    damping: sympy.Expr = sympy.S.Zero   # s in ``s * field``: stepped with the trapezoidal rule
+    local: tuple = ()                    # Local terms: other fields without a derivative
+
+
+@dataclass(frozen=True)
+class Local:
+    """``coef * field`` in another field's equation, ``field`` without a
+    derivative and at the same position. ``average``: ``field`` is updated
+    earlier in the same sub-step (the same time level), so the term reads the
+    mean of its values before and after that update (the trapezoidal rule)."""
+    coef: sympy.Expr
+    field: Field
+    average: bool = False
 
 
 @dataclass(frozen=True)
@@ -361,6 +383,12 @@ class LoweredFirst:
     def dissipative(self):
         """The dissipative terms, ``((field, Group), ...)`` in the order written."""
         return tuple((up.field, g) for sub in self.substeps for up in sub.updates for g in up.d2)
+
+    @property
+    def damped(self):
+        """``((field, s), ...)``: the fields whose equation carries ``s * field``."""
+        return tuple((up.field, up.damping) for sub in self.substeps for up in sub.updates
+                     if up.damping != 0)
 
 
 def _axis_key(axes):
@@ -425,6 +453,32 @@ def _split_dissipative(eq, field, rhs, axes, ndim):
     return rest, tuple(groups)
 
 
+def _split_local(eq, field, rhs):
+    """``(rest, damping, local)``: the terms of ``rhs`` that are a model-only
+    coefficient times a field without a derivative, split off -- ``damping``
+    the coefficient of ``field`` itself, ``local`` ``[(coef, other), ...]`` --
+    and what remains of ``rhs``, its terms kept as written."""
+    ops = rhs.atoms(D1, D2, Dn, Lap)
+    holes = {op: sympy.Dummy(f"op{k}") for k, op in enumerate(sorted(ops, key=sympy.default_sort_key))}
+    e = rhs.xreplace(holes)
+    bare = sorted((s for s in e.free_symbols if isinstance(s, Field)), key=sympy.default_sort_key)
+    if not bare:
+        return rhs, sympy.S.Zero, []
+    slots = set(holes.values())
+    damping, local = sympy.S.Zero, []
+    for g in bare:
+        c = sympy.diff(e, g)
+        if c.free_symbols & slots or _fields_and_ops(c):
+            raise ValueError(f"{eq}: not linear in the fields ({g} is multiplied by a field or a derivative)")
+        _check_coefficient(eq, g, c)
+        if g == field:
+            damping = c
+        else:
+            local.append((c, g))
+    rest = e.xreplace({g: 0 for g in bare}).xreplace({v: k for k, v in holes.items()})
+    return rest, damping, local
+
+
 def _first_order_terms(eq, rhs, dissipative=False):
     """``[(coef, (D1, ...)), ...]`` with ``rhs == sum(coef * sum(D1s))``: each top-level
     term of ``rhs`` as written (a coefficient times a derivative or a plain sum
@@ -437,11 +491,6 @@ def _first_order_terms(eq, rhs, dissipative=False):
             raise TypeError(f"{eq}: {op} is not a derivative of a Field")
     holes = {op: sympy.Dummy(f"D{op.order}_{op.field}_{op.axis}") for op in ops}
     e = rhs.xreplace(holes)
-    bare = sorted((s for s in e.free_symbols if isinstance(s, Field)), key=sympy.default_sort_key)
-    if bare:
-        raise NotImplementedError(
-            f"{eq}: {', '.join(map(str, bare))} without a derivative -- a first-order equation "
-            "takes first derivatives of the other fields only (no damping or coupling terms yet)")
     slots = set(holes.values())
     for s in slots:
         c = sympy.diff(e, s)
@@ -526,8 +575,20 @@ def lower_first_order(solved, ndim, models=None):
         rhs, d2 = _split_dissipative(eq, field, rhs, axes, ndim)
         for g in d2:
             used |= g.coef.free_symbols
+        rhs, damping, local = _split_local(eq, field, rhs)
+        used |= damping.free_symbols
+        for c, g in local:
+            if g not in updates:
+                raise ValueError(f"{eq}: field {g} has no equation of its own")
+            moved = [a for a in axes if g.position(a) != field.position(a)]
+            if moved:
+                raise ValueError(
+                    f"{eq}: {g} and {field} sit at different {moved[0]} positions, so {c*g} does "
+                    f"not land on {field}; a term without a derivative needs the two fields "
+                    f"staggered alike")
+            used |= c.free_symbols
         terms = []
-        for c, parts in _first_order_terms(eq, rhs, dissipative=bool(d2)):
+        for c, parts in _first_order_terms(eq, rhs, dissipative=bool(d2 or local or damping != 0)):
             derivs = []
             for op in parts:
                 if op.field not in updates:
@@ -544,7 +605,8 @@ def lower_first_order(solved, ndim, models=None):
         terms = sorted((Term(c, d) for c, d in merged.items()), key=lambda t: _axis_key(axes)(t.derivs[0]))
         reads = sorted({d for t in terms for d in t.derivs},
                        key=lambda d: (axes.index(d.axis), d.field._order, d.order))
-        by_field[field] = (eq, FirstUpdate(field, tuple(terms), tuple(reads), d2))
+        by_field[field] = (eq, FirstUpdate(field, tuple(terms), tuple(reads), d2, damping,
+                                           tuple(Local(c, g) for c, g in local)))
 
     # One derivative of a field along an axis: one difference, one CPML memory.
     seen = {}
@@ -567,6 +629,26 @@ def lower_first_order(solved, ndim, models=None):
         written.add(field)
         read |= reads
     substeps.append(run)
+
+    # A field read without a derivative: from an earlier or a later sub-step,
+    # its current value is centred in time (the leapfrog); from the same
+    # sub-step, the mean of its values before and after its update, so it must
+    # be updated before the field that reads it.
+    for k, run in enumerate(substeps):
+        order = [up.field for up in run]
+        for i, up in enumerate(run):
+            if not up.local:
+                continue
+            local = []
+            for t in up.local:
+                if t.field in order[i + 1:]:
+                    raise NotImplementedError(
+                        f"{by_field[up.field][0]}: reads {t.field}, which is updated later in the same "
+                        f"sub-step (the same time level); write {t.field}'s equation before "
+                        f"{up.field}'s, so that the term reads the mean of {t.field} before and after "
+                        "its update")
+                local.append(Local(t.coef, t.field, t.field in order[:i]))
+            run[i] = FirstUpdate(up.field, up.terms, up.derivs, up.d2, up.damping, tuple(local))
 
     out, taken_all = [], set()
     for run in substeps:

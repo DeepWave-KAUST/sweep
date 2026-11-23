@@ -105,6 +105,9 @@ class SymbolicFirstOrderEquation(FirstOrderEquation):
     # The dissipative (viscous, diffusive) terms of the PDE as text,
     # ("nu*laplace(vx)", ...); empty for a lossless system.
     DISSIPATIVE_TERMS = ()
+    # The damping terms (``-r/tau_s*r``: a field times a coefficient in its own
+    # equation) as text; empty without one.
+    DAMPING_TERMS = ()
     HIGH_ORDER_STENCILS = ()
     default_pml_type = "cpmls"
     # Appended by the propagator to its refusal of a topography.
@@ -141,15 +144,15 @@ class SymbolicFirstOrderEquation(FirstOrderEquation):
     # does not have).
     @property
     def supports_boundary_saving_eager(self):
-        if self.DISSIPATIVE_TERMS:
-            terms = ", ".join(self.DISSIPATIVE_TERMS)
+        lossy = self.DISSIPATIVE_TERMS + self.DAMPING_TERMS
+        if lossy:
             raise NotImplementedError(
                 f"{type(self).__name__} cannot use boundary saving: it rebuilds the wavefield by "
-                f"stepping backwards in time, which the dissipative term"
-                f"{'s' if len(self.DISSIPATIVE_TERMS) > 1 else ''} {terms} do"
-                f"{'' if len(self.DISSIPATIVE_TERMS) > 1 else 'es'} not allow: stepped backwards, "
-                "a diffusion amplifies every round-off error instead of damping it, and the gradient "
-                "would be wrong. Use memory=Full() or memory=Ckpt().")
+                f"stepping backwards in time, which the dissipative or damping term"
+                f"{'s' if len(lossy) > 1 else ''} {', '.join(lossy)} do"
+                f"{'' if len(lossy) > 1 else 'es'} not allow: stepped backwards, "
+                "a diffusion or a damping amplifies every round-off error instead of damping it, and "
+                "the gradient would be wrong. Use memory=Full() or memory=Ckpt().")
         return True
 
     @property

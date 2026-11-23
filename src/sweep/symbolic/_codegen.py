@@ -380,6 +380,10 @@ def _first_update(up, shared, cache=True):
         return shared.get(derivs) or _plain_sum(derivs)
 
     items = [(t.coef, _sum(t.derivs)) for t in up.terms] + [(g.coef, _lap_sum(g)) for g in up.d2]
+    items += [(t.coef / 2, f"({_old_name(t.field)} + {t.field})") if t.average else (t.coef, str(t.field))
+              for t in up.local]
+    if up.damping != 0:
+        return _damped_update(f, up.damping, items, cache)
     if len(items) == 1:
         c, s = items[0]
         sign = "+"
@@ -397,6 +401,16 @@ def _first_update(up, shared, cache=True):
         if cache and c != 1 and c.free_symbols:
             dtc = _once(dtc)
         return f"{f} = {f} {sign} {dtc} * {s}"
+    return f"{f} = {f} + dt * ({_sum_items(items, cache)})"
+
+
+def _old_name(field):
+    """The value of ``field`` before its update, kept for a term that reads its mean."""
+    return f"_old_{field}"
+
+
+def _sum_items(items, cache):
+    """``c0*s0 + c1*s1 - ...``: products of models made once per rollout."""
     parts = []
     for k, (c, s) in enumerate(items):
         neg = c.could_extract_minus_sign()
@@ -410,7 +424,27 @@ def _first_update(up, shared, cache=True):
                 text = _once(text)
             term = f"{text}*{s}"
         parts.append(("-" if neg else "") + term if k == 0 else (" - " if neg else " + ") + term)
-    return f"{f} = {f} + dt * ({''.join(parts)})"
+    return "".join(parts)
+
+
+_DT = sympy.Symbol("dt")
+
+
+def _damped_update(f, damping, items, cache):
+    """``f_t = s f + R`` with the trapezoidal rule, ``f = f + dt * (s (f + f_next) / 2 + R)``
+    solved for ``f_next``: ``f = (1 + s dt/2) / (1 - s dt/2) * f + dt / (1 - s dt/2) * R``.
+    Stable for any ``dt`` when ``s <= 0`` (a relaxation, however fast), second order
+    in ``dt``; the two factors are made once per rollout."""
+    half = damping * _DT / 2
+    a = _printer.doprint((1 + half) / (1 - half))
+    b = _printer.doprint(_DT / (1 - half))
+    if cache:
+        a, b = _once(a), _once(b)
+    else:
+        a, b = f"({a})", f"({b})"
+    if not items:
+        return f"{f} = {a} * {f}"
+    return f"{f} = {a} * {f} + {b} * ({_sum_items(items, cache)})"
 
 
 def _substep_lines(sub, use_cpml, counter, ndim, free=True, cache=True):
@@ -437,7 +471,10 @@ def _substep_lines(sub, use_cpml, counter, ndim, free=True, cache=True):
         if sums.count(derivs) > 1 and derivs not in names:
             names[derivs] = f"_s{next(counter)}"
     done, shared = set(), {}
+    averaged = [t.field for up in sub.updates for t in up.local if t.average]
     for up in sub.updates:
+        if up.field in averaged:
+            lines.append(f"{_old_name(up.field)} = {up.field}")
         for d in (up.derivs if use_cpml else ()):
             if d in done or d.order > 1:          # no CPML above first order
                 continue
@@ -461,7 +498,8 @@ def _substep_lines(sub, use_cpml, counter, ndim, free=True, cache=True):
         dead = laps + [_high_name(up.field, ax, n) for n, ax in highs]
         if dead:
             lines.append(f"del {', '.join(dead)}")
-    temps = [_dname(d) for d in sub.taken] + list(names.values())
+    temps = ([_dname(d) for d in sub.taken] + list(names.values())
+             + [_old_name(f) for f in dict.fromkeys(averaged)])
     if free and temps:
         lines.append(f"del {', '.join(temps)}")
     return lines
@@ -473,6 +511,7 @@ def generate_first_order(name, low, *, pml, doc):
     use_cpml = pml == "cpml"
     mem = tuple(d for d in low.derivs if d.order == 1) if use_cpml else ()
     dissipative = dissipative_terms(low)
+    damping = tuple(str(c * f) for f, c in low.damped)
     stencils = sorted({(d.order, "forward" if d.forward else "backward") for d in low.derivs if d.order > 1}
                       | {(g.order, None) for _, g in low.dissipative if g.order > 2}, key=repr)
 
@@ -505,10 +544,11 @@ def generate_first_order(name, low, *, pml, doc):
         body += _substep_lines(sub, use_cpml, counter, ndim)
     body.append(f"return ({', '.join(state)},)")
 
-    # A dissipative system has no lossless sub-steps to run backwards: the
-    # class refuses boundary saving instead (SymbolicFirstOrderEquation).
+    # A dissipative or damped system has no lossless sub-steps to run
+    # backwards: the class refuses boundary saving instead
+    # (SymbolicFirstOrderEquation).
     substeps = []
-    if not dissipative:
+    if not dissipative and not damping:
         subs = []
         for k, sub in enumerate(low.substeps):
             subs += [f"def _sub{k}(wavefields, models, dt, h):",
@@ -551,6 +591,7 @@ def generate_first_order(name, low, *, pml, doc):
         f"    DEFAULT_SOURCE_FIELDS = {tuple(src_fields[:1])!r}",
         f"    DEFAULT_RECEIVER_FIELDS = {tuple(rec_fields[:1])!r}",
         *([f"    DISSIPATIVE_TERMS = {dissipative!r}"] if dissipative else []),
+        *([f"    DAMPING_TERMS = {damping!r}"] if damping else []),
         *([f"    HIGH_ORDER_STENCILS = {tuple(stencils)!r}"] if stencils else []),
         "    takes_invariants = True",
         f"    supports_batched_models = {ndim == 2}",

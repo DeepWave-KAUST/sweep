@@ -143,3 +143,19 @@ batch of shots on a 2-D grid and animates the wavefield. The
     [:material-notebook-outline: Open notebook](../../notebooks/81_symbolic_stokes.ipynb)
 
 </div>
+
+## Damping and memory variables
+
+<div class="grid cards" markdown>
+
+-   ![Lossy radar · conductivity](../../figures/gallery/82_symbolic_lossy_gpr.png){ loading=lazy }
+
+    **Lossy radar · conductivity**
+
+    ---
+
+    `-σ/ε Ey`, a field in its own equation; dry sand and a moist soil in one batch.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/82_symbolic_lossy_gpr.ipynb)
+
+</div>

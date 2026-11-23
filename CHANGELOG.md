@@ -192,6 +192,15 @@ and this project adheres to
   and hyperdiffusion as `dt`. The flexural gradient matches finite differences.
   `Ckpt()` and `BoundarySaving()` work, and the step compiles as one graph.
   `test/test_symbolic_high_order.py`.
+- **`sweep.symbolic`: damping and coupling terms in first-order systems.** A
+  field without a derivative times a model-only coefficient: the field itself
+  (`-r / ts`, a relaxation, stepped with the trapezoidal rule, stable for any
+  `dt`) or another field at the same position (`- r` in a stress equation,
+  read at the time centre of the step: the mean of its values before and after
+  its update when it is updated earlier in the same sub-step). Memory-variable
+  attenuation can now be written: the GSLS system of `ViscoElastic` reproduces
+  it to float32 round-off, record and gradients. A damping refuses
+  `BoundarySaving()`. `test/test_symbolic_local_terms.py`.
 - **Agent Skill for AI coding assistants** in `skills/sweep-solver/`
   ([agentskills.io](https://agentskills.io) format): a `SKILL.md` entry point
   plus on-demand references (equations, propagators, boundaries, gradients,

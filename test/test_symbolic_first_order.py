@@ -376,13 +376,10 @@ GOOD_P = Eq(p1.dt, -rho * vp**2 * (ux.dx + uz.dz))
     ([Eq(flat.dt, -p1.dx / rho), Eq(p1.dt, flat.dx)], NotImplementedError, "collocated"),
     ([Eq(ux.dt, -ux_before.dx / rho), Eq(ux_before.dt, ux.dx), Eq(p1.dt, ux.dx)], ValueError, "whole cell"),
     ([Eq(uz.dt, -p1.dx / rho), Eq(ux.dt, -p1.dx / rho), GOOD_P], ValueError, "different z positions"),
-    ([Eq(ux.dt, -p1.dx / rho + 0.1 * ux), Eq(uz.dt, -p1.dz / rho), GOOD_P], NotImplementedError,
-     "without a derivative"),
     ([Eq(ux.dt, -p1.dx / rho), Eq(uz.dt, p1.dz2), GOOD_P], NotImplementedError, "its own field only"),
     ([Eq(ux.dt, -p1.dx / rho + ux * laplace(ux)), Eq(uz.dt, -p1.dz / rho), GOOD_P], ValueError, "not linear"),
     ([Eq(ux.dt, -p1.dx / rho + p1.dx * ux.dx2), Eq(uz.dt, -p1.dz / rho), GOOD_P], ValueError, "not linear"),
     ([Eq(p1.dt, vp * laplace(p1) + vp)], ValueError, "contains no field"),
-    ([Eq(p1.dt, vp * laplace(p1) + p1)], NotImplementedError, "without a derivative"),
     ([Eq(ux.dt, -p1.dx / rho), Eq(uz.dt, -p1.dz / rho), GOOD_P, Eq(p2.dt2, vp**2 * laplace(p2))],
      NotImplementedError, "mixes first-order"),
     ([Eq(ux.dt, ux.dx), Eq(p1.dt, ux.dx)], ValueError, "derivative of itself"),
@@ -392,8 +389,8 @@ GOOD_P = Eq(p1.dt, -rho * vp**2 * (ux.dx + uz.dz))
      NotImplementedError, "two sub-steps"),
     ([Eq(ux.dt, -p1.dx / rho), Eq(uz.dt, -p1.dz / rho), Eq(p1.dt, vp * (ux.dx + uz.dz) + vp)], ValueError,
      "contains no field"),
-], ids=["collocated", "whole-cell", "other-axis", "bare-field", "second-derivative", "nonlinear-dissipation",
-        "dissipation-times-derivative", "dissipation-source-term", "dissipation-bare-field", "mixed-order",
+], ids=["collocated", "whole-cell", "other-axis", "second-derivative", "nonlinear-dissipation",
+        "dissipation-times-derivative", "dissipation-source-term", "mixed-order",
         "itself", "two-positions", "two-substeps", "source-term"])
 def test_unsupported_first_order_is_refused(equations, error, match):
     with pytest.raises(error, match=match):
@@ -635,7 +632,7 @@ def test_dissipative_memory_modes():
     assert torch.equal(d, d_ref)
     for a, b in zip(g, g_ref):
         assert _rel(a, b) <= 1e-6
-    with pytest.raises(NotImplementedError, match=r"dissipative terms nu\*laplace\(vx\), nu\*laplace\(vz\) do not allow"):
+    with pytest.raises(NotImplementedError, match=r"dissipative or damping terms nu\*laplace\(vx\), nu\*laplace\(vz\) do not allow"):
         run(memory=BoundarySaving(storage="gpu"))
 
 

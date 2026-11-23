@@ -195,6 +195,50 @@ rebuilds the wavefield exactly that way, so the class has no
 (`DISSIPATIVE_TERMS`), instead of returning a wrong gradient. `Full()` and
 `Ckpt()` run as usual.
 
+### Damping and coupling terms
+
+A first-order equation may also carry fields without a derivative, each times
+a model-only coefficient:
+
+- **The field itself: a damping.** `s * f` in `f`'s own equation (usually
+  `s < 0`, a relaxation `-f / tau`). It is stepped with the trapezoidal rule,
+  `f_next = ((1 + s dt/2) f + dt R) / (1 - s dt/2)` with `R` the rest of the
+  right-hand side, which is second order in `dt` and stable for any `dt` when
+  `s <= 0`: a memory variable whose relaxation time is far below `dt` needs no
+  smaller step.
+- **Another field: a coupling.** `c * g` in `f`'s equation, where `g` has an
+  equation of its own and sits at `f`'s position along every axis. `g` is read
+  at the centre of `f`'s time step. Updated in another sub-step of the leapfrog
+  (a velocity read by a stress), its current value is already centred. Updated
+  earlier in the same sub-step (a memory variable read by the stress it
+  relaxes), the term reads the mean of `g` before and after its update. `g`'s
+  equation must then be written before `f`'s; the other order is refused.
+
+A standard linear solid (Zener), acoustic waves with one memory variable:
+
+```python
+K, rho, tau, ts = Model("K"), Model("rho"), Model("tau"), Model("ts")
+p = Field("p", time_order=1, source=True, receiver=True)
+vx = Field("vx", time_order=1, stagger="x")
+vz = Field("vz", time_order=1, stagger="z")
+r = Field("r", time_order=1)
+div = vx.dx + vz.dz
+
+Zener = PDE([
+    Eq(vx.dt, -p.dx / rho),
+    Eq(vz.dt, -p.dz / rho),
+    Eq(r.dt, -(r + K * tau * div) / ts),      # r before p: p reads the mean of r
+    Eq(p.dt, -K * (1 + tau) * div - r),
+], name="Zener").build(ndim=2)
+```
+
+The memory variables of the shipped `ViscoElastic` (GSLS) are stepped the same
+way, and its system written like this reproduces it to float32 round-off
+(see [Accuracy](#accuracy)). Neither kind of term gets a CPML correction: CPML
+stretches derivatives only. A damping makes the step lossy, so a class with one
+refuses `BoundarySaving()` and names the terms (`DAMPING_TERMS`); a coupling
+alone keeps the leapfrog reversible, and boundary saving runs.
+
 ### Higher derivatives
 
 A derivative of order 3 or higher along one axis is written `u.dx3`, `u.dz4`,
@@ -258,6 +302,9 @@ term. Mixed derivatives (`u.dx.dz`) are not supported yet.
 - Derivatives of order 3 and higher along one axis (`u.dx4`, `v.dx3`), without
   CPML: even orders in second-order equations; in first-order systems odd
   orders of the other fields and even orders of the field itself (dissipative).
+- In first-order systems, fields without a derivative times a model-only
+  coefficient: the field itself (a damping, trapezoidal rule) and other fields
+  at the same position (a coupling, read at the time centre of the step).
 - 2-D and 3-D, any even `spatial_order`.
 - `pml="cpml"` (default): C-PML on every spatial derivative, the updates the
   shipped equations use (`cpmlr` for second-order fields, `cpmls` for
@@ -273,8 +320,9 @@ second-order fields, damping terms (`f.dt` next to `f.dt2`), terms nonlinear in
 the fields, terms without a field (sources are injected by the propagator),
 symbols that are neither models nor coefficients, a field used without its own
 equation, mixed derivatives, odd derivatives of order 3 or higher in a
-second-order equation; in a first-order system also a free surface, a field without a
-derivative on a right-hand side (damping and coupling terms), a second
+second-order equation; in a first-order system also a free surface, a field
+without a derivative at another position, or updated later in the same
+sub-step than the field whose equation reads it, a second
 derivative of another field, an odd derivative of order 3 or higher of the field
 itself, a derivative between fields at the same position
 (collocated) or a whole cell apart, and a derivative read before and after its
@@ -360,6 +408,9 @@ in [Extending](extending.md#part-2-adding-a-compiled-cuda-kernel-implc).
 | Hyperdiffusion `T_t = -T_xxxx`, the same (8th order, fp64) | 2.2e-5 at dt 0.02, 1.1e-5 at dt 0.01 (first order); grows without bound just above `2 h^4 / S_4` |
 | Flexural gradient, finite differences (fp32) | `kappa` 3.6e-4, at the fp32 floor of the finite difference |
 | Flexural and dispersive long waves, `Ckpt()` and `BoundarySaving()` vs `Full()` | records bit for bit; gradients 2.5e-7 to 7.3e-7 (`Ckpt()`), 4.3e-6 to 8.6e-6 (`BoundarySaving()`) |
+| Standard linear solid, a Gaussian pressure at rest vs the exact solution (8th order, fp64, `ts = 2`) | 7.0e-4 at dt 0.2, 1.8e-4 at dt 0.1 (second order); at `ts = 0.05`, eight times below dt 0.4, 6.7e-3, still second order |
+| Restated GSLS `ViscoElastic` (1 and 3 mechanisms) | record 6.3e-7, gradients 0.9e-7 to 8.3e-7 (`vp`, `vs`, `rho`, `Qp`, `Qs`): the same scheme, products associated differently |
+| Zener `Ckpt()`, a coupling alone with `BoundarySaving()`, vs `Full()` | records bit for bit; gradients up to 1.2e-6 (`Ckpt()`), 1.1e-6 (`BoundarySaving()`) |
 | `torch.compile(fullgraph=True)` | one graph per step |
 
 The restated 3-D `Elastic` takes its derivatives and CPML corrections in an

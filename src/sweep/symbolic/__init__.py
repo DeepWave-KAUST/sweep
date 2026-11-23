@@ -27,7 +27,10 @@ Supported so far:
   on every derivative; no free surface; plus dissipative terms, a model-only
   coefficient times second derivatives of the field itself
   (``nu * laplace(vx)``, ``kappa * T.dz2``), stepped forward in time (Euler)
-  without CPML. A class with such a term refuses boundary saving;
+  without CPML. A class with such a term refuses boundary saving; and fields
+  without a derivative: the field itself (a damping, ``-r / ts``, trapezoidal
+  rule; refuses boundary saving) or another field at the same position (a
+  coupling, read at the time centre of the step);
 * derivatives of order 3 and higher along one axis (``u.dx4``, ``v.dx3``,
   ``u.deriv("x", 4)``), without CPML: even orders in second-order equations;
   odd orders of the other fields and even orders of the field itself in
