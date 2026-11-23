@@ -52,6 +52,7 @@ one 7 of 15.
 from __future__ import annotations
 
 import copy
+import os
 import warnings
 
 import torch
@@ -77,6 +78,9 @@ AXES = {"x": (-1, 0), "y": (-2, 1)}
 def _impl(prop):
     """The eager backend of a ``PropTorch`` facade (or ``prop`` itself)."""
     return getattr(prop, "_backend_impl", prop)
+
+
+_UNSET = object()          # overlap= not given
 
 
 def _is_eager(prop):
@@ -1068,10 +1072,20 @@ class EagerModelParallel:
     """
 
     def __init__(self, prop, mesh: MeshTopology, *, halo: str = "nccl", exchange_steps=None,
-                 overlap=None, balance: bool = False):
+                 overlap=_UNSET, balance: bool = False):
         if not _is_eager(prop):
             raise TypeError("EagerModelParallel wraps an impl='eager' propagator")
-        if overlap is not None:
+        # The retired variable and a malformed overlap= are refused as the
+        # stepped class refuses them; a well-formed one is refused because
+        # the eager tiles have nothing to overlap.
+        if "SWEEP_DD_DISABLE_OVERLAP" in os.environ:
+            raise ValueError(
+                "SWEEP_DD_DISABLE_OVERLAP is no longer read: the serial step-then-exchange "
+                "forward is ModelParallel(prop, mesh, overlap=False) on an impl='c' "
+                "propagator. Unset it.")
+        if overlap is not _UNSET and not isinstance(overlap, bool):
+            raise TypeError(f"overlap must be True or False, got {overlap!r}")
+        if overlap is not _UNSET:
             raise NotImplementedError(
                 "overlap= is the stepped drivers' switch (impl='c'): the eager tiles have no "
                 "communication/computation overlap. Leave it unset; exchange_steps= is the "
@@ -1110,7 +1124,7 @@ class EagerModelParallel:
             raise ValueError(f"exchange_steps must be a positive integer; got {exchange_steps!r}")
         self.prop, self.mesh, self.halo, self.K = prop, mesh, halo, int(exchange_steps)
         self.rank, self.world = mesh.rank, mesh.world_size
-        self.dev = p.dev
+        self.dev = torch.device(p.dev)
         self._transport = "nccl" if halo == "nccl" and self.dev.type == "cuda" else "dist"
         if self._transport == "nccl":
             from sweep.parallel.nccl_direct import library
