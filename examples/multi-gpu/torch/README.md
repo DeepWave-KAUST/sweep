@@ -250,6 +250,30 @@ torchrun --standalone --nproc-per-node=4 \
 The walkthrough and measured numbers are on the docs page
 [SEM · multi-GPU domain decomposition](../../../docs/examples/sem_dd.md).
 
+### 2D — the eager propagator, one gradient
+
+- `dd_eager_marmousi_2d.py`
+
+`ModelParallel` takes an `impl="eager"` propagator with the same call. Each
+rank runs the eager rollout on its x strip plus a halo, the halo is refilled
+from the neighbours every `exchange_steps` steps, and autograd gives the
+gradient. The script computes one FWI gradient on Marmousi (10 m, 4 shots,
+5 Hz, a smoothed start), split across the ranks, and rank 0 computes it again
+on one GPU:
+
+```bash
+torchrun --standalone --nproc-per-node=2 \
+  examples/multi-gpu/torch/dd_eager_marmousi_2d.py --outdir out
+```
+
+![eager DD gradient vs one domain](../../../docs/figures/examples/dd_eager_marmousi_2d.png)
+
+On two V100s, the record differs from the single-domain one by 5e-7 of its
+maximum and the gradient by 6e-6 (panel c). Nothing marks the cut (dashed). `--device cpu`
+runs the same script on CPU processes (add `--downsample 16`). Which
+equations the eager tiles take, and how they scale, is in
+[the user guide](../../../docs/user-guide/parallel.md#the-eager-propagator).
+
 ### Across nodes
 
 Every script above runs unchanged on several machines. They read `LOCAL_RANK`

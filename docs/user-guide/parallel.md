@@ -146,6 +146,9 @@ loss = 0.5 * (syn - obs[:, :, ddp.own_receivers]).pow(2).sum()
 loss.backward()                   # vp.grad: this rank's tile; wavelet.grad: complete
 ```
 
+A runnable version, one Marmousi gradient checked against one GPU, is
+`examples/multi-gpu/torch/dd_eager_marmousi_2d.py`.
+
 There are no decomposed kernels here. Each rank runs the single-domain eager
 rollout on its tile -- its owned cells of the grid plus `H` ghost cells on
 each cut side (x strips in 2-D, an x/y tile grid in 3-D, as the stepped
