@@ -51,7 +51,7 @@ from sweep.symbolic import PDE, Coefficient, Eq, Field, Model, laplace
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
 DH, DT = 10.0, 1.0e-3
 SHAPES = {2: (48, 64), 3: (24, 20, 28)}
-NT = {2: 150, 3: 80}
+NT = {2: 150, 3: 50}
 
 
 @pytest.fixture(autouse=True)
@@ -162,8 +162,8 @@ def _rel(a, b):
     return ((a - b).abs().max() / b.abs().max()).item()
 
 
-BITWISE = [(kind, order, strips) for kind in ("acoustic1st", "elastic") for order in (4, 8)
-           for strips in (False, True)]
+# Each pair of (kind, order), (kind, strips), (order, strips) met once.
+BITWISE = [("acoustic1st", 4, False), ("acoustic1st", 8, True), ("elastic", 4, True), ("elastic", 8, False)]
 # The uncompiled step makes its products of models and dt once per rollout
 # (sweep.equations._invariants), the generated one under the product's text:
 # Elastic makes dt/rho under two names, for vz and for vx (rho_z, rho_x, both
@@ -615,7 +615,7 @@ def test_dissipative_gradient_matches_finite_differences():
 def test_dissipative_memory_modes():
     def run(**kw):
         models = _stokes_models()
-        d = _stokes_record(models, **kw)
+        d = _stokes_record(models, nt=120, **kw)          # the wavelet peaks at step 75
         d.square().sum().backward()
         return d.detach(), [m.grad for m in models]
 

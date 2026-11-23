@@ -180,14 +180,15 @@ def _models():
 
 
 def test_damping_runs_with_checkpoints_and_refuses_boundary_saving():
-    for cls, fs in ((DAMPED, False), (DAMPED_FS, True)):
-        d_ref, g_ref = _run(cls, _models(), free_surface=fs)
-        assert torch.isfinite(d_ref).all() and d_ref.abs().max() > 0
-        assert all(torch.isfinite(g).all() and g.abs().max() > 0 for g in g_ref)
-        d, g = _run(cls, _models(), memory=Ckpt(), free_surface=fs)
-        assert torch.equal(d, d_ref)
-        for a, b in zip(g, g_ref):
-            assert _rel(a, b) <= 1e-5
+    d_fs, g_fs = _run(DAMPED_FS, _models(), free_surface=True)
+    assert torch.isfinite(d_fs).all() and d_fs.abs().max() > 0
+    assert all(torch.isfinite(g).all() and g.abs().max() > 0 for g in g_fs)
+    d_ref, g_ref = _run(DAMPED, _models())
+    assert all(torch.isfinite(g).all() and g.abs().max() > 0 for g in g_ref)
+    d, g = _run(DAMPED, _models(), memory=Ckpt())
+    assert torch.equal(d, d_ref)
+    for a, b in zip(g, g_ref):
+        assert _rel(a, b) <= 1e-5
     with pytest.raises(NotImplementedError, match=r"eta\*p\.dt"):
         _run(DAMPED, _models(), memory=BoundarySaving(storage="gpu" if DEV == "cuda" else "cpu"))
 

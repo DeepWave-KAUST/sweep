@@ -482,7 +482,7 @@ in [Extending](extending.md#part-2-adding-a-compiled-cuda-kernel-implc).
 
 | Check | Result |
 | --- | --- |
-| `p.dt2 = vp**2 laplace(p)` vs `Acoustic` / `Acoustic3D` | bit for bit, record and gradient: 15 configurations uncompiled on CPU and on CUDA; `Full()`, `Ckpt()` and `BoundarySaving()`, compiled or not, on CUDA |
+| `p.dt2 = vp**2 laplace(p)` vs `Acoustic` / `Acoustic3D` | bit for bit, record and gradient: 9 configurations (every pair of order, free surface and `cpml_strips`, a topography, two 3-D) uncompiled on CPU and on CUDA; `Full()`, `Ckpt()` and `BoundarySaving()`, compiled or not, on CUDA |
 | Coupled VTI system, finite differences (canonical 48 x 56 case, fp32) | error falls as h² down to the fp32 floor, ~1e-3 |
 | Coupled VTI system, `BoundarySaving` vs `Full()` | 2e-5 to 9e-5 (`Acoustic` on the same case: 1.4e-5) |
 | Restated `Acoustic1st` and 2-D `Elastic`, uncompiled | bit for bit, record and gradient: spatial orders 4 and 8, with and without `cpml_strips`, `Full()`, `Ckpt()` and `BoundarySaving()`; but the `Elastic` `rho` gradient with `Full()` and `Ckpt()`, 1.1e-8 to 1.4e-8 (see above) |
@@ -503,7 +503,7 @@ in [Extending](extending.md#part-2-adding-a-compiled-cuda-kernel-implc).
 | Zener `Ckpt()`, a coupling alone with `BoundarySaving()`, vs `Full()` | records bit for bit; gradients up to 1.2e-6 (`Ckpt()`), 1.1e-6 (`BoundarySaving()`) |
 | Damped line `p_tt + eta p_t = p_xx`, a Gaussian at rest vs the exact solution (8th order, fp64, `eta = 0.05`) | 8.5e-4 at dt 0.2, 2.1e-4 at dt 0.1 (second order) |
 | Damped acoustic class at `eta = 0` vs the undamped class | record and gradient bit for bit |
-| Damped acoustic `Ckpt()` vs `Full()`, with and without a free surface | records bit for bit; gradients to 1e-5 |
+| Damped acoustic `Ckpt()` vs `Full()`; with a free surface | records bit for bit, gradients to 1e-5; runs, gradients finite |
 | Elliptic TTI vs `AcousticTTI` at `epsilon = delta` (its S term then vanishes) | record 2.4e-6, gradients 8.4e-7 to 1.3e-6: the same operators, products associated differently |
 | Variable density at constant density vs `Acoustic` / `Acoustic3D` | 2-D record 1.6e-6, `vp` gradient 6.8e-7 (`rho.dx` of a constant is round-off, not 0); 3-D bit for bit |
 | Variable density with a mixed term vs a manufactured solution (8th order, fp64, dt = 0.2 h) | 9.4e-5 at 48², 2.3e-5 at 96², 5.8e-6 at 192² (second order: dt dominates) |

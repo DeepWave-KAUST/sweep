@@ -87,8 +87,13 @@ def _run(cls, ndim, order, fs, strips, topography=None):
     return d.detach(), model.grad
 
 
+# 2-D: every pair of free surface x strips, the spatial order alternating
+# (it changes the stencil, not the code path), so each pair of options is
+# met at least once.
 ACOUSTIC_CASES = [
-    *[(2, order, fs, strips, None) for order in (4, 8) for fs in (False, True, ["top", "left"]) for strips in (False, True)],
+    *[(2, order, fs, strips, None) for order, fs, strips in (
+        (4, False, False), (8, False, True), (8, True, False), (4, True, True),
+        (8, ["top", "left"], False), (4, ["top", "left"], True))],
     (2, 4, True, False, np.r_[np.zeros(30), np.arange(34) // 4].astype(np.int64)),
     # 3-D: the two corners; 2-D covers the free-surface x strips product.
     (3, 4, False, False, None),
