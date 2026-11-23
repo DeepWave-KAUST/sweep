@@ -13,7 +13,22 @@ takes the centred difference ``(f_next - f_prev) / (2 dt)``; solved for
     f_next = (2 f - (1 + s dt/2) f_prev + dt**2 * RHS) / (1 - s dt/2),
 
 second order in ``dt``, and for ``s <= 0`` stable under the undamped step's
-time-step bound. The terms are
+time-step bound.
+
+A second-order equation may also take first derivatives (``p.dx``) and mixed
+second derivatives (``p.dx.dz``) of a field, each times a model-only
+coefficient, and the coefficients may hold first derivatives of models
+(``rho.dx``): variable density as ``vp**2 * (laplace(p) - (rho.dx * p.dx +
+rho.dz * p.dz) / rho)``, the tilted terms of a TTI system. They are taken as
+the shipped ``AcousticTTI`` takes its mixed term: a first derivative is the
+centred gradient with the CPML stretch of the field's second derivative along
+that axis, ``(1 + b) du + a psi``; a mixed derivative is the centred gradient
+along the other axis of that stretched first derivative, without a stretch
+of its own; a model derivative is the centred gradient of the model, made once
+per rollout. A centred first derivative misses the sawtooth ``(-1)**i``, so
+each such derivative of ``f`` along an axis requires ``f``'s second derivative
+along that axis somewhere in the system; its CPML memory is the one the
+stretch reads. The terms are
 gathered per field into groups of axes that share a coefficient, so that
 ``vp**2 * laplace(p)`` and ``vp**2 * (p.dz2 + p.dx2)`` lower to the same
 ``vp**2 * (d2z + d2x)``.
@@ -62,7 +77,7 @@ from dataclasses import dataclass
 import sympy
 from sympy.core.symbol import Str
 
-from ._expr import AXES, D1, D2, Coefficient, Dn, Dt, Field, Lap, Model
+from ._expr import AXES, D1, D2, Coefficient, Dm, Dn, Dt, Field, Lap, Model
 
 
 def axes_of(ndim):
@@ -91,6 +106,8 @@ class Update:
     local: tuple          # ((coef, field), ...)
     high: tuple = ()      # Groups of derivatives of order 4, 6, ...
     damping: sympy.Expr = sympy.S.Zero
+    d1: tuple = ()        # ((coef, field, axis), ...) first derivatives
+    mixed: tuple = ()     # ((coef, field, a, b), ...) mixed derivatives, a before b
 
 
 @dataclass(frozen=True)
@@ -102,6 +119,9 @@ class Lowered:
     updates: tuple        # one per field, same order
     d2: tuple             # ((field, axis), ...) second derivatives taken
     high: tuple = ()      # ((field, axis, order), ...) derivatives of order 4, 6, ... taken
+    d1: tuple = ()        # ((field, axis), ...) stretched first derivatives taken (mixed ones' too)
+    mixed: tuple = ()     # ((field, a, b), ...) mixed derivatives taken
+    model_derivs: tuple = ()   # ModelDerivs the coefficients use
 
     @property
     def damped(self):
@@ -152,11 +172,42 @@ def _solve_for_dt(eq):
 
 
 def _fields_and_ops(expr):
-    return expr.atoms(D1, D2, Dn, Dt, Lap) | {s for s in expr.free_symbols if isinstance(s, Field)}
+    return expr.atoms(D1, D2, Dm, Dn, Dt, Lap) | {s for s in expr.free_symbols if isinstance(s, Field)}
+
+
+class ModelDeriv(sympy.Symbol):
+    """``model.d<axis>`` in a coefficient: a symbol named ``_d<axis>_<model>``,
+    which the step makes once per rollout as the model's centred gradient."""
+
+    def __new__(cls, model, axis):
+        obj = sympy.Symbol.__xnew__(cls, f"_d{axis}_{model}")
+        obj.model, obj.axis = model, axis
+        return obj
+
+    def __getnewargs__(self):
+        return (self.model, self.axis)
+
+    def _hashable_content(self):
+        return super()._hashable_content() + (self.model,)
+
+
+def _model_derivs(eq, expr, ndim):
+    """``expr`` with each ``model.d<axis>`` replaced by its :class:`ModelDeriv`."""
+    axes = axes_of(ndim)
+    subs = {}
+    for op in expr.atoms(D1):
+        if isinstance(op.field, Field):
+            continue
+        if not isinstance(op.field, Model):
+            raise TypeError(f"{eq}: {op} is not a derivative of a Field or a Model")
+        if op.axis not in axes:
+            raise ValueError(f"{eq}: {op} is a {op.axis}-derivative in a {ndim}-D build")
+        subs[op] = ModelDeriv(op.field, op.axis)
+    return expr.xreplace(subs) if subs else expr
 
 
 def _check_coefficient(eq, atom, c):
-    unknown = [s for s in c.free_symbols if not isinstance(s, (Model, Coefficient))]
+    unknown = [s for s in c.free_symbols if not isinstance(s, (Model, Coefficient, ModelDeriv))]
     if unknown:
         raise ValueError(f"{eq}: {', '.join(map(str, unknown))} in the coefficient of {atom} "
                          "is neither a Model, a Coefficient nor a number")
@@ -175,6 +226,8 @@ def _models_and_coefficients(symbols, models=None):
                 stack.extend(s.expr.free_symbols)
         elif isinstance(s, Model):
             used_models.add(s)
+        elif isinstance(s, ModelDeriv):
+            used_models.add(s.model)
     if models is None:
         model_order = tuple(sorted(used_models, key=lambda m: m._order))
     else:
@@ -195,18 +248,14 @@ def _models_and_coefficients(symbols, models=None):
 
 def _decompose(eq, rhs, ndim):
     """``{(field, axis): coef}`` of the second derivatives, ``{(field, axis,
-    order): coef}`` of the even ones of order 4 and higher and ``{field: coef}``
-    of the bare fields, with RHS == their sum."""
+    order): coef}`` of the even ones of order 4 and higher, ``{field: coef}``
+    of the bare fields, ``{(field, axis): coef}`` of the first derivatives and
+    ``{(field, a, b): coef}`` of the mixed ones, with RHS == their sum."""
     axes = axes_of(ndim)
     for op in rhs.atoms(Dt):
         raise NotImplementedError(
             f"{eq}: {op} on the right-hand side is not supported; a first time derivative "
             "may only be the field's own (a damping f.dt in f's equation)")
-    for op in rhs.atoms(D1):
-        raise NotImplementedError(
-            f"{eq}: first spatial derivative {op} in a second-order equation, which takes "
-            "second derivatives (f.dz2, f.dx2, laplace(f)); first derivatives belong to a "
-            "first-order system (Field(..., time_order=1))")
     laps = {}
     for lap in rhs.atoms(Lap):
         if not isinstance(lap.field, Field):
@@ -219,13 +268,21 @@ def _decompose(eq, rhs, ndim):
                 f"{eq}: {op}, an odd derivative in a second-order equation: its centred stencil "
                 "leaves odd and even grid points decoupled. Second-order fields take even "
                 "derivatives (f.dx2, f.dx4); odd ones belong to a staggered first-order system")
-    d2s = sorted(rhs.atoms(D2, Dn), key=sympy.default_sort_key)
+    d2s = sorted(rhs.atoms(D1, D2, Dn), key=sympy.default_sort_key)
     for op in d2s:
         if not isinstance(op.field, Field):
             raise TypeError(f"{eq}: {op} is not a derivative of a Field")
         if op.axis not in axes:
             raise ValueError(f"{eq}: {op} is a {op.axis}-derivative in a {ndim}-D build")
+    mixed_ops = sorted(rhs.atoms(Dm), key=sympy.default_sort_key)
+    for op in mixed_ops:
+        if not isinstance(op.field, Field):
+            raise TypeError(f"{eq}: {op} is not a derivative of a Field")
+        for ax in op.axes:
+            if ax not in axes:
+                raise ValueError(f"{eq}: {op} is a {ax}-derivative in a {ndim}-D build")
     holes = {op: sympy.Dummy(f"D{op.order}_{op.field}_{op.axis}") for op in d2s}
+    holes.update({op: sympy.Dummy(f"Dm_{op.field}_{''.join(op.axes)}") for op in mixed_ops})
     e = rhs.xreplace(holes)
     fields = sorted((s for s in e.free_symbols if isinstance(s, Field)), key=sympy.default_sort_key)
     holes.update({f: sympy.Dummy(f"F_{f}") for f in fields})
@@ -246,15 +303,19 @@ def _decompose(eq, rhs, ndim):
     for atom, c in coefs.items():
         _check_coefficient(eq, atom, c)
 
-    d2, high, local = {}, {}, {}
+    d2, high, local, d1, mixed = {}, {}, {}, {}, {}
     for atom, c in coefs.items():
         if isinstance(atom, D2):
             d2[(atom.field, atom.axis)] = c
+        elif isinstance(atom, D1):
+            d1[(atom.field, atom.axis)] = c
+        elif isinstance(atom, Dm):
+            mixed[(atom.field, *atom.axes)] = c
         elif isinstance(atom, Dn):
             high[(atom.field, atom.axis, atom.order)] = c
         else:
             local[atom] = c
-    return d2, high, local
+    return d2, high, local, d1, mixed
 
 
 def lower(equations, ndim, models=None):
@@ -267,6 +328,16 @@ def lower(equations, ndim, models=None):
             "the system mixes first-order (f.dt) and second-order (f.dt2) fields; "
             "mixed-order systems are not supported yet")
     if orders == {1}:
+        for eq, _, _, rhs in solved:
+            for op in rhs.atoms(Dm):
+                raise NotImplementedError(
+                    f"{eq}: mixed derivative {op} in a first-order system; mixed derivatives "
+                    "are supported in second-order equations")
+            for op in rhs.atoms(D1):
+                if isinstance(op.field, Model):
+                    raise NotImplementedError(
+                        f"{eq}: model derivative {op} in a first-order system; model "
+                        "derivatives are supported in second-order equations")
         return lower_first_order(solved, ndim, models)
     return _lower_second_order(solved, ndim, models)
 
@@ -285,18 +356,20 @@ def _lower_second_order(solved, ndim, models):
     updates = _by_field(solved)
     fields = tuple(sorted(updates, key=lambda f: f._order))
 
-    out, used, d2_taken, high_taken = [], set(), [], []
+    out, used, d2_taken, high_taken, d1_taken, mixed_taken = [], set(), [], [], [], []
+    needs = []   # (eq, op text, field, axis): a first derivative needs f's second along axis
     for field in fields:
         eq, rhs = updates[field]
+        rhs = _model_derivs(eq, rhs, ndim)
         rhs, damping = _split_damping(eq, field, rhs)
-        d2, high, local = _decompose(eq, rhs, ndim)
-        for f, *_ in (*d2, *high):
+        d2, high, local, d1, mixed = _decompose(eq, rhs, ndim)
+        for f, *_ in (*d2, *high, *d1, *mixed):
             if f not in updates:
                 raise ValueError(f"{eq}: field {f} has no equation of its own")
         for f in local:
             if f not in updates:
                 raise ValueError(f"{eq}: field {f} has no equation of its own")
-        for c in (*d2.values(), *high.values(), *local.values(), damping):
+        for c in (*d2.values(), *high.values(), *local.values(), *d1.values(), *mixed.values(), damping):
             used |= c.free_symbols
         groups = []
         for f in fields:
@@ -311,12 +384,44 @@ def _lower_second_order(solved, ndim, models):
             groups += [Group(c, f, tuple(a)) for c, a in by_coef.items()]
         local_terms = tuple((local[f], f) for f in fields if f in local and local[f] != 0)
         high_groups = _high_groups(high, fields, axes, high_taken)
-        out.append(Update(field, tuple(groups), local_terms, high_groups, damping))
+        d1_terms, mixed_terms = [], []
+        for f in fields:
+            for ax in axes:
+                c = d1.get((f, ax))
+                if c is not None and c != 0:
+                    d1_terms.append((c, f, ax))
+                    needs.append((eq, f"{f}.d{ax}", f, ax))
+                    if (f, ax) not in d1_taken:
+                        d1_taken.append((f, ax))
+            for (g, a, b), c in sorted(mixed.items(), key=lambda kv: (axes.index(kv[0][1]), axes.index(kv[0][2]))):
+                if g != f or c == 0:
+                    continue
+                mixed_terms.append((c, f, a, b))
+                needs.append((eq, f"{f}.d{a}.d{b}", f, b))
+                if (f, b) not in d1_taken:
+                    d1_taken.append((f, b))
+                if (f, a, b) not in mixed_taken:
+                    mixed_taken.append((f, a, b))
+        out.append(Update(field, tuple(groups), local_terms, high_groups, damping,
+                          tuple(d1_terms), tuple(mixed_terms)))
+
+    for eq, text, f, ax in needs:
+        if (f, ax) not in d2_taken:
+            raise ValueError(
+                f"{eq}: {text} needs {f}'s second derivative along {ax} in the system "
+                f"({f}.d{ax}2 or laplace({f})): a centred first derivative misses the sawtooth "
+                "(-1)**i, which the second derivative holds together, and its CPML stretch is "
+                f"the one of {f}.d{ax}2")
 
     model_order, coefs = _models_and_coefficients(used, models)
     d2_taken.sort(key=lambda fa: (fa[0]._order, axes.index(fa[1])))
     high_taken.sort(key=lambda t: (t[0]._order, t[2], axes.index(t[1])))
-    return Lowered(ndim, fields, model_order, coefs, tuple(out), tuple(d2_taken), tuple(high_taken))
+    d1_taken.sort(key=lambda fa: (fa[0]._order, axes.index(fa[1])))
+    mixed_taken.sort(key=lambda t: (t[0]._order, axes.index(t[1]), axes.index(t[2])))
+    mderivs = sorted({s for s in used if isinstance(s, ModelDeriv)},
+                     key=lambda s: (s.model._order, axes.index(s.axis)))
+    return Lowered(ndim, fields, model_order, coefs, tuple(out), tuple(d2_taken), tuple(high_taken),
+                   tuple(d1_taken), tuple(mixed_taken), tuple(mderivs))
 
 
 def _split_damping(eq, field, rhs):

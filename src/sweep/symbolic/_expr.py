@@ -61,6 +61,21 @@ class Model(_Declared):
         self.description = description or f"Model parameter `{name}`."
         self._order = next(_declared)
 
+    # ``rho.dx``: a model's first derivative, for a coefficient of a
+    # second-order equation (``-vp**2 * rho.dx / rho * p.dx``); centred, made
+    # once per rollout.
+    @property
+    def dz(self):
+        return D1(self, Str("z"))
+
+    @property
+    def dy(self):
+        return D1(self, Str("y"))
+
+    @property
+    def dx(self):
+        return D1(self, Str("x"))
+
 
 class Coefficient(_Declared):
     """A coefficient derived from the models, such as the Lamé parameters.
@@ -246,8 +261,9 @@ class _Op(sympy.Function):
 
 class _Spatial(_Op):
     """A spatial derivative along one axis. Another derivative along the same
-    axis raises its order (``u.dx2.dx`` is ``u.dx3``); one along another axis, a
-    mixed derivative, is not supported yet."""
+    axis raises its order (``u.dx2.dx`` is ``u.dx3``); a first derivative along
+    another axis of a first derivative is a mixed derivative (``u.dx.dz``,
+    :class:`Dm`); higher mixed derivatives are not supported."""
 
     @property
     def axis(self):
@@ -258,11 +274,17 @@ class _Spatial(_Op):
         return 1
 
     def _then(self, axis, order):
+        if not isinstance(self.field, Field):
+            raise NotImplementedError(
+                f"{self}.d{axis}{'' if order == 1 else order}: a model takes first derivatives only")
         if axis != self.axis:
+            if axis not in AXES:
+                raise ValueError(f"axis must be 'z', 'y' or 'x', got {axis!r}")
+            if self.order == 1 and order == 1:
+                return Dm(self.field, *(Str(a) for a in sorted((self.axis, axis), key=AXES.index)))
             raise NotImplementedError(
                 f"{self}.d{axis}{'' if order == 1 else order}: mixed derivatives (along {self.axis} "
-                f"and {axis}) are not "
-                "supported yet; derivatives of any order along one axis are")
+                f"and {axis}) are supported as the second derivative u.d{self.axis}.d{axis} only")
         return _derivative(self.field, axis, self.order + order)
 
     @property
@@ -350,6 +372,41 @@ class Dn(_Spatial):
     def _latex(self, printer):
         n = self.order
         return r"\frac{\partial^{%d} %s}{\partial %s^{%d}}" % (n, printer._print(self.args[0]), self.axis, n)
+
+
+class Dm(_Op):
+    """The mixed second derivative ``d^2 f / d a d b``; args ``(field, a, b)``
+    with ``a`` before ``b`` in z, y, x order: ``u.dx.dz`` and ``u.dz.dx`` are
+    one atom."""
+
+    nargs = 3
+
+    @property
+    def axes(self):
+        return str(self.args[1]), str(self.args[2])
+
+    @property
+    def order(self):
+        return 2
+
+    def _then(self, axis, order):
+        raise NotImplementedError(f"{self}.d{axis}: mixed derivatives above the second are not supported")
+
+    def __getattr__(self, name):
+        if len(name) > 1 and name[0] == "d" and name[1] in AXES:
+            self._then(name[1], 1)
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
+
+    def deriv(self, axis, order=1):
+        return self._then(axis, order)
+
+    def _sympystr(self, printer):
+        a, b = self.axes
+        return f"{printer._print(self.args[0])}.d{a}.d{b}"
+
+    def _latex(self, printer):
+        a, b = self.axes
+        return r"\frac{\partial^{2} %s}{\partial %s \partial %s}" % (printer._print(self.args[0]), a, b)
 
 
 class Lap(sympy.Function):

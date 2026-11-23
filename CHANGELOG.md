@@ -207,6 +207,14 @@ and this project adheres to
   Rayleigh damping, the telegraph equation. At `eta = 0` the class is the
   undamped one bit for bit. A damping refuses `BoundarySaving()`.
   `test/test_symbolic_second_order_damping.py`.
+- **`sweep.symbolic`: first, mixed and model derivatives in second-order
+  equations.** `p.dx`, `p.dz.dx` and `rho.dx`, taken as `AcousticTTI` takes
+  its mixed term (centred, the first derivative stretched by the CPML of
+  `p.dx2`). Variable density, `vp**2 * (laplace(p) - grad(rho).grad(p) /
+  rho)`, and TTI can be written: elliptic TTI matches `AcousticTTI` at
+  `epsilon = delta` to 2.4e-6. A first or mixed derivative needs the field's
+  second derivative along that axis. `cpml_stretch` in `equations/_cpml.py`
+  reads strip-held memory. `test/test_symbolic_mixed_derivatives.py`.
 - **Agent Skill for AI coding assistants** in `skills/sweep-solver/`
   ([agentskills.io](https://agentskills.io) format): a `SKILL.md` entry point
   plus on-demand references (equations, propagators, boundaries, gradients,

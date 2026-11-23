@@ -77,8 +77,9 @@ def test_spellings_of_a_high_order_derivative():
     assert isinstance(u.dx.dx, D2) and isinstance(u.deriv("x"), D1) and isinstance(u.deriv("x", 2), D2)
     assert (u.dx4.order, u.dx4.axis, str(u.dy5)) == (4, "x", "u.dy5")
     assert sympy.latex(u.dz4) == r"\frac{\partial^{4} u}{\partial z^{4}}"
+    assert u.dx.dz == u.dz.dx                         # a mixed second derivative (Dm)
     with pytest.raises(NotImplementedError, match="mixed derivatives"):
-        u.dx.dz
+        u.dx2.dz
     with pytest.raises(NotImplementedError, match="mixed derivatives"):
         u.dx2.deriv("z", 2)
     with pytest.raises(ValueError, match="integer >= 1"):

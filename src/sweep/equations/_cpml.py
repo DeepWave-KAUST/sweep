@@ -124,6 +124,23 @@ def cpml_axis_update(lap_axis, du, psi, zeta, a, b, dbd, h, axis, grad_op,
     return _on_strips(lap_axis, (psi, zeta), side)
 
 
+def cpml_stretch(du, psi, a, b):
+    """The CPML-stretched first derivative ``(1 + b) du + a psi`` of a
+    second-order field (``AcousticTTI``'s ``dpdx``), ``psi`` its memory variable
+    before the step's update, held whole or as :class:`Strips` (``a psi`` is
+    zero between the strips)."""
+    if not isinstance(psi, Strips):
+        return (1 + b) * du + a * psi
+    axis, (w_lo, w_hi) = psi.axis, psi.widths
+    n = du.shape[axis]
+    out = (1 + b) * du
+    if w_lo:
+        out = out + _pad_axis(a.narrow(axis, 0, w_lo) * psi.lo, axis, 0, n - w_lo)
+    if w_hi:
+        out = out + _pad_axis(a.narrow(axis, n - w_hi, w_hi) * psi.hi, axis, n - w_hi, 0)
+    return out
+
+
 def _axis_terms(lap_axis, du, g, a, b, dbd, psi, zeta):
     tmp = ((1 + b) * lap_axis + dbd * du) + g
     contrib = (1 + b) * tmp + a * zeta

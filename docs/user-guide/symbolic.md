@@ -46,7 +46,9 @@ equations this way, each in a notebook that animates its wavefield.
 | `p.dt2`, `vx.dt` | second / first time derivative (`p.dt` next to `p.dt2`: a damping, see below) |
 | `p.dz2`, `p.dy2`, `p.dx2` | second derivative along one axis (second-order fields; in a first-order system, of the field itself: a dissipative term) |
 | `laplace(p)` | sum of the second derivatives over every axis of the build |
-| `vx.dz`, `vx.dy`, `vx.dx` | first derivative along one axis (first-order systems) |
+| `vx.dz`, `vx.dy`, `vx.dx` | first derivative along one axis (first-order systems; in a second-order equation, centred, see below) |
+| `p.dz.dx` | mixed second derivative (second-order equations); `p.dx.dz` is the same atom |
+| `rho.dz`, `rho.dx` | first derivative of a model, in a coefficient of a second-order equation |
 | `Eq(lhs, rhs)` | one equation; each field has exactly one |
 
 Coefficients are sympy expressions of models, coefficients and numbers, with
@@ -103,6 +105,57 @@ one bit for bit. The term gets no CPML correction. A damping makes the step
 lossy, so the class refuses `BoundarySaving()` and names the terms
 (`DAMPING_TERMS`). The first time derivative of another field (`q.dt` in
 `p`'s equation) is refused.
+
+### First, mixed and model derivatives
+
+A second-order equation may also take first derivatives (`p.dx`) and mixed
+second derivatives (`p.dz.dx`) of the fields, each times a model-only
+coefficient, and a coefficient may hold first derivatives of the models
+(`rho.dx`). Variable density, `p_tt = vp^2 rho div(grad(p) / rho)` written
+out, and elliptic TTI:
+
+```python
+rho, eps, theta = Model("rho"), Model("epsilon"), Model("theta")
+
+VarDensity = PDE([
+    Eq(p.dt2, vp**2 * (laplace(p) - (rho.dx * p.dx + rho.dz * p.dz) / rho)),
+], name="VarDensity").build(ndim=2)
+
+c, s = sympy.cos(theta), sympy.sin(theta)
+EllipticTTI = PDE([
+    Eq(p.dt2, vp**2 * (((1 + 2 * eps) * c**2 + s**2) * p.dx2
+                       + ((1 + 2 * eps) * s**2 + c**2) * p.dz2
+                       - 2 * eps * sympy.sin(2 * theta) * p.dz.dx)),
+], name="EllipticTTI").build(ndim=2)
+```
+
+They are taken as the shipped `AcousticTTI` takes its mixed term:
+
+- `p.dx` is the centred first derivative with the CPML stretch of `p.dx2`,
+  `(1 + b) dp/dx + a psi`, from the memory variable before its update;
+- `p.dz.dx` is the centred z-derivative of that stretched x-derivative,
+  without a stretch of its own;
+- `rho.dx` is the centred first derivative of the model, made once per
+  rollout.
+
+A centred first derivative returns zero for the sawtooth `(-1)**i`. So a first
+or mixed derivative of `p` along an axis requires `p`'s second derivative
+along that axis in the system (`p.dx2` or `laplace(p)`), which keeps odd and
+even points together; its CPML memory is the one the stretch reads. Without
+it the PDE is refused.
+
+Some limits:
+
+- The density is not written in the conservative form `div(b grad p)`. The
+  expanded form needs a density smooth on the scale of the stencil.
+- A model derivative is zero on the outermost `spatial_order / 2` cells of the
+  padded grid, inside the PML.
+- In 3-D the first derivatives are `torch.gradient`, second order in space
+  whatever `spatial_order`, as the CPML terms of `Acoustic3D` are.
+- With `BoundarySaving()`, the gradient differs from `Full()`'s in the
+  outermost `M` cells next to an absorbing face, as for every equation (see
+  [Boundary saving next to the PML](propagators.md#bs-near-pml)). A model derivative reads the PML cells, so there the
+  `rho` gradient is about 1e-3 off (7e-4 in the test).
 
 ## First-order systems
 
@@ -317,14 +370,17 @@ one. An odd derivative of a first-order field in its own equation is the
 other, such as the `u_xxx` of the Airy or KdV equation. Both would need a
 centred odd stencil, which returns zero for the sawtooth `(-1)**i` and so lets
 odd and even points evolve apart, and forward Euler is unstable for such a
-term. Mixed derivatives (`u.dx.dz`) are not supported yet.
+term. Mixed derivatives above the second (`u.dx2.dz`) are not supported.
 
 ### What is supported
 
 - Second-order-in-time fields; the right-hand side linear in the fields, each
   term a model-only coefficient times a second derivative along one axis or
   times a field; a damping, a model-only coefficient times the field's own
-  first time derivative (centred in time, no boundary saving).
+  first time derivative (centred in time, no boundary saving); first and mixed
+  second derivatives (`p.dx`, `p.dz.dx`), centred, where the field's second
+  derivative along the axis is in the system; first derivatives of models
+  (`rho.dx`) in coefficients.
 - First-order systems; each right-hand side a model-only coefficient times
   first derivatives of the other fields, or a sum of such terms, plus
   dissipative terms: a model-only coefficient times second derivatives of the
@@ -344,14 +400,17 @@ term. Mixed derivatives (`u.dx.dz`) are not supported yet.
   topography. `free_surface=None` (default) builds a class that refuses the
   propagator's `free_surface=True` and `topography=`.
 
-Everything else raises when the `PDE` is constructed, with the reason: first
-derivatives in a second-order equation, a system mixing first- and
+Everything else raises when the `PDE` is constructed, with the reason: a first
+or mixed derivative of a field without its second derivative along that axis,
+a system mixing first- and
 second-order fields, the first time derivative of another field (`q.dt` in
 `p`'s equation), terms nonlinear in
 the fields, terms without a field (sources are injected by the propagator),
 symbols that are neither models nor coefficients, a field used without its own
-equation, mixed derivatives, odd derivatives of order 3 or higher in a
-second-order equation; in a first-order system also a free surface, a field
+equation, mixed derivatives above the second, derivatives of models above
+the first, odd derivatives of order 3 or higher in a
+second-order equation; in a first-order system also mixed and model
+derivatives, a free surface, a field
 without a derivative at another position, or updated later in the same
 sub-step than the field whose equation reads it, a second
 derivative of another field, an odd derivative of order 3 or higher of the field
@@ -445,6 +504,11 @@ in [Extending](extending.md#part-2-adding-a-compiled-cuda-kernel-implc).
 | Damped line `p_tt + eta p_t = p_xx`, a Gaussian at rest vs the exact solution (8th order, fp64, `eta = 0.05`) | 8.5e-4 at dt 0.2, 2.1e-4 at dt 0.1 (second order) |
 | Damped acoustic class at `eta = 0` vs the undamped class | record and gradient bit for bit |
 | Damped acoustic `Ckpt()` vs `Full()`, with and without a free surface | records bit for bit; gradients to 1e-5 |
+| Elliptic TTI vs `AcousticTTI` at `epsilon = delta` (its S term then vanishes) | record 2.4e-6, gradients 8.4e-7 to 1.3e-6: the same operators, products associated differently |
+| Variable density at constant density vs `Acoustic` / `Acoustic3D` | 2-D record 1.6e-6, `vp` gradient 6.8e-7 (`rho.dx` of a constant is round-off, not 0); 3-D bit for bit |
+| Variable density with a mixed term vs a manufactured solution (8th order, fp64, dt = 0.2 h) | 9.4e-5 at 48², 2.3e-5 at 96², 5.8e-6 at 192² (second order: dt dominates) |
+| Variable density and elliptic TTI, `Ckpt()` and `BoundarySaving()` vs `Full()` | records bit for bit; `Ckpt()` gradients to 2.7e-7; `BoundarySaving()` 1.5e-7 to 6.2e-7 away from the outermost 2 cells (`rho` 7e-4 there) |
+| `cpml_strips` vs whole memory (elliptic TTI) | record bit for bit, gradients 2e-9 to 1.5e-7 |
 | `torch.compile(fullgraph=True)` | one graph per step |
 
 The restated 3-D `Elastic` takes its derivatives and CPML corrections in an

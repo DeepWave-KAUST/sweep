@@ -302,7 +302,7 @@ def test_undeclared_free_surface_is_refused():
 
 
 @pytest.mark.parametrize("equations, error, match", [
-    ([Eq(p.dt2, vp**2 * p.dx)], NotImplementedError, "first spatial derivative"),
+    ([Eq(p.dt2, vp**2 * p.dx)], ValueError, "needs p's second derivative along x"),
     ([Eq(p.dt, vp * p.dx2)], ValueError, "declared with time_order=2"),
     ([Eq(p.dt2, vp**2 * laplace(p) - 0.1 * q.dt)], NotImplementedError, "first time derivative of another field"),
     ([Eq(p.dt2, p * p.dx2)], ValueError, "not linear"),

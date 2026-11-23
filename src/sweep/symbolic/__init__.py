@@ -20,7 +20,10 @@ Supported so far:
   each term a model-only coefficient times a second derivative along one axis
   (``p.dz2``, ``p.dx2``, ``laplace(p)``) or times a field, plus a damping
   ``s * p.dt`` of the field itself (centred in time; refuses boundary
-  saving); any number of coupled fields; CPML on every second derivative; a pressure-release free
+  saving); first and mixed derivatives (``p.dx``, ``p.dz.dx``) where the
+  field's second derivative along the axis is in the system, and first
+  derivatives of models (``rho.dx``) in coefficients, all centred; any number
+  of coupled fields; CPML on every second derivative; a pressure-release free
   surface (flat, per edge in 2-D, or image-method topography);
 * first-order staggered-grid systems (``Field(time_order=1, stagger=...)``,
   ``Eq(vx.dt, ...)``): each right-hand side a model-only coefficient times

@@ -50,6 +50,16 @@ batch of shots on a 2-D grid and animates the wavefield. The
 
     [:material-notebook-outline: Open notebook](../../notebooks/73_symbolic_flexural.ipynb)
 
+-   ![Variable density · tilted anisotropy](../../figures/gallery/84_symbolic_variable_density_tti.png){ loading=lazy }
+
+    **Variable density · tilted anisotropy**
+
+    ---
+
+    `p.dx`, `rho.dx` and the mixed `p.dz.dx`: a density step reflects, a tilted axis tilts the front.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/84_symbolic_variable_density_tti.ipynb)
+
 </div>
 
 ## First-order systems (staggered grid)
