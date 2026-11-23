@@ -190,6 +190,20 @@ nav:
           - Extending:
               - examples/extending/index.md
               - Add a new equation: notebooks/18_extending_add_new_equation.ipynb
+          - Symbolic PDEs:
+              - examples/symbolic/index.md
+              - Acoustic · free surface: notebooks/70_symbolic_acoustic.ipynb
+              - Pseudo-acoustic VTI: notebooks/71_symbolic_vti.ipynb
+              - Klein-Gordon: notebooks/72_symbolic_klein_gordon.ipynb
+              - Flexural waves · fourth derivatives: notebooks/73_symbolic_flexural.ipynb
+              - Acoustic · pressure-velocity: notebooks/74_symbolic_acoustic_first_order.ipynb
+              - Elliptic anisotropy: notebooks/75_symbolic_elliptic_anisotropic.ipynb
+              - Elastic · velocity-stress: notebooks/76_symbolic_elastic.ipynb
+              - Maxwell TM · ground-penetrating radar: notebooks/77_symbolic_maxwell_tm.ipynb
+              - Shallow water · tsunami: notebooks/78_symbolic_shallow_water.ipynb
+              - Linear MHD: notebooks/79_symbolic_mhd.ipynb
+              - Heat equation: notebooks/80_symbolic_heat.ipynb
+              - Unsteady Stokes: notebooks/81_symbolic_stokes.ipynb
           - Sensitivity & resolution:
               - examples/sensitivity/index.md
               - Acoustic · radiation (Vp, ρ): notebooks/20_radiation_acoustic.ipynb

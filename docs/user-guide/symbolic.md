@@ -32,6 +32,9 @@ with `Full()`, `Ckpt()` or `BoundarySaving()`. Like the shipped `Acoustic` and
 `Elastic`, a 2-D generated class takes a batch of shots with a model per shot,
 `(B, nz, nx)`, as well as one model shared by the batch.
 
+The [Symbolic PDEs examples](../examples/symbolic/index.md) write twelve
+equations this way, each in a notebook that animates its wavefield.
+
 ## Writing a PDE
 
 | Object | Meaning |

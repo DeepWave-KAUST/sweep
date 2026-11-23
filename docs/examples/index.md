@@ -106,6 +106,17 @@ linked at the bottom of this page.
 
     [:octicons-arrow-right-24: 1 notebook](extending/index.md)
 
+-   [![Symbolic PDEs](../figures/gallery/73_symbolic_flexural.png){ loading=lazy }](symbolic/index.md)
+
+    **Symbolic PDEs**
+
+    ---
+
+    Equations written with `sweep.symbolic`, from acoustic and elastic waves to
+    Maxwell, shallow water, MHD, heat flow and flexural plates.
+
+    [:octicons-arrow-right-24: 12 notebooks](symbolic/index.md)
+
 -   [![Sensitivity & resolution](../figures/gallery/21_radiation_elastic.png){ loading=lazy }](sensitivity/index.md)
 
     **Sensitivity & resolution**
