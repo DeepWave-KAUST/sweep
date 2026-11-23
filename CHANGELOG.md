@@ -169,6 +169,16 @@ and this project adheres to
   gradient (~1e-8: it computes `dt / rho` twice), the 3-D `Elastic` record bit
   for bit and gradients to ~4e-7. Docs page *Symbolic PDEs*;
   `test/test_symbolic_pde.py`, `test/test_symbolic_first_order.py`.
+- **`sweep.operators.Derivative`: a finite-difference derivative of any order
+  along one axis.** `Derivative(order, accuracy, ndim, stagger=None)`, called
+  as `d.dx(u, h)`, takes stencil weights from Fornberg's recursion in exact
+  rational arithmetic (`sweep.scalars.fd_weights`, `fd_stencil`): centred for
+  any order, or half a cell forward or backward for an odd order (the
+  staggered-grid convention). Order 2 centred is bitwise the second derivative
+  of `separable_d2_2d/3d`, and order 1 staggered is bitwise
+  `StaggeredDerivative`; mixed derivatives compose (`d.dz(d.dx(u))`). It runs
+  as a conv uncompiled and as fused slices under `torch.compile`, with no
+  absorbing layer. `test/test_fd_derivative.py`.
 - **Agent Skill for AI coding assistants** in `skills/sweep-solver/`
   ([agentskills.io](https://agentskills.io) format): a `SKILL.md` entry point
   plus on-demand references (equations, propagators, boundaries, gradients,

@@ -112,3 +112,81 @@ def generate_convolution_kernel(spatial_order, derivative_order=2, mode='full', 
         kernel[center, center] = -2*np.sum(constant)
 
     return kernel.reshape(1, 1, *kernel.shape)
+
+
+def fd_weights(derivative_order, offsets):
+    """Finite-difference weights of the ``derivative_order``-th derivative at 0
+    from samples at ``offsets`` (in grid spacings, any spacing, e.g. half-integers
+    for a staggered grid), by Fornberg's recursion (Math. Comp. 51, 1988).
+
+    The recursion runs in exact rational arithmetic (``fractions.Fraction``) and
+    rounds once, to float64, so the weights of a high-order stencil carry no
+    cancellation error.  ``offsets`` must be distinct and number more than
+    ``derivative_order``.  Returns a float64 array, one weight per offset.
+    """
+    from fractions import Fraction
+
+    m = int(derivative_order)
+    xs = [Fraction(o).limit_denominator(1 << 20) for o in offsets]
+    n = len(xs)
+    if m < 0:
+        raise ValueError(f"derivative_order must be >= 0, got {derivative_order!r}")
+    if n <= m:
+        raise ValueError(f"a derivative of order {m} needs more than {m} points, got {n}")
+    if len(set(xs)) != n:
+        raise ValueError(f"offsets must be distinct, got {list(offsets)!r}")
+    # c[k][j]: weight of sample j for the k-th derivative, over the first i+1 samples.
+    c = [[Fraction(0)] * n for _ in range(m + 1)]
+    c[0][0] = Fraction(1)
+    c1 = Fraction(1)
+    for i in range(1, n):
+        c2 = Fraction(1)
+        for j in range(i):
+            c3 = xs[i] - xs[j]
+            c2 *= c3
+            if j == i - 1:                       # the new sample's weights, from the old c[.][i-1]
+                for k in range(min(i, m), -1, -1):
+                    prev = c[k - 1][i - 1] if k else Fraction(0)
+                    c[k][i] = c1 / c2 * (k * prev - xs[i - 1] * c[k][i - 1])
+            for k in range(min(i, m), -1, -1):
+                prev = c[k - 1][j] if k else Fraction(0)
+                c[k][j] = (xs[i] * c[k][j] - k * prev) / c3
+        c1 = c2
+    return np.array([float(w) for w in c[m]], dtype=np.float64)
+
+
+def fd_stencil(derivative_order, accuracy_order, stagger=None):
+    """The symmetric stencil of the ``derivative_order``-th derivative with error
+    ``O(h**accuracy_order)``: ``(shifts, weights)``.
+
+    ``stagger=None``: centred on a grid point; the result is at that point.
+    ``stagger="forward"`` / ``"backward"`` (odd orders only): the result is half a
+    cell after / before the point, from the samples on either side of it -- the
+    staggered-grid convention of :class:`sweep.operators.StaggeredDerivative`.
+    ``shifts`` are integer sample offsets from the output's grid point ``i``:
+    the derivative at ``i`` (or ``i +- 1/2``) is ``sum(w * u[i + s])``.
+    ``accuracy_order`` must be even (a symmetric stencil gains it in steps of two).
+    """
+    n, p = int(derivative_order), int(accuracy_order)
+    if n < 1:
+        raise ValueError(f"derivative_order must be >= 1, got {derivative_order!r}")
+    if p < 2 or p % 2:
+        raise ValueError(f"accuracy_order must be even and >= 2, got {accuracy_order!r}")
+    if stagger is None:
+        npts = p + n - (n % 2 == 0)              # odd: p + n - 1 for even n, p + n for odd n
+        half = npts // 2
+        shifts = np.arange(-half, half + 1)
+        return shifts, fd_weights(n, shifts)
+    if stagger not in ("forward", "backward"):
+        raise ValueError(f"stagger must be None, 'forward' or 'backward', got {stagger!r}")
+    if n % 2 == 0:
+        raise ValueError(f"a staggered stencil takes an odd derivative order (it moves the "
+                         f"result half a cell); got {n}: use stagger=None")
+    half = (p + n - 1) // 2                      # p + n - 1 samples, half-integer offsets
+    offsets = np.arange(-half, half) + 0.5       # -(half - 1/2) ... half - 1/2
+    w = fd_weights(n, offsets)
+    if stagger == "forward":                     # output at i + 1/2: sample i + s has offset s - 1/2
+        shifts = np.arange(-half + 1, half + 1)
+    else:                                        # output at i - 1/2: sample i + s has offset s + 1/2
+        shifts = np.arange(-half, half)
+    return shifts, w

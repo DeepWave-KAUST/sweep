@@ -2,7 +2,7 @@
 
 When you write a new equation's `func()` you reach for SWEEP's
 spatial-derivative operators — Laplacians, partial derivatives, staggered
-finite differences. This page lays out the three operator families, when to
+finite differences. This page lays out the operator families, when to
 pick each, and how to call them.
 
 You usually do **not** instantiate operators yourself — the base classes in
@@ -253,6 +253,38 @@ tensor once per call (`prepare_models`), and its step makes twelve RSG calls
 instead of eight: it is 2-D-3C, so `vy`, `sxy` and `syz` get the same
 backward / forward pairing.
 
+## Derivatives of any order
+
+`Derivative` takes the derivative of any order along one axis, at any even
+accuracy. Its stencil weights come from Fornberg's recursion, computed in exact
+rational arithmetic. Order 2 centred gives the same kernel as
+`separable_d2_2d`, and order 1 staggered the same as `StaggeredDerivative`, bit
+for bit. No equation uses it yet, so you construct it yourself:
+
+```python
+from sweep.operators import Derivative
+
+d3 = Derivative(3, accuracy=8, ndim=2, device="cuda")       # centred u_xxx
+d3s = Derivative(3, accuracy=8, stagger="forward")          # u_xxx at i + 1/2
+d1 = Derivative(1, accuracy=8)
+
+uxxx = d3.dx(u, hx)              # u: (B, 1, nz, nx)
+uxz = d1.dz(d1.dx(u, hx), hz)    # a mixed derivative composes
+```
+
+Where the result lands depends on the order. A centred stencil returns the
+derivative on the input's own grid points. An odd-order derivative can instead
+be staggered: `stagger="forward"` puts it half a cell after each point, as a
+staggered-grid system needs. A centred odd-order stencil returns zero for the
+sawtooth `(-1)**i`, so on its own it lets odd and even points decouple. Use it
+only where an odd derivative has to land on the field's own points, as in
+`u * u_x` or `u_xxx` in the equation of `u`.
+
+The operator applies no absorbing layer and takes the field as zero beyond the
+grid, like the other stencils. The stencil has `accuracy + order - 1` points
+for an even order or a staggered one, and `accuracy + order` for a centred odd
+order.
+
 ## Spacing helpers on the base class
 
 Every equation `func()` receives an `h` argument that may be a scalar
@@ -311,7 +343,7 @@ self.my_kernel = register_stencil(my_kernel)   # (1, 1, kz, kx) or (1, 1, kz, ky
 ## See also
 
 - [Operators API reference](../api/operators/index.md) — full signatures for
-  `LaplaceGradientOps`, `StaggeredDerivative`, `RSGDerivative`.
+  `LaplaceGradientOps`, `StaggeredDerivative`, `RSGDerivative`, `Derivative`.
 - [Extending: Adding a New Equation](extending.md) — full lifecycle of a new
   equation (`FIELD_SPECS`, registration, `C_NAME`, CUDA path).
 - [Add a new equation notebook](../notebooks/18_extending_add_new_equation.ipynb)

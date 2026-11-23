@@ -1,6 +1,6 @@
 # Operators
 
-This section documents the three spatial-derivative operator classes in
+This section documents the four spatial-derivative operator classes in
 `sweep.operators`. For the conceptual / how-to guide and decision tree see
 [Operators](../../user-guide/operators.md).
 
@@ -9,6 +9,7 @@ from sweep.operators import (
     LaplaceGradientOps,      # Laplacian + gradient bundle
     StaggeredDerivative,     # 1st-order staggered FD
     RSGDerivative,           # rotated staggered grid (2-D)
+    Derivative,              # any order, centred or staggered
 )
 ```
 
@@ -21,6 +22,7 @@ You usually do **not** instantiate these directly:
 - `RSGDerivative` is constructed explicitly by `ElasticTTI` as `self.rsg`
   (and also bound to `self.pd`); `ElasticTTISG` uses the `StaggeredDerivative`
   on `self.pd` instead.
+- `Derivative` is not wired into any equation yet; construct it yourself.
 
 ## LaplaceGradientOps
 
@@ -33,3 +35,7 @@ You usually do **not** instantiate these directly:
 ## RSGDerivative
 
 ::: sweep.operators.RSGDerivative
+
+## Derivative
+
+::: sweep.operators.Derivative

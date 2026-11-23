@@ -1,6 +1,6 @@
 """Spatial-derivative operators shared by the equation classes.
 
-Three operator families are exposed:
+Four operator families are exposed:
 
 - :class:`LaplaceGradientOps` — backend-dispatch bundle providing
   ``separable_d2_2d`` / ``separable_d2_3d`` (per-axis second-derivative
@@ -16,10 +16,14 @@ Three operator families are exposed:
   :class:`sweep.equations.base.FirstOrderEquation` as ``self.pd``.
 - :class:`RSGDerivative` — rotated-staggered-grid 2-D first-order derivatives
   with ``lx_fwd / lx_bwd / lz_fwd / lz_bwd``. Used by elastic TTI equations.
+- :class:`Derivative` — the general form of the first two: the derivative of
+  any order along one axis, any even accuracy, centred or (odd orders)
+  staggered, from Fornberg weights.
 """
 
 from .factory import LaplaceGradientOps
 from .general import StaggeredDerivative
 from .rsg import RSGDerivative
+from .derivative import Derivative
 
-__all__ = ["LaplaceGradientOps", "StaggeredDerivative", "RSGDerivative"]
+__all__ = ["LaplaceGradientOps", "StaggeredDerivative", "RSGDerivative", "Derivative"]
