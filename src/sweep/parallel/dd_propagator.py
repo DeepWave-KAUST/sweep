@@ -220,8 +220,23 @@ class ModelParallel:
     validated against, and a production escape hatch.  It used to be
     ``SWEEP_DD_DISABLE_OVERLAP=1`` in the environment; a set one is refused."""
 
+    def __new__(cls, prop=None, mesh=None, *args, **kwargs):
+        # An eager propagator is decomposed by sweep.parallel.eager_dd: tiles
+        # of the eager rollout with a differentiable halo exchange, no stepped
+        # kernels.  Same call, another class (its __init__ takes the eager
+        # keywords: exchange_steps=, halo=; overlap= is the stepped drivers').
+        from sweep.parallel.eager_dd import _is_eager
+        if prop is not None and _is_eager(prop):
+            from sweep.parallel.eager_dd import EagerModelParallel
+            return EagerModelParallel(prop, mesh, *args, **kwargs)
+        return super().__new__(cls)
+
     def __init__(self, prop, mesh: MeshTopology, *, halo: str = "nccl",
-                 overlap: bool = True) -> None:
+                 overlap: bool = True, balance: bool = False) -> None:
+        if balance is not False:
+            raise NotImplementedError(
+                "balance= is the eager tiles' switch (impl='eager'): the stepped drivers split "
+                "the axes uniformly (MeshTopology.local_extent). Leave it unset.")
         # How the halo strips travel between tiles each step. ``"nccl"``:
         # torch.distributed batch_isend_irecv on the tile group (any backend,
         # any number of nodes). ``"ipc"``: CUDA peer-to-peer through torch
