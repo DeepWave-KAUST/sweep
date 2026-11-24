@@ -53,6 +53,20 @@ coupling), is read at the time centre of ``f``'s step: its current value when
 before and after its update when ``g`` is updated earlier in the same sub-step
 (``g`` updated later in the same sub-step is refused).
 
+A second-order system may also hold first-order fields without a stagger
+(``Field("r", time_order=1)``): memory variables, as a standard linear solid
+holds its relaxation (``p.dt2 = vp**2 * (laplace(p) + r)``, ``r.dt = -r / tau
++ k * laplace(p)``). Such a field takes no spatial derivative of its own and
+no other memory field; its right-hand side is what a second-order equation
+admits of the second-order fields, plus a decay ``s * r``. It sits at the half
+time levels: from the terms at time ``n`` and the trapezoidal rule for the
+decay,
+
+    r^{n+1/2} = ((1 + s dt/2) r^{n-1/2} + dt * RHS^n) / (1 - s dt/2),
+
+and the second-order equations read it at time ``n`` as the mean
+``(r^{n-1/2} + r^{n+1/2}) / 2``; second order in ``dt``.
+
 Derivatives of order 3 and higher (``u.dx4``, ``v.dx3``) are admitted where
 their result lands on the field they update, and are taken with
 :class:`sweep.operators.Derivative` without a CPML correction:
@@ -122,11 +136,20 @@ class Lowered:
     d1: tuple = ()        # ((field, axis), ...) stretched first derivatives taken (mixed ones' too)
     mixed: tuple = ()     # ((field, a, b), ...) mixed derivatives taken
     model_derivs: tuple = ()   # ModelDerivs the coefficients use
+    memory: tuple = ()    # Updates of the memory fields (``damping``: the decay s of ``s * r``)
 
     @property
     def damped(self):
         """``((field, s), ...)`` of the fields with a damping ``s * f.dt``."""
         return tuple((u.field, u.damping) for u in self.updates if u.damping != 0)
+
+    @property
+    def memory_fields(self):
+        return tuple(u.field for u in self.memory)
+
+    @property
+    def all_fields(self):
+        return self.fields + self.memory_fields
 
 
 def _solve_for_dt(eq):
@@ -323,10 +346,6 @@ def lower(equations, ndim, models=None):
     :class:`LoweredFirst` for a first-order (staggered-grid) system."""
     solved = [(eq, *_solve_for_dt(eq)) for eq in equations]
     orders = {order for _, _, order, _ in solved}
-    if len(orders) > 1:
-        raise NotImplementedError(
-            "the system mixes first-order (f.dt) and second-order (f.dt2) fields; "
-            "mixed-order systems are not supported yet")
     if orders == {1}:
         for eq, _, _, rhs in solved:
             for op in rhs.atoms(Dm):
@@ -351,17 +370,43 @@ def _by_field(solved):
     return updates
 
 
+def _memory_field_checks(eq, field, d2, high, d1, mixed, local, memory):
+    """A memory field enters without derivatives, and a memory equation reads
+    no other memory field."""
+    for f, *rest in (*d2, *high, *d1, *mixed):
+        if f in memory:
+            raise NotImplementedError(
+                f"{eq}: a derivative of {f}, a first-order field in a second-order system; "
+                f"such a memory field enters the equations without derivatives ({f} itself)")
+    if field in memory:
+        for f in local:
+            if f in memory and f != field:
+                raise NotImplementedError(
+                    f"{eq}: {f}, another memory field, in the equation of {field}; a memory "
+                    "equation reads the second-order fields and its own field (a decay) only")
+
+
 def _lower_second_order(solved, ndim, models):
     axes = axes_of(ndim)
     updates = _by_field(solved)
-    fields = tuple(sorted(updates, key=lambda f: f._order))
+    for eq, field, order, _ in solved:
+        if order == 1 and field.stagger:
+            raise NotImplementedError(
+                f"{eq}: {field} is staggered ({field.stagger}); the first-order fields of a "
+                "second-order system (memory variables) sit on the integer nodes, stagger=None")
+    fields = tuple(sorted((f for f in updates if f.time_order == 2), key=lambda f: f._order))
+    memory = tuple(sorted((f for f in updates if f.time_order == 1), key=lambda f: f._order))
 
-    out, used, d2_taken, high_taken, d1_taken, mixed_taken = [], set(), [], [], [], []
+    out, mem_out, used = [], [], set()
+    taken = ([], [], [], [])   # d2, high, d1, mixed
     needs = []   # (eq, op text, field, axis): a first derivative needs f's second along axis
-    for field in fields:
+    for field in (*fields, *memory):
         eq, rhs = updates[field]
         rhs = _model_derivs(eq, rhs, ndim)
-        rhs, damping = _split_damping(eq, field, rhs)
+        if field in memory:
+            damping = sympy.S.Zero
+        else:
+            rhs, damping = _split_damping(eq, field, rhs)
         d2, high, local, d1, mixed = _decompose(eq, rhs, ndim)
         for f, *_ in (*d2, *high, *d1, *mixed):
             if f not in updates:
@@ -369,42 +414,16 @@ def _lower_second_order(solved, ndim, models):
         for f in local:
             if f not in updates:
                 raise ValueError(f"{eq}: field {f} has no equation of its own")
+        _memory_field_checks(eq, field, d2, high, d1, mixed, local, memory)
+        if field in memory:
+            damping = local.pop(field, sympy.S.Zero)
         for c in (*d2.values(), *high.values(), *local.values(), *d1.values(), *mixed.values(), damping):
             used |= c.free_symbols
-        groups = []
-        for f in fields:
-            by_coef = {}
-            for ax in axes:
-                c = d2.get((f, ax))
-                if c is None or c == 0:
-                    continue
-                by_coef.setdefault(c, []).append(ax)
-                if (f, ax) not in d2_taken:
-                    d2_taken.append((f, ax))
-            groups += [Group(c, f, tuple(a)) for c, a in by_coef.items()]
-        local_terms = tuple((local[f], f) for f in fields if f in local and local[f] != 0)
-        high_groups = _high_groups(high, fields, axes, high_taken)
-        d1_terms, mixed_terms = [], []
-        for f in fields:
-            for ax in axes:
-                c = d1.get((f, ax))
-                if c is not None and c != 0:
-                    d1_terms.append((c, f, ax))
-                    needs.append((eq, f"{f}.d{ax}", f, ax))
-                    if (f, ax) not in d1_taken:
-                        d1_taken.append((f, ax))
-            for (g, a, b), c in sorted(mixed.items(), key=lambda kv: (axes.index(kv[0][1]), axes.index(kv[0][2]))):
-                if g != f or c == 0:
-                    continue
-                mixed_terms.append((c, f, a, b))
-                needs.append((eq, f"{f}.d{a}.d{b}", f, b))
-                if (f, b) not in d1_taken:
-                    d1_taken.append((f, b))
-                if (f, a, b) not in mixed_taken:
-                    mixed_taken.append((f, a, b))
-        out.append(Update(field, tuple(groups), local_terms, high_groups, damping,
-                          tuple(d1_terms), tuple(mixed_terms)))
+        up = _second_update(eq, field, fields, memory, axes, d2, high, local, d1, mixed, damping,
+                            taken, needs)
+        (mem_out if field in memory else out).append(up)
 
+    d2_taken, high_taken, d1_taken, mixed_taken = taken
     for eq, text, f, ax in needs:
         if (f, ax) not in d2_taken:
             raise ValueError(
@@ -421,7 +440,47 @@ def _lower_second_order(solved, ndim, models):
     mderivs = sorted({s for s in used if isinstance(s, ModelDeriv)},
                      key=lambda s: (s.model._order, axes.index(s.axis)))
     return Lowered(ndim, fields, model_order, coefs, tuple(out), tuple(d2_taken), tuple(high_taken),
-                   tuple(d1_taken), tuple(mixed_taken), tuple(mderivs))
+                   tuple(d1_taken), tuple(mixed_taken), tuple(mderivs), tuple(mem_out))
+
+
+def _second_update(eq, field, fields, memory, axes, d2, high, local, d1, mixed, damping, taken, needs):
+    """The :class:`Update` of ``field`` from its decomposed right-hand side;
+    records the derivatives taken in ``taken`` and the second derivatives the
+    first and mixed ones need in ``needs``."""
+    d2_taken, high_taken, d1_taken, mixed_taken = taken
+    groups = []
+    for f in fields:
+        by_coef = {}
+        for ax in axes:
+            c = d2.get((f, ax))
+            if c is None or c == 0:
+                continue
+            by_coef.setdefault(c, []).append(ax)
+            if (f, ax) not in d2_taken:
+                d2_taken.append((f, ax))
+        groups += [Group(c, f, tuple(a)) for c, a in by_coef.items()]
+    local_terms = tuple((local[f], f) for f in (*fields, *memory) if f in local and local[f] != 0)
+    high_groups = _high_groups(high, fields, axes, high_taken)
+    d1_terms, mixed_terms = [], []
+    for f in fields:
+        for ax in axes:
+            c = d1.get((f, ax))
+            if c is not None and c != 0:
+                d1_terms.append((c, f, ax))
+                needs.append((eq, f"{f}.d{ax}", f, ax))
+                if (f, ax) not in d1_taken:
+                    d1_taken.append((f, ax))
+        for (g, a, b), c in sorted(mixed.items(), key=lambda kv: (axes.index(kv[0][1]), axes.index(kv[0][2]))):
+            if g != f or c == 0:
+                continue
+            mixed_terms.append((c, f, a, b))
+            needs.append((eq, f"{f}.d{a}.d{b}", f, b))
+            if (f, b) not in d1_taken:
+                d1_taken.append((f, b))
+            if (f, a, b) not in mixed_taken:
+                mixed_taken.append((f, a, b))
+    return Update(field, tuple(groups), local_terms, high_groups, damping,
+                  tuple(d1_terms), tuple(mixed_terms))
 
 
 def _split_damping(eq, field, rhs):

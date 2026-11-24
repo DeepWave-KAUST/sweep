@@ -43,6 +43,7 @@ equations this way, each in a notebook that animates its wavefield.
 | `Coefficient("mu", rho * vs**2)` | a coefficient derived from the models, computed once per run before the time loop |
 | `Field("p", source=, receiver=, aliases=, description=)` | a second-order wavefield; its name is what `source_type` / `receiver_type` take |
 | `Field("vx", time_order=1, stagger="x", ...)` | a field of a first-order system, half a cell after the node along x (see below) |
+| `Field("r", time_order=1)` | in a second-order system: a memory field, without derivatives of its own (see below) |
 | `p.dt2`, `vx.dt` | second / first time derivative (`p.dt` next to `p.dt2`: a damping, see below) |
 | `p.dz2`, `p.dy2`, `p.dx2` | second derivative along one axis (second-order fields; in a first-order system, of the field itself: a dissipative term) |
 | `laplace(p)` | sum of the second derivatives over every axis of the build |
@@ -156,6 +157,52 @@ Some limits:
   outermost `M` cells next to an absorbing face, as for every equation (see
   [Boundary saving next to the PML](propagators.md#bs-near-pml)). A model derivative reads the PML cells, so there the
   `rho` gradient is about 1e-3 off (7e-4 in the test).
+
+### Memory fields
+
+A second-order system may hold first-order fields on the integer nodes,
+`Field("r", time_order=1)` without a `stagger`: memory variables. A standard
+linear solid in the second-order form:
+
+```python
+tau, k = Model("tau"), Model("k")
+r = Field("r", time_order=1)
+
+SLS = PDE([
+    Eq(p.dt2, vp**2 * (laplace(p) + r)),
+    Eq(r.dt, -r / tau + k * laplace(p)),
+], name="SLSAcoustic").build(ndim=2)
+```
+
+A memory equation's right-hand side holds what a second-order equation admits
+of the second-order fields (second, first, mixed and higher derivatives, the
+fields themselves) plus a decay `s * r` of its own field. The second-order
+equations read the memory fields without derivatives. With `k < 0` the
+unrelaxed modulus is `vp^2` and the relaxed one `vp^2 (1 + k tau)`.
+
+A memory field sits at the half time levels. Its step takes the terms at time
+`n`, from the derivatives the second-order fields take anyway, and the decay
+by the trapezoidal rule:
+
+```text
+r^{n+1/2} = ((1 + s dt/2) r^{n-1/2} + dt R^n) / (1 - s dt/2)
+```
+
+The second-order equations read `(r^{n-1/2} + r^{n+1/2}) / 2` at time `n`,
+which keeps the step second order in `dt`. A memory field adds one wavefield;
+`laplace(p)` in both equations is computed and summed once. A memory field
+can be recorded (`receiver=True`); it starts at zero.
+
+Some limits:
+
+- A memory field takes no spatial derivative, and a memory equation reads no
+  other memory field. Several memory fields, each driven by the second-order
+  fields, are fine (several relaxation mechanisms).
+- A staggered first-order field next to second-order fields is refused; that is
+  a first-order system.
+- A system with a memory field refuses `BoundarySaving()`: its backward
+  rebuild does not step the half time levels. A decay also makes the step
+  lossy; `DAMPING_TERMS` names it (`"-r/tau"`).
 
 ## First-order systems
 
@@ -380,7 +427,8 @@ term. Mixed derivatives above the second (`u.dx2.dz`) are not supported.
   first time derivative (centred in time, no boundary saving); first and mixed
   second derivatives (`p.dx`, `p.dz.dx`), centred, where the field's second
   derivative along the axis is in the system; first derivatives of models
-  (`rho.dx`) in coefficients.
+  (`rho.dx`) in coefficients; memory fields, first-order fields without a
+  stagger or derivatives of their own (half time levels, no boundary saving).
 - First-order systems; each right-hand side a model-only coefficient times
   first derivatives of the other fields, or a sum of such terms, plus
   dissipative terms: a model-only coefficient times second derivatives of the
@@ -402,8 +450,8 @@ term. Mixed derivatives above the second (`u.dx2.dz`) are not supported.
 
 Everything else raises when the `PDE` is constructed, with the reason: a first
 or mixed derivative of a field without its second derivative along that axis,
-a system mixing first- and
-second-order fields, the first time derivative of another field (`q.dt` in
+a staggered first-order field next to second-order fields, a derivative of a
+memory field, another memory field in a memory equation, the first time derivative of another field (`q.dt` in
 `p`'s equation), terms nonlinear in
 the fields, terms without a field (sources are injected by the propagator),
 symbols that are neither models nor coefficients, a field used without its own
@@ -462,11 +510,12 @@ uncompiled rollout computes each once, as the shipped equations do.
 | Generated | From |
 | --- | --- |
 | `MODEL_SPECS` | the models the equations use (coefficients included) |
-| `FIELD_SPECS` | second order: each field and its previous time level (`p`, `p_prev`), then the CPML memory fields of each second derivative taken (`psix`, `zetax`, ...; suffixed with the field name in a system). First order: each field, then one CPML memory field per derivative taken (`m_vx_z` for `vx.dz`) |
+| `FIELD_SPECS` | second order: each field and its previous time level (`p`, `p_prev`), then the memory fields (`r`), then the CPML memory fields of each second derivative taken (`psix`, `zetax`, ...; suffixed with the field name in a system). First order: each field, then one CPML memory field per derivative taken (`m_vx_z` for `vx.dz`) |
 | `default_source_fields` / `default_receiver_fields` | the first field with `source=True` / `receiver=True` |
 | `prepare_models` | the coefficients, if any |
 | `func` | the time step |
 | `interior_substeps` | first order: the sub-steps without CPML, for eager boundary saving; not for a system with dissipative terms |
+| `MEMORY_FIELDS` | second order: the memory fields, which follow the second-order fields in `FIELD_SPECS` and make the class refuse boundary saving |
 | `DISSIPATIVE_TERMS` | first order: the dissipative terms (`"nu*laplace(vx)"`, ...), which make the class refuse boundary saving |
 
 `build(ndim, register=True)` also registers the class under `name`, so
@@ -508,6 +557,9 @@ in [Extending](extending.md#part-2-adding-a-compiled-cuda-kernel-implc).
 | Variable density at constant density vs `Acoustic` / `Acoustic3D` | 2-D record 1.6e-6, `vp` gradient 6.8e-7 (`rho.dx` of a constant is round-off, not 0); 3-D bit for bit |
 | Variable density with a mixed term vs a manufactured solution (8th order, fp64, dt = 0.2 h) | 9.4e-5 at 48², 2.3e-5 at 96², 5.8e-6 at 192² (second order: dt dominates) |
 | Variable density and elliptic TTI, `Ckpt()` and `BoundarySaving()` vs `Full()` | records bit for bit; `Ckpt()` gradients to 2.7e-7; `BoundarySaving()` 1.5e-7 to 6.2e-7 away from the outermost 2 cells (`rho` 7e-4 there) |
+| Standard linear solid on a line, a Gaussian at rest vs the exact solution (8th order, fp64, `tau = 5`, `k tau = -0.2`) | 9.3e-4 at dt 0.2, 2.3e-4 at dt 0.1 (second order) |
+| Standard linear solid with `k = 0` vs the plain class | record and gradient bit for bit, 2-D and 3-D |
+| Standard linear solid `Ckpt()` vs `Full()`; with a free surface | records bit for bit, gradients to 1e-5; runs, gradients finite |
 | `cpml_strips` vs whole memory (elliptic TTI) | record bit for bit, gradients 2e-9 to 1.5e-7 |
 | `torch.compile(fullgraph=True)` | one graph per step |
 

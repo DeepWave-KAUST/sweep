@@ -215,6 +215,13 @@ and this project adheres to
   `epsilon = delta` to 2.4e-6. A first or mixed derivative needs the field's
   second derivative along that axis. `cpml_stretch` in `equations/_cpml.py`
   reads strip-held memory. `test/test_symbolic_mixed_derivatives.py`.
+- **`sweep.symbolic`: memory fields in second-order systems.** A first-order
+  field without a stagger, `Field("r", time_order=1)`, next to second-order
+  fields: `p.dt2 = vp**2 * (laplace(p) + r)`, `r.dt = -r / tau + k *
+  laplace(p)`, a standard linear solid. The memory field sits at the half time
+  levels and the second-order fields read the mean around their time (second
+  order in `dt`). It takes no derivative of its own; the class refuses
+  `BoundarySaving()`. `test/test_symbolic_mixed_order.py`.
 - **Agent Skill for AI coding assistants** in `skills/sweep-solver/`
   ([agentskills.io](https://agentskills.io) format): a `SKILL.md` entry point
   plus on-demand references (equations, propagators, boundaries, gradients,

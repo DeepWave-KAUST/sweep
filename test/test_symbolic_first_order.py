@@ -381,7 +381,7 @@ GOOD_P = Eq(p1.dt, -rho * vp**2 * (ux.dx + uz.dz))
     ([Eq(ux.dt, -p1.dx / rho + p1.dx * ux.dx2), Eq(uz.dt, -p1.dz / rho), GOOD_P], ValueError, "not linear"),
     ([Eq(p1.dt, vp * laplace(p1) + vp)], ValueError, "contains no field"),
     ([Eq(ux.dt, -p1.dx / rho), Eq(uz.dt, -p1.dz / rho), GOOD_P, Eq(p2.dt2, vp**2 * laplace(p2))],
-     NotImplementedError, "mixes first-order"),
+     NotImplementedError, "staggered"),
     ([Eq(ux.dt, ux.dx), Eq(p1.dt, ux.dx)], ValueError, "derivative of itself"),
     ([Eq(ux.dt, -p1.dx / rho), Eq(p1.dt, ux.dx), Eq(ux_before.dt, -p1.dx / rho)], NotImplementedError,
      "two positions"),

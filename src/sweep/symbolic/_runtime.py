@@ -55,8 +55,11 @@ class SymbolicSecondOrderEquation(SecondOrderEquation):
     DEFAULT_RECEIVER_FIELDS = ()
     # ((order, stagger), ...) of the derivatives of order 3 and higher.
     HIGH_ORDER_STENCILS = ()
-    # The damping terms (``b*p.dt``) as text; empty without one.
+    # The damping terms (``b*p.dt``, a memory field's decay ``-r/tau``) as
+    # text; empty without one.
     DAMPING_TERMS = ()
+    # The first-order fields (memory variables) of a mixed-order system.
+    MEMORY_FIELDS = ()
 
     _fs_active = False
     # Appended by the propagator to its refusal of a topography on a PDE built
@@ -82,7 +85,15 @@ class SymbolicSecondOrderEquation(SecondOrderEquation):
     # See SymbolicFirstOrderEquation.supports_boundary_saving_eager.
     @property
     def supports_boundary_saving_eager(self):
-        return _refuse_lossy_boundary_saving(type(self), self.DAMPING_TERMS)
+        _refuse_lossy_boundary_saving(type(self), self.DAMPING_TERMS)
+        if self.MEMORY_FIELDS:
+            raise NotImplementedError(
+                f"{type(self).__name__} cannot use boundary saving: its memory field"
+                f"{'s' if len(self.MEMORY_FIELDS) > 1 else ''} {', '.join(self.MEMORY_FIELDS)} "
+                f"sit{'' if len(self.MEMORY_FIELDS) > 1 else 's'} at the half time levels, which "
+                "the backward rebuild of boundary saving "
+                "does not step. Use memory=Full() or memory=Ckpt().")
+        return True
 
     @property
     def default_source_fields(self):

@@ -115,7 +115,7 @@ linked at the bottom of this page.
     Equations written with `sweep.symbolic`, from acoustic and elastic waves to
     Maxwell, shallow water, MHD, heat flow and flexural plates.
 
-    [:octicons-arrow-right-24: 15 notebooks](symbolic/index.md)
+    [:octicons-arrow-right-24: 16 notebooks](symbolic/index.md)
 
 -   [![Sensitivity & resolution](../figures/gallery/21_radiation_elastic.png){ loading=lazy }](sensitivity/index.md)
 

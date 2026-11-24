@@ -178,4 +178,14 @@ batch of shots on a 2-D grid and animates the wavefield. The
 
     [:material-notebook-outline: Open notebook](../../notebooks/83_symbolic_damped_acoustic.ipynb)
 
+-   ![Viscoacoustic · memory variable](../../figures/gallery/85_symbolic_sls_viscoacoustic.png){ loading=lazy }
+
+    **Viscoacoustic · memory variable**
+
+    ---
+
+    A standard linear solid: a first-order memory field `r` beside `p_tt`; attenuation and dispersion.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/85_symbolic_sls_viscoacoustic.ipynb)
+
 </div>

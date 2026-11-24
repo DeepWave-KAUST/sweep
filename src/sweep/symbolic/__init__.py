@@ -25,6 +25,10 @@ Supported so far:
   derivatives of models (``rho.dx``) in coefficients, all centred; any number
   of coupled fields; CPML on every second derivative; a pressure-release free
   surface (flat, per edge in 2-D, or image-method topography);
+* memory fields in a second-order system (``Field("r", time_order=1)``
+  without a stagger): no derivatives of their own, at the half time levels,
+  read as the mean around the second-order step (a standard linear solid);
+  boundary saving refused;
 * first-order staggered-grid systems (``Field(time_order=1, stagger=...)``,
   ``Eq(vx.dt, ...)``): each right-hand side a model-only coefficient times
   first derivatives of the other fields, taken as staggered differences; CPML
@@ -108,9 +112,10 @@ class PDE:
         if isinstance(low, LoweredFirst) and free_surface is not None:
             raise NotImplementedError(
                 f"free_surface={free_surface!r}: a first-order system takes no free surface yet")
-        if not any(f.source for f in low.fields):
+        fields = low.fields if isinstance(low, LoweredFirst) else low.all_fields
+        if not any(f.source for f in fields):
             raise ValueError("no field has source=True")
-        if not any(f.receiver for f in low.fields):
+        if not any(f.receiver for f in fields):
             raise ValueError("no field has receiver=True")
 
     def lower(self, ndim=2):

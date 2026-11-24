@@ -62,12 +62,13 @@ def _once(text):
     return f"once(invariants, {text!r}, lambda: {text})"
 
 
-def _coef_times(coef, rest):
+def _coef_times(coef, rest, dt="dt**2"):
     """``coef * dt**2 * rest`` with ``coef`` printed at multiplication
-    precedence and ``coef * dt**2`` made once per rollout."""
+    precedence and ``coef * dt**2`` made once per rollout (``dt`` for a memory
+    field's step)."""
     if coef == 1:
-        return f"dt**2 * {rest}"
-    c = f"{_printer.parenthesize(coef, PRECEDENCE['Mul'])} * dt**2"
+        return f"{dt} * {rest}"
+    c = f"{_printer.parenthesize(coef, PRECEDENCE['Mul'])} * {dt}"
     return f"{_once(c) if coef.free_symbols else c} * {rest}"
 
 
@@ -165,22 +166,26 @@ def generate(name, low, *, free_surface, pml, doc):
         specs.append(f"FieldSpec({_q(str(f))}{aliases}, description={_q(f.description)}, "
                      f"supports_source={f.source}, supports_receiver={f.receiver})")
         specs.append(f"FieldSpec({_q(nm.prev(f))}, description={_q(f'Previous time level of `{f}`.')}, internal=True)")
+    for f in low.memory_fields:
+        aliases = f", aliases={tuple(f.aliases)!r}" if f.aliases else ""
+        specs.append(f"FieldSpec({_q(str(f))}{aliases}, description={_q(f.description)}, "
+                     f"supports_source={f.source}, supports_receiver={f.receiver})")
     if use_cpml:
         for kind, namer in (("memory variable", nm.psi), ("auxiliary wavefield", nm.zeta)):
             for f, ax in nm.cpml:
                 specs.append(f"FieldSpec({_q(namer(f, ax))}, description={_q(f'CPML {kind} of the {ax}-derivative of `{f}`.')}, "
                              f"internal=True, boundary_related=True, cpml_axis={_q(ax)})")
-    names = [str(f) for f in low.fields] + [nm.prev(f) for f in low.fields]
+    names = [str(f) for f in low.all_fields] + [nm.prev(f) for f in low.fields]
     if use_cpml:
         names += [n(f, ax) for f, ax in nm.cpml for n in (nm.psi, nm.zeta)]
-    names += [a for f in low.fields for a in f.aliases]
+    names += [a for f in low.all_fields for a in f.aliases]
     names += [str(m) for m in low.models] + [a for m in low.models for a in m.aliases]
     names += [str(c) for c in low.coefficients]
     _check_names(names)
     models = _model_specs(low)
 
-    src_fields = [str(f) for f in low.fields if f.source]
-    rec_fields = [str(f) for f in low.fields if f.receiver]
+    src_fields = [str(f) for f in low.all_fields if f.source]
+    rec_fields = [str(f) for f in low.all_fields if f.receiver]
 
     # ---- the step -------------------------------------------------------------
     sp = ", ".join(f"_h{ax}" for ax in axes)
@@ -189,6 +194,7 @@ def generate(name, low, *, free_surface, pml, doc):
     state = []
     for f in low.fields:
         state += [str(f), nm.prev(f)]
+    state += [str(f) for f in low.memory_fields]
     if use_cpml:
         state += [f"_{n(f, ax)}" for n in (nm.psi, nm.zeta) for f, ax in nm.cpml]
     body.append(f"{', '.join(state)} = wavefields")
@@ -226,12 +232,15 @@ def generate(name, low, *, free_surface, pml, doc):
 
     # A group of several axes is summed into ``_w<k>``; a one-axis group is its
     # derivative.
-    groups = [g for up in low.updates for g in up.groups]
-    multi = [g for g in groups if len(g.axes) > 1]
-    sums = {id(g): d2_of(g.field, g.axes[0]) for g in groups}
-    sums.update({id(g): f"_w{k}" for k, g in enumerate(multi)})
-    body += [f"{sums[id(g)]} = 0." for g in multi]
-    temps += [sums[id(g)] for g in multi]
+    every = (*low.memory, *low.updates)
+    groups = [g for up in every for g in up.groups]
+    # Groups over the same axes of the same field (laplace(p) in two
+    # equations) share one sum.
+    multi = list(dict.fromkeys((g.field, g.axes) for g in groups if len(g.axes) > 1))
+    sums = {(g.field, g.axes): d2_of(g.field, g.axes[0]) for g in groups}
+    sums.update({key: f"_w{k}" for k, key in enumerate(multi)})
+    body += [f"{sums[key]} = 0." for key in multi]
+    temps += [sums[key] for key in multi]
     for f, ax in low.d2:
         if use_cpml:
             i = axis_index[ax]
@@ -240,7 +249,7 @@ def generate(name, low, *, free_surface, pml, doc):
             body.append(f"_d2{ax}_{f}, _{psi}_n, _{zeta}_n = cpml_axis_update(")
             body.append(f"    _lap{ax}_{f}, _d{ax}_{f}, _{psi}, _{zeta}, _a{ax}, _b{ax}, _db{ax}, h, {i},")
             body.append(f"    self.gradient, self.grad_kernels, _src_{f})")
-        body += [f"{sums[id(g)]} += {d2_of(f, ax)}" for g in multi if g.field == f and ax in g.axes]
+        body += [f"{sums[(g, axs)]} += {d2_of(f, ax)}" for g, axs in multi if g == f and ax in axs]
 
     # First derivatives, the CPML stretch of the second derivative along the
     # same axis applied ((1 + b) du + a psi, from psi before its update), and
@@ -266,21 +275,41 @@ def generate(name, low, *, free_surface, pml, doc):
     for f, ax, n in low.high:
         temps.append(_high_name(f, ax, n))
         body.append(f"{_high_name(f, ax, n)} = {_dn_call(f, ax, n, None, f'_h{ax}')}")
-    high = [g for up in low.updates for g in up.high]
-    hsums = {id(g): _high_name(g.field, g.axes[0], g.order) for g in high}
-    for k, g in enumerate(g for g in high if len(g.axes) > 1):
-        hsums[id(g)] = f"_v{k}"
+    high = [g for up in every for g in up.high]
+    hsums = {(g.field, g.axes, g.order): _high_name(g.field, g.axes[0], g.order) for g in high}
+    for k, (f, axs, n) in enumerate(dict.fromkeys((g.field, g.axes, g.order) for g in high if len(g.axes) > 1)):
+        hsums[(f, axs, n)] = f"_v{k}"
         temps.append(f"_v{k}")
-        body.append(f"_v{k} = {' + '.join(_high_name(g.field, ax, g.order) for ax in g.axes)}")
+        body.append(f"_v{k} = {' + '.join(_high_name(f, ax, n) for ax in axs)}")
+
+    def terms_of(up, dt):
+        terms = [_coef_times(g.coef, sums[(g.field, g.axes)], dt) for g in up.groups]
+        for c, g in up.local:
+            terms.append(_coef_times(c, mid.get(g, str(g)), dt))
+        terms += [_coef_times(g.coef, hsums[(g.field, g.axes, g.order)], dt) for g in up.high]
+        terms += [_coef_times(c, d1_of(g, ax), dt) for c, g, ax in up.d1]
+        terms += [_coef_times(c, f"_d{a}{b}_{g}", dt) for c, g, a, b in up.mixed]
+        return terms
+
+    # Memory fields, at the half time levels: r^{n+1/2} from r^{n-1/2} and the
+    # terms at time n; the second-order fields read the mean of the two.
+    mid = {}
+    for up in low.memory:
+        f = up.field
+        terms = terms_of(up, "dt")
+        if up.damping == 0:
+            rhs = str(f) + "".join(f" + {t}" for t in terms)
+        else:
+            rhs = _decayed_first(f, up.damping, terms)
+        body.append(f"_{f}_next = {rhs}")
+        if any(g == f for u in low.updates for _, g in u.local):
+            mid[f] = f"_{f}_mid"
+            temps.append(mid[f])
+            body.append(f"_{f}_mid = 0.5 * ({f} + _{f}_next)")
 
     for up in low.updates:
         f = up.field
-        terms = [_coef_times(g.coef, sums[id(g)]) for g in up.groups]
-        for c, g in up.local:
-            terms.append(_coef_times(c, str(g)))
-        terms += [_coef_times(g.coef, hsums[id(g)]) for g in up.high]
-        terms += [_coef_times(c, d1_of(g, ax)) for c, g, ax in up.d1]
-        terms += [_coef_times(c, f"_d{a}{b}_{g}") for c, g, a, b in up.mixed]
+        terms = terms_of(up, "dt**2")
         if up.damping == 0:
             rhs = f"2 * {f} - {nm.prev(f)}" + "".join(f" + {t}" for t in terms)
         else:
@@ -290,6 +319,7 @@ def generate(name, low, *, free_surface, pml, doc):
     out = []
     for f in low.fields:
         out += [f"_{f}_next", str(f)]
+    out += [f"_{f}_next" for f in low.memory_fields]
     if use_cpml:
         out += [f"_{n(f, ax)}_n" for n in (nm.psi, nm.zeta) for f, ax in nm.cpml]
     # The shipped equations compute these inside step_cpml(), which frees them
@@ -329,7 +359,8 @@ def generate(name, low, *, free_surface, pml, doc):
         f"    DEFAULT_RECEIVER_FIELDS = {tuple(rec_fields[:1])!r}",
         *([f"    HIGH_ORDER_STENCILS = {tuple(sorted({(n, None) for _, _, n in low.high}))!r}"]
           if low.high else []),
-        *([f"    DAMPING_TERMS = {damping_terms(low)!r}"] if low.damped else []),
+        *([f"    DAMPING_TERMS = {damping_terms(low)!r}"] if damping_terms(low) else []),
+        *([f"    MEMORY_FIELDS = {tuple(map(str, low.memory_fields))!r}"] if low.memory else []),
         '    default_pml_type = "cpmlr"',
         "    takes_invariants = True",
         *[f"    {fl}" for fl in flags],
@@ -350,8 +381,20 @@ def generate(name, low, *, free_surface, pml, doc):
 
 
 def damping_terms(low):
-    """The damping terms ``s * f.dt`` of a second-order system as text."""
-    return tuple(f"{sympy.sstr(s * sympy.Symbol(f'{f}.dt'))}" for f, s in low.damped)
+    """The damping terms ``s * f.dt`` of a second-order system, then the decays
+    ``s * r`` of its memory fields, as text."""
+    return (tuple(f"{sympy.sstr(s * sympy.Symbol(f'{f}.dt'))}" for f, s in low.damped)
+            + tuple(sympy.sstr(u.damping * u.field) for u in low.memory if u.damping != 0))
+
+
+def _decayed_first(f, decay, terms):
+    """``r_t = s r + R``, the decay by the trapezoidal rule, ``R`` at the time
+    centre: ``r_next = ((1 + s dt/2) r + dt R) / (1 - s dt/2)``; the two
+    factors are made once per rollout."""
+    half = decay * _DT / 2
+    a = _once(_printer.doprint(1 / (1 - half)))
+    b = _once(_printer.doprint(1 + half))
+    return f"{a} * ({b} * {f}" + "".join(f" + {t}" for t in terms) + ")"
 
 
 def _damped_second(f, prev, damping, terms):
