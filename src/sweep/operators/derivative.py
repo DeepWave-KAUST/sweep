@@ -4,7 +4,10 @@
 already use: the second derivative of ``separable_d2_2d/3d`` (order 2, centred)
 and the staggered first derivative of :class:`~sweep.operators.StaggeredDerivative`
 (order 1, ``stagger="forward"/"backward"``).  Any order, any even accuracy, built
-from Fornberg weights (:func:`sweep.scalars.fd_stencil`).
+from Fornberg weights (:func:`sweep.scalars.fd_stencil`).  In float32 the centred
+second derivative takes the equations' coefficients instead
+(:func:`sweep.scalars.second_derivative_coefficients_fp32`, rounded to sum to zero
+exactly, so a constant gives zero), which keeps it bitwise ``separable_d2_2d/3d``.
 
 Where the result lands: a centred stencil returns the derivative on the input's
 own grid points.  An odd-order derivative may instead be staggered: it moves the
@@ -22,9 +25,10 @@ whose backward keeps only the kernel (``sweep.operators.torch``).
 """
 from __future__ import annotations
 
+import numpy as np
 import torch
 
-from sweep.scalars import fd_stencil
+from sweep.scalars import fd_stencil, second_derivative_coefficients_fp32
 
 _AXES = {2: ("z", "x"), 3: ("z", "y", "x")}
 
@@ -59,6 +63,14 @@ class Derivative:
         taps = torch.zeros(2 * self.halo + 1, dtype=torch.float64)
         taps[torch.as_tensor(self.shifts + self.halo)] = torch.as_tensor(self.weights)
         self._taps = taps
+        # Order 2 centred in float32: the equations' second-derivative
+        # coefficients, whose float32 values sum to zero exactly.  Float64
+        # keeps the Fornberg weights: rounded to float32 they would cap its
+        # accuracy near 1e-8.
+        self._taps_fp32 = None
+        if self.order == 2 and stagger is None:
+            c0, c = second_derivative_coefficients_fp32(self.accuracy)
+            self._taps_fp32 = torch.as_tensor(np.concatenate([c[::-1], [c0], c]), dtype=torch.float64)
         self.kernels = {}
         self.to(device, dtype)
 
@@ -70,7 +82,8 @@ class Derivative:
         device = device if device is not None else (ref.device if ref is not None else "cpu")
         dtype = dtype if dtype is not None else (ref.dtype if ref is not None else torch.float32)
         axes = _AXES[self.ndim]
-        k1d = self._taps.to(device=device, dtype=dtype)
+        taps = self._taps_fp32 if dtype == torch.float32 and self._taps_fp32 is not None else self._taps
+        k1d = taps.to(device=device, dtype=dtype)
         self.kernels = {}
         for i, ax in enumerate(axes):
             shape = [1, 1] + [1] * self.ndim

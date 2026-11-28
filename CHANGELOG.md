@@ -301,8 +301,10 @@ and this project adheres to
   rational arithmetic (`sweep.scalars.fd_weights`, `fd_stencil`): centred for
   any order, or half a cell forward or backward for an odd order (the
   staggered-grid convention). Order 2 centred is bitwise the second derivative
-  of `separable_d2_2d/3d`, and order 1 staggered is bitwise
-  `StaggeredDerivative`; mixed derivatives compose (`d.dz(d.dx(u))`). It runs
+  of `separable_d2_2d/3d` in float32, where it takes the equations' zero-sum
+  float32 coefficients (float64 keeps the exact weights), and order 1
+  staggered is bitwise `StaggeredDerivative`; mixed derivatives compose
+  (`d.dz(d.dx(u))`). It runs
   as a conv uncompiled and as fused slices under `torch.compile`, with no
   absorbing layer. `test/test_fd_derivative.py`.
 - **`sweep.symbolic`: derivatives of order 3 and higher.** `u.dx3`, `u.dz4`,
