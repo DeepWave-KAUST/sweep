@@ -103,7 +103,7 @@ def register_stencil(kernel):
     spatial = tuple(kernel.shape[2:])
     if any(s % 2 == 0 for s in spatial):
         return kernel
-    k = kernel.detach().to("cpu", torch.float64).sum(dim=0)[0]
+    k = kernel.detach().cpu().to(torch.float64).sum(dim=0)[0]
     centre = [s // 2 for s in spatial]
     taps = tuple(
         (tuple(i - c for i, c in zip(idx, centre)), float(k[tuple(idx)]))
