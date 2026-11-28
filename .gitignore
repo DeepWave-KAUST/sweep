@@ -50,3 +50,4 @@ site/
 # written next to the notebooks when nb12 / nb15 run
 docs/notebooks/fwi_ddp.py
 docs/notebooks/15_wavefield_topography.gif
+docs/notebooks/86_symbolic_devices.png

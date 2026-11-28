@@ -35,6 +35,12 @@ with `Full()`, `Ckpt()` or `BoundarySaving()`. Like the shipped `Acoustic` and
 The [Symbolic PDEs examples](../examples/symbolic/index.md) write twelve
 equations this way, each in a notebook that animates its wavefield.
 
+A generated class runs wherever eager PyTorch runs. `device="cuda"` above is
+one choice: `"cpu"` and, on Apple silicon, `"mps"` work the same way, with the
+equation's `device=`, the propagator's `dev=` and the model tensors on the same
+device. The [CPU, CUDA or MPS](../notebooks/86_symbolic_devices.ipynb) notebook
+runs one PDE on every device the machine has and compares them.
+
 ## Writing a PDE
 
 | Object | Meaning |

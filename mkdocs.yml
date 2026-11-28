@@ -208,6 +208,7 @@ nav:
               - Damped acoustic · telegraph: notebooks/83_symbolic_damped_acoustic.ipynb
               - Variable density · tilted anisotropy: notebooks/84_symbolic_variable_density_tti.ipynb
               - Viscoacoustic · memory variable: notebooks/85_symbolic_sls_viscoacoustic.ipynb
+              - CPU, CUDA or MPS: notebooks/86_symbolic_devices.ipynb
           - Sensitivity & resolution:
               - examples/sensitivity/index.md
               - Acoustic · radiation (Vp, ρ): notebooks/20_radiation_acoustic.ipynb

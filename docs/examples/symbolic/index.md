@@ -189,3 +189,19 @@ batch of shots on a 2-D grid and animates the wavefield. The
     [:material-notebook-outline: Open notebook](../../notebooks/85_symbolic_sls_viscoacoustic.ipynb)
 
 </div>
+
+## Devices
+
+<div class="grid cards" markdown>
+
+-   ![CPU, CUDA or MPS](../../figures/gallery/86_symbolic_devices.png){ loading=lazy }
+
+    **CPU, CUDA or MPS**
+
+    ---
+
+    One PDE on every device torch finds; the three places that name the device, agreement to round-off, and timings.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/86_symbolic_devices.ipynb)
+
+</div>
