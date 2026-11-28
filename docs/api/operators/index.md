@@ -39,3 +39,7 @@ You usually do **not** instantiate these directly:
 ## Derivative
 
 ::: sweep.operators.Derivative
+
+## slice_stencils
+
+::: sweep.operators.torch.slice_stencils

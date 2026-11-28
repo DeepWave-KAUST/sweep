@@ -20,7 +20,7 @@ from sweep.equations._edges import (
     torch_pad_order,
     fs_faces_to_c_bitmask,
 )
-from sweep.propagator.options import BOUNDARY_DEFAULTS, CKPT_DEFAULTS, PROP_DEFAULTS
+from sweep.propagator.options import BOUNDARY_DEFAULTS, CKPT_DEFAULTS, PROP_DEFAULTS, check_boundary_compress
 
 class PropBase:
 
@@ -863,6 +863,8 @@ class PropBase:
             "ring_buffers": BOUNDARY_DEFAULTS.ring_buffers,
             "disk_async_read": BOUNDARY_DEFAULTS.disk_async_read,
             "tail_steps": None,
+            "compress": BOUNDARY_DEFAULTS.compress,
+            "compress_budget": BOUNDARY_DEFAULTS.compress_budget,
         }
 
         if config is None:
@@ -883,10 +885,18 @@ class PropBase:
                 raise ValueError("boundary_saving_config['tail_steps'] must be a positive int or None")
 
         if merged["storage"] == "gpu":
-            merged["transfer_interval"] = BOUNDARY_DEFAULTS.gpu_transfer_interval
+            if merged.get("compress"):
+                # The compressed device store is a ring: chunking knobs as on
+                # the staged storages, with the compressor's own defaults.
+                if merged["transfer_interval"] is None:
+                    merged["transfer_interval"] = BOUNDARY_DEFAULTS.compress_gpu_transfer_interval
+                if merged["ring_buffers"] is None:
+                    merged["ring_buffers"] = BOUNDARY_DEFAULTS.compress_gpu_ring_buffers
+            else:
+                merged["transfer_interval"] = BOUNDARY_DEFAULTS.gpu_transfer_interval
+                merged["ring_buffers"] = BOUNDARY_DEFAULTS.gpu_ring_buffers
             merged["pinned_memory"] = BOUNDARY_DEFAULTS.gpu_pinned_memory
             merged["disk_dir"] = None
-            merged["ring_buffers"] = BOUNDARY_DEFAULTS.gpu_ring_buffers
             merged["disk_async_read"] = BOUNDARY_DEFAULTS.disk_async_read
 
         if merged["storage"] == "cpu":
@@ -926,6 +936,14 @@ class PropBase:
             raise ValueError("boundary_saving_config['transfer_interval'] must be >= 1")
         if merged["ring_buffers"] < 1:
             raise ValueError("boundary_saving_config['ring_buffers'] must be >= 1")
+        # The legacy dict route drops the knobs its storage ignores
+        # (_applicable_boundary_knobs); compress_budget on 'disk' is one, so the
+        # shared check sees the default there and only the typed route refuses it.
+        if merged["storage"] == "disk":
+            merged["compress_budget"] = BOUNDARY_DEFAULTS.compress_budget
+        check_boundary_compress(merged["compress"], merged["compress_budget"], merged["storage"],
+                                merged["disk_async_read"], what="boundary_saving_config")
+        merged["compress_budget"] = float(merged["compress_budget"])
 
         return merged
 

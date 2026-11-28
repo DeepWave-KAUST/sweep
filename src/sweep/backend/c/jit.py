@@ -66,7 +66,22 @@ def _nvidia_pip_roots() -> list[str]:
     return [str(p) for p in getattr(nvidia, "__path__", [])]
 
 
-def _nvidia_pip_includes() -> list[str]:
+def _of_major(path: str, major: int | None) -> bool:
+    """Whether ``nvidia/<drawer>/{lib,include}`` belongs to CUDA ``major``: a
+    ``cu<N>`` drawer (the CUDA 13 layout) only when ``N == major``; the per-component
+    drawers of the CUDA 12 layout, and any drawer when ``major`` is None, always.
+    A mixed install (torch cu12 next to the cu13 wheels another package pulled in)
+    has both layouts side by side, and a link line that reaches ``nvidia/cu13/lib``
+    first links CUDA 13's ``libcudart_static.a`` into a core compiled by a CUDA 12
+    nvcc -- a core that a CUDA 12 driver then refuses on every call ("CUDA driver
+    version is insufficient for CUDA runtime version")."""
+    if major is None:
+        return True
+    m = _tag_major(os.path.basename(os.path.dirname(path)))
+    return m is None or m == major
+
+
+def _nvidia_pip_includes(major: int | None = None) -> list[str]:
     """Every ``nvidia/*/include`` dir from the pip CUDA wheels torch pulls in
     (cuda_runtime, cusparse, cublas, cudnn, … under CUDA 12; the one
     ``nvidia/cu13/include`` under CUDA 13 -- the glob covers both layouts) — so
@@ -74,6 +89,8 @@ def _nvidia_pip_includes() -> list[str]:
     incs: list[str] = []
     for base in _nvidia_pip_roots():
         for inc in sorted(glob.glob(os.path.join(base, "*", "include"))):
+            if not _of_major(inc, major):
+                continue
             incs.append(inc)
     return incs
 
@@ -86,7 +103,7 @@ def _pip_cuda_runtime_headers() -> bool:
     layout they landed in (``nvidia/cuda_runtime/include`` +
     ``nvidia/cuda_nvcc/include`` under CUDA 12, both in ``nvidia/cu13/include``
     under CUDA 13; :func:`_nvidia_pip_includes` lists either)."""
-    dirs = _nvidia_pip_includes()
+    dirs = _nvidia_pip_includes(_torch_cuda_major())
     return all(any(os.path.isfile(os.path.join(d, h)) for d in dirs)
                for h in ("cuda_runtime_api.h", os.path.join("crt", "host_defines.h")))
 
@@ -206,15 +223,17 @@ def _find_cuda_home() -> str | None:
     return result
 
 
-def _nvidia_pip_libs() -> list[str]:
+def _nvidia_pip_libs(major: int | None = None) -> list[str]:
     """``nvidia/*/lib`` dirs so the JIT link step finds libcudart etc. when there
     is no system CUDA toolkit (provided by torch's pip CUDA wheels: one dir per
     component under CUDA 12, the one ``nvidia/cu13/lib`` under CUDA 13 -- the
-    glob covers both layouts)."""
+    glob covers both layouts); with ``major``, only that CUDA major's (see
+    :func:`_of_major`)."""
     libs: list[str] = []
     for base in _nvidia_pip_roots():
         for lib in sorted(glob.glob(os.path.join(base, "*", "lib"))):
-            libs.append(lib)
+            if _of_major(lib, major):
+                libs.append(lib)
     return libs
 
 
@@ -487,7 +506,7 @@ def _preload_cufft(cuda_home: str | None) -> None:
     install never hands a cu13 core the cu12 runtime.  Nothing found: fall
     through to the dynamic loader silently."""
     import ctypes
-    dirs = _nvidia_pip_libs()
+    dirs = _nvidia_pip_libs(_torch_cuda_major())
     if cuda_home:
         dirs += [os.path.join(cuda_home, "lib64"), os.path.join(cuda_home, "lib")]
     soname = _cufft_soname(_torch_cuda_major())
@@ -598,6 +617,13 @@ def can_build() -> tuple[bool, str]:
 # --------------------------------------------------------------------------- #
 # source staging (dedupe object basenames)
 # --------------------------------------------------------------------------- #
+def _build_major(cuda_home: str | None) -> int | None:
+    """The CUDA major of the nvcc under ``cuda_home`` (torch's when it cannot be
+    asked): the one whose pip libraries a link line may reach."""
+    ver = _nvcc_version(os.path.join(cuda_home, "bin", "nvcc")) if cuda_home else None
+    return ver[0] if ver else _torch_cuda_major()
+
+
 def _cufft_link_flag(cuda_home: str) -> str:
     """``-lcufft`` when the toolkit ships the unversioned ``libcufft.so``; a
     pip-only toolkit (``nvidia-cufft-cu12``, or CUDA 13's ``nvidia-cufft``)
@@ -606,15 +632,16 @@ def _cufft_link_flag(cuda_home: str) -> str:
     for a CUDA 12 nvcc, ``.so.12`` for CUDA 13), never the other layout's on a
     mixed install; the shortest ``libcufft.so.*`` around is the last resort."""
     toolkit_libs = [os.path.join(cuda_home, "lib64"), os.path.join(cuda_home, "lib")]
-    for d in toolkit_libs + _nvidia_pip_libs():
+    major = _build_major(cuda_home)
+    pip = _nvidia_pip_libs(major)
+    for d in toolkit_libs + pip:
         if os.path.exists(os.path.join(d, "libcufft.so")):
             return "-lcufft"
-    ver = _nvcc_version(os.path.join(cuda_home, "bin", "nvcc"))
-    soname = _cufft_soname(ver[0] if ver else _torch_cuda_major())
-    for d in _nvidia_pip_libs() + toolkit_libs:
+    soname = _cufft_soname(major)
+    for d in pip + toolkit_libs:
         if soname and os.path.isfile(os.path.join(d, soname)):
             return f"-l:{soname}"
-    for d in _nvidia_pip_libs() + toolkit_libs:
+    for d in pip + toolkit_libs:
         sonames = sorted(glob.glob(os.path.join(d, "libcufft.so.*")), key=len)
         if sonames:
             return f"-l:{os.path.basename(sonames[0])}"
@@ -1045,7 +1072,8 @@ def _core_ninja(core_dir: Path, sources: list[str], inc: list[str], cuda_home: s
     cufft = _cufft_link_flag(cuda_home)
     if not cufft.startswith("-lcufft"):
         cufft = "-Xlinker " + cufft                     # -l:libcufft.so.<n> is the host linker's spelling
-    ldflags = " ".join([f"-L{shlex.quote(d)}" for d in _nvidia_pip_libs()] + [cufft])
+    ldflags = " ".join([f"-L{shlex.quote(d)}" for d in _nvidia_pip_libs(_build_major(cuda_home))]
+                       + [cufft])
     cflags = " ".join(_CORE_DEFINES + _gencode_flags() + _CORE_FLAGS + [f"-I{shlex.quote(d)}" for d in inc])
     lines = [f"nvcc = {nvcc}", f"cflags = {cflags}", "",
              "rule nvcc",
@@ -1348,7 +1376,7 @@ def load(compile_only: bool = False):
     if cuda_home:
         inc = inc + _toolkit_includes(cuda_home)
     else:
-        inc = inc + _nvidia_pip_includes()
+        inc = inc + _nvidia_pip_includes(_torch_cuda_major())
     building = _will_build(build_dir, core_shipped=core_so is not None)
     if building:
         target = _target_name()
@@ -1372,7 +1400,7 @@ def load(compile_only: bool = False):
         extra_include_paths=inc,
         extra_cflags=["-O3", "-Wno-attributes"],
         extra_ldflags=[f"-L{core_dir}", "-lsweep_core", f"-Wl,-rpath,{core_dir}"]
-                      + [f"-L{d}" for d in _nvidia_pip_libs()],
+                      + [f"-L{d}" for d in _nvidia_pip_libs(_build_major(cuda_home))],
         build_directory=str(build_dir),
         verbose=building,
     )

@@ -33,6 +33,7 @@
 #include "../../launch/by_order.cuh"
 #include "../../common/context.h"
 #include "../../common/acoustic.h"
+#include "../../operators/laplace.cuh"   // tap_diff
 
 namespace qp2d {
 
@@ -168,6 +169,9 @@ __device__ __forceinline__ Cell cell(const float* __restrict__ u,
 
     Cell c;
     const float u0 = u[idx];
+    // Lx, Lz summed, unlike the other stencils (operators/laplace.cuh): in difference form
+    // the Born pair's forward ran 3-6% slower on V100 at orders 6 and 8 (VTI), and its
+    // order-8 TTI instance took 136 registers on sm_70 (one block per SM, 35-40% slower).
     float Lx = -lc[0] * u0, Lz = -lc[0] * u0, Dux = 0.f, Duz = 0.f;
 #pragma unroll
     for (int k = 1; k <= (Order > 0 ? MS : 16); ++k) {
@@ -547,14 +551,18 @@ __global__ void qp_adjoint_apply(AcousticWavefieldPointer adj, Scratch scr,
     const float* __restrict__ lc = ctx.lap_coeff;
     const float* __restrict__ gc = ctx.grad_coeff;
 
-    float lx = -lc[0] * ((1.f + cpml.bx[ix]) * TX[idx]);
-    float lz = -lc[0] * ((1.f + cpml.bz[iz]) * TZ[idx]);
+    // L((1+b) T) in difference form around its centre tap (operators/laplace.cuh)
+    const float lx0 = (1.f + cpml.bx[ix]) * TX[idx];
+    const float lz0 = (1.f + cpml.bz[iz]) * TZ[idx];
+    float lx = 0.f, lz = 0.f;
     float gx = 0.f, gz = 0.f, ttx = 0.f, ttz = 0.f;
 #pragma unroll
     for (int k = 1; k <= (Order > 0 ? MS : 16); ++k) {
         if (Order <= 0 && k > M) break;
-        lx += lc[k] * ((1.f + cpml.bx[ix + k]) * TX[idx + k] + (1.f + cpml.bx[ix - k]) * TX[idx - k]);
-        lz += lc[k] * ((1.f + cpml.bz[iz + k]) * TZ[idx + k * nx] + (1.f + cpml.bz[iz - k]) * TZ[idx - k * nx]);
+        lx += lc[k] * (tap_diff((1.f + cpml.bx[ix + k]) * TX[idx + k], lx0)
+                     + tap_diff((1.f + cpml.bx[ix - k]) * TX[idx - k], lx0));
+        lz += lc[k] * (tap_diff((1.f + cpml.bz[iz + k]) * TZ[idx + k * nx], lz0)
+                     + tap_diff((1.f + cpml.bz[iz - k]) * TZ[idx - k * nx], lz0));
         gx += gc[k] * (DUX[idx - k] - DUX[idx + k]);
         gz += gc[k] * (DUZ[idx - k * nx] - DUZ[idx + k * nx]);
         ttx += gc[k] * (TX[idx - k] - TX[idx + k]);

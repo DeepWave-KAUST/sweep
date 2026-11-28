@@ -108,7 +108,8 @@ jobs:
       # The host core, built here rather than inside the first test that needs
       # it: about 5 min from scratch on a runner. The whole sweep_C drawer is
       # cached (staged sources and objects) under a key over everything the
-      # build reads -- csrc, the build code, the compiler, ninja -- so a run that
+      # build reads -- csrc, the build code, the compiler, ninja, the runner
+      # image (the depfiles name its system headers) -- so a run that
       # restores it finds nothing to build, and any change to those builds the
       # core from scratch.
       - name: Look up the host core's cache key

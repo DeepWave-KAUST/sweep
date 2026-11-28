@@ -1,11 +1,14 @@
 """The wavefield-snapshot buffer must not outlive the call that made it.
 
-``return_wavefield=True`` used to take its buffer from ``_workspace_cache``,
-which has no eviction policy, so a buffer whose size grows linearly in the
-number of snapshot steps -- and the default is EVERY step -- stayed pinned to
-the propagator for its whole lifetime. Because it was workspace, it then had to
-be cloned on the way out, so the path cost two copies of it at once.
+``return_wavefield=True`` used to take its buffer from a workspace cache on the
+propagator, which had no eviction policy, so a buffer whose size grows linearly
+in the number of snapshot steps -- and the default is EVERY step -- stayed
+pinned to the propagator for its whole lifetime. Because it was workspace, it
+then had to be cloned on the way out, so the path cost two copies of it at once.
 """
+import gc
+import weakref
+
 import numpy as np
 import pytest
 import torch
@@ -43,23 +46,14 @@ def _shoot(prop):
 
 
 def test_the_buffer_is_not_retained_after_the_call(prop):
-    _shoot(prop)
-    cache = getattr(prop._backend_impl, "_workspace_cache", {})
-    # the cache is keyed by (kind, shape, device, dtype), not by kind alone
-    kinds = {k[0] for k in cache}
-    assert "snapshots" not in kinds, (
+    _, snaps = _shoot(prop)
+    alive = weakref.ref(snaps)
+    del snaps
+    gc.collect()
+    assert alive() is None, (
         "the snapshot buffer is pinned to the propagator; it grows with the "
         "number of snapshot steps and nothing ever evicts it"
     )
-
-
-def test_the_returned_buffer_is_the_one_that_was_filled(prop):
-    """Returning workspace directly would hand the caller a buffer the next
-    call overwrites; returning a per-call allocation must not."""
-    _, snaps = _shoot(prop)
-    cache_ptrs = {t.data_ptr() for t in
-                  getattr(prop._backend_impl, "_workspace_cache", {}).values()}
-    assert snaps.data_ptr() not in cache_ptrs
 
 
 def test_two_calls_do_not_alias(prop):

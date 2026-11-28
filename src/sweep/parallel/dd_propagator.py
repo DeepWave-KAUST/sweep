@@ -64,6 +64,7 @@ from sweep.parallel.routing import (
     partition_global_coords,
 )
 from sweep.propagator.options import BoundarySaving
+from sweep.propagator._second_order import has_tangent, refuse_create_graph, refuse_forward_ad
 from sweep.parallel.pml import dd_cut_face_mask
 from sweep.propagator.torch import PropTorch, _device_type
 from sweep.propagator._stepped import (
@@ -155,7 +156,14 @@ class _DDForward(torch.autograd.Function):
         return rec.detach().clone()
 
     @staticmethod
+    def jvp(ctx, *tangents):
+        refuse_forward_ad("Domain decomposition (ModelParallel)",
+                          "its compiled kernels propagate no tangent field")
+
+    @staticmethod
     def backward(ctx, grad_record):
+        refuse_create_graph("Domain decomposition (ModelParallel)",
+                            "its backward is the compiled DD adjoint")
         ddp = ctx.ddp
         # _run_adjoint's contract is the raw CUDA layout and stays that way; the
         # conversion belongs at this boundary, mirroring _c.Wrapper.backward.
@@ -199,9 +207,57 @@ class ModelParallel:
     is a config carrier, not the compute object (constructing it is cheap — the
     big buffers are allocated lazily at forward, which only the per-tile solvers
     do).  ``mesh`` is the :class:`MeshTopology` (x-cut ``py=1``; 3-D may add a
-    y-cut ``py>1`` — see :func:`sweep.parallel.balanced_grid`)."""
+    y-cut ``py>1`` — see :func:`sweep.parallel.balanced_grid`).
 
-    def __init__(self, prop, mesh: MeshTopology) -> None:
+    ``halo`` is the transport of the per-step halo strips: ``"nccl"``
+    (default) or ``"ipc"`` (CUDA peer-to-peer through torch symmetric memory,
+    single node; see :mod:`sweep.parallel.fast_halo`).  Same values either way.
+
+    ``overlap`` (default True) lets the acoustic / VRZ forward run each step's
+    halo exchange on a comm stream while the interior computes, where the cut
+    geometry allows it.  ``overlap=False`` takes the serial step-then-exchange
+    loop instead: bit-identical, the reference the overlapped loop is
+    validated against, and a production escape hatch.  It used to be
+    ``SWEEP_DD_DISABLE_OVERLAP=1`` in the environment; a set one is refused."""
+
+    def __new__(cls, prop=None, mesh=None, *args, **kwargs):
+        # An eager propagator is decomposed by sweep.parallel.eager_dd: tiles
+        # of the eager rollout with a differentiable halo exchange, no stepped
+        # kernels.  Same call, another class (its __init__ takes the eager
+        # keywords: exchange_steps=, halo=; overlap= is the stepped drivers').
+        from sweep.parallel.eager_dd import _is_eager
+        if prop is not None and _is_eager(prop):
+            from sweep.parallel.eager_dd import EagerModelParallel
+            return EagerModelParallel(prop, mesh, *args, **kwargs)
+        return super().__new__(cls)
+
+    def __init__(self, prop, mesh: MeshTopology, *, halo: str = "nccl",
+                 overlap: bool = True, balance: bool = False) -> None:
+        if balance is not False:
+            raise NotImplementedError(
+                "balance= is the eager tiles' switch (impl='eager'): the stepped drivers split "
+                "the axes uniformly (MeshTopology.local_extent). Leave it unset.")
+        # How the halo strips travel between tiles each step. ``"nccl"``:
+        # torch.distributed batch_isend_irecv on the tile group (any backend,
+        # any number of nodes). ``"ipc"``: CUDA peer-to-peer through torch
+        # symmetric memory -- the sender writes straight into the neighbour's
+        # receive buffer and signals it on the stream, no torch.distributed
+        # call per step; bit-identical, single-node CUDA tile groups only, and
+        # it refuses (rather than falls back) where it cannot run. Checked here
+        # so a typo fails at construction, and again across the tile group when
+        # the first exchanger set is built (every rank must pass the same value).
+        from sweep.parallel.fast_halo import check_transport_name
+        self.halo = check_transport_name(halo)
+        # A switch between two schedules belongs in the config, where it is
+        # recorded with the run and a misspelling is refused; a set variable
+        # must not go unnoticed either.
+        if "SWEEP_DD_DISABLE_OVERLAP" in os.environ:
+            raise ValueError(
+                "SWEEP_DD_DISABLE_OVERLAP is no longer read: the serial step-then-exchange "
+                "forward is ModelParallel(prop, mesh, overlap=False). Unset it.")
+        if not isinstance(overlap, bool):
+            raise TypeError(f"overlap must be True or False, got {overlap!r}")
+        self.overlap = overlap
         # Read the global-problem spec off the single-domain propagator.
         # dh/dt are stored as buffer tensors (dh per-axis); recover plain Python
         # for the per-tile prop (scalar dh when the spacing is uniform).
@@ -281,6 +337,7 @@ class ModelParallel:
                 f"memory=BoundarySaving(...) (storage='gpu' is the default, "
                 f"'cpu' stages the ring to the host) and wrap that.")
         _bcfg = getattr(prop, "boundary_saving_config", None) or {}
+        self._bcfg = dict(_bcfg)
         self._bstorage = _bcfg.get("storage", "gpu")
         self._bdtype = _bcfg.get("storage_dtype", "fp32")
         # Boundary tail truncation (BoundaryOptions.tail_steps) is inherited
@@ -401,15 +458,13 @@ class ModelParallel:
         # when no source sits in a cut strip (checked per-call in forward).
         # Not gated on the device: a CPU tile takes the same phased loop, minus
         # the stream (see _run_dd_loop_overlapped).
-        # SWEEP_DD_DISABLE_OVERLAP=1 forces the serial step-then-exchange path —
-        # the bit-exact reference for validating the overlap, and a production
+        # overlap=False takes the serial step-then-exchange path instead — the
+        # bit-exact reference for validating the overlap, and a production
         # safety escape hatch.
         self._comm_stream = None
         self._comm_evt = None
-        _disable_overlap = os.environ.get("SWEEP_DD_DISABLE_OVERLAP", "") not in ("", "0")
-        self._overlap_ok = (self.world > 1 and self.cut_mask != 0
-                            and (self.cut_mask & ~0x3) == 0
-                            and not _disable_overlap)
+        self._overlap_ok = (self.overlap and self.world > 1 and self.cut_mask != 0
+                            and (self.cut_mask & ~0x3) == 0)
 
         self._captured = False
         # Two-stage capture. ``bp`` -- and every adjoint-side buffer derived from
@@ -493,7 +548,7 @@ class ModelParallel:
         from sweep.parallel.fast_halo import FastHaloSet
         cur = getattr(self, attr)
         if cur is None:
-            cur = {ax: FastHaloSet(self.mesh, self.M, (ax,))
+            cur = {ax: FastHaloSet(self.mesh, self.M, (ax,), self.halo)
                    for ax in self.axes}
             setattr(self, attr, cur)
         return cur
@@ -701,11 +756,13 @@ class ModelParallel:
         # dtype-tolerant (_repad_runtime_model casts each tile to the runtime
         # buffer's dtype), so a caller may hand a float64 model to any call
         # after the first; a promotion re-capture that inherited that dtype
-        # would build a float64 probe and the C kernel would reject it
-        # ("expected scalar type Float but found Double"). Pinning the dtype
+        # would build a float64 probe and the forward would refuse it
+        # (impl='c' takes float32 models). Pinning the dtype
         # makes a promoted instance land in exactly the state it would have
         # reached had it been gradient-capable from its first call. None on the
-        # first capture, so that one still infers from the tile as before.
+        # first capture, so that one still infers from the tile as before, and
+        # pinned only once a capture has run: a refused float64 first call that
+        # pinned float64 would rebuild that probe for every float32 call after.
         # The probe asks for exactly the gradients the caller asked for when the
         # compiled layout depends on them (cuda_layout_for_grads), so it binds
         # that layout; every other equation keeps the all-models probe.
@@ -713,7 +770,6 @@ class ModelParallel:
         models = [torch.tensor(t, device=self.dev, dtype=self._model_dtype,
                                requires_grad=need_adjoint and (not per_model or self._grad_mask[i]))
                   for i, t in enumerate(tiles)]
-        self._model_dtype = models[0].dtype
         # The ADJOINT probe is differentiated to grab the backward params, so it
         # needs grad MODE even when the caller has switched it off — but it only
         # ever runs once a gradient has actually been asked for, so the textbook
@@ -748,6 +804,7 @@ class ModelParallel:
         finally:
             impl.forward_func, impl.backward_bs_func = f_orig, b_orig
 
+        self._model_dtype = models[0].dtype
         self.fp, self.bp = cap["fp"], cap.get("bp")
         # The slot table of the layout the probe bound: per call for an equation
         # with cuda_layout_for_grads (AcousticBorn reconstructs 3 grids without
@@ -764,10 +821,12 @@ class ModelParallel:
         # ring_buffers then overlap nothing and storage='cpu' degenerates into
         # one un-overlapped PCIe round trip per step.  Handing the SAME session
         # to every step lets the copy issued in step ``it`` still be in flight
-        # while step ``it+1`` computes.  Only built for staged storage; the
-        # VRAM path is untouched (session stays None -> old behaviour).
+        # while step ``it+1`` computes.  Only built for staged storage -- which
+        # a compressed gpu ring is too: its chunks are compressed on the copy
+        # stream and a per-call runtime would flush the open chunk every step.
+        # The plain VRAM path is untouched (session stays None -> old behaviour).
         self._bsession = None
-        if self._bstorage != "gpu":
+        if self._bstorage != "gpu" or self._bcfg.get("compress"):
             try:
                 from sweep import _C as _sweep_C
                 self._bsession = _sweep_C.BoundarySession()
@@ -933,6 +992,28 @@ class ModelParallel:
                       for _ in range(self._illum_nvar)]
         self.bp.illum_out = self.illum
 
+    def boundary_compress_report(self):
+        """This rank's :func:`sweep.propagator._c.compress_report` of the
+        tile's compressed boundary store (``BoundarySaving(compress='bitcomp')``),
+        None without one or before the first call.  The store lives on the
+        captured tile params, not on the wrapped propagator, so read it here:
+        ``peak_ratio`` / ``budget_needed`` are the fullest segment of the last
+        call (what ``compress_budget`` must cover), ``ratio`` the chunks in
+        the arena now (after a backward: the first segment)."""
+        fp = getattr(self, "fp", None)
+        if fp is None or not fp.boundary_compress:
+            return None
+        from sweep.propagator._c import compress_report
+        impl = self.prop._backend_impl
+        return compress_report(list(fp.boundary_compress), list(fp.boundary_gpu), impl.ndim, impl.dev)
+
+    @property
+    def last_boundary_compress_ratio(self):
+        """uncompressed / packed bytes of the fullest segment the last call
+        kept packed on this rank (see :meth:`boundary_compress_report`), or None."""
+        rep = self.boundary_compress_report()
+        return None if rep is None else rep["peak_ratio"]
+
     def __call__(self, *args, **kwargs):
         """Alias for :meth:`forward` so a ``ModelParallel`` can be invoked like
         the single-domain ``PropTorch`` (``ddp(...)`` == ``ddp.forward(...)``).
@@ -1075,6 +1156,12 @@ class ModelParallel:
                 "ModelParallel does not return the wavelet gradient: the domain-decomposed "
                 "backward returns the model gradients only. Detach the wavelet, or take that "
                 "gradient from a single-domain PropTorch run.")
+        # A dual tensor (forward-mode AD) that does not require grad takes the
+        # plain stepped forward below, whose kernels carry no tangent: the record
+        # came back with the tangent dropped. Refused here, on every path.
+        if has_tangent(wavelet, *(models or ())):
+            refuse_forward_ad("Domain decomposition (ModelParallel)",
+                              "its compiled kernels propagate no tangent field")
         # ``torch.is_grad_enabled()`` is part of the predicate because
         # ``requires_grad`` is a TENSOR property, blind to grad mode: without it
         # a caller who writes ``with torch.no_grad(): ddp(..., models=[vp])``
@@ -1123,6 +1210,13 @@ class ModelParallel:
         # empty placeholder, because use_boundary_saving was never on)
         if self.bp is not None:
             self.bp.boundary_gpu = list(self.fp.boundary_gpu)
+            # the rest of the store travels with the ring: the staged faces
+            # and scales (storage='cpu'/'disk'), the fp32 staging of a scaled
+            # dtype, and the compression workspace (whose live-chunk flags
+            # and arena the backward reads)
+            self.bp.boundary_cpu = list(self.fp.boundary_cpu)
+            self.bp.boundary_staging = list(self.fp.boundary_staging)
+            self.bp.boundary_compress = list(self.fp.boundary_compress)
             self.bp.u_last_two = self.fp.last_two
         # Return the SINGLE-CARD layout, (B, nt, nrec, nfield). The raw buffer
         # stays raw -- eq_driver.cuh TORCH_CHECKs record_out contiguous with
@@ -1454,7 +1548,7 @@ class ModelParallel:
         computes just the cut strips, the shipment starts on the comm stream,
         phase 2 computes the strict complement over it, and the join happens
         before the next step's phase 1. Bit-identical to the serial loop -- the
-        strips carry the same values either way -- so ``SWEEP_DD_DISABLE_OVERLAP``
+        strips carry the same values either way -- so ``overlap=False``
         selecting the serial variant is a usable reference, not a fallback.
         On a CPU device the same phases run without the stream.
         """
@@ -1637,6 +1731,14 @@ class ModelParallel:
             kwargs["ring_buffers"] = self._bring
         if self._bstorage == "cpu":
             kwargs["pinned_memory"] = self._bpinned
+        if self._bstorage == "disk":
+            kwargs["disk_async_read"] = bool(self._bcfg.get("disk_async_read", False))
+        # Ring compression (BoundarySaving.compress), inherited per tile like the
+        # dtype; its budget only where a storage reads it.
+        if self._bcfg.get("compress"):
+            kwargs["compress"] = self._bcfg["compress"]
+            if self._bstorage != "disk":
+                kwargs["compress_budget"] = float(self._bcfg.get("compress_budget", 0.75))
         return BoundarySaving(**kwargs)
 
     @property

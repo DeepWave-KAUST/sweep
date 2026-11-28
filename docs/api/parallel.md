@@ -15,6 +15,20 @@ Model-parallel / domain-decomposition entry points. Usage guide:
      which griffe's static collection cannot see -->
 ::: sweep.parallel.dd_propagator.ModelParallel
 
+## The eager propagator's tiles
+
+`ModelParallel(prop, mesh)` builds this class when `prop` is `impl="eager"`.
+
+::: sweep.parallel.eager_dd.EagerModelParallel
+
+::: sweep.parallel.eager_dd.step_reach
+
+::: sweep.parallel.eager_dd.exchange_plan
+
+::: sweep.parallel.eager_dd.admit
+
+::: sweep.parallel.eager_dd.decomposed_forward
+
 ## Mesh padding helpers
 
 ::: sweep.parallel.pad_to_mesh

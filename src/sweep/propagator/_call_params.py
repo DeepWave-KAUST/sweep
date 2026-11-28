@@ -78,6 +78,9 @@ class CompiledCallParams:
     # this call's mode); allocated per call.
     derived_model_nvar_forward: int = 0
     derived_model_nvar_backward: int = 0
+    # What the create_graph=True refusal of the compiled backward recommends
+    # (None: the default alternatives).
+    create_graph_instead: Any = None
     # Full-mode history shape (cuda_layout.save_all_shape at this batch), or
     # None when the compiled forward allocates its own.
     u_allt_shape: tuple = None
@@ -110,6 +113,9 @@ class CompiledCallParams:
     # from and dequantizes into (Layout.staging_shapes). () for fp32/bf16
     # storage, which never stages.
     boundary_staging: tuple = ()
+    # The nvCOMP workspace of BoundarySaving(compress='bitcomp'), flat byte
+    # buffers in saver.cuh bind_compress order; () when not compressing.
+    boundary_compress: tuple = ()
     boundary_disk_files: tuple = ()
     # Whether this call runs a backward, decided by the caller before
     # Wrapper.apply from grad mode and the inputs' requires_grad: inside the

@@ -118,7 +118,8 @@ per-face tuple, fixed at construction. See `references/boundaries.md`.
 
 **Gradient memory** (`memory=` from `sweep.propagator.options`): `Full()` (store everything,
 fastest backward), `BoundarySaving(storage="gpu"|"cpu"|"disk", storage_dtype=...)` (default on
-`impl='c'`; on a CPU device only `storage="gpu"`, i.e. on the compute device),
+`impl='c'`; on a CPU device only `storage="gpu"`, i.e. on the compute device; `compress="bitcomp"`
+packs the saved ring losslessly with nvCOMP on `impl='c'`, needs `nvidia-nvcomp-cu12`),
 `Ckpt(chunks=...)` (default on eager). See `references/gradients.md`.
 
 ## Conventions
@@ -163,7 +164,12 @@ fastest backward), `BoundarySaving(storage="gpu"|"cpu"|"disk", storage_dtype=...
    `backward()` per batch when memory is tight. `ModelParallel` refuses a forward (`no_grad`
    included) while a backward is pending.
 8. **No second backward on `impl='c'`** (`retain_graph=True` then `backward()` again raises):
-   run the forward again; for Hessian-vector products use eager with `memory=Full()`.
+   run the forward again. **`create_graph=True` raises** on `impl='c'`, `BoundarySaving()` and
+   the compiled eager step: exact Hessian-vector products need eager with
+   `EagerOptions(use_compile=False)` and `memory=Full()`/`Ckpt()`; at scale, take the exact
+   `H h` as a first-order gradient of the Born system, or difference two gradients. J h of
+   any eager equation comes from forward-mode AD (`torch.autograd.forward_ad`, uncompiled,
+   `Full()`); see `references/gradients.md` section 8.
 9. **TF32 on Ampere+ with `impl='eager'`:** cuDNN TF32 moves eager gradients by 1e-2..1e-1
    (3-D). Set `torch.backends.cudnn.allow_tf32 = False` (and `torch.backends.cuda.matmul.allow_tf32
    = False`) before comparing eager with `c` or with finite differences.

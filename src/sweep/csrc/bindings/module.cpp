@@ -431,6 +431,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("boundary_cpu", &ForwardInput::boundary_cpu)
         .def_readwrite("boundary_gpu", &ForwardInput::boundary_gpu)
         .def_readwrite("boundary_staging", &ForwardInput::boundary_staging)
+        .def_readwrite("boundary_compress", &ForwardInput::boundary_compress)
         .def_readwrite("boundary_disk_files", &ForwardInput::boundary_disk_files)
         .def_readwrite("checkpoints", &ForwardInput::checkpoints)
         .def_readwrite("checkpoint_steps", &ForwardInput::checkpoint_steps);
@@ -492,6 +493,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("boundary_cpu", &BackwardInput::boundary_cpu)
         .def_readwrite("boundary_gpu", &BackwardInput::boundary_gpu)
         .def_readwrite("boundary_staging", &BackwardInput::boundary_staging)
+        .def_readwrite("boundary_compress", &BackwardInput::boundary_compress)
         .def_readwrite("boundary_disk_files", &BackwardInput::boundary_disk_files)
         .def_readwrite("checkpoint_steps", &BackwardInput::checkpoint_steps)
         .def_readwrite("compute_illumination", &BackwardInput::compute_illumination)

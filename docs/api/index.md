@@ -84,6 +84,11 @@
       <p>3-D staggered grid.</p>
       <div class="sweep-api__card-models">models: <span class="sweep-api__chip orange">vp</span> <span class="sweep-api__chip orange">vs</span> <span class="sweep-api__chip orange">rho</span></div>
     </a>
+    <a class="sweep-api__card" href="equations/pseudoelastic_p/">
+      <div class="sweep-api__card-hd"><code>PseudoelasticP</code><div class="sweep-api__card-tags"><span>2D</span><span>1st-order</span></div></div>
+      <p>Pure P-mode: elastic PP amplitudes on the P-wave grid, no S waves (eager only).</p>
+      <div class="sweep-api__card-models">models: <span class="sweep-api__chip orange">vp</span> <span class="sweep-api__chip orange">vs</span> <span class="sweep-api__chip orange">rho</span></div>
+    </a>
   </div>
 </section>
 

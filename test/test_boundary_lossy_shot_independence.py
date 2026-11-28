@@ -25,8 +25,14 @@ Both need a grid whose per-shot band is not a multiple of 256 cells on some face
 
 The host (CPU) core runs the same savers with its own quantize loops, cut per
 shot the same way; it is checked in 2-D with on-device storage (it refuses host
-staging).  The eager backend lays its saved ring out per shot as well; its tests
-drive the ring store directly, on the CPU.
+staging).
+
+The staged copies run bounds-checked (``SWEEP_BOUNDARY_BOUNDS``): after a larger
+batch they copy inside buffers narrowed from it, which the check used to measure
+by their numel() and reject.
+
+The eager backend lays its saved ring out per shot as well; its tests drive the
+ring store directly, on the CPU.
 """
 
 import os
@@ -35,8 +41,11 @@ import numpy as np
 import pytest
 import torch
 
-from sweep.equations import Acoustic, Acoustic3D
-from sweep.propagator._eager_boundary_saving import (
+# Read once into a static on the first staged copy, so set before any runs.
+os.environ.setdefault("SWEEP_BOUNDARY_BOUNDS", "1")
+
+from sweep.equations import Acoustic, Acoustic3D  # noqa: E402
+from sweep.propagator._eager_boundary_saving import (  # noqa: E402
     ReconState,
     _put_ring,
     _ring_index_tuples,
@@ -46,8 +55,8 @@ from sweep.propagator._eager_boundary_saving import (
     save_step,
     save_steps,
 )
-from sweep.propagator.torch import PropTorch
-from sweep.signal import ricker
+from sweep.propagator.torch import PropTorch  # noqa: E402
+from sweep.signal import ricker  # noqa: E402
 
 
 cuda_only = pytest.mark.skipif(

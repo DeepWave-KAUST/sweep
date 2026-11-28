@@ -131,16 +131,17 @@ ForwardOutputCore forward_core(const ForwardInputCore& in) {
 
     int save_width = p.abcn > 0 ? p.M + 1 : p.M;
     EffectiveBoundarySaver boundary_saver;
+    SWEEP_CHECK(p.boundary_compress.empty(), "boundary compression (BoundarySaving(compress=...)) is not implemented on this driver");
     bool staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
     if (staged_boundary) {
         boundary_saver.allocate(
             p.use_boundary_saving, 3, rwi ? 2 : 1, ctx, vp, save_width, 2,
-            true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu, p.last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging
+            true, false, p.transfer_interval, p.boundary_cpu, p.boundary_gpu, p.last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging, p.boundary_compress
         );
     } else {
         boundary_saver.allocate(
             p.use_boundary_saving, 3, rwi ? 2 : 1, ctx, vp, save_width, 2,
-            true, true, 1, {}, p.boundary_gpu, p.last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging
+            true, true, 1, {}, p.boundary_gpu, p.last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging, p.boundary_compress
         );
     }
     auto bs = boundary_saver.view();

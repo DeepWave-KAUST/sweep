@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 from dataclasses import asdict, dataclass, fields, is_dataclass
 from sweep.core.arguments import warn_deprecated_spelling
 from typing import Any
@@ -48,6 +49,12 @@ class BoundaryDefaults:
     disk_dir: str | None = None
     ring_buffers: int | None = None
     disk_async_read: bool = False
+    compress: Literal["bitcomp"] | None = None
+    compress_budget: float = 0.75
+    # storage='gpu' with compress: the chunk the compressor sees (a 1-step
+    # chunk compresses poorly and costs a launch per step).
+    compress_gpu_transfer_interval: int = 16
+    compress_gpu_ring_buffers: int = 2
     gpu_transfer_interval: int = 1
     gpu_pinned_memory: bool = False
     gpu_ring_buffers: int = 1
@@ -215,12 +222,36 @@ class BoundaryOptions:
     # accordingly.  None = full-length backward (bit-exact legacy).
     # Currently impl='c' Acoustic/Acoustic3D with boundary saving only.
     tail_steps: int | None = None
+    # Lossless compression of the saved boundary (impl='c' only): every
+    # transfer_interval steps the ring chunk is run through nvCOMP Bitcomp on
+    # the copy stream and the packed bytes are what is kept -- in a device
+    # arena (storage='gpu'), a pinned host arena ('cpu') or one sparse file
+    # ('disk').  Lossless, so the gradient is bit-identical to the same
+    # storage_dtype without it; what it buys is bytes.  Measured (Overthrust
+    # 3-D acoustic / SEG-EAGE Salt 3-D / Marmousi2 2-D elastic) the packed
+    # ring is 52 / 37 / 28 % of an int8 ring, 54 / 43 / 28 % of fp16 and
+    # 60 / 52 / 33 % of fp32 (the coder is told the element width, so fp32
+    # packs by its exponent structure); the ratio of a run is
+    # ``propagator.last_boundary_compress_ratio``.  Needs the
+    # ``nvidia-nvcomp-cu12`` wheel (or SWEEP_NVCOMP_LIB); a missing library
+    # raises, nothing falls back.  storage='disk' needs disk_async_read=True.
+    compress: Literal["bitcomp"] | None = None
+    # storage='gpu' / 'cpu' with compress: the arena is allocated up front at
+    # this fraction of the uncompressed ring plus the int8/fp16 scales (kept
+    # as they are), since the packed size is only known as the forward runs;
+    # what the run saves is 1 - compress_budget of the ring.  It holds one
+    # fill of the ring (a segmented ring restarts it per refill).  A run whose packed bytes exceed it raises,
+    # naming the ratio it reached.  Not read by storage='disk' (the file is
+    # sparse), so a non-default value there is refused.
+    compress_budget: float = 0.75
 
     def __post_init__(self):
         if self.storage not in {"gpu", "cpu", "disk"}:
             raise ValueError("BoundaryOptions.storage must be 'gpu', 'cpu', or 'disk'.")
         if self.storage_dtype not in {"fp32", "fp16", "bf16", "int8"}:
             raise ValueError("BoundaryOptions.storage_dtype must be 'fp32', 'fp16', 'bf16', or 'int8'.")
+        check_boundary_compress(self.compress, self.compress_budget, self.storage,
+                                self.disk_async_read, what="BoundaryOptions")
         # Every storage location (gpu/cpu/disk) supports every storage_dtype,
         # including int8 (staged int8 uses a uint8 main + FP32 per-block scale
         # ring, with parallel uint8/scale files for disk).
@@ -231,13 +262,17 @@ class BoundaryOptions:
         if self.tail_steps is not None and self.tail_steps < 1:
             raise ValueError("BoundaryOptions.tail_steps must be >= 1 (or None).")
         if self.storage == "gpu":
-            if self.transfer_interval not in (None, 1):
+            # With compress the device store is a ring too (chunks are what gets
+            # compressed), so the chunking knobs apply there as on 'cpu'/'disk'.
+            if self.transfer_interval not in (None, 1) and self.compress is None:
                 raise ValueError(
-                    "BoundaryOptions.transfer_interval is only valid when storage='cpu' or storage='disk'."
+                    "BoundaryOptions.transfer_interval is only valid when storage='cpu' or "
+                    "storage='disk', or with compress='bitcomp'."
                 )
-            if self.ring_buffers not in (None, 1):
+            if self.ring_buffers not in (None, 1) and self.compress is None:
                 raise ValueError(
-                    "BoundaryOptions.ring_buffers is only valid when storage='cpu' or storage='disk'."
+                    "BoundaryOptions.ring_buffers is only valid when storage='cpu' or "
+                    "storage='disk', or with compress='bitcomp'."
                 )
             if self.pinned_memory:
                 raise ValueError(
@@ -257,6 +292,31 @@ class BoundaryOptions:
             )
 
 
+def check_boundary_compress(compress, compress_budget, storage, disk_async_read, what):
+    """The compress option's own rules, shared by the typed dataclass and the
+    legacy dict route (base.py ``_normalize_boundary_saving_config``) so a
+    config that one accepts the other accepts too."""
+    if compress not in (None, "bitcomp"):
+        raise ValueError(f"{what}.compress must be 'bitcomp' or None, got {compress!r}.")
+    if isinstance(compress_budget, bool) or not isinstance(compress_budget, (int, float)):
+        raise ValueError(f"{what}.compress_budget must be a number in (0, 1], got {compress_budget!r}.")
+    if not (0.0 < float(compress_budget) <= 1.0):
+        raise ValueError(f"{what}.compress_budget must be in (0, 1], got {compress_budget!r}.")
+    if compress is None and float(compress_budget) != BOUNDARY_DEFAULTS.compress_budget:
+        raise ValueError(
+            f"{what}.compress_budget is only read with compress='bitcomp' "
+            f"(got compress_budget={compress_budget!r} with compress=None).")
+    if compress is not None and storage == "disk":
+        if float(compress_budget) != BOUNDARY_DEFAULTS.compress_budget:
+            raise ValueError(
+                f"{what}.compress_budget is only read with storage='gpu' or 'cpu' "
+                "(the disk payload file is sparse and needs no budget).")
+        if not disk_async_read:
+            raise ValueError(
+                f"{what}: compress='bitcomp' with storage='disk' needs disk_async_read=True "
+                "(the packed chunks are fetched by the reader thread); pass it explicitly.")
+
+
 # The staging knobs only some storages accept; BoundaryOptions.__post_init__
 # refuses them anywhere else.  The legacy boundary_saving_config dict route
 # never validated them, so a config that set them once for every storage
@@ -267,16 +327,20 @@ _STORAGE_ONLY_KNOBS = {
     "ring_buffers": ("cpu", "disk"),
     "pinned_memory": ("cpu",),
     "disk_async_read": ("disk",),
+    "compress_budget": ("gpu", "cpu"),
 }
 
 
 def _applicable_boundary_knobs(knobs: dict) -> dict:
     """``knobs`` without the staging knobs its storage ignores (the legacy dict
     semantics).  The typed ``BoundarySaving(...)`` stays strict; this is for
-    reading a legacy dict only."""
+    reading a legacy dict only.  A compressed 'gpu' store is a ring, so the
+    chunking knobs apply to it as well."""
     storage = knobs.get("storage", BOUNDARY_DEFAULTS.storage)
+    ring = "gpu" if knobs.get("compress") else None
     return {k: v for k, v in knobs.items()
-            if storage in _STORAGE_ONLY_KNOBS.get(k, (storage,))}
+            if storage in _STORAGE_ONLY_KNOBS.get(k, (storage,))
+            or (storage == ring and k in ("transfer_interval", "ring_buffers"))}
 
 
 @dataclass
@@ -370,6 +434,28 @@ def _drop_none(value: Any) -> Any:
     return value
 
 
+# Retired: these used to set the storage dtype of the implicit default boundary
+# ring from the environment.  A setting that changes the numbers belongs in the
+# propagator's config, where it is recorded with the run and a misspelling is
+# refused; in the environment a misspelt name or value fell back to fp32
+# unnoticed.  A set one must not go unnoticed either, so it is an error.
+_RETIRED_BOUNDARY_DTYPE_ENV = ("SWEEP_BOUNDARY_DTYPE", "SWEEP_FP16_BOUNDARY")
+
+
+def refuse_retired_boundary_dtype_env():
+    """Raise if a retired boundary-dtype environment variable is set.
+
+    Called where every propagator resolves its gradient-memory mode
+    (:func:`resolve_memory_strategy`), so the error comes at construction on
+    every backend, and again where ``impl='c'`` allocates its ring."""
+    for k in _RETIRED_BOUNDARY_DTYPE_ENV:
+        if k in os.environ:
+            raise ValueError(
+                f"{k} is no longer read. The boundary storage dtype is part of the "
+                "propagator's config: memory=BoundarySaving(storage_dtype='fp16' | "
+                "'bf16' | 'int8'); the default ring is fp32. Unset it.")
+
+
 def resolve_memory_strategy(impl, memory=None, use_ckpt=None, boundary_saving_config=None):
     """Resolve the three-way gradient-memory mode: 'full' | 'boundary' | 'ckpt'.
 
@@ -390,6 +476,7 @@ def resolve_memory_strategy(impl, memory=None, use_ckpt=None, boundary_saving_co
     ('boundary' for impl='c', 'ckpt' otherwise) applies only when no
     gradient-memory knob was passed at all.
     """
+    refuse_retired_boundary_dtype_env()
     requests = {}
     exclude = set()
 
@@ -604,12 +691,14 @@ _MEMORY_CAPABILITIES = {
         "strategies": ("full", "boundary", "ckpt"),
         "boundary_storage": ("gpu", "cpu", "disk"),
         "boundary_tail_steps": True,
+        "boundary_compress": True,            # nvCOMP Bitcomp on the ring (boundary/nvcomp_shim.cuh)
         "ckpt_mode": ("chunk", "recursive"),
     },
     "eager": {
         "strategies": ("full", "boundary", "ckpt"),
         "boundary_storage": ("gpu", "cpu", "disk"),   # the ring on device, in host RAM or in files
         "boundary_tail_steps": False,         # no truncated backward in the eager driver
+        "boundary_compress": False,           # the eager ring is torch tensors, no nvCOMP path
         "ckpt_mode": ("chunk",),              # no recursive/binomial schedule
     },
     # impl='c' on a CPU device runs the host core (sweep.backend.c.hostcore): the
@@ -620,6 +709,7 @@ _MEMORY_CAPABILITIES = {
         "strategies": ("full", "boundary", "ckpt"),
         "boundary_storage": ("gpu",),
         "boundary_tail_steps": True,
+        "boundary_compress": False,           # nvCOMP runs on a GPU; the host core has none
         "ckpt_mode": ("chunk", "recursive"),
         "ckpt_storage": ("gpu",),
     },
@@ -677,6 +767,12 @@ def check_memory_supported(impl, strategy, device=None):
                 f"(truncated backward); it would be accepted and ignored, "
                 f"returning a full-length gradient. Use impl='c' for "
                 f"tail_steps={tail!r}.")
+        compress = getattr(strategy, "compress", None)
+        if compress and not caps.get("boundary_compress", False):
+            raise NotImplementedError(
+                f"{label} boundary saving does not implement compress={compress!r} "
+                "(the nvCOMP ring compression); it would be accepted and ignored. "
+                "Use impl='c' on a CUDA device.")
 
     elif name == "ckpt":
         mode = getattr(strategy, "mode", "chunk")

@@ -136,6 +136,7 @@ nav:
               - examples/wavefields/index.md
               - DAS: notebooks/04_das_zhao_vs_mu.ipynb
               - Elastic: notebooks/06_wavefield_elastic.ipynb
+              - Pseudoelastic pure P-mode: notebooks/62_wavefield_pseudoelastic_p.ipynb
               - Elastic vector-reflectivity: notebooks/16_elastic_vector_reflectivity.ipynb
               - Topography (irregular FS): notebooks/15_wavefield_topography.ipynb
               - Per-edge free surface (4 faces): notebooks/24_wavefield_per_edge_free_surface.ipynb
@@ -183,6 +184,7 @@ nav:
               - examples/hpc/index.md
               - Memory strategies: notebooks/07_memory_strategies.ipynb
               - FWI · boundary compression: notebooks/19_fwi_boundary_dtype.ipynb
+              - Boundary ring · nvCOMP compression: notebooks/35_boundary_ring_compression.ipynb
               - eager vs c · time & memory: notebooks/33_eager_vs_c.ipynb
               - Multi-GPU · DDP vs 1 GPU: notebooks/12_multi_gpu.ipynb
               - Domain decomposition · model-parallel: notebooks/25_domain_decomposition.ipynb
@@ -215,6 +217,7 @@ nav:
               - Elastic · radiation P-P/P-S/S-S: notebooks/21_radiation_elastic.ipynb
               - Poroelastic · traveltime kernels: notebooks/38_kernels_poroelastic.ipynb
               - Poroelastic · radiation (fast P → P, S): notebooks/39_radiation_poroelastic.ipynb
+              - Hessian-vector products: notebooks/46_hessian_vector_product.ipynb
       - Scripts:
           - Multi-GPU DDP: examples/multi_gpu_dist.md
           - SEM · multi-GPU domain decomposition: examples/sem_dd.md
@@ -238,6 +241,7 @@ nav:
           - Elastic: api/equations/elastic.md
           - Elastic3D: api/equations/elastic3d.md
           - ElasticBorn: api/equations/elastic_born.md
+          - PseudoelasticP: api/equations/pseudoelastic_p.md
           - ViscoElastic: api/equations/visco_elastic.md
           - ElasticTTI: api/equations/elastic_tti.md
           - ElasticTTISG: api/equations/elastic_tti_sg.md
@@ -254,6 +258,7 @@ nav:
           - PropTorch: api/propagators/prop_torch.md
           - PropJax: api/propagators/prop_jax.md
       - Parallel (DD): api/parallel.md
+      - Derivative products: api/autodiff.md
       - Symbolic PDEs: api/symbolic.md
       - Spectral element (SEM):
           - api/sem/index.md

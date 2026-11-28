@@ -357,6 +357,7 @@ Tail truncation has a legacy dict spelling too — `boundary_saving_config=
 | Boundary saving (GPU, CPU or disk ring) | both | `BoundarySaving(storage=..., storage_dtype=..., ...)` |
 | Asynchronous disk prefetch | both (always on for `impl="eager"`) | `BoundarySaving(storage="disk", disk_async_read=True, ...)` |
 | Boundary tail truncation (steady-state / freqsel objectives) | `impl="c"` acoustic | `BoundarySaving(tail_steps=...)` |
+| Lossless compression of the boundary ring (nvCOMP Bitcomp) | `impl="c"`, template-driver equations | `BoundarySaving(compress="bitcomp", ...)` |
 | Chunked checkpointing | both | `Ckpt(mode="chunk", chunks=...)` |
 | Recursive (fixed-budget) checkpointing | `impl="c"` | `Ckpt(mode="recursive", count=...)` |
 | `torch.compile` on the eager step | `impl="eager"` | `EagerOptions(use_compile=True, ...)` |
@@ -425,6 +426,168 @@ absorbing axis grows by `2(M + 1)` cells.  It cannot be combined with
 `topography=` yet.  `impl="c"` needs no buffer, and the eager default `Ckpt()`
 is exact without one.  `AcousticVRR` has no compiled kernel: when its outermost
 cells matter, use the buffer or `Ckpt()`.
+### Second derivatives (Hessian-vector products)
+
+A Hessian-vector product by double backward (`torch.autograd.grad(..., create_graph=True)`,
+then a second `grad`) needs the first backward on the autograd tape. Only the uncompiled
+eager step has that: `impl="eager"` with `memory=Full()` or `Ckpt()` and
+`EagerOptions(use_compile=False)`, with `torch.backends.cudnn.allow_tf32 = False` on
+Ampere and later GPUs. The tape holds every step of the forward and of the first backward,
+so this route is for small models. `impl="c"`, `BoundarySaving()`, the compiled eager step,
+`ModelParallel` and registered gradient-mode imaging conditions raise a `RuntimeError`
+under `create_graph=True`. The qP equations (`AcousticVTI`, `AcousticTTI` and their Born
+pair) refuse a second derivative in every `s_gradient` mode, because it is off the tape
+(`'adjoint'`, which refuses `create_graph=True`), NaN in float32 (`'exact'`) or not a
+Hessian (`'frozen'`); `'exact'` and `'frozen'` keep their `create_graph=True` gradient for
+a derivative with respect to the residual, as a Gauss-Newton solver takes it (J h by a
+double vjp for `'exact'`, the linearisation with S_n held fixed for `'frozen'`). A difference
+of their gradients is no substitute: S_n depends on the direction of a field's own gradient,
+which turns abruptly where that gradient nearly vanishes, so where epsilon differs from delta
+the record and the gradient are not smooth functions of the model, and central differences
+converge only at steps of about 1e-5 of the model or below, where float32 round-off
+dominates.
+
+At production size, compute the product from first derivatives, which run with every
+`impl` and memory strategy:
+
+| Product | How | Cost |
+| --- | --- | --- |
+| $\mathbf H\mathbf h$, to $O(\varepsilon^2)$ | `(g(m + eps*h) - g(m - eps*h)) / (2*eps)` | two gradients |
+| $\mathbf J^{\mathsf T}\mathbf J\mathbf h$ (Gauss-Newton), exact | Born record of `h` (e.g. `AcousticBorn`, `mp = 2*h/vp`) as `grad_outputs` of a gradient | one Born forward, one gradient |
+| $\mathbf H\mathbf h$, exact | gradient of $\langle \mathbf d(\mathbf m), \mathbf s\rangle + \langle \mathbf J(\mathbf m)\mathbf h, \mathbf r\rangle$ with $\mathbf s = \mathbf J\mathbf h$ and the residual $\mathbf r$ held fixed; `J(m) h` is the Born record with `mp = 2*h/m` computed from the model tensor | one Born forward, one forward, their gradients |
+
+The last route is the second-order adjoint method written as first derivatives: it needs the
+Born equation to return the gradient of its background model (`AcousticBorn` with
+`impl="c"` in `Full()` or `BoundarySaving()`, or any eager Born equation), and it runs with
+the compiled eager step as well.
+
+### Jacobian-vector products (forward mode)
+
+Forward-mode AD carries a direction `h` through the uncompiled eager step with
+`memory=Full()`: pass the models as dual tensors, and the tangent of the record is
+$\mathbf J\mathbf h$, the Born record of `h`, for any eager equation and without a Born
+equation:
+
+```python
+import torch.autograd.forward_ad as fwAD
+
+with torch.no_grad(), fwAD.dual_level():
+    record = prop(wavelet, sources, receivers, models=[fwAD.make_dual(vp, h)])
+    d, jh = fwAD.unpack_dual(record)          # the record and J h
+```
+
+It keeps no autograd tape, so its memory is about twice that of the forward; the
+uncompiled dual step took 11 to 17 times as long as a plain forward on a V100. With the
+models also requiring grad (drop `torch.no_grad()`), the gradient of
+$\langle \mathbf d, \mathbf s\rangle + \langle \mathbf J(\mathbf m)\mathbf h, \mathbf r\rangle$
+with $\mathbf s = \mathbf J\mathbf h$ held fixed in the first term and the residual
+$\mathbf r$ in the second is the exact $\mathbf H\mathbf h$ from first derivatives. The
+compiled step, `Ckpt()`, `BoundarySaving()`, `impl="c"`, `ModelParallel`, `PropSEM`,
+registered gradient-mode imaging conditions, `AcousticVTI` and `AcousticTTI` in their
+`'adjoint'` and `'frozen'` modes and their Born pair in every mode refuse a dual tensor with
+a `RuntimeError` (the compiled steps used to return a tangent of zero; the `'frozen'` tangent
+would be the linearisation with S_n held fixed; the Born pair's scattered field takes S_n
+from its own gradient, so at mp = 0 a tangent would propagate it elliptically).
+`AcousticVTI` and `AcousticTTI` carry J h with `s_gradient='exact'`. `ViscoAcoustic`'s Q
+tangent holds the fractional exponent fixed, as its gradient does.
+
+`sweep.autodiff` wraps these routes in one call each, `jacobian_vector_product`,
+`gauss_newton_vector_product` and `hessian_vector_product`, for any twice-differentiable
+loss of the record. `route="auto"` (the default) takes forward mode where the propagator
+carries a tangent and a central difference of two gradients (or forwards) everywhere else,
+so the same call runs with `impl="c"`, boundary saving and `ModelParallel`:
+
+```python
+from sweep.autodiff import hessian_vector_product
+
+loss = lambda d: 0.5 * ((d - d_obs) ** 2).sum()
+(hv,) = hessian_vector_product(prop, wavelet, sources, receivers, [vp], [h], loss)
+```
+
+A `None` direction holds a model fixed: it is not perturbed, no gradient is taken of it
+(`impl="c"` `ElasticBorn` and the qP Born pair refuse a background model that requires one,
+as `AcousticBorn` does under checkpointing) and its entry of the result is `None`.
+Directions are cast to their model's dtype and device. The difference step changes no model
+by more than `rel_step` (default 1e-2) of its peak, an all-zero model (LSRTM's zero
+reflectivity) counting as 1; under `ModelParallel` every rank takes the step of the whole
+model. `"auto"` takes forward mode, which is exact, where the propagator carries a tangent
+(the uncompiled step with `Full()`), and differences everywhere else, also on the uncompiled
+step with `Ckpt()`, where `route="double_backward"` is exact too. One H h on a 100 x 200 grid
+with 1000 steps (4 shots, V100, `Acoustic`):
+
+| Route | Time | Peak memory | Off the exact product |
+| --- | --- | --- | --- |
+| double backward, uncompiled eager, `Full()` | 7.3 s | 5.3 GiB | (reference) |
+| reverse over forward, uncompiled eager, `Full()` (`"auto"`) | 27 s | 3.3 GiB | 2.8e-6 |
+| difference, uncompiled eager, `Full()` | 5.4 s | 0.7 GiB | 1.6e-3 |
+| difference, eager defaults: compiled step, `Ckpt()` (`"auto"`) | 0.95 s | 127 MiB | 2.1e-3 |
+| difference, `impl="c"`, boundary saving (`"auto"`) | 0.13 s | 7 MiB | 1.3e-3 |
+
+On a direction that touches the outermost ring (a gradient does), a difference is about
+1e-2 off double backward whatever the step (below). The qP equations refuse the curvature
+products and differences (their `curvature_refusal()` and `difference_refusal()`): where
+epsilon differs from delta their record and gradient are not smooth functions of the model,
+and the `'exact'` gradient, the Gauss-Newton product's J^T, moves by tens of percent between
+float32 and float64. J h of `AcousticVTI` and `AcousticTTI` along a smooth direction still
+holds by forward mode with `s_gradient='exact'` (float32 within 0.5% of float64); the Born
+pair refuses a tangent (above), and for LSRTM its record with mp = h is the Born operator
+applied to h, the mp gradient its adjoint.
+
+Forward mode, like a difference of gradients, differentiates the gradient the propagator
+returns. On the outermost ring of model cells that gradient is the cropped one (the model is
+edge-replicated into the PML, `EdgePadding`, and its backward crops), so for a direction on
+that ring forward mode and differences give a product that is not symmetric, while double
+backward gives the symmetric one; keep directions off that ring when the routes are
+compared or when a solver needs a symmetric operator.
+
+The
+[Hessian-vector products notebook](../notebooks/46_hessian_vector_product.ipynb)
+compares the routes, shows how to choose `rel_step`, and assembles the full Hessian and the
+Gauss-Newton matrix of a small model with `hessian_vector_products`.
+
+**Many directions at once.** `hessian_vector_products` takes K directions stacked on a
+leading axis, `(K, *model.shape)` per model, and returns the K products stacked the same
+way -- what K calls of `hessian_vector_product` return. Where the equation takes a model per
+shot (`supports_batched_models`: the 2-D `Acoustic`, `Elastic`, `ElasticBorn`, `ViscoAcoustic`
+and `Biot`) and the models are shared, `batch` directions (all K by default) run as copies of
+the survey in one call, each copy with its own models: one forward and one double backward
+for the lot (one dual forward for `route="forward"`, one gradient of 2 x `batch` copies for
+`"difference"`, with every impl). A copy holds what one survey holds, so `batch` bounds the
+memory. Elsewhere the directions run one after another.
+
+```python
+from sweep.autodiff import hessian_vector_products
+
+eye = torch.eye(vp.numel(), device=vp.device).reshape(-1, *vp.shape)   # every unit direction
+(H,) = hessian_vector_products(prop, wavelet, sources, receivers, [vp], [eye], loss,
+                               route="double_backward", batch=150)
+H = H.reshape(vp.numel(), vp.numel())                                    # the full Hessian
+```
+
+All 600 columns of the Hessian of a 20 x 30 model (one shot, 400 steps, free surface, V100,
+`Acoustic`):
+
+| Route | Per column | 600 columns | Peak memory |
+| --- | --- | --- | --- |
+| `hessian_vector_product`, double backward, one call per column | 2.9 s | 29 min | 42 MiB |
+| `torch.autograd.grad(..., is_grads_batched=True)` on the double backward | 0.58 s | 5.8 min | 110 MiB |
+| `hessian_vector_products`, double backward, `batch=150` | 20 ms | 12 s | 6.0 GiB |
+| the same inside `slice_stencils()`, `batch=150` | 32 ms | 19 s | 1.6 GiB |
+| the same inside `slice_stencils()`, `batch=300` | 16 ms | 9.8 s | 3.1 GiB |
+| `hessian_vector_products`, reverse over forward, `batch=150` | 70 ms | 42 s | 3.8 GiB |
+| `hessian_vector_products`, difference, `impl="c"`, `batch=300` | 0.9 ms | 0.55 s | 78 MiB |
+
+PyTorch's own batching of directions, `torch.autograd.grad(..., is_grads_batched=True)` and
+`torch.autograd.functional.hessian(..., vectorize=True)`, does not batch the eager step: its
+legacy vmap has no batching rule for the convolutions' derivatives (nor for `copy_`,
+`zeros_like`, `index_select`), so it loops per direction inside them. The double backward
+builds its graph with the convolutions, whose backward keeps the kernel alone, so a second
+derivative is one more convolution. Inside `sweep.operators.torch.slice_stencils()` the
+uncompiled step runs its stencils as the shifted slices `torch.compile` runs: the same
+products (5e-7 apart), a graph three to four times smaller and 1.4 to 1.7 times the time at
+the same `batch`, so the batch can grow three to four times where memory is the limit (the
+`batch=300` row). Nothing switches to it by itself, and the slices carry no forward-mode
+tangent.
 
 ### Boundary tail truncation (`BoundarySaving.tail_steps`)
 
@@ -469,6 +632,91 @@ memory=BoundarySaving(storage="gpu", tail_steps=n_probe + margin)
   waiting in an exchange).  The truncated DD gradient is bit-exact against
   the truncated single-domain gradient on fp32 boundaries
   (`test/test_dd_tail_two_tile.py`, `test/dd_tail_nccl_check.py`).
+
+### Boundary ring compression (`BoundarySaving.compress`) {#bs-compress}
+
+`compress="bitcomp"` runs every chunk of the saved boundary through nvCOMP's
+lossless Bitcomp coder on the copy stream, and keeps the packed bytes instead
+of the chunk: in a device arena (`storage="gpu"`), a pinned host arena
+(`storage="cpu"`) or one sparse file (`storage="disk"`).  It is lossless, so
+the gradient is **bit-identical** to the same `storage_dtype` without it
+(`test/test_boundary_compress.py` asserts `torch.equal` on every storage);
+what changes is bytes, and it composes with `storage_dtype`:
+
+```python
+memory=BoundarySaving(storage="gpu", storage_dtype="int8",
+                      compress="bitcomp", compress_budget=0.6)
+```
+
+- **What it saves.**  Packed bytes as a fraction of the ring (measured, one
+  shot, `transfer_interval=16`):
+
+  | problem | int8 | fp16 | bf16 | fp32 |
+  | --- | --- | --- | --- | --- |
+  | Overthrust crop, 3-D acoustic, 100x160x160, 800 steps | 52 % | 54 % | 51 % | 60 % |
+  | SEG/EAGE Salt crop, 3-D acoustic, 100x160x160, 800 steps | 37 % | 43 % | 46 % | 52 % |
+  | Marmousi2 at 25 m, 2-D elastic (five fields), 2000 steps | 28 % | 28 % | 29 % | 33 % |
+
+  `storage_dtype="int8"` is itself 25 % of fp32, so int8 + compress is 7-14 %
+  of an fp32 ring.  The coder is told the element width, which is why an fp32
+  ring packs at all (its exponents are smooth).  The ratio of a run is
+  `propagator.last_boundary_compress_ratio` (uncompressed / packed) and
+  `propagator.boundary_compress_report()` gives it per face.
+- **`compress_budget`** (`storage="gpu"` / `"cpu"` only): the arena is
+  allocated up front at this fraction of the uncompressed ring (plus the
+  int8 / fp16 scales, which ride along uncompressed), since the packed size
+  is only known as the forward runs; the bytes a run saves are
+  `1 - compress_budget` of the ring, not the ratio it happens to reach.  A run
+  that overflows it raises, naming the live set that did not fit and the
+  budget it needed.  The disk file is sparse and takes no budget.
+- **What the arena holds, and how to set the budget.**  With a ring as
+  long as the record every chunk stays: the arena holds the whole forward
+  packed, and `compress_budget = 1 / ratio` fits.  A ring refilled per
+  segment (`ModelParallel(segment_steps=K)`: the ring is `K + 1` steps and
+  the forward overwrites it) holds only the chunks the ring still covers,
+  at most `ceil((K + 1) / transfer_interval) + 1`; older chunks are
+  evicted and the arena is allocated circularly, which can waste up to one
+  packed chunk at the wrap.  The budget therefore multiplies that live
+  window plus one chunk, so `1 / ratio` of the *live set* fits here too.
+  Read the budget off a run instead of guessing it:
+  `propagator.boundary_compress_report()` returns, besides the per-face
+  bytes of the chunks in the arena *now* (`ratio`), the fullest live set the
+  last call held at any time (`peak_ratio`, `peak_bytes`: for a segmented
+  ring the forward's last segment or whichever refill packed worst, since
+  the backward replays the segments in reverse and leaves the first,
+  quietest one in the arena) and `budget_needed`, the `compress_budget`
+  that set needed without margin; set about 10 % more.
+  `propagator.last_boundary_compress_ratio` is `peak_ratio`.  Under
+  `ModelParallel` the store lives on the captured tile params, so call
+  `ddp.boundary_compress_report()` / `ddp.last_boundary_compress_ratio` on
+  the wrapper (per rank; ranks differ, take the lowest ratio).  Each chunk's
+  index row records the steps it was compressed with, so segment ends need
+  not align with `transfer_interval`.
+- **Chunking.**  The chunk is `transfer_interval` steps (the ring's slot);
+  with `storage="gpu"` the knobs `transfer_interval` / `ring_buffers` apply
+  as on the staged storages and default to 16 / 2.  `storage="disk"` needs
+  `disk_async_read=True` (the packed chunks are fetched by the reader
+  thread).  Cost: compressing a chunk is one batched kernel on the copy
+  stream per `transfer_interval` steps; it overlaps the next chunk's
+  compute, and the per-step save / restore kernels are untouched.
+- **When it pays.**  The chunk kernels hide behind compute only when there
+  is compute to hide behind.  Measured per-step cost of `compress` (forward
+  with saving + backward, int8 ring, RTX 6000 Ada): a step of 0.06-0.14 ms
+  (small 2-D grids, a 48x64x64 3-D box) pays 2-8 %, a 0.5 ms step
+  (100x160x160) about 1 %, a step of 1.8 ms and up (160x256x256 and
+  larger) 0.3 % or less.  Use it where the ring is what limits the problem
+  size, not on a small model that fits anyway.
+- **Dependency.**  The library is loaded at run time from the
+  `nvidia-nvcomp-cu12` wheel (`import nvidia.libnvcomp`) or
+  `SWEEP_NVCOMP_LIB=/path/to/libnvcomp.so.6`; nothing falls back, a missing
+  library raises `ImportError`.
+- Scope: `impl="c"` on a CUDA device, the equations on the shared template
+  drivers (Acoustic 2-D/3-D, Elastic 2-D/3-D, the staggered TTI and VRR
+  families, DASMu, AcousticVTI, ViscoElastic; `cuda_layout.supports_boundary_compress`).
+  The hand-written drivers, the eager backend and the host core raise
+  `NotImplementedError` rather than ignoring the option.  `ModelParallel`
+  inherits it per tile like `storage_dtype`.  Worked example:
+  [Compress the saved boundary with nvCOMP](../notebooks/35_boundary_ring_compression.ipynb).
 
 ## Several time steps per compiled call {#steps-per-call}
 
@@ -649,13 +897,13 @@ gradient: 2.2 to 1.3 GB for 8 acoustic shots on 1000² under boundary saving,
 
 A few knobs stay out of the API because the right value depends on the
 machine, not on the problem. All are read once per run. None changes the
-physics, but one changes the numbers: a lossy `SWEEP_BOUNDARY_DTYPE`
-(fp16/bf16/int8).
+numbers: a setting that does belongs in the propagator's config, where it is
+recorded with the run. The boundary storage dtype used to be one
+(`SWEEP_BOUNDARY_DTYPE`, `SWEEP_FP16_BOUNDARY`); it is
+`BoundarySaving(storage_dtype=...)` now, and a set variable is an error.
 
 | Variable | Effect |
 | --- | --- |
-| `SWEEP_DD_DISABLE_OVERLAP=1` | Domain decomposition: serial step-then-exchange instead of the overlapped forward (see [Domain decomposition](parallel.md)). |
-| `SWEEP_BOUNDARY_DTYPE` | `impl="c"`: `storage_dtype` of the implicit default ring only (no memory knob passed). Any `BoundarySaving(...)` carries `storage_dtype="fp32"` unless set, so it always wins. |
 | `SWEEP_DATASETS_CACHE` | Where `sweep.datasets` caches downloads (see [Datasets](datasets.md)). |
 | `SWEEP_JIT_FULL=1` | Developer path: compile the pybind shim against your torch instead of using the ctypes layer over the prebuilt core. |
 | `SWEEP_CORE=<path>/libsweep_core.so` | Use a custom CUDA core; its `core.json` sidecar gets the same fit check as the shipped one. |

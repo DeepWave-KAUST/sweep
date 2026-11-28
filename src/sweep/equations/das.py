@@ -1295,6 +1295,7 @@ class DASMu(FirstOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            supports_boundary_compress=True,
             record_shape=record_multi(),
             save_all_shape=history_fields(2),   # vx, vz
             base_nvar=8,
@@ -1463,6 +1464,7 @@ class DASMu3D(FirstOrderEquation):
     @property
     def cuda_layout(self):
         return CUDALayoutSpec(
+            supports_boundary_compress=True,
             record_shape=record_multi(),
             save_all_shape=history_fields(3),   # vx, vy, vz
             base_nvar=15,

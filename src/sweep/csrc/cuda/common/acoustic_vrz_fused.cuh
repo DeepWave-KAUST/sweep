@@ -15,9 +15,10 @@
 //
 // Bit-exactness: gradient<>() already routes through centered_gradient_stencil
 // (operators/gradient.cuh), so a matching product accessor reproduces the split
-// numerics tap-for-tap.  centered_laplace1d_stencil below mirrors LaplaceGPU's
-// coefficient expressions (operators/laplace.cuh) line-for-line, including the
-// `/(h*h)` division order, so the fused laplace is bit-identical too.
+// numerics tap-for-tap.  centered_laplace1d_stencil below mirrors the split path's
+// laplace_diff (operators/laplace.cuh: LaplaceGPU, and LaplaceGPU<4>::eval_diff)
+// line-for-line, including the `/(h*h)` division order, so the fused laplace is
+// bit-identical too.
 
 // value_at(off) = a[idx + off*stride] * b[idx + off*stride]
 struct VrzProductAccessor {
@@ -34,7 +35,7 @@ struct VrzProductAccessor {
 };
 
 // Second derivative along one axis, applied to a functor value_at(off).
-// Coefficient expressions and division order match LaplaceGPU<Order> exactly.
+// Coefficient expressions and division order match laplace_diff's exactly.
 template<int Order, typename Accessor>
 __device__ __forceinline__ float centered_laplace1d_stencil(
     const Accessor& v,
@@ -42,40 +43,44 @@ __device__ __forceinline__ float centered_laplace1d_stencil(
     int M,
     const float* __restrict__ coeff
 ) {
+    // Difference form through tap_diff, as laplace_diff (operators/laplace.cuh says why):
+    // the taps here are products, which tap_diff keeps from fusing into the difference.
+    const float v0 = v(0);
     if constexpr (Order == 2) {
-        return (v(-1) + v(1) - 2.f * v(0)) / (h * h);
+        return (tap_diff(v(-1), v0) + tap_diff(v(1), v0)) / (h * h);
     } else if constexpr (Order == 4) {
         constexpr float c0 = 5.f / 2.f;
         constexpr float c1 = 4.f / 3.f;
-        constexpr float c2 = -1.f / 12.f;
-        return (c1 * (v(-1) + v(1))
-              + c2 * (v(-2) + v(2))
-              - c0 * v(0)) / (h * h);
+        // The last coefficient is what makes c0 = 2 (c1 + ... + cM) exact in fp32, so the
+        // difference form below is exactly eager's stencil -c0 u0 + c1 (u1 + u-1) + ...
+        // (c0 itself is never applied); it differs from its fraction by < 6e-8
+        // (sweep.scalars.second_derivative_coefficients_fp32 holds the same values).
+        constexpr float c2 = 0.5f * c0 - c1;                     // -1/12
+        return (c1 * (tap_diff(v(-1), v0) + tap_diff(v(1), v0))
+              + c2 * (tap_diff(v(-2), v0) + tap_diff(v(2), v0))) / (h * h);
     } else if constexpr (Order == 6) {
         constexpr float c0 = 49.f / 18.f;
         constexpr float c1 = 3.f / 2.f;
         constexpr float c2 = -3.f / 20.f;
-        constexpr float c3 = 1.f / 90.f;
-        return (c1 * (v(-1) + v(1))
-              + c2 * (v(-2) + v(2))
-              + c3 * (v(-3) + v(3))
-              - c0 * v(0)) / (h * h);
+        constexpr float c3 = (0.5f * c0 - c1) - c2;              // 1/90, see order 4
+        return (c1 * (tap_diff(v(-1), v0) + tap_diff(v(1), v0))
+              + c2 * (tap_diff(v(-2), v0) + tap_diff(v(2), v0))
+              + c3 * (tap_diff(v(-3), v0) + tap_diff(v(3), v0))) / (h * h);
     } else if constexpr (Order == 8) {
         constexpr float c0 = 205.f / 72.f;
         constexpr float c1 = 8.f / 5.f;
         constexpr float c2 = -1.f / 5.f;
         constexpr float c3 = 8.f / 315.f;
-        constexpr float c4 = -1.f / 560.f;
-        return (c1 * (v(-1) + v(1))
-              + c2 * (v(-2) + v(2))
-              + c3 * (v(-3) + v(3))
-              + c4 * (v(-4) + v(4))
-              - c0 * v(0)) / (h * h);
+        constexpr float c4 = ((0.5f * c0 - c1) - c2) - c3;       // -1/560, see order 4
+        return (c1 * (tap_diff(v(-1), v0) + tap_diff(v(1), v0))
+              + c2 * (tap_diff(v(-2), v0) + tap_diff(v(2), v0))
+              + c3 * (tap_diff(v(-3), v0) + tap_diff(v(3), v0))
+              + c4 * (tap_diff(v(-4), v0) + tap_diff(v(4), v0))) / (h * h);
     } else {
         float acc = 0.f;
         #pragma unroll 1
         for (int k = 1; k <= M; ++k)
-            acc += coeff[k] * (v(k) + v(-k));
-        return (acc - coeff[0] * v(0)) / (h * h);
+            acc += coeff[k] * (tap_diff(v(k), v0) + tap_diff(v(-k), v0));
+        return acc / (h * h);
     }
 }

@@ -8,6 +8,7 @@ MRO); they are grouped here only to keep the core propagator class focused.
 import torch
 from sweep.sources.torch import SourceTorch
 from sweep.receivers.torch import ReceiverTorch
+from sweep.propagator._second_order import refuse_create_graph, refuse_forward_ad
 
 
 class _GradBridgeFn(torch.autograd.Function):
@@ -40,7 +41,14 @@ class _GradBridgeFn(torch.autograd.Function):
         return tuple(m.detach() for m in model_leaves)
 
     @staticmethod
+    def jvp(ctx, *tangents):
+        refuse_forward_ad("A registered gradient-mode imaging condition",
+                          "it replaces the model derivative with a hook-accumulated gradient")
+
+    @staticmethod
     def backward(ctx, *grad_outputs):
+        refuse_create_graph("A registered gradient-mode imaging condition",
+                            "its gradient is accumulated by hooks on the adjoint wavefields")
         # grad_outputs (one per detached output) are whatever autograd would
         # have written to the detached tensors — we ignore them entirely and
         # substitute the hook-accumulated grads.

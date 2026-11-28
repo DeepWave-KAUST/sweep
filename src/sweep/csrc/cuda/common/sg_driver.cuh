@@ -207,16 +207,16 @@ public:
         if (stepped && p.use_boundary_saving)
             SWEEP_CHECK(!p.boundary_gpu.empty(),
                         "stepped forward with boundary saving requires Python-bound boundary_gpu");
-        staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
+        staged_boundary = p.boundary_on_cpu || p.boundary_on_disk || !p.boundary_compress.empty();
         if (staged_boundary)
             boundary_saver.allocate(p.use_boundary_saving, Eq::NDIM, Eq::BS_NVAR, solver, vp,
                                     save_width, 1, true, false, p.transfer_interval,
                                     p.boundary_cpu, p.boundary_gpu, p.last_two,
-                                    p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging);
+                                    p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging, p.boundary_compress);
         else
             boundary_saver.allocate(p.use_boundary_saving, Eq::NDIM, Eq::BS_NVAR, solver, vp,
                                     save_width, 1, true, true, 1, {}, p.boundary_gpu,
-                                    p.last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging);
+                                    p.last_two, p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging, p.boundary_compress);
         bs = boundary_saver.view();
 
         launch_config = wave_config<Eq::NDIM>(d);
@@ -668,7 +668,7 @@ public:
         cpml_view = cpml_tensor.view();
 
         save_width = solver.M + 1;
-        staged_boundary = p.boundary_on_cpu || p.boundary_on_disk;
+        staged_boundary = p.boundary_on_cpu || p.boundary_on_disk || !p.boundary_compress.empty();
         // ``bs.last_two`` is dead in the BACKWARD: ``save_last_state`` writes it
         // in the forward only, and ``seed_recon`` reads ``p.u_last_two``
         // directly.  Passing {} sent allocate_last_two down its self-allocating
@@ -684,11 +684,11 @@ public:
             boundary_saver.allocate(true, Eq::NDIM, Eq::BS_NVAR, solver, vp, save_width,
                                     1, true, false, p.transfer_interval,
                                     p.boundary_cpu, p.boundary_gpu, last_two_bound,
-                                    p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging);
+                                    p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging, p.boundary_compress);
         } else {
             boundary_saver.allocate(true, Eq::NDIM, Eq::BS_NVAR, solver, vp, save_width,
                                     1, true, true, 1, {}, p.boundary_gpu, last_two_bound,
-                                    p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging);
+                                    p.use_pinned_memory, /*tangent_pad=*/0, p.boundary_staging, p.boundary_compress);
             if (p.boundary_gpu.empty())
                 boundary_saver.load_from_vector(p.u_boundary, vp);
         }
@@ -803,6 +803,11 @@ public:
                               *boundary_runtime, bs, save_width, carriers, forward,
                               it, (int)p.nt);
         }
+
+        // Compressed ring: check the decompressor's statuses once the copy stream
+        // has drained (see eq_driver.cuh; a sync of the copy stream only).
+        if (boundary_scope->owns() && boundary_runtime->compress_enabled())
+            boundary_runtime->synchronize();
 
         out.grads = grads;
         return out;

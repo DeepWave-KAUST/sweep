@@ -263,9 +263,9 @@ def test_grads_out_and_illum_declarations(eq_name, expected):
 # vs the shared test wavelet
 # --------------------------------------------------------------------------- #
 def test_the_local_ricker_copies_that_remain_are_genuinely_different():
-    """Sixteen modules were migrated onto ``conftest.ricker``; five were not.
+    """Sixteen modules were migrated onto ``conftest.ricker``; six were not.
 
-    Each of those five keeps its own because it is a DIFFERENT wavelet, not
+    Each of those six keeps its own because it is a DIFFERENT wavelet, not
     because nobody got round to it -- and this test says which is which, so a
     later reader does not "finish the job" and silently change those tests'
     inputs. If one of them ever becomes equivalent, this fails and it can be
@@ -282,7 +282,8 @@ def test_the_local_ricker_copies_that_remain_are_genuinely_different():
             "test_elastic_tti_2nd.py": "array form ricker(t, f)",
             "test_elastic_tti_sg3d.py": "array form ricker(t, f)",
             "test_sweep_pytorch.py": "array form, (1-0.5x^2)exp(-0.25x^2)",
-            "test_visco_acoustic.py": "signature (nt, dt, f0), own delay rule"}
+            "test_visco_acoustic.py": "signature (nt, dt, f0), own delay rule",
+            "test_laplacian_zero_sum.py": "array form, float64 at any time (analytic Green's function)"}
     here = pathlib.Path(__file__).parent
     still_local = {p.name for p in here.glob("test_*.py")
                    if any(isinstance(n, ast.FunctionDef) and n.name in ("ricker", "_ricker")

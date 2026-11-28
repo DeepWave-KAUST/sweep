@@ -342,7 +342,7 @@ __global__ void acoustic2nd_adjoint_fused(
     const float* vpb = vp + b * sp;
     int sz = solver.nx;                       // z-stride
     float dt2 = solver.dt * solver.dt;
-    const float* lc = lap_ctx.coeff;          // [c0(center), c1, ..., cM]
+    const float* lc = lap_ctx.coeff;          // [c0 (centre, unused), c1, ..., cM]
     const float* gc = grad_ctx_x.coeff;       // [_, c1, ..., cM]  (antisymmetric)
     float invdx2 = 1.0f / (lap_ctx.dx * lap_ctx.dx);
     float invdz2 = 1.0f / (lap_ctx.dz * lap_ctx.dz);
@@ -383,11 +383,12 @@ __global__ void acoustic2nd_adjoint_fused(
         (iz >= (solver.cut_z_lo() ? halo : solver.padLo(0) + 2 * halo + 1)) &&
         (iz < solver.nz - (solver.cut_z_hi() ? halo : solver.padHi(0) + 2 * halo + 1));
     if (pure_interior) {
-        float lapx = -lc[0] * gw, lapz = -lc[0] * gw;
+        // Lap(gw) in difference form, as laplace_diff (operators/laplace.cuh)
+        float lapx = 0.0f, lapz = 0.0f;
         #pragma unroll
         for (int k = 1; k <= halo; ++k) {
-            lapx += lc[k] * (GW_AT(idx + k)      + GW_AT(idx - k));
-            lapz += lc[k] * (GW_AT(idx + k * sz) + GW_AT(idx - k * sz));
+            lapx += lc[k] * (tap_diff(GW_AT(idx + k), gw)      + tap_diff(GW_AT(idx - k), gw));
+            lapz += lc[k] * (tap_diff(GW_AT(idx + k * sz), gw) + tap_diff(GW_AT(idx - k * sz), gw));
         }
         f.u_next[idx] = 2.0f * gun - f.u_prev[idx] + lapx * invdx2 + lapz * invdz2;
         // Interior aux stays 0: both psi/zeta double-buffers are zero-allocated
@@ -414,14 +415,16 @@ __global__ void acoustic2nd_adjoint_fused(
     #define GTMP_Z(n, niz) ( cpml.bz[niz]*f.zetaz[n] + (1.0f+cpml.bz[niz])*(vpb[n]*vpb[n]*dt2)*f.u_now[n] )
 
     // X-direction: Lx(g_lx), Dx(g_gx), Dx(g_qx); one read per tap.
-    float Lx_glx = -lc[0] * ((1.0f + bx_) * gtmpx0);
+    // Lx((1+b) gtmp) in difference form around its centre tap (operators/laplace.cuh)
+    float lx0 = (1.0f + bx_) * gtmpx0;
+    float Lx_glx = 0.0f;
     float Dx_ggx = 0.0f, Dx_gqx = 0.0f;
     #pragma unroll
     for (int k = 1; k <= halo; ++k) {
         int np = idx + k, nm = idx - k, nixp = ix + k, nixm = ix - k;
         float tp = GTMP_X(np, nixp), tm = GTMP_X(nm, nixm);
         float bxp = cpml.bx[nixp], bxm = cpml.bx[nixm];
-        Lx_glx += lc[k] * ((1.0f + bxp) * tp + (1.0f + bxm) * tm);
+        Lx_glx += lc[k] * (tap_diff((1.0f + bxp) * tp, lx0) + tap_diff((1.0f + bxm) * tm, lx0));
         Dx_ggx += gc[k] * ((bxp * f.psix[np] + cpml.dbxdx[nixp] * tp)
                          - (bxm * f.psix[nm] + cpml.dbxdx[nixm] * tm));
         Dx_gqx += gc[k] * (tp - tm);   // d(gtmp)/dx (ax applied at psix_out)
@@ -429,14 +432,15 @@ __global__ void acoustic2nd_adjoint_fused(
     Lx_glx *= invdx2; Dx_ggx *= invdx; Dx_gqx *= invdx;
 
     // Z-direction
-    float Lz_glz = -lc[0] * ((1.0f + bz_) * gtmpz0);
+    float lz0 = (1.0f + bz_) * gtmpz0;
+    float Lz_glz = 0.0f;
     float Dz_ggz = 0.0f, Dz_gqz = 0.0f;
     #pragma unroll
     for (int k = 1; k <= halo; ++k) {
         int np = idx + k * sz, nm = idx - k * sz, nizp = iz + k, nizm = iz - k;
         float tp = GTMP_Z(np, nizp), tm = GTMP_Z(nm, nizm);
         float bzp = cpml.bz[nizp], bzm = cpml.bz[nizm];
-        Lz_glz += lc[k] * ((1.0f + bzp) * tp + (1.0f + bzm) * tm);
+        Lz_glz += lc[k] * (tap_diff((1.0f + bzp) * tp, lz0) + tap_diff((1.0f + bzm) * tm, lz0));
         Dz_ggz += gc[k] * ((bzp * f.psiz[np] + cpml.dbzdz[nizp] * tp)
                          - (bzm * f.psiz[nm] + cpml.dbzdz[nizm] * tm));
         Dz_gqz += gc[k] * (tp - tm);   // d(gtmp)/dz (az applied at psiz_out)

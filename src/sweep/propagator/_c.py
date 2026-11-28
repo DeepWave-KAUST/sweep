@@ -18,34 +18,33 @@ from sweep.memory.torch import Allocator
 from sweep.memory.shape import Layout
 from sweep.core.arguments import validate_memory_strategy
 from sweep.propagator._call_params import CompiledCallParams
+from sweep.propagator._second_order import (HESSIAN_ALTERNATIVES, refuse_create_graph,
+                                            refuse_forward_ad, substitute_for)
+from sweep.propagator.options import BOUNDARY_DEFAULTS
 from sweep.propagator.base import PropBase
+from sweep.propagator.options import refuse_retired_boundary_dtype_env
 from sweep.equations._edges import is_top_only_or_none
 from sweep.utils.torch import EdgePadding
-from sweep.scalars import fd_coefficients, staggered_grid_coes
+from sweep.scalars import fd_coefficients, second_derivative_coefficients_fp32, staggered_grid_coes
 from sweep.equations.base import FirstOrderEquation
 
 
 def _resolve_boundary_dtype(boundary_dtype=None):
-    """The boundary storage dtype a run allocates.
+    """The boundary storage dtype a run allocates: the explicit Python kwarg
+    (``BoundaryOptions.storage_dtype`` / ``boundary_saving_config
+    ['storage_dtype']``), else ``fp32``.
 
-    Precedence: explicit Python kwarg (from BoundaryOptions /
-    boundary_saving_config dict) wins over the SWEEP_BOUNDARY_DTYPE env
-    var (the documented global override), which wins over the legacy
-    SWEEP_FP16_BOUNDARY=1 gate, which wins over the ``fp32`` default.
-    This only decides what dtype to ALLOCATE the boundary buffers in; we
-    deliberately do NOT write the choice back into os.environ.  The C++
-    saver derives the storage dtype from the buffer tensors it is handed
+    This only decides what dtype to ALLOCATE the boundary buffers in.  The
+    C++ saver derives the storage dtype from the buffer tensors it is handed
     (see csrc/.../boundary/saver.cuh), so a per-instance storage_dtype
     cannot leak into later default-config propagators in the same process.
+    The environment no longer takes part: the retired SWEEP_BOUNDARY_DTYPE /
+    SWEEP_FP16_BOUNDARY are refused, not read
+    (options.refuse_retired_boundary_dtype_env).
     """
+    refuse_retired_boundary_dtype_env()
     if boundary_dtype is None:
-        _env_dtype = os.environ.get('SWEEP_BOUNDARY_DTYPE', '').strip().lower()
-        if _env_dtype in ('fp32', 'fp16', 'bf16', 'int8'):
-            boundary_dtype = _env_dtype
-        elif os.environ.get('SWEEP_FP16_BOUNDARY', '') in ('1', 'true', 'yes', 'on'):
-            boundary_dtype = 'fp16'
-        else:
-            boundary_dtype = 'fp32'
+        boundary_dtype = 'fp32'
     if boundary_dtype not in ('fp32', 'fp16', 'bf16', 'int8'):
         raise ValueError(f"boundary_dtype must be 'fp32'/'fp16'/'bf16'/'int8', got {boundary_dtype!r}")
     return boundary_dtype
@@ -271,6 +270,88 @@ class _BufferLease:
     __slots__ = ("__weakref__",)
 
 
+_COMPRESS_CFG_HEADER = 64   # bytes: 8 int64 words before the per-chunk live flags (runtime.cuh kCfgHeader)
+
+
+def compress_report(boundary_compress, boundary_gpu, ndim, dev):
+    """What ``BoundarySaving(compress='bitcomp')`` packed, read from the store
+    alone (so :class:`~sweep.parallel.ModelParallel`, which keeps the store on
+    its captured tile params, can report too).
+
+    Returns a dict:
+
+    - ``faces``: ``{name: (raw, packed)}`` bytes of the chunks NOW in the
+      arena (the live set: the whole last forward for a ring as long as the
+      record; for a ring refilled per segment the segment last refilled, which
+      at the end of a call is the first one), ``raw``, ``packed``, ``ratio``
+      (raw / packed, scales excluded) summed over them;
+    - ``peak_raw``, ``peak_packed``, ``peak_ratio``, ``peak_bytes``: the
+      FULLEST live set the last call held at any time (the forward's last
+      segment, or whichever refill packed worst); ``peak_bytes`` is what it
+      occupied in the arena, scales and alignment included;
+    - ``budget_needed``: the ``compress_budget`` that live set needed (no
+      margin; set ~10 % more), None for ``storage='disk'``; ``arena_bytes``
+      the arena / file allocated.
+
+    cfg word 7 holds flags: 1 = the ring is refilled (one chunk of slack at
+    the arena's wrap), 2 = ``storage='disk'``.
+
+    The forward writes one index row per chunk (offset, total, steps, piece
+    sizes); the face split follows the piece counts of each face's region in
+    the compressor's own order.
+    """
+    from sweep.backend.c import nvcomp as _nvcomp
+    cfg = boundary_compress[10]
+    words = cfg[:_COMPRESS_CFG_HEADER].view(torch.int64)
+    nt_saved, arena_bytes, TI, R, nt, basis, extra, flags = (int(x) for x in words[:8].tolist())
+    ring = boundary_gpu[:6 if ndim == 3 else 4]
+    piece = _nvcomp.piece_bytes(dev)
+    es = ring[0].element_size()
+    names = ("top", "bottom", "front", "back", "left", "right") if ndim == 3 else ("top", "bottom", "left", "right")
+
+    # one region per face (per field in 2-D), in order; its piece count at len steps
+    def regions(length):
+        out = []
+        for name, t in zip(names, ring):
+            if t.numel() == 0:
+                continue
+            if ndim == 3:
+                nv = t.shape[0] // (TI * R)
+                out.append((name, length * nv * t.stride(0) * es))
+            else:
+                for v in range(t.shape[0]):
+                    out.append((name, length * t.stride(1) * es))
+        return out
+    idx = boundary_compress[4].view(torch.int64)
+    nrows = max(-(-nt_saved // TI), -(-nt // TI))
+    max_pieces = idx.numel() // nrows - 3
+    idx = idx.view(nrows, 3 + max_pieces)
+    live = cfg[_COMPRESS_CFG_HEADER:_COMPRESS_CFG_HEADER + nrows]   # the chunks now in the arena
+    faces = {n: [0, 0] for n in names}
+    for k in range(nrows):
+        length = int(idx[k, 2])          # steps the chunk was compressed with (0: never)
+        if length == 0 or int(live[k]) == 0:
+            continue
+        sizes = idx[k, 3:]
+        i = 0
+        for name, nbytes in regions(length):
+            n = -(-nbytes // piece)
+            faces[name][0] += nbytes
+            faces[name][1] += int(sum(-(-int(x) // 8) * 8 for x in sizes[i:i + n].tolist()))
+            i += n
+    raw = sum(v[0] for v in faces.values()); packed = sum(v[1] for v in faces.values())
+    stats = boundary_compress[5].view(torch.int64)
+    peak_packed, peak_raw, peak_bytes, max_chunk = (int(x) for x in stats[4:8].tolist())
+    budget = None
+    if basis > 0 and peak_bytes > 0 and not (flags & 2):     # not the sparse disk file
+        budget = max(peak_bytes + (max_chunk if flags & 1 else 0) - extra, 0) / basis
+    return dict(faces={n: tuple(v) for n, v in faces.items()}, raw=raw, packed=packed,
+                ratio=(raw / packed) if packed else None,
+                peak_raw=peak_raw, peak_packed=peak_packed,
+                peak_ratio=(peak_raw / peak_packed) if peak_packed else None,
+                peak_bytes=peak_bytes, budget_needed=budget, arena_bytes=arena_bytes)
+
+
 @dataclass
 class _BoundaryStore:
     """One allocation of boundary-saving storage: everything a boundary-saving
@@ -282,6 +363,9 @@ class _BoundaryStore:
     boundary_gpu: tuple = ()
     boundary_gpu_full: tuple = ()
     boundary_staging: tuple = ()
+    # The nvCOMP workspace of BoundarySaving(compress=...), in the order
+    # saver.cuh bind_compress reads it; () when not compressing.
+    boundary_compress: tuple = ()
     last_two: torch.Tensor = None
     disk_root: str = None
     disk_files: tuple = ()
@@ -297,6 +381,23 @@ def _create_disk_files(disk_dir, specs):
             handle.truncate(nbytes)
         files.append(path)
     return root, tuple(files)
+def _require_float32_models(models, names):
+    """Refuse a model that is not float32, by index and name, before anything
+    is built from it. The compiled kernels read every model as float32 and
+    nothing past this point asks: the core's buffer check spoke only of a
+    "boundary storage tag" (float64, int64), a float16 or bfloat16 model tripped
+    an assertion that aborted the process, and an int32 one -- as wide as
+    float32 -- was read as float bits without a word. Refused rather than cast
+    like the wavelet: a float64 model asks for a precision this path does not
+    have, and a cast would hide that."""
+    for i, m in enumerate(models):
+        if torch.is_tensor(m) and m.dtype != torch.float32:
+            name = f" ({names[i]!r})" if i < len(names) else ""
+            raise TypeError(
+                f"impl='c' computes in float32 and takes float32 models; models[{i}]{name} "
+                f"is {m.dtype}. Cast it before the call with .float(). (A NumPy array is "
+                "float64 unless made float32, and np.linspace(a, b, n, np.float32) is "
+                "float64 too: its fourth positional argument is endpoint.)")
 
 
 class Wrapper(torch.autograd.Function):
@@ -318,6 +419,7 @@ class Wrapper(torch.autograd.Function):
         # it leaking back into the caller's params object.
         spacing = cp.spacing
         dt = cp.dt
+        ctx.create_graph_instead = cp.create_graph_instead or HESSIAN_ALTERNATIVES
         use_checkpoint = cp.use_checkpoint
         use_recursive_checkpoint = cp.use_recursive_checkpoint
         use_boundary_saving = cp.use_boundary_saving
@@ -359,12 +461,21 @@ class Wrapper(torch.autograd.Function):
         elif cp.boundary_on_cpu:
             params.boundary_cpu = list(cp.boundary_cpu)
             params.boundary_gpu = list(cp.boundary_gpu) if use_boundary_saving else []
+        elif cp.boundary_compress:
+            # Compressed device arena: the ring in boundary_gpu, the ring again
+            # (the saver's geometry template) plus the device scales in
+            # boundary_cpu; the arena itself is in boundary_compress.
+            params.boundary_cpu = list(cp.boundary_cpu) if use_boundary_saving else []
+            params.boundary_gpu = list(cp.boundary_gpu) if use_boundary_saving else []
         else:
             params.boundary_cpu = []
             params.boundary_gpu = [b.zero_() for b in cp.boundary_gpu] if use_boundary_saving else []
         # Scaled (int8/fp16) storage only; NOT zeroed per call, unlike the
         # buffers above -- see _ensure_boundary_buffers for why once is enough.
         params.boundary_staging = list(cp.boundary_staging) if use_boundary_saving else []
+        # The compression workspace (empty = no compression); the forward
+        # restarts its arena from byte 0, so nothing here needs zeroing.
+        params.boundary_compress = list(cp.boundary_compress) if use_boundary_saving else []
         params.boundary_disk_files = list(cp.boundary_disk_files) if cp.boundary_on_disk else []
         params.checkpoints = [c.zero_() for c in cp.checkpoint_buffers] if use_checkpoint else []
         params.transfer_interval = cp.transfer_interval
@@ -489,8 +600,15 @@ class Wrapper(torch.autograd.Function):
         return syn
     
     @staticmethod
+    def jvp(ctx, *tangents):
+        refuse_forward_ad("impl='c'", "its compiled kernels propagate no tangent field")
+
+    @staticmethod
     def backward(ctx, adjoint_source):
 
+        refuse_create_graph("impl='c'", "its backward is the compiled adjoint, which autograd "
+                            "cannot differentiate again",
+                            instead=getattr(ctx, "create_graph_instead", HESSIAN_ALTERNATIVES))
         if not hasattr(ctx, "cp"):
             # The end of this function releases the params object -- wavefields,
             # PML profiles, the forward source -- at the earliest point it can,
@@ -653,12 +771,14 @@ class Wrapper(torch.autograd.Function):
             params.forward_sources_loc = forward_sources_loc.contiguous()
             cp.backward_func(params)
         else:
-            params.boundary_cpu = list(cp.boundary_cpu) if cp.boundary_on_cpu else []
+            params.boundary_cpu = (list(cp.boundary_cpu)
+                                   if (cp.boundary_on_cpu or cp.boundary_compress) else [])
             params.boundary_gpu = list(cp.boundary_gpu) if ctx.use_boundary_saving else []
             # The same staging the forward quantized through: dequantize_step
             # refills it in full before every restore, so it carries nothing
             # across and needs no zeroing here either.
             params.boundary_staging = list(cp.boundary_staging) if ctx.use_boundary_saving else []
+            params.boundary_compress = list(cp.boundary_compress)
             params.boundary_disk_files = list(cp.boundary_disk_files) if cp.boundary_on_disk else []
             params.u_last_two = last.contiguous()
             # on the models' device: with cpu/disk boundary staging ``last`` may
@@ -886,6 +1006,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self.boundary_gpu = ()
         self.boundary_gpu_full = ()
         self.boundary_staging = ()
+        self.boundary_compress = ()
         self.checkpoint_allocator = Allocator(self.dev)
         self.checkpoints = ()
         self.checkpoint_replay = ()
@@ -1013,12 +1134,11 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
     def _build_fd_coefficients(self, M):
         lap_coes = torch.zeros(M + 1, dtype=torch.float32, device=self.dev)
 
-        coes = fd_coefficients(2, 2 * M)
-        lap_coes[1:] = torch.from_numpy(coes).to(self.dev).float()
-        # Summed in fp64 and rounded once, as eager's kernel centre
-        # (generate_convolution_kernel): the fp32 sum of the rounded
-        # coefficients is one ulp off at orders 8 and 10.
-        lap_coes[0] = float(2 * coes.sum())
+        # The float32 stencil eager's kernel holds (generate_convolution_kernel):
+        # lap_coes[0] = 2 * sum(lap_coes[1:]) exactly, zero on a constant field.
+        c0, coes = second_derivative_coefficients_fp32(2 * M)
+        lap_coes[1:] = torch.from_numpy(coes).to(self.dev)
+        lap_coes[0] = float(-c0)
 
         # First-order CUDA equations use staggered-grid forward/backward
         # derivatives (`sgradient`), so their first-derivative coefficients
@@ -1140,7 +1260,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             scale_shapes.append(tuple(outer) + (n_blocks,))
         return tuple(scale_shapes)
 
-    def _ensure_boundary_buffers(self, boundary_storage, transfer_interval, use_pinned_memory, disk_dir=None, ring_buffers=1, boundary_dtype=None, nt_saved=None):
+    def _ensure_boundary_buffers(self, boundary_storage, transfer_interval, use_pinned_memory, disk_dir=None, ring_buffers=1, boundary_dtype=None, nt_saved=None,
+                                 compress=None, compress_budget=BOUNDARY_DEFAULTS.compress_budget):
         # nt_saved < self.nt when boundary tail truncation is active: buffers
         # only hold the last nt_saved steps (the C++ side indexes them in
         # shifted saved-step coordinates).
@@ -1161,6 +1282,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             and self._boundary_cache_disk_dir == disk_dir
             and self._boundary_cache_nt == (self.nt if nt_saved is None else nt_saved)
             and getattr(self, '_boundary_cache_dtype', None) == boundary_dtype
+            and getattr(self, '_boundary_cache_compress', None) == (compress, float(compress_budget))
             # the saved field count can change per call (AcousticBorn: 2 when vp
             # needs its RWI gradient, else 1)
             and getattr(self, '_boundary_cache_nvar', None) == self._boundary_nvar_key()
@@ -1169,7 +1291,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
 
         store = self._allocate_boundary_store(
             self.B, boundary_storage, transfer_interval, use_pinned_memory, disk_dir,
-            ring_buffers, boundary_dtype, nt_saved)
+            ring_buffers, boundary_dtype, nt_saved, compress, compress_budget)
         self._remove_boundary_disk_cache()
         self.boundary_cpu_allocator = store.cpu_allocator
         self.boundary_gpu_allocator = store.gpu_allocator
@@ -1177,11 +1299,13 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self.boundary_gpu = store.boundary_gpu
         self.boundary_gpu_full = store.boundary_gpu_full
         self.boundary_staging = store.boundary_staging
+        self.boundary_compress = store.boundary_compress
         self.last_two = store.last_two
         self._boundary_disk_root = store.disk_root
         self._boundary_disk_files = store.disk_files
 
         self._boundary_cache_dtype = boundary_dtype
+        self._boundary_cache_compress = (compress, float(compress_budget))
         self._boundary_cache_nvar = self._boundary_nvar_key()
         self._boundary_cache_mode = boundary_storage
         self._boundary_cache_interval = transfer_interval
@@ -1192,12 +1316,17 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         self._boundary_cache_batch = self.B
 
     def _allocate_boundary_store(self, batch, boundary_storage, transfer_interval, use_pinned_memory,
-                                 disk_dir, ring_buffers, boundary_dtype, nt_saved):
+                                 disk_dir, ring_buffers, boundary_dtype, nt_saved,
+                                 compress=None, compress_budget=BOUNDARY_DEFAULTS.compress_budget):
         """Allocate one boundary-saving store at ``batch`` without touching the
         propagator: the persistent one (``_ensure_boundary_buffers``) and the
         private one a forward takes while the persistent store is leased to a
         pending backward (``forward``) come out of this same code."""
         boundary_on_cpu = boundary_storage in {"cpu", "disk"}
+        compress = compress or None
+        # Compressing stages every storage through the ring: 'gpu' keeps the
+        # packed chunks in a device arena instead of the full-nt buffer.
+        staged = boundary_on_cpu or compress is not None
         staging_pinned = use_pinned_memory or boundary_storage == "disk"
         staging_interval = transfer_interval * ring_buffers
         boundary_dtype = _resolve_boundary_dtype(boundary_dtype)
@@ -1219,7 +1348,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             self.abcn,
             self.equation.so // 2,
             batch,
-            staging_interval if boundary_on_cpu else transfer_interval,
+            staging_interval if staged else transfer_interval,
             self._image_method_active,
             self.equation.so // 2 * cuda_layout.boundary_save_reach + 1 + frame,
             tangent_pad=cuda_layout.boundary_tangent_pad + frame,
@@ -1268,6 +1397,13 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         # ``forward()`` calls ``boundary_gpu_allocator.zero_()`` per call, which
         # re-zeroes these too; a superset of "once", so still bit-exact.)
         store.boundary_staging = ()
+
+        if compress is not None:
+            self._allocate_compressed_store(
+                store, layout, batch, boundary_storage, transfer_interval, ring_buffers,
+                boundary_dtype, disk_dir, staging_pinned, compress, compress_budget,
+                last_two_shape)
+            return store
 
         if boundary_on_cpu and boundary_dtype in ('int8', 'fp16'):
             # Staged scaled storage (int8 / fp16): a persistent payload main
@@ -1386,6 +1522,210 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             # seed of a boundary-saving backward still pending on this store.
             store.last_two = gpu_alloc.zeros([last_two_shape])[0]
         return store
+
+    def _alloc_padded_ring(self, alloc, shapes, dtype):
+        """The ring faces with every per-step pitch rounded up to a multiple of
+        8 bytes, as views of one flat allocation each: the compressor's pieces
+        start on step boundaries and nvCOMP Bitcomp wants them 8-byte aligned.
+        The batch, the spatial strides and the batch axis (what
+        ``_slice_boundary_buffers`` narrows and the saver reads its per-shot
+        geometry from) are unchanged; only the step pitch (3-D ``stride(0)``,
+        2-D ``stride(1)``) grows by the pad, which the saver takes from the
+        tensor itself.  The pad cells stay zero for the buffer's life."""
+        es = torch.empty((), dtype=dtype).element_size()
+        lead = 1 if self.ndim == 3 else 2
+        out = []
+        for shape in shapes:
+            shape = tuple(int(d) for d in shape)
+            pitch = 1
+            for d in shape[lead:]:
+                pitch *= d
+            pitch_p = -(-pitch * es // 8) * 8 // es
+            n_slots = 1
+            for d in shape[:lead]:
+                n_slots *= d
+            flat = alloc.zeros([(n_slots * pitch_p,)], dtype=dtype)[0]
+            inner = []
+            st = 1
+            for d in reversed(shape[lead:]):
+                inner.append(st)
+                st *= d
+            inner.reverse()
+            if self.ndim == 3:
+                strides = (pitch_p, *inner)
+            else:
+                strides = (shape[1] * pitch_p, pitch_p, *inner)
+            out.append(flat.as_strided(shape, strides))
+        return tuple(out)
+
+    def _allocate_compressed_store(self, store, layout, batch, boundary_storage, transfer_interval,
+                                   ring_buffers, boundary_dtype, disk_dir, staging_pinned,
+                                   compress, compress_budget, last_two_shape):
+        """The ring, its scales and the nvCOMP workspace for
+        ``BoundarySaving(compress='bitcomp')`` (csrc/.../boundary/nvcomp_shim.cuh,
+        runtime.cuh compress_chunk / fetch_compressed_chunk).
+
+        Every storage runs the forward through the GPU ring; at each chunk end
+        the ring slot is compressed on the copy stream and the packed bytes land
+        in the persistent tier: a device arena (storage='gpu'), a pinned host
+        arena ('cpu'), both ``compress_budget`` x the uncompressed ring, or one
+        sparse file ('disk').  The saver binds the ring itself as the
+        persistent ``boundary_cpu`` faces (it only reads their geometry there;
+        the packed bytes never pass through them), followed by the persistent
+        FP32 scales of a scaled dtype: full-nt on the device ('gpu'), full-nt
+        pinned ('cpu'), ring-sized pinned staging in front of the scale files
+        ('disk') -- the scales are 1.5% of an int8 ring and are not compressed.
+        """
+        from sweep.backend.c import nvcomp as _nvcomp
+        assert compress == "bitcomp"
+        _nvcomp.ensure_loaded(self.dev)
+        cpu_alloc, gpu_alloc = store.cpu_allocator, store.gpu_allocator
+        _BLOCK = 256
+        nt_saved = layout.nt
+        scaled = boundary_dtype in ('int8', 'fp16')
+        main_dtype = {'fp32': torch.float32, 'bf16': torch.bfloat16,
+                      'fp16': torch.float16, 'int8': torch.uint8}[boundary_dtype]
+        es = torch.empty((), dtype=main_dtype).element_size()
+
+        ring_main = self._alloc_padded_ring(gpu_alloc, layout.gpu_shapes, main_dtype)
+        store.boundary_gpu = ring_main
+        store.boundary_cpu = ring_main
+        scale_step_bytes = 0
+        if scaled:
+            ring_scale = tuple(gpu_alloc.zeros(
+                self._int8_scale_shapes(layout.gpu_shapes, _BLOCK), dtype=torch.float32))
+            # The scales ride along with each packed chunk (uncompressed) in the
+            # arena / file, so the compressed store keeps no persistent scale
+            # buffer: the saver's "persistent" scale is the ring itself (its
+            # geometry template), exactly as for the payload faces.
+            store.boundary_gpu = ring_main + ring_scale
+            store.boundary_cpu = ring_main + ring_scale
+            store.boundary_staging = tuple(gpu_alloc.zeros(layout.staging_shapes, dtype=torch.float32))
+            for t in ring_scale:
+                scale_step_bytes += (layout.nvar * t.stride(0) if self.ndim == 3
+                                     else layout.nvar * t.stride(1)) * 4
+        store.boundary_gpu_full = ()
+
+        # Piece geometry, mirrored from BoundaryRuntime::comp_pieces: one region
+        # per face (per field in 2-D) and chunk, split into PIECE-byte pieces.
+        piece = _nvcomp.piece_bytes(self.dev)
+        R, TI, nvar = ring_buffers, transfer_interval, layout.nvar
+        max_pieces = 0
+        raw_bytes = 0
+        for t in ring_main:
+            if self.ndim == 3:
+                pitch = t.stride(0)                       # one (step, field) slot
+                region = TI * nvar * pitch * es
+                max_pieces += -(-region // piece)
+                raw_bytes += nt_saved * nvar * pitch * es
+            else:
+                pitch = t.stride(1)
+                region = TI * pitch * es
+                max_pieces += nvar * (-(-region // piece))
+                raw_bytes += nvar * nt_saved * pitch * es
+        # One index row per chunk of the WHOLE record (absolute chunk ids), not
+        # of the ring: a segmented ring (nt_saved = its steps) is refilled per
+        # segment while the chunk ids keep counting; the arena only has to hold
+        # one refill (sized from nt_saved below).  A row is ~1 KB.
+        nchunks = max(-(-nt_saved // TI), -(-int(self.nt) // TI))
+        nring_chunks = -(-nt_saved // TI)
+        scale_chunk = -(-TI * scale_step_bytes // 8) * 8          # one full chunk's scales, 8-aligned
+        raw_scales = nring_chunks * scale_chunk                    # what one fill of the ring appends
+        maxout = _nvcomp.max_piece_out(es, self.dev)
+        cap = max_pieces * maxout
+        temp = max(256, _nvcomp.decompress_temp_bytes(max_pieces, self.dev))
+        u8 = torch.uint8
+        tab = gpu_alloc.zeros([((R + 1) * 6 * max_pieces * 8,)], dtype=u8)[0]
+        status = gpu_alloc.zeros([((R + 1) * max_pieces * 4,)], dtype=u8)[0]
+        status_host = cpu_alloc.zeros([((R + 1) * max_pieces * 4,)], dtype=u8, dev='cpu', pin_memory=True)[0]
+        index_dev = gpu_alloc.zeros([(nchunks * (3 + max_pieces) * 8,)], dtype=u8)[0]
+        index_host = cpu_alloc.zeros([(nchunks * (3 + max_pieces) * 8,)], dtype=u8, dev='cpu', pin_memory=True)[0]
+        stats_host = cpu_alloc.zeros([(64,)], dtype=u8, dev='cpu', pin_memory=True)[0]
+        bound = gpu_alloc.zeros([(R * cap,)], dtype=u8)[0]
+        # More pack slots than ring slots: a chunk's landing (which needs its
+        # packed size on the host) can then wait for the pack to finish instead
+        # of forcing a host sync when the slot is reused (runtime.cuh land_pending).
+        n_pack = max(R, 4)
+        # a pack slot carries the packed payload (cap) and the chunk's scales
+        pack = gpu_alloc.zeros([(n_pack * (cap + scale_chunk),)], dtype=u8)[0]
+        temp_t = gpu_alloc.zeros([(temp,)], dtype=u8)[0]
+        # What the arena has to hold.  A ring as long as the record (or its
+        # tail) is filled once: every chunk stays, the arena holds the record
+        # packed.  A ring REFILLED per segment (ModelParallel(segment_steps=K):
+        # nt_saved = K + 1 steps, the forward overwrites it) holds parts of at
+        # most ceil(nt_saved / TI) + 1 chunks at a time (one partial chunk at
+        # each end when a refill starts mid-chunk); the C++ side evicts older
+        # ones and allocates circularly, which can waste up to one packed chunk
+        # at the wrap.  So the "basis" compress_budget multiplies is that live
+        # window plus one chunk, all at TI steps, and compress_budget = 1 /
+        # (live ratio) always fits; the budget a run needed is in the report.
+        refilled = getattr(self, "_boundary_ring_steps", None) is not None and nt_saved < int(self.nt)
+        step_bytes = raw_bytes // nt_saved
+        if refilled:
+            arena_chunks = nring_chunks + 2
+            basis = arena_chunks * TI * step_bytes
+        else:
+            arena_chunks = nring_chunks
+            basis = raw_bytes
+        # beyond budget x basis: the scales (not compressed) and the 8-byte
+        # rounding of each chunk
+        extra = arena_chunks * scale_chunk + 8 * arena_chunks
+        if boundary_storage == "disk":
+            # one pinned stage per pack slot (payload cap + one chunk's scales):
+            # a landing D2H goes to the stage of the pack slot it drains
+            persist = cpu_alloc.zeros([(n_pack * (cap + scale_chunk),)], dtype=u8, dev='cpu', pin_memory=True)[0]
+            arena_or_file = int(basis + extra)          # sparse: sized as if budget = 1
+            store.disk_root, store.disk_files = _create_disk_files(
+                disk_dir, [("boundary_packed.bin", arena_or_file)])
+        else:
+            arena = -(-int(basis * float(compress_budget)) // 8) * 8 + extra
+            arena_or_file = int(arena)
+            if boundary_storage == "gpu":
+                persist = gpu_alloc.zeros([(arena,)], dtype=u8)[0]
+            else:
+                persist = cpu_alloc.zeros([(arena,)], dtype=u8, dev='cpu', pin_memory=staging_pinned)[0]
+        # cfg: 8 int64 words, then one live flag per chunk (runtime.cuh
+        # kCfgHeader).  [0] the step ring's length (the C++ side evicts packed
+        # chunks the ring has overwritten), [1] arena / file bytes, [2] TI,
+        # [3] R, [4] nt, [5] basis, [6] extra, [7] flags (1 refilled ring: one
+        # chunk of slack at the wrap; 2 disk) -- the geometry
+        # the report needs, so it reads the store alone (ModelParallel keeps the
+        # store on its captured tile params, not on this object).  NOT through
+        # the allocator: the disk path zeroes the allocators per call, and the
+        # live flags must survive a call.  Kept alive by the store.
+        cfg = torch.zeros(_COMPRESS_CFG_HEADER + -(-nchunks // 8) * 8, dtype=u8)
+        cfg[:_COMPRESS_CFG_HEADER].view(torch.int64)[:8] = torch.tensor(
+            [int(nt_saved), int(arena_or_file), int(TI), int(R), int(self.nt), int(basis), int(extra),
+             (1 if refilled else 0) | (2 if boundary_storage == "disk" else 0)], dtype=torch.int64)
+        store.boundary_compress = (tab, status, status_host, index_dev, index_host, stats_host,
+                                   bound, pack, persist, temp_t, cfg)
+        # last_two: on the device for the device arena, else on the host as
+        # the staged paths keep it.
+        if boundary_storage == "gpu":
+            store.last_two = gpu_alloc.zeros([last_two_shape])[0]
+        else:
+            store.last_two = cpu_alloc.zeros(
+                [last_two_shape], dtype=torch.float32, dev='cpu', pin_memory=staging_pinned)[0]
+
+    def boundary_compress_report(self):
+        """Packed vs uncompressed bytes of the compressed boundary store
+        (``BoundarySaving(compress='bitcomp')``), or None without one.  See
+        :func:`compress_report`."""
+        if not self.boundary_compress:
+            return None
+        return compress_report(self.boundary_compress, self.boundary_gpu, self.ndim, self.dev)
+
+    @property
+    def last_boundary_compress_ratio(self):
+        """uncompressed / packed bytes of the fullest set of packed chunks the
+        last call kept in the arena at once (``BoundarySaving(compress='bitcomp')``),
+        or None before one ran.  For a ring as long as the record that is the
+        whole forward; for a ring refilled per segment it is the fullest
+        segment.  ``boundary_compress_report()['budget_needed']`` turns it
+        into the ``compress_budget`` the run needed."""
+        if not self.boundary_compress:
+            return None
+        return compress_report(self.boundary_compress, self.boundary_gpu, self.ndim, self.dev)["peak_ratio"]
 
     def __del__(self):
         self._remove_boundary_disk_cache()
@@ -1885,7 +2225,8 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
             wavelet: Source wavelet (numpy or torch).
             sources: Source coordinates.
             receivers: Receiver coordinates.
-            models: List of model parameters (must be ``torch.Tensor``).
+            models: List of model parameters, float32 ``torch.Tensor``; any
+                other dtype is a ``TypeError`` (the kernels compute in float32).
         """
 
         boundary_saving_config = self._merge_legacy_call_kwargs(
@@ -1908,6 +2249,14 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         boundary_disk_async_read = boundary_cfg["disk_async_read"]
         use_pinned_memory = boundary_cfg["pinned_memory"]
         boundary_disk_dir = boundary_cfg.get("disk_dir")
+        boundary_compress = boundary_cfg.get("compress") or None
+        boundary_compress_budget = float(boundary_cfg.get("compress_budget", BOUNDARY_DEFAULTS.compress_budget))
+        if boundary_compress is not None and not self._cuda_layout().supports_boundary_compress:
+            raise NotImplementedError(
+                f"compress: the {type(self.equation).__name__} impl='c' driver does not "
+                "implement boundary compression (cuda_layout.supports_boundary_compress).")
+        # Every storage saves through the GPU ring when compressing.
+        boundary_staged = boundary_on_cpu or boundary_compress is not None
 
         self.nt = wavelet.shape[-1]
 
@@ -1960,6 +2309,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         # Get the model parameters
 
         models = list(models if models is not None else self.parameters())
+        _require_float32_models(models, self.model_names)
         unpadded_models = models
         models = [EdgePadding.apply(para, padding) for para in models]
         self.models_padded = models
@@ -2113,21 +2463,25 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
         # a no-grad call zeroing the disk path's host staging and last_two
         # broke the backward still pending on them.
         boundary_cpu, boundary_gpu, boundary_staging, boundary_disk_files = (), (), (), ()
+        boundary_compress_bufs = ()
         last_two = torch.empty(0, device=self.dev)
         if use_boundary_saving and private_store:
             # Fresh zeros at exactly this batch: nothing to zero or narrow.
             store = self._allocate_boundary_store(
                 batch_size, boundary_storage, transfer_interval, use_pinned_memory,
-                boundary_disk_dir, boundary_ring_buffers, boundary_cfg.get('storage_dtype'), nt_saved)
+                boundary_disk_dir, boundary_ring_buffers, boundary_cfg.get('storage_dtype'), nt_saved,
+                boundary_compress, boundary_compress_budget)
             if store.disk_root is not None:
                 weakref.finalize(lease, shutil.rmtree, store.disk_root, True)
             boundary_cpu = store.boundary_cpu
-            boundary_gpu = store.boundary_gpu if boundary_on_cpu else store.boundary_gpu_full
+            boundary_gpu = store.boundary_gpu if boundary_staged else store.boundary_gpu_full
             boundary_staging = store.boundary_staging
+            boundary_compress_bufs = store.boundary_compress
             last_two = store.last_two
             boundary_disk_files = store.disk_files
         elif use_boundary_saving:
-            self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype'), nt_saved=nt_saved)
+            self._ensure_boundary_buffers(boundary_storage, transfer_interval, use_pinned_memory, boundary_disk_dir, boundary_ring_buffers, boundary_dtype=boundary_cfg.get('storage_dtype'), nt_saved=nt_saved,
+                                          compress=boundary_compress, compress_budget=boundary_compress_budget)
             if boundary_on_disk:
                 self.boundary_cpu_allocator.zero_()
                 self.boundary_gpu_allocator.zero_()
@@ -2136,11 +2490,14 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     t.zero_()
             boundary_cpu = self._slice_boundary_buffers(self.boundary_cpu, batch_size)
             boundary_gpu = self._slice_boundary_buffers(
-                self.boundary_gpu if boundary_on_cpu else self.boundary_gpu_full, batch_size)
+                self.boundary_gpu if boundary_staged else self.boundary_gpu_full, batch_size)
             # Narrowed on the same batch axis as the buffers it feeds; () unless
             # the storage dtype is scaled (int8/fp16), which is the only path
             # that quantizes through a staging band.
             boundary_staging = self._slice_boundary_buffers(self.boundary_staging, batch_size)
+            # Flat byte buffers, never narrowed (the pieces span the ring's
+            # capacity pitch; the saver reads the call's batch off the ring).
+            boundary_compress_bufs = self.boundary_compress
             last_two = self._slice_last_two(batch_size)
             boundary_disk_files = self._boundary_disk_files if boundary_on_disk else ()
 
@@ -2196,6 +2553,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     forward_workspace=forward_workspace,
                     derived_model_nvar_forward=self._derived_model_count("forward"),
                     derived_model_nvar_backward=derived_model_nvar_backward,
+                    create_graph_instead=substitute_for(self.equation, HESSIAN_ALTERNATIVES),
                     forward_state_shapes=forward_state_shapes,
                     bs_replay_shapes=bs_replay_shapes,
                     u_allt_shape=self._history_shape(batch_size),
@@ -2212,6 +2570,7 @@ class _CompiledPropagator(PropBase, torch.nn.Module):
                     boundary_cpu=boundary_cpu,
                     boundary_gpu=boundary_gpu,
                     boundary_staging=boundary_staging,
+                    boundary_compress=boundary_compress_bufs,
                     boundary_disk_files=boundary_disk_files,
                     requires_backward=requires_backward,
                     buffer_lease=lease,

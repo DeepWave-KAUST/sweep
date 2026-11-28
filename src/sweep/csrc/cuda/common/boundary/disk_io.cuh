@@ -341,6 +341,66 @@ inline void launch_boundary_disk_write_3d(std::shared_ptr<BoundaryDisk3DWriteTas
     }
 }
 
+// ---- the compressed ring's single payload file ------------------------------
+// One packed chunk: ``bytes`` from the pinned stage at ``src`` to byte offset
+// ``offset`` of ``path`` (the file Python truncated to the raw ring size,
+// sparse; what lands is the compressed bytes).  The callback copies the stage
+// into the task before the writer thread starts, exactly as the 2-D/3-D
+// callbacks do, so the stream may reuse the stage slot as soon as the
+// callback returns.
+struct BoundaryPackedMeta {
+    std::string path;
+    size_t offset = 0;
+    size_t bytes = 0;
+    const char* src = nullptr;
+};
+
+struct BoundaryPackedWriteTask {
+    std::string path;
+    size_t offset = 0;
+    std::vector<char> data;
+};
+
+inline void launch_boundary_packed_write(std::shared_ptr<BoundaryPackedWriteTask> task)
+{
+    boundary_disk_writer_begin();
+    try {
+        std::thread([task]() {
+            try {
+                write_boundary_file_chunk(task->path, task->offset, task->data.data(), task->data.size(), 1);
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "Boundary disk async write failed: %s\n", e.what());
+                boundary_disk_writer_record_error(std::current_exception());
+            }
+            boundary_disk_writer_done();
+        }).detach();
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "Boundary disk async write launch failed: %s\n", e.what());
+        try {
+            write_boundary_file_chunk(task->path, task->offset, task->data.data(), task->data.size(), 1);
+        } catch (const std::exception& write_error) {
+            std::fprintf(stderr, "Boundary disk fallback write failed: %s\n", write_error.what());
+            boundary_disk_writer_record_error(std::current_exception());
+        }
+        boundary_disk_writer_done();
+    }
+}
+
+inline void CUDART_CB write_boundary_packed_callback(void* user_data)
+{
+    std::unique_ptr<BoundaryPackedMeta> meta(static_cast<BoundaryPackedMeta*>(user_data));
+    try {
+        auto task = std::make_shared<BoundaryPackedWriteTask>();
+        task->path = meta->path;
+        task->offset = meta->offset;
+        task->data.assign(meta->src, meta->src + meta->bytes);
+        launch_boundary_packed_write(task);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "Boundary disk write callback failed: %s\n", e.what());
+        boundary_disk_writer_record_error(std::current_exception());
+    }
+}
+
 inline void CUDART_CB write_boundary_disk_2d_callback(void* user_data)
 {
     std::unique_ptr<BoundaryDisk2DMeta> meta(static_cast<BoundaryDisk2DMeta*>(user_data));

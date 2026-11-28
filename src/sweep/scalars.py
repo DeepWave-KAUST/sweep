@@ -1,4 +1,5 @@
 import math
+from fractions import Fraction
 import numpy as np
 
 def regular_grid_coes(M):
@@ -65,6 +66,32 @@ def fd_coefficients(derivative_order=2, accuracy_order=2):
 
     return coefficients[-n:]
 
+def second_derivative_coefficients_fp32(accuracy_order):
+    """Centred second-derivative coefficients in float32, ``(c0, c)`` with
+    ``c0 + 2 * sum(c) == 0`` exactly in their float32 values, so the stencil
+    ``c0 u_0 + sum_k c_k (u_k + u_-k)`` is zero on a constant field.
+
+    Rounding each fp64 coefficient to float32 on its own leaves the sum off by
+    up to ~1e-7 (7.45e-8 at 4th order).  In the wave equation that is a term
+    ``v^2 (sum / h^2) u``, whose relative effect, ~ sum / (k h)^2, grows as the
+    grid is refined: past ~100 points per wavelength the record stops
+    converging.  The residual goes into ``c[-1]``, the smallest coefficient and
+    the only one where it is exactly representable; it moves by < 6e-8.  The
+    CUDA kernels of orders 4, 6 and 8 hold the same values
+    (``operators/laplace.cuh``).
+    """
+    c = fd_coefficients(2, accuracy_order)
+    c0 = np.float32(-2 * c.sum())
+    c = c.astype(np.float32)
+    residual = Fraction(float(c0)) + 2 * sum(Fraction(float(x)) for x in c)
+    if residual:
+        target = Fraction(float(c[-1])) - residual / 2
+        c[-1] = np.float32(float(target))
+        if Fraction(float(c[-1])) != target:
+            raise RuntimeError(f"no float32 second-derivative stencil of order {accuracy_order} "
+                               "sums to zero through its last coefficient")
+    return c0, c
+
 def generate_convolution_kernel(spatial_order, derivative_order=2, mode='full', no_center=False, grid='normal', sign=1):
     """Generate convolution kernel
 
@@ -78,9 +105,13 @@ def generate_convolution_kernel(spatial_order, derivative_order=2, mode='full', 
     assert spatial_order % 2 == 0, "spatial_order must be even"
     assert grid in ['normal', 'staggered'], "grid must be one of ['normal', 'staggered']"
 
+    c0 = None   # the centre coefficient, when the stencil fixes it
     if grid == 'normal':
         # constant = normal_grid_coes(spatial_order//2)
-        constant = fd_coefficients(derivative_order, spatial_order)
+        if derivative_order == 2:
+            c0, constant = second_derivative_coefficients_fp32(spatial_order)
+        else:
+            constant = fd_coefficients(derivative_order, spatial_order)
     elif grid == 'staggered':
         constant = staggered_grid_coes(spatial_order//2)
 
@@ -96,7 +127,7 @@ def generate_convolution_kernel(spatial_order, derivative_order=2, mode='full', 
         kernel[0:center, center] = constant[::-1]
         # Center
         if not no_center:
-            kernel[center, center] = -2*2*np.sum(constant)
+            kernel[center, center] = 2 * c0 if c0 is not None else -2*2*np.sum(constant)
     
     if mode=='z':
         # X axis
@@ -109,7 +140,7 @@ def generate_convolution_kernel(spatial_order, derivative_order=2, mode='full', 
         kernel[center, 0:center] = sign*constant[::-1] # left
 
     if mode in ['x', 'z'] and not no_center:
-        kernel[center, center] = -2*np.sum(constant)
+        kernel[center, center] = c0 if c0 is not None else -2*np.sum(constant)
 
     return kernel.reshape(1, 1, *kernel.shape)
 

@@ -23,6 +23,76 @@ def stop_gradient(x):
     return jax.lax.stop_gradient(x)
 
 
+# Why the qP equations refuse a second derivative in every s_gradient mode, and
+# whether their create_graph=True gradient is still a first-order graph (it is
+# for 'frozen' and 'exact', whose double vjp a Gauss-Newton solver takes);
+# the eager propagator reads it through ``second_derivative_refusal``.
+_NO_SECOND_DERIVATIVE = {
+    "adjoint": ("its s_gradient='adjoint' step is differentiated by a hand-written adjoint "
+                "off the autograd tape", False),
+    "frozen": ("s_gradient='frozen' holds S_n fixed, so its gradient is the adjoint of the "
+               "linearisation with S_n fixed, not the derivative of the forward, and "
+               "differentiating it again gives no Hessian", True),
+    "exact": ("the second derivative of S_n = N / (D + 1e-26) overflows float32 where the "
+              "wavefield is quiet (D ~ 0) and comes back as NaN", True),
+}
+
+
+def qp_second_derivative_refusal(equation):
+    return _NO_SECOND_DERIVATIVE[equation.s_gradient]
+
+
+# Why a forward-mode tangent is not J h in a mode: 'adjoint' has no forward-mode
+# counterpart, and 'frozen' would carry the linearisation with S_n held fixed.
+_NO_FORWARD_MODE = {
+    "adjoint": "its s_gradient='adjoint' step is differentiated by a hand-written adjoint with no "
+               "forward-mode counterpart",
+    "frozen": "s_gradient='frozen' holds S_n fixed, so its tangent would be the frozen "
+              "linearisation, not J h",
+}
+
+
+def qp_forward_mode_refusal(equation):
+    return _NO_FORWARD_MODE.get(equation.s_gradient)
+
+
+# Why sweep.autodiff refuses the qP curvature products and differences.  S_n
+# depends on the direction of a field's own gradient (the scattered field's too,
+# in the Born pair), which turns abruptly where that gradient nearly vanishes,
+# so where epsilon differs from delta the record and the gradients vary on scales
+# of about 1e-5 of the model.  In float64, on a model with ten cells per
+# wavelength, J h by central differences along vp still moved by 8% between
+# steps of 1e-4 and 1e-5 of vp (forward mode is its limit), and the difference
+# of 'adjoint' gradients grew as the step shrank.  The 'exact' gradient is
+# ill-conditioned in float32 (see the AcousticVTI docstring), and so is its
+# Gauss-Newton product.  Forward-mode J h along a smooth direction is the one
+# product that holds (float32 within 0.5% of float64).  The hooks do not look at
+# the models: an isotropic or elliptic one (epsilon = delta, S_n = 0) is as
+# smooth as Acoustic.
+_NOT_SMOOTH = ("S_n depends on the direction of a field's own gradient, which turns abruptly where "
+               "that gradient nearly vanishes, so where epsilon differs from delta the record and "
+               "its gradient are not smooth functions of the model")
+_ONLY_JH = ("J h along a smooth direction is reliable by forward mode, with s_gradient='exact', "
+            "memory=Full() and EagerOptions(use_compile=False)")
+_NO_CURVATURE = {
+    "adjoint": f"{_NOT_SMOOTH}; a difference of its gradients grows as the step shrinks",
+    "frozen": ("s_gradient='frozen' holds S_n fixed, so its gradient is not the derivative of the "
+               "record and differentiating it gives no Hessian"),
+    "exact": ("its gradient is ill-conditioned (in float32 it moves by tens of percent against "
+              "float64 where epsilon differs from delta), and so are its Gauss-Newton product and "
+              "its second derivative, which double backward returns as NaN"),
+}
+
+
+def qp_curvature_refusal(equation):
+    return f"{_NO_CURVATURE[equation.s_gradient]}. {_ONLY_JH}"
+
+
+def qp_difference_refusal(equation):
+    return (f"{_NOT_SMOOTH}: central differences converge only at steps of about 1e-5 of the "
+            f"model or below, where float32 round-off dominates. {_ONLY_JH}")
+
+
 def check_s_gradient(value, backend="torch"):
     if value not in S_GRADIENTS:
         raise ValueError(f"s_gradient must be one of {S_GRADIENTS}, got {value!r}")
@@ -198,6 +268,12 @@ class _AdjointSRhs:
 
                 @staticmethod
                 def backward(ctx, grad):
+                    # create_graph=True and a dual tensor are refused on the input
+                    # side of the rollout (second_derivative_refusal,
+                    # forward_mode_refusal), not here: raising in this per-step node
+                    # left the rest of the backward queued and the interpreter
+                    # aborted at exit, and a custom jvp on this Function would break
+                    # the compiled graph (Dynamo does not trace one).
                     sk, vp2dt2, *models = (t.detach() for t in ctx.saved_tensors)
                     need = ctx.needs_input_grad
                     grad = grad.detach()
@@ -471,6 +547,18 @@ class AcousticVTI(SecondOrderEquation):
     def c_eq_aux(self, prop):
         return s_gradient_aux(self)
 
+    def second_derivative_refusal(self):
+        return qp_second_derivative_refusal(self)
+
+    def forward_mode_refusal(self):
+        return qp_forward_mode_refusal(self)
+
+    def curvature_refusal(self):
+        return qp_curvature_refusal(self)
+
+    def difference_refusal(self):
+        return qp_difference_refusal(self)
+
     def check_stability(self, models, dt, spacing):
         """Warn once when ``dt`` breaks the scheme's stability condition
         (:func:`qp_stability_ratio`); ``PropTorch`` calls it before every forward."""
@@ -496,6 +584,7 @@ def qp_cuda_layout():
       in the absorbing layer sees the true forward state.
     """
     return CUDALayoutSpec(
+        supports_boundary_compress=True,
         record_shape=record_single(),
         save_all_shape=history_fields(5),
         base_nvar=3,

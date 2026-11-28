@@ -345,6 +345,8 @@ wavefields, and backend / binding behavior:
 - [Elastic3D](elastic3d.md)
 - [ElasticBorn](elastic_born.md) — Born modelling (background + scattered
   field), the elastic LSRTM / RWI operator
+- [PseudoelasticP](pseudoelastic_p.md) — pure P-mode pseudoelastic equation
+  (Sun & Alkhalifah 2021): elastic PP amplitudes on the P-wave grid, no S waves
 - [ViscoElastic](visco_elastic.md)
 - [ElasticTTI](elastic_tti.md)
 - [ElasticTTISG](elastic_tti_sg.md)

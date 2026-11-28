@@ -2,10 +2,12 @@
 
 #include <chrono>
 #include "../../launch/launch.h"   // SWEEP_LAUNCH
+#include <algorithm>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cuda_runtime.h>
+#include <deque>
 #include <exception>
 #include <mutex>
 #include <thread>
@@ -91,7 +93,9 @@ public:
         : saver_(&saver),
           dim_(dim),
           enabled_(use_boundary_saving),
-          staged_(boundary_on_cpu || boundary_on_disk),
+          staged_(boundary_on_cpu || boundary_on_disk || saver.compress),
+          compress_(use_boundary_saving && saver.compress),
+          compress_tier_(boundary_on_disk ? 2 : boundary_on_cpu ? 1 : 0),
           boundary_on_disk_(boundary_on_disk),
           boundary_disk_async_read_(boundary_on_disk && boundary_disk_async_read),
           transfer_interval_(transfer_interval > 0 ? transfer_interval : 1),
@@ -139,6 +143,9 @@ public:
             cudaEventRecord(compute_ready_[i], compute_stream_);
         }
 
+        if (compress_)
+            init_compress();
+
         if (boundary_disk_async_read_)
             disk_reader_thread_ = std::thread(&BoundaryRuntime::disk_reader_loop, this);
 
@@ -172,6 +179,10 @@ public:
             if (event != nullptr)
                 cudaEventDestroy(event);
         }
+        for (auto event : comp_pack_ready_) {
+            if (event != nullptr)
+                cudaEventDestroy(event);
+        }
     }
 
     // Rebind the two objects that only exist for one call. The persistent
@@ -182,10 +193,35 @@ public:
     {
         saver_ = &saver;
         disk_files_ = &disk_files;
+        // The piece tables hold raw device pointers into this call's ring and
+        // workspace; a session that is re-pointed at other tensors rebuilds them.
+        if (compress_ && (saver.top_gpu.data_ptr() != comp_ring_ptr_ ||
+                          saver.comp_tab.data_ptr() != comp_tab_ptr_))
+            build_compress_tables();
     }
 
     inline bool enabled() const { return enabled_; }
     inline bool staged() const { return staged_; }
+    inline bool compress_enabled() const { return compress_; }
+
+    // A new forward phase starts the arena from byte 0 (the session reuses one
+    // runtime across phases; the per-call path builds a fresh one anyway).
+    inline void begin_forward()
+    {
+        if (!compress_) return;
+        pending_land_.clear();
+        comp_live_.clear();
+        comp_clear_live_flags();
+        comp_open_valid_ = false;
+        arena_fill_ = 0;
+        comp_last_chunk_ = -1;
+        comp_last_len_ = 0;
+        comp_packed_bytes_ = 0;
+        comp_raw_bytes_ = 0;
+        comp_chunks_landed_ = 0;
+        int64_t* stats = reinterpret_cast<int64_t*>(saver_->comp_stats_host.data_ptr());
+        stats[4] = stats[5] = stats[6] = stats[7] = 0;   // the peak live set of this call starts over
+    }
 
     inline BoundaryChunk forward_chunk(int it, int nt) const
     {
@@ -542,13 +578,25 @@ public:
 
     inline void flush_forward_if_needed(const BoundaryChunk& chunk)
     {
-        if (!enabled_ || !staged_ || !chunk.is_chunk_end)
+        if (!enabled_ || !staged_)
             return;
+        if (!chunk.is_chunk_end) {
+            // A segmented ring's refill ends mid-chunk; the chunk is compressed
+            // when the phase ends (synchronize) rather than never.
+            if (compress_) { comp_open_ = chunk; comp_open_valid_ = true; }
+            return;
+        }
+        comp_open_valid_ = false;
 
         cudaEventRecord(compute_ready_[chunk.ring_slot], compute_stream_);
         cudaStreamWaitEvent(copy_stream_, compute_ready_[chunk.ring_slot], 0);
         if (profile_enabled_)
             cudaEventRecord(forward_copy_start_[chunk.ring_slot], copy_stream_);
+
+        if (compress_) {
+            compress_chunk(chunk);
+            return;
+        }
 
         if (boundary_on_disk_) {
             saver_->flush_gpu_to_disk(
@@ -811,6 +859,7 @@ public:
             profile_have_compute_start_ = true;
             return;
         }
+        if (compress_) comp_settle();
         prefetch_backward_chunk(chunk_start, chunk_len, backward_slot_for_chunk(chunk_start));
         profile_compute_start_ = Clock::now();
     }
@@ -831,6 +880,15 @@ public:
         if (profile_enabled_ && profile_have_compute_start_)
             profile_compute_between_chunks_s_ += elapsed_seconds(profile_compute_start_, boundary_arrive);
 
+        // Deferred fetch (see prefetch_next_backward_chunk_if_needed): the
+        // chunk was not in the arena when its early prefetch came round.
+        if (compress_ && comp_slot_chunk_[chunk_slot] != chunk_start / transfer_interval_) {
+            comp_settle();
+            if (boundary_disk_async_read_)
+                start_async_disk_read(chunk_start, chunk_len, chunk_slot);
+            else
+                prefetch_backward_chunk(chunk_start, chunk_len, chunk_slot);
+        }
         if (boundary_disk_async_read_) {
             wait_for_async_disk_task(chunk_start, chunk_len, chunk_slot);
         }
@@ -844,7 +902,8 @@ public:
 
         if (boundary_disk_async_read_) {
             int next_start = chunk_start - transfer_interval_;
-            if (next_start >= 0) {
+            if (compress_) comp_settle();
+            if (next_start >= 0 && !(compress_ && !*comp_live_flag(next_start / transfer_interval_))) {
                 int next_len = backward_chunk_len(next_start);
                 start_async_disk_read(next_start, next_len, backward_slot_for_chunk(next_start));
             }
@@ -1339,6 +1398,14 @@ public:
         }
         int remain = nt - next_start;
         int next_len = remain < transfer_interval_ ? remain : transfer_interval_;
+        // A compressed chunk that is not in the arena yet belongs to a segment
+        // the driver refills later (ModelParallel segment_steps): leave it, the
+        // entry into that chunk fetches it (wait_before_backward_restore).
+        if (compress_) {
+            comp_settle();
+            if (!*comp_live_flag(next_start / transfer_interval_))
+                return;
+        }
         prefetch_backward_chunk(next_start, next_len,
                                 backward_slot_for_chunk(next_start));
     }
@@ -1346,10 +1413,14 @@ public:
     inline void synchronize()
     {
         wait_for_pending_disk_reader_task();
+        if (compress_)
+            comp_settle();
         if (enabled_ && staged_)
             cudaStreamSynchronize(copy_stream_);
         if (boundary_on_disk_)
             wait_for_boundary_disk_writes();
+        if (compress_)
+            finish_compress_phase();
         accumulate_all_forward_copy_time();
         print_profile_if_needed();
     }
@@ -1364,6 +1435,8 @@ private:
     int dim_ = 2;
     bool enabled_ = false;
     bool staged_ = false;
+    bool compress_ = false;
+    int compress_tier_ = 0;   // 0 gpu arena, 1 pinned host arena, 2 disk file
     bool boundary_on_disk_ = false;
     bool boundary_disk_async_read_ = false;
     int transfer_interval_ = 1;
@@ -1398,6 +1471,53 @@ private:
     std::vector<char> copy_pending_;
     std::vector<char> forward_copy_profile_pending_;
     std::vector<char> backward_copy_profile_pending_;
+
+    // ---- compression state (BoundarySaving(compress='bitcomp')) ----
+    // Geometry: every chunk of a slot is a fixed set of ≤ kPieceBytes pieces
+    // (one region per face, per field in 2-D, split in order); table t in
+    // [0, R) describes slot t at a full transfer_interval, table R the one
+    // shorter tail chunk (built on first use).  The per-chunk index carries
+    // the packed bytes; the arena offset is a running sum the host keeps.
+    int comp_elem_size_ = 1;
+    int comp_max_pieces_ = 0;
+    int64_t comp_cap_ = 0;          // bytes per bound / pack slot
+    int comp_pack_slots_ = 0;       // pack slots (>= ring_buffers): how long a landing may be deferred
+    int64_t comp_maxout_ = 0;       // bound bytes per piece (8-aligned)
+    int64_t comp_nchunks_ = 0;      // index rows: one per chunk of the WHOLE record
+    int comp_last_chunk_ = -1;      // last chunk compressed in this forward phase (-1: none)
+    int comp_last_len_ = 0;         // ... and the steps it held then
+    std::vector<int> comp_slot_chunk_;   // per ring slot: the chunk last fetched into it (-1 none)
+    int64_t comp_scale_full_bytes_ = 0;   // the scale ring's bytes for one full chunk (0 for fp32/bf16)
+    int64_t comp_temp_bytes_ = 0;
+    int64_t comp_persist_bytes_ = 0;
+    std::vector<int> comp_npieces_;          // per table
+    std::vector<int64_t> comp_raw_per_table_; // uncompressed bytes per table
+    std::vector<int64_t> comp_tab_host_;     // (R+1) x kTabRows x max_pieces, rows 0..2 meaningful
+    std::vector<char> comp_status_used_;     // per table: a batch ran since the last check
+    int comp_tail_slot_ = -1, comp_tail_len_ = -1;
+    void* comp_ring_ptr_ = nullptr;
+    void* comp_tab_ptr_ = nullptr;
+    std::vector<cudaEvent_t> comp_pack_ready_;
+    std::deque<int> pending_land_;
+    // The arena is a ring of packed chunks: live ones in order, allocated
+    // circularly; a chunk whose steps the step ring has overwritten is dead.
+    struct LiveChunk { int k; int64_t off; int64_t bytes; int64_t raw; int64_t packed; };  // bytes = packed + scales + alignment
+    std::deque<LiveChunk> comp_live_;
+    int64_t comp_ring_steps_ = 0;    // the step ring's length (Python: nt_saved); 0 = whole record
+    int64_t comp_arena_bytes_ = 0;   // capacity of the circular arena (device / pinned arena, or the disk file)
+    int comp_window_ = 0;            // live chunks kept: ceil(ring_steps / TI) + 1 (0 = all)
+    int64_t comp_raw_step_bytes_ = 0;   // uncompressed bytes of one saved step (all faces)
+    int64_t comp_basis_bytes_ = 0;   // cfg[5]: the bytes compress_budget multiplies (Python _allocate_compressed_store)
+    int64_t comp_extra_bytes_ = 0;   // cfg[6]: what the arena holds beyond budget x basis (scales, alignment)
+    int comp_wrap_slack_ = 0;        // cfg[7] & 1: the arena is refilled and may waste one chunk at the wrap
+    BoundaryChunk comp_open_;        // the last chunk saved into but not yet compressed
+    bool comp_open_valid_ = false;
+    int64_t arena_fill_ = 0;
+    int64_t comp_packed_bytes_ = 0;
+    int64_t comp_raw_bytes_ = 0;
+    int64_t comp_chunks_landed_ = 0;
+    double profile_compress_land_wait_s_ = 0.0;
+    int profile_compress_forced_lands_ = 0;
     std::thread disk_reader_thread_;
     std::mutex disk_reader_mutex_;
     std::condition_variable disk_reader_cv_;
@@ -1507,6 +1627,12 @@ private:
             // different slot, so this event has long completed -- no stall, real
             // overlap; with ring==1 it correctly orders the H2D after the read
             // (no overlap, but no corruption).
+            if (compress_) {
+                fetch_compressed_chunk(start, slot);
+                if (profile_enabled_)
+                    ++profile_chunks_;
+                return;
+            }
             cudaStreamWaitEvent(copy_stream_, compute_ready_[slot], 0);
             // ...into that slot's own GPU ring interval; the old default
             // gpu_start=0 packed every chunk into slot 0, which left
@@ -1536,6 +1662,8 @@ private:
 
     inline void start_async_disk_read(int start, int len, int slot)
     {
+        if (compress_)
+            comp_slot_chunk_[slot] = start / transfer_interval_;   // queued for this slot
         std::unique_lock<std::mutex> lock(disk_reader_mutex_);
         disk_reader_cv_.wait(lock, [this]() {
             return !disk_task_queued_ && !disk_task_running_ && !disk_task_done_;
@@ -1616,6 +1744,25 @@ private:
         // boundary for nvar>1.  (compute_ready_ already gates the H2D's write
         // to top_gpu; this gates the disk read's write to the CPU staging.)
         cudaEventSynchronize(copy_ready_[slot]);
+        if (compress_) {
+            // The packed chunk goes to this slot's pinned stage, the scales to
+            // their cpu staging as on the plain disk path; the copy-stream work
+            // (H2D, decompress, copy_ready) is then issued from this thread.
+            const int k = start / transfer_interval_;
+            const int64_t* row = comp_index_host_row(k);
+            const int fwd_len = static_cast<int>(row[sweep_nvcomp::kIdxLen]);
+            auto read_start = Clock::now();
+            const size_t nbytes = static_cast<size_t>(row[sweep_nvcomp::kIdxTotal] + comp_scale_bytes(fwd_len));
+            if (nbytes > 0)
+                read_boundary_file_chunk((*disk_files_)[0], static_cast<size_t>(row[sweep_nvcomp::kIdxOffset]),
+                                         comp_stage_ptr(slot), nbytes, 1);
+            add_disk_read_time(elapsed_seconds(read_start, Clock::now()));
+            fetch_compressed_chunk(start, slot);
+            if (profile_enabled_) {
+                ++profile_chunks_;
+            }
+            return;
+        }
         auto read_start = Clock::now();
         if (dim_ == 2)
             saver_->load_disk_to_cpu_2d(start, len, (*disk_files_), stage_start);
@@ -1728,6 +1875,8 @@ private:
             "backward_chunk_cpu_time=%.6f "
             "forward_copy_write_time=%.6f "
             "forward_slot_reuse_wait_time=%.6f "
+            "compress_land_wait_time=%.6f "
+            "compress_forced_lands=%d "
             "chunks=%d "
             "forward_chunks=%d "
             "async=%d\n",
@@ -1740,6 +1889,8 @@ private:
             profile_compute_between_chunks_s_,
             profile_disk_write_time_s_,
             profile_forward_slot_reuse_wait_s_,
+            profile_compress_land_wait_s_,
+            profile_compress_forced_lands_,
             profile_chunks_,
             profile_forward_chunks_,
             boundary_disk_async_read_ ? 1 : 0
@@ -1777,5 +1928,611 @@ private:
             return;
         for (int i = 0; i < ring_buffers_; ++i)
             accumulate_forward_copy_time(i);
+    }
+
+    // =====================================================================
+    // Lossless ring compression (nvCOMP Bitcomp).  Chunk granularity, on the
+    // copy stream; the per-step save/restore kernels never see it.
+    //
+    // Forward, at every chunk end (compress_chunk):
+    //   compress the slot's pieces -> bound[slot]; scan sizes -> packed
+    //   offsets + index row; pack -> pack[slot]; D2H the index row; record
+    //   copy_ready (ring slot free) and pack_ready.  The LANDING of a chunk
+    //   (pack[slot] -> arena / pinned arena / disk, at its exact packed size)
+    //   needs the size on the host, so it is issued at a LATER chunk end once
+    //   pack_ready has passed (cudaEventQuery, no stall), and forced only when
+    //   its pack slot is about to be reused or the phase ends.
+    // Backward, at every chunk fetch (fetch_compressed_chunk):
+    //   persist[offset] -> pack[slot]; scan the index row -> compressed piece
+    //   pointers; decompress -> the ring slot; copy_ready.  dequantize / restore
+    //   read the ring exactly as without compression, so the result is
+    //   bit-identical to the uncompressed path (lossless).
+    // =====================================================================
+    inline bool comp_scaled() const
+    {
+        const auto dt = saver_->top_gpu.dtype();
+        return dt == BoundaryDtype::INT8 || dt == BoundaryDtype::FP16;
+    }
+    inline int64_t* comp_tab_host(int t, int row) { return comp_tab_host_.data() + (static_cast<int64_t>(t) * sweep_nvcomp::kTabRows + row) * comp_max_pieces_; }
+    inline int64_t* comp_tab_dev(int t, int row) const
+    {
+        return reinterpret_cast<int64_t*>(saver_->comp_tab.data_ptr())
+            + (static_cast<int64_t>(t) * sweep_nvcomp::kTabRows + row) * comp_max_pieces_;
+    }
+    inline int32_t* comp_status_dev(int t) const { return reinterpret_cast<int32_t*>(saver_->comp_status.data_ptr()) + static_cast<int64_t>(t) * comp_max_pieces_; }
+    inline int32_t* comp_status_host(int t) const { return reinterpret_cast<int32_t*>(saver_->comp_status_host.data_ptr()) + static_cast<int64_t>(t) * comp_max_pieces_; }
+    // cfg[16 + k]: 1 while chunk k's packed bytes are in the arena (host memory
+    // the propagator owns, written by this side only -- so no D2H races it).
+    // cfg: 8 int64 words [ring steps, arena/file bytes, TI, R, nt, basis, extra, wrap slack], then one live flag per chunk
+    static constexpr int kCfgHeader = 64;
+    inline const int64_t* comp_cfg_words() const { return reinterpret_cast<const int64_t*>(saver_->comp_cfg.data_ptr()); }
+    inline uint8_t* comp_live_flag(int k) const { return static_cast<uint8_t*>(saver_->comp_cfg.data_ptr()) + kCfgHeader + k; }
+    inline void comp_clear_live_flags() { std::memset(static_cast<uint8_t*>(saver_->comp_cfg.data_ptr()) + kCfgHeader, 0, static_cast<size_t>(comp_nchunks_)); }
+    inline int64_t* comp_index_dev_row(int k) const { return reinterpret_cast<int64_t*>(saver_->comp_index_dev.data_ptr()) + static_cast<int64_t>(k) * (sweep_nvcomp::kIdxSizes + comp_max_pieces_); }
+    inline int64_t* comp_index_host_row(int k) const { return reinterpret_cast<int64_t*>(saver_->comp_index_host.data_ptr()) + static_cast<int64_t>(k) * (sweep_nvcomp::kIdxSizes + comp_max_pieces_); }
+    inline int64_t comp_index_row_bytes() const { return static_cast<int64_t>(sweep_nvcomp::kIdxSizes + comp_max_pieces_) * 8; }
+    inline char* comp_bound_ptr(int slot) const { return static_cast<char*>(saver_->comp_bound.data_ptr()) + static_cast<int64_t>(slot) * comp_cap_; }
+    // A pack slot is [packed payload (cap)] [the chunk's scales]: the scales are
+    // copied out of their ring slot at compress time, so the deferred landing
+    // never reads the ring (which the next chunk in that ring slot rewrites).
+    inline char* comp_pack_ptr(int slot) const { return static_cast<char*>(saver_->comp_pack.data_ptr()) + static_cast<int64_t>(slot) * (comp_cap_ + comp_scale_full_bytes_); }
+    inline char* comp_stage_ptr(int slot) const { return static_cast<char*>(saver_->comp_persist.data_ptr()) + static_cast<int64_t>(slot) * (comp_cap_ + comp_scale_full_bytes_); }
+    inline char* comp_persist_ptr() const { return static_cast<char*>(saver_->comp_persist.data_ptr()); }
+
+    inline void init_compress()
+    {
+#if defined(SWEEP_HOST_CORE)
+        SWEEP_CHECK(false, "boundary compression (BoundarySaving(compress=...)) is not available on the host core");
+#else
+        SWEEP_CHECK(compress_tier_ != 2 || boundary_disk_async_read_,
+                    "boundary compression with storage='disk' needs disk_async_read=True "
+                    "(the packed chunks are fetched by the reader thread).");
+        const auto& S = *saver_;
+        comp_elem_size_ = static_cast<int>(S.top_gpu.element_size());
+        sweep_nvcomp::check_alignments(comp_elem_size_);
+        const int R = ring_buffers_;
+        comp_max_pieces_ = static_cast<int>(S.comp_status.numel() / 4 / (R + 1));
+        SWEEP_CHECK(comp_max_pieces_ > 0 && S.comp_status.numel() == static_cast<int64_t>(comp_max_pieces_) * 4 * (R + 1),
+                    "boundary_compress status buffer is not (ring_buffers + 1) x max_pieces int32");
+        SWEEP_CHECK(S.comp_tab.numel() == static_cast<int64_t>(R + 1) * sweep_nvcomp::kTabRows * comp_max_pieces_ * 8,
+                    "boundary_compress table buffer is not (ring_buffers + 1) x 6 x max_pieces int64");
+        SWEEP_CHECK(S.comp_status_host.numel() == S.comp_status.numel(), "boundary_compress status mirror size mismatch");
+        comp_cap_ = S.comp_bound.numel() / R;
+        SWEEP_CHECK(comp_cap_ > 0 && S.comp_bound.numel() == comp_cap_ * R,
+                    "boundary_compress bound buffer must be ring_buffers equal slots");
+        comp_scale_full_bytes_ = comp_scale_bytes(transfer_interval_);
+        comp_pack_slots_ = static_cast<int>(S.comp_pack.numel() / (comp_cap_ + comp_scale_full_bytes_));
+        SWEEP_CHECK(comp_pack_slots_ >= R && S.comp_pack.numel() == (comp_cap_ + comp_scale_full_bytes_) * comp_pack_slots_,
+                    "boundary_compress pack buffer must be >= ring_buffers slots of (bound slot + scale chunk) bytes");
+        comp_nchunks_ = S.comp_index_dev.numel() / comp_index_row_bytes();
+        SWEEP_CHECK(comp_nchunks_ > 0 && S.comp_index_dev.numel() == comp_nchunks_ * comp_index_row_bytes()
+                    && S.comp_index_host.numel() == S.comp_index_dev.numel(),
+                    "boundary_compress index buffers are not nchunks x (2 + max_pieces) int64");
+        SWEEP_CHECK(S.comp_stats_host.numel() >= 64, "boundary_compress stats buffer must hold 8 int64");
+        comp_maxout_ = sweep_nvcomp::max_compressed_piece_bytes(comp_elem_size_);
+        comp_temp_bytes_ = sweep_nvcomp::decompress_temp_bytes(comp_max_pieces_, static_cast<int64_t>(comp_max_pieces_) * sweep_nvcomp::kPieceBytes);
+        SWEEP_CHECK(comp_temp_bytes_ <= S.comp_temp.numel(),
+                    "nvCOMP wants ", comp_temp_bytes_, " B of decompression scratch but boundary_compress "
+                    "temp holds ", S.comp_temp.numel(), " B");
+        comp_persist_bytes_ = S.comp_persist.numel();
+        SWEEP_CHECK(S.comp_cfg.numel() >= kCfgHeader + comp_nchunks_, "boundary_compress cfg must hold 64 + nchunks bytes");
+        const int64_t* cfg = comp_cfg_words();
+        comp_ring_steps_ = cfg[0];
+        // the arena the circular allocation runs in: the device / pinned arena
+        // itself, or for the disk tier the payload file (cfg[1]), not the stage
+        comp_arena_bytes_ = compress_tier_ == 2 ? cfg[1] : comp_persist_bytes_;
+        SWEEP_CHECK(comp_arena_bytes_ > 0, "boundary_compress: the arena / packed file size is not set (cfg[1])");
+        SWEEP_CHECK(cfg[2] == transfer_interval_ && cfg[3] == ring_buffers_,
+                    "boundary_compress workspace was sized for transfer_interval=", cfg[2], " ring_buffers=", cfg[3],
+                    " but the runtime has ", transfer_interval_, "/", ring_buffers_);
+        comp_basis_bytes_ = cfg[5];
+        comp_extra_bytes_ = cfg[6];
+        comp_wrap_slack_ = static_cast<int>(cfg[7] & 1);   // bit 1 (disk) is for the Python report
+        // Live window: the ring holds ring_steps steps, i.e. parts of at most
+        // ceil(ring_steps / TI) + 1 chunks (one partial at each end when a
+        // refill starts mid-chunk); older ones are overwritten and evicted.
+        comp_window_ = comp_ring_steps_ > 0
+            ? static_cast<int>((comp_ring_steps_ + transfer_interval_ - 1) / transfer_interval_) + 1 : 0;
+        if (compress_tier_ == 2) {
+            SWEEP_CHECK(comp_persist_bytes_ == (comp_cap_ + comp_scale_full_bytes_) * comp_pack_slots_,
+                        "boundary_compress disk stage must be one (cap + scale chunk)-sized slot per pack slot");
+            SWEEP_CHECK(disk_files_ != nullptr && !disk_files_->empty(),
+                        "boundary_compress on storage='disk' needs the packed file in boundary_disk_files");
+        }
+        comp_pack_ready_.resize(comp_pack_slots_, nullptr);
+        for (int i = 0; i < comp_pack_slots_; ++i)
+            cudaEventCreateWithFlags(&comp_pack_ready_[i], cudaEventDisableTiming);
+        comp_status_used_.assign(R + 1, 0);
+        comp_slot_chunk_.assign(R, -1);
+        build_compress_tables();
+        // Not begin_forward() here: the live flags are the propagator's memory
+        // and describe what the LAST forward left in the arena; a backward's
+        // (per-call) runtime must read them, not clear them.  BoundaryScope
+        // calls begin_forward() when a forward phase starts.
+#endif
+    }
+
+    // The uncompressed pieces of slot ``slot`` holding ``len`` steps: one
+    // contiguous region per face (per field in 2-D), split into kPieceBytes.
+    inline std::vector<std::pair<int64_t, int64_t>> comp_pieces(int slot, int len) const
+    {
+        const auto& S = *saver_;
+        const int64_t es = comp_elem_size_;
+        std::vector<std::pair<int64_t, int64_t>> out;
+        auto add_region = [&](int64_t start, int64_t bytes) {
+            SWEEP_CHECK(start % sweep_nvcomp::kAlign == 0,
+                        "boundary compression: a ring region starts at byte ", start, " of its buffer, "
+                        "not a multiple of ", sweep_nvcomp::kAlign, " (the Python side pads the ring's "
+                        "per-step pitch when compress is on; this ring was not allocated that way)");
+            for (int64_t off = 0; off < bytes; off += sweep_nvcomp::kPieceBytes)
+                out.emplace_back(start + off, std::min<int64_t>(sweep_nvcomp::kPieceBytes, bytes - off));
+        };
+        const Buf* faces3[6] = {&S.top_gpu, &S.bottom_gpu, &S.front_gpu, &S.back_gpu, &S.left_gpu, &S.right_gpu};
+        const Buf* faces2[4] = {&S.top_gpu, &S.bottom_gpu, &S.left_gpu, &S.right_gpu};
+        const int nf = dim_ == 3 ? 6 : 4;
+        for (int f = 0; f < nf; ++f) {
+            const Buf& b = dim_ == 3 ? *faces3[f] : *faces2[f];
+            if (!b.defined() || b.numel() == 0) continue;   // DD cut face
+            const int64_t base = reinterpret_cast<int64_t>(b.data_ptr());
+            if (dim_ == 3) {
+                const int64_t pitch = b.stride(0);   // one (step, field) slot
+                add_region(base + static_cast<int64_t>(slot) * transfer_interval_ * S.nvar * pitch * es,
+                           static_cast<int64_t>(len) * S.nvar * pitch * es);
+            } else {
+                const int64_t var_block = b.stride(0), pitch = b.stride(1);
+                for (int v = 0; v < S.nvar; ++v)
+                    add_region(base + (v * var_block + static_cast<int64_t>(slot) * transfer_interval_ * pitch) * es,
+                               static_cast<int64_t>(len) * pitch * es);
+            }
+        }
+        SWEEP_CHECK(static_cast<int>(out.size()) <= comp_max_pieces_,
+                    "boundary compression: slot ", slot, " at ", len, " steps needs ", out.size(),
+                    " pieces but the Python workspace holds ", comp_max_pieces_);
+        return out;
+    }
+
+    // The FP32 per-block scales of a chunk (int8 / fp16 rings): one region per
+    // face (per field in 2-D) of the scale RING, in the same order and
+    // step-geometry as comp_pieces.  They ride along uncompressed, appended to
+    // the packed payload in the arena / file, so the compressed store needs no
+    // persistent scale buffer of its own -- which is what lets a ring that is
+    // refilled per segment (ModelParallel segment_steps) work unchanged.
+    inline std::vector<std::pair<char*, int64_t>> comp_scale_regions(int slot, int len) const
+    {
+        std::vector<std::pair<char*, int64_t>> out;
+        if (!comp_scaled()) return out;
+        const auto& S = *saver_;
+        const Buf* faces3[6] = {&S.top_scale_gpu, &S.bottom_scale_gpu, &S.front_scale_gpu, &S.back_scale_gpu, &S.left_scale_gpu, &S.right_scale_gpu};
+        const Buf* faces2[4] = {&S.top_scale_gpu, &S.bottom_scale_gpu, &S.left_scale_gpu, &S.right_scale_gpu};
+        const int nf = dim_ == 3 ? 6 : 4;
+        for (int f = 0; f < nf; ++f) {
+            const Buf& b = dim_ == 3 ? *faces3[f] : *faces2[f];
+            if (!b.defined() || b.numel() == 0) continue;
+            char* base = static_cast<char*>(b.data_ptr());
+            if (dim_ == 3) {
+                const int64_t pitch = b.stride(0);
+                out.emplace_back(base + static_cast<int64_t>(slot) * transfer_interval_ * S.nvar * pitch * 4,
+                                 static_cast<int64_t>(len) * S.nvar * pitch * 4);
+            } else {
+                const int64_t var_block = b.stride(0), pitch = b.stride(1);
+                for (int v = 0; v < S.nvar; ++v)
+                    out.emplace_back(base + (v * var_block + static_cast<int64_t>(slot) * transfer_interval_ * pitch) * 4,
+                                     static_cast<int64_t>(len) * pitch * 4);
+            }
+        }
+        return out;
+    }
+    inline int64_t comp_scale_bytes(int len) const
+    {
+        int64_t n = 0;
+        for (const auto& r : comp_scale_regions(0, len)) n += r.second;
+        return sweep_nvcomp::align_up(n);
+    }
+    // Move a chunk's scale regions between the scale ring and a contiguous
+    // run at ``dst``/``src`` (arena or pinned stage), in region order.
+    inline void comp_copy_scales(char* lin, int slot, int len, bool ring_to_lin, cudaMemcpyKind kind)
+    {
+        int64_t off = 0;
+        for (const auto& r : comp_scale_regions(slot, len)) {
+            if (ring_to_lin)
+                cudaMemcpyAsync(lin + off, r.first, static_cast<size_t>(r.second), kind, copy_stream_);
+            else
+                cudaMemcpyAsync(r.first, lin + off, static_cast<size_t>(r.second), kind, copy_stream_);
+            off += r.second;
+        }
+    }
+
+    inline void fill_table(int t, int bound_slot, int slot, int len, cudaStream_t stream)
+    {
+        const auto pieces = comp_pieces(slot, len);
+        const int n = static_cast<int>(pieces.size());
+        comp_npieces_[t] = n;
+        int64_t raw = 0;
+        int64_t* unc_ptr = comp_tab_host(t, sweep_nvcomp::kRowUncPtr);
+        int64_t* unc_bytes = comp_tab_host(t, sweep_nvcomp::kRowUncBytes);
+        int64_t* bound_ptr = comp_tab_host(t, sweep_nvcomp::kRowBoundPtr);
+        const int64_t bound_base = reinterpret_cast<int64_t>(comp_bound_ptr(bound_slot));
+        for (int i = 0; i < n; ++i) {
+            unc_ptr[i] = pieces[i].first;
+            unc_bytes[i] = pieces[i].second;
+            bound_ptr[i] = bound_base + static_cast<int64_t>(i) * comp_maxout_;
+            raw += pieces[i].second;
+        }
+        comp_raw_per_table_[t] = raw;
+        SWEEP_CHECK(static_cast<int64_t>(n) * comp_maxout_ <= comp_cap_,
+                    "boundary compression: ", n, " pieces x ", comp_maxout_, " B bound exceeds the ", comp_cap_,
+                    " B workspace slot");
+        // Rows 0..2 of table t, in one copy (the host vector is a member, alive
+        // for the runtime; a pageable async copy is staged by the driver).
+        cudaMemcpyAsync(comp_tab_dev(t, 0), comp_tab_host(t, 0),
+                        static_cast<size_t>(3) * comp_max_pieces_ * 8, cudaMemcpyHostToDevice, stream);
+    }
+
+    inline void build_compress_tables()
+    {
+        const int R = ring_buffers_;
+        comp_tab_host_.assign(static_cast<size_t>(R + 1) * sweep_nvcomp::kTabRows * comp_max_pieces_, 0);
+        comp_npieces_.assign(R + 1, 0);
+        comp_raw_per_table_.assign(R + 1, 0);
+        for (int s = 0; s < R; ++s)
+            fill_table(s, s, s, transfer_interval_, copy_stream_);
+        comp_raw_step_bytes_ = comp_raw_per_table_[0] / transfer_interval_;
+        comp_tail_slot_ = -1;
+        comp_tail_len_ = -1;
+        comp_ring_ptr_ = saver_->top_gpu.data_ptr();
+        comp_tab_ptr_ = saver_->comp_tab.data_ptr();
+    }
+
+    // Table index for a chunk of ``len`` steps in ``slot``: its slot's table
+    // at a full interval, else the tail table (built for the first short chunk
+    // seen; there is exactly one per phase).
+    inline int comp_table_for(int slot, int len)
+    {
+        if (len == transfer_interval_) return slot;
+        const int R = ring_buffers_;
+        if (comp_tail_slot_ != slot || comp_tail_len_ != len) {
+            fill_table(R, slot, slot, len, copy_stream_);
+            comp_tail_slot_ = slot;
+            comp_tail_len_ = len;
+        }
+        return R;
+    }
+
+    inline void compress_chunk(const BoundaryChunk& chunk)
+    {
+#if !defined(SWEEP_HOST_CORE)
+        const int slot = chunk.ring_slot, len = chunk.chunk_len, k = chunk.chunk_id;
+        SWEEP_CHECK(k < comp_nchunks_, "boundary compression: chunk ", k, " beyond the ", comp_nchunks_,
+                    "-row index (the propagator sizes it by ceil(nt / transfer_interval); "
+                    "nt or transfer_interval changed under the workspace?)");
+        // A chunk id at or below the last one compressed in this phase means the
+        // ring is being REFILLED (a segmented ring re-runs each segment's forward
+        // inside the backward): land what is pending and start the arena over.
+        // The arena therefore has to hold one refill, which is what the Python
+        // side sizes it from (nt_saved = the ring's steps), not the whole record.
+        if (k == comp_last_chunk_ && len > comp_last_len_) {
+            // The same chunk again with MORE steps: a continuation, not a
+            // refill -- a per-call runtime (no session) flushes the open chunk
+            // at every call's end and the next call grows it.  The previous
+            // compression of this chunk is superseded: drop it from the
+            // pending list, or from the live set (it is the newest, so the
+            // arena simply reuses its bytes).
+            for (auto it = pending_land_.begin(); it != pending_land_.end(); ++it)
+                if (*it == k) { pending_land_.erase(it); break; }
+            if (!comp_live_.empty() && comp_live_.back().k == k) {
+                *comp_live_flag(k) = 0;
+                comp_live_.pop_back();
+            }
+        } else if (k <= comp_last_chunk_) {
+            land_pending(-1, true);
+            comp_live_.clear();
+            comp_clear_live_flags();
+            arena_fill_ = 0;
+        }
+        comp_last_chunk_ = k;
+        comp_last_len_ = len;
+        const int t = comp_table_for(slot, len);
+        const int n = comp_npieces_[t];
+        // The pack slots outnumber the ring slots so a landing can usually wait
+        // for its pack to finish without a host sync: the chunk that last used
+        // this pack slot must be landed before it is rewritten.
+        const int ps = k % comp_pack_slots_;
+        land_pending(ps, false);
+        // The chunk's scales go behind the payload area of the pack slot now
+        // (copy stream, before copy_ready releases the ring slot); the landing
+        // appends them to the packed payload from there.
+        comp_copy_scales(comp_pack_ptr(ps) + comp_cap_, slot, len, true, cudaMemcpyDeviceToDevice);
+        if (n > 0) {
+            const auto& api = sweep_nvcomp::require();
+            auto st = api.compress(
+                reinterpret_cast<const void* const*>(comp_tab_dev(t, sweep_nvcomp::kRowUncPtr)),
+                reinterpret_cast<const size_t*>(comp_tab_dev(t, sweep_nvcomp::kRowUncBytes)),
+                static_cast<size_t>(sweep_nvcomp::kPieceBytes), static_cast<size_t>(n), nullptr, 0,
+                reinterpret_cast<void* const*>(comp_tab_dev(t, sweep_nvcomp::kRowBoundPtr)),
+                reinterpret_cast<size_t*>(comp_tab_dev(t, sweep_nvcomp::kRowCompBytes)),
+                sweep_nvcomp::compress_opts(comp_elem_size_), comp_status_dev(t), copy_stream_);
+            SWEEP_CHECK(st == sweep_nvcomp::kSuccess, "nvcompBatchedBitcompCompressAsync failed: status ", st);
+            sweep_nvcomp::scan_piece_sizes_kernel<<<1, sweep_nvcomp::kScanThreads, 0, copy_stream_>>>(
+                comp_tab_dev(t, sweep_nvcomp::kRowCompBytes), n, comp_pack_ptr(ps),
+                comp_tab_dev(t, sweep_nvcomp::kRowCompPtr),
+                comp_index_dev_row(k) + sweep_nvcomp::kIdxTotal, comp_index_dev_row(k) + sweep_nvcomp::kIdxSizes,
+                comp_index_dev_row(k) + sweep_nvcomp::kIdxLen, static_cast<int64_t>(len));
+            sweep_nvcomp::pack_pieces_kernel<<<n, 256, 0, copy_stream_>>>(
+                comp_tab_dev(t, sweep_nvcomp::kRowBoundPtr), comp_tab_dev(t, sweep_nvcomp::kRowCompBytes),
+                comp_tab_dev(t, sweep_nvcomp::kRowCompPtr));
+            cudaMemcpyAsync(comp_status_host(t), comp_status_dev(t), static_cast<size_t>(n) * 4,
+                            cudaMemcpyDeviceToHost, copy_stream_);
+            comp_status_used_[t] = 1;
+        } else {
+            // Nothing to compress (every face cut): the row still records the
+            // step count, with a zero total, so the backward fetch accepts it.
+            sweep_nvcomp::scan_piece_sizes_kernel<<<1, sweep_nvcomp::kScanThreads, 0, copy_stream_>>>(
+                comp_tab_dev(t, sweep_nvcomp::kRowCompBytes), 0, comp_pack_ptr(ps),
+                comp_tab_dev(t, sweep_nvcomp::kRowCompPtr),
+                comp_index_dev_row(k) + sweep_nvcomp::kIdxTotal, nullptr,
+                comp_index_dev_row(k) + sweep_nvcomp::kIdxLen, static_cast<int64_t>(len));
+        }
+        cudaMemcpyAsync(comp_index_host_row(k), comp_index_dev_row(k), static_cast<size_t>(comp_index_row_bytes()),
+                        cudaMemcpyDeviceToHost, copy_stream_);
+        cudaEventRecord(copy_ready_[slot], copy_stream_);
+        copy_pending_[slot] = 1;
+        cudaEventRecord(comp_pack_ready_[ps], copy_stream_);
+        pending_land_.push_back(k);
+        comp_raw_bytes_ += comp_raw_per_table_[t];
+        if (profile_enabled_) {
+            ++profile_forward_chunks_;
+            if (boundary_on_disk_)
+                forward_copy_profile_pending_[slot] = 1;
+        }
+#endif
+    }
+
+    // Everything the forward has saved so far is in the arena after this: the
+    // chunk still open (a ring refilled per segment stops mid-chunk) is
+    // compressed, every pending landing is issued.  Called at the end of a
+    // phase and before any backward fetch -- a driver that refills the ring
+    // inside its backward phase never flips the phase, so the fetch itself
+    // settles.  A no-op in a plain backward.
+    inline void comp_settle()
+    {
+        if (comp_open_valid_) {
+            BoundaryChunk open = comp_open_;
+            comp_open_valid_ = false;
+            cudaEventRecord(compute_ready_[open.ring_slot], compute_stream_);
+            cudaStreamWaitEvent(copy_stream_, compute_ready_[open.ring_slot], 0);
+            compress_chunk(open);
+        }
+        land_pending(/*force_slot=*/-1, /*force_all=*/true);
+    }
+
+    // Issue the persistent landing of every pending chunk whose pack is done
+    // (in order; a not-yet-done chunk stops the sweep), forcing the one whose
+    // pack slot is ``force_slot`` (about to be rewritten) or all of them.
+    inline void land_pending(int force_slot, bool force_all)
+    {
+#if !defined(SWEEP_HOST_CORE)
+        while (!pending_land_.empty()) {
+            const int k = pending_land_.front();
+            const int s = k % comp_pack_slots_;
+            if (comp_window_ > 0 && k <= comp_last_chunk_ - comp_window_) {
+                pending_land_.pop_front();   // its steps are already overwritten in the ring
+                continue;
+            }
+            if (force_all || s == force_slot) {
+                auto wait_start = Clock::now();
+                cudaEventSynchronize(comp_pack_ready_[s]);
+                if (profile_enabled_) {
+                    profile_compress_land_wait_s_ += elapsed_seconds(wait_start, Clock::now());
+                    ++profile_compress_forced_lands_;
+                }
+            } else {
+                cudaError_t q = cudaEventQuery(comp_pack_ready_[s]);
+                if (q == cudaErrorNotReady) {
+                    (void)cudaGetLastError();   // not-ready is not an error
+                    break;
+                }
+                SWEEP_CHECK(q == cudaSuccess, "cudaEventQuery failed: ", cudaGetErrorString(q));
+            }
+            land_chunk(k, s);
+            pending_land_.pop_front();
+        }
+#else
+        (void)force_slot; (void)force_all;
+#endif
+    }
+
+    inline void land_chunk(int k, int s)
+    {
+#if !defined(SWEEP_HOST_CORE)
+        int64_t* row = comp_index_host_row(k);
+        const int64_t total = row[sweep_nvcomp::kIdxTotal];
+        const int len = static_cast<int>(row[sweep_nvcomp::kIdxLen]);
+        const int64_t sbytes = comp_scale_bytes(len);
+        // Evict the chunks the step ring has overwritten, then allocate
+        // circularly after the newest live chunk (wrapping to 0 when the tail
+        // does not fit), so the arena holds one fill of the ring, not the
+        // record.  For the disk file the "arena" is the file, sized the same.
+        if (comp_window_ > 0)
+            while (!comp_live_.empty() && comp_live_.front().k <= k - comp_window_) {
+                *comp_live_flag(comp_live_.front().k) = 0;
+                comp_live_.pop_front();
+            }
+        const int64_t need = total + sbytes;
+        int64_t offset = 0;
+        bool fits = need <= comp_arena_bytes_;
+        if (!comp_live_.empty()) {
+            const int64_t head = comp_live_.front().off;
+            const int64_t tail = comp_live_.back().off + comp_live_.back().bytes;
+            if (tail >= head) {            // live run [head, tail): free after tail, or before head
+                if (tail + need <= comp_arena_bytes_) offset = tail;
+                else if (need <= head) offset = 0;
+                else fits = false;
+            } else {                       // wrapped: live run [head, cap) + [0, tail)
+                if (tail + need <= head) offset = tail;
+                else fits = false;
+            }
+        }
+        const int64_t raw = comp_raw_step_bytes_ * len;
+        int64_t live_bytes = need, live_raw = raw, live_packed = total, max_chunk = need;
+        for (const auto& c : comp_live_) {
+            live_bytes += c.bytes; live_raw += c.raw; live_packed += c.packed;
+            if (c.bytes > max_chunk) max_chunk = c.bytes;
+        }
+        if (!fits) {
+            // The budget this live set needs, in the units Python sizes the
+            // arena with (budget x basis + extra, one chunk of slack where the
+            // arena is refilled and may waste that much at the wrap).
+            const int64_t want = live_bytes + (comp_wrap_slack_ ? max_chunk : 0) - comp_extra_bytes_;
+            const double budget = comp_basis_bytes_ > 0 ? static_cast<double>(want) / static_cast<double>(comp_basis_bytes_) : 0.0;
+            SWEEP_CHECK(false,
+                        "boundary compression: chunk ", k, " (", need, " B packed + scales) does not fit the arena of ",
+                        comp_arena_bytes_, " B; the live packed chunks hold ", live_bytes - need, " B for ",
+                        live_raw - raw, " B of ring (ratio ", live_raw - raw > 0 && live_bytes - need > 0
+                        ? static_cast<double>(live_raw - raw) / static_cast<double>(live_bytes - need) : 0.0,
+                        " including scales). This live set needs BoundarySaving(compress_budget=", budget,
+                        "); set at least ", budget * 1.1, " (the late chunks of a record pack worse than its early ones), "
+                        "or use storage='disk' where the file is sparse.");
+        }
+        comp_live_.push_back(LiveChunk{k, offset, need, raw, total});
+        *comp_live_flag(k) = 1;
+        row[sweep_nvcomp::kIdxOffset] = offset;
+        char* src = comp_pack_ptr(s);
+        char* src_scales = src + comp_cap_;
+        if (compress_tier_ == 0) {
+            if (total > 0)
+                cudaMemcpyAsync(comp_persist_ptr() + offset, src, static_cast<size_t>(total), cudaMemcpyDeviceToDevice, copy_stream_);
+            if (sbytes > 0)
+                cudaMemcpyAsync(comp_persist_ptr() + offset + total, src_scales, static_cast<size_t>(sbytes), cudaMemcpyDeviceToDevice, copy_stream_);
+        } else if (compress_tier_ == 1) {
+            if (total > 0)
+                cudaMemcpyAsync(comp_persist_ptr() + offset, src, static_cast<size_t>(total), cudaMemcpyDeviceToHost, copy_stream_);
+            if (sbytes > 0)
+                cudaMemcpyAsync(comp_persist_ptr() + offset + total, src_scales, static_cast<size_t>(sbytes), cudaMemcpyDeviceToHost, copy_stream_);
+        } else if (total + sbytes > 0) {
+            char* stage = comp_stage_ptr(s);
+            if (total > 0)
+                cudaMemcpyAsync(stage, src, static_cast<size_t>(total), cudaMemcpyDeviceToHost, copy_stream_);
+            if (sbytes > 0)
+                cudaMemcpyAsync(stage + total, src_scales, static_cast<size_t>(sbytes), cudaMemcpyDeviceToHost, copy_stream_);
+            auto* meta = new BoundaryPackedMeta();
+            meta->path = (*disk_files_)[0];
+            meta->offset = static_cast<size_t>(offset);
+            meta->bytes = static_cast<size_t>(total + sbytes);
+            meta->src = stage;
+            cudaLaunchHostFunc(copy_stream_, write_boundary_packed_callback, meta);
+        }
+        arena_fill_ = offset + need;
+        comp_packed_bytes_ += total;
+        ++comp_chunks_landed_;
+        // The stats mirror follows every landing (host words the propagator
+        // reads for last_boundary_compress_ratio): a driver that keeps one
+        // session for the whole run never reaches the phase-end write.  Words
+        // 4..7 track the FULLEST live set of the call (the refills of a
+        // segmented ring overwrite the arena; the budget has to cover the
+        // worst of them, not the last).
+        int64_t* stats = reinterpret_cast<int64_t*>(saver_->comp_stats_host.data_ptr());
+        stats[0] = comp_packed_bytes_;
+        stats[1] = comp_raw_bytes_;
+        stats[2] = comp_chunks_landed_;
+        stats[3] = comp_arena_bytes_;
+        if (live_bytes > stats[6]) {
+            stats[4] = live_packed;   // payload bytes of the fullest live set
+            stats[5] = live_raw;      // its uncompressed bytes
+            stats[6] = live_bytes;    // what it occupies (payload + scales + alignment)
+        }
+        if (max_chunk > stats[7]) stats[7] = max_chunk;   // the largest packed chunk seen
+#else
+        (void)k; (void)s;
+#endif
+    }
+
+    // Backward: bring chunk ``start`` back into ring slot ``slot`` -- for the
+    // disk tier from the pinned stage the reader thread just filled, else
+    // straight from the arena -- and decompress it there.  The geometry is the
+    // one the chunk was COMPRESSED with (its step count is in the index row):
+    // the backward's own chunk length is one step shorter at the top, and a
+    // segmented ring cuts chunks at segment ends.
+    inline void fetch_compressed_chunk(int start, int slot)
+    {
+#if !defined(SWEEP_HOST_CORE)
+        const int k = start / transfer_interval_;
+        comp_slot_chunk_[slot] = k;
+        SWEEP_CHECK(k < comp_nchunks_, "boundary compression: backward asks for chunk ", k,
+                    " beyond the ", comp_nchunks_, "-row index");
+        const int64_t* row = comp_index_host_row(k);
+        const int64_t offset = row[sweep_nvcomp::kIdxOffset], total = row[sweep_nvcomp::kIdxTotal];
+        const int fwd_len = static_cast<int>(row[sweep_nvcomp::kIdxLen]);
+        SWEEP_CHECK(*comp_live_flag(k) == 1, "boundary compression: the backward asks for chunk ", k,
+                    " (steps ", k * transfer_interval_, "..), which is not in the compressed ring: its steps were "
+                    "overwritten (the ring holds its last ", comp_ring_steps_ > 0 ? comp_ring_steps_ : static_cast<int64_t>(comp_nchunks_) * transfer_interval_,
+                    " steps) or it was never compressed in the phase that filled the ring.");
+        SWEEP_CHECK(fwd_len >= 1 && fwd_len <= transfer_interval_,
+                    "boundary compression: chunk ", k, " was never compressed in this phase "
+                    "(index row holds ", fwd_len, " steps); the forward that filled the ring "
+                    "did not flush it, or the backward reads a chunk outside the refilled segment.");
+        const int t = comp_table_for(slot, fwd_len);
+        const int n = comp_npieces_[t];
+        const int stage_start = slot * transfer_interval_;
+        // write-after-read: the previous chunk's restores must be done with
+        // this ring slot before the decompressor overwrites it.
+        cudaStreamWaitEvent(copy_stream_, compute_ready_[slot], 0);
+        if (profile_enabled_ && boundary_on_disk_) {
+            cudaEventRecord(backward_copy_start_[slot], copy_stream_);
+            cudaEventRecord(backward_h2d_start_[slot], copy_stream_);
+        }
+        if (total > 0) {
+            if (compress_tier_ == 0)
+                cudaMemcpyAsync(comp_pack_ptr(slot), comp_persist_ptr() + offset, static_cast<size_t>(total), cudaMemcpyDeviceToDevice, copy_stream_);
+            else if (compress_tier_ == 1)
+                cudaMemcpyAsync(comp_pack_ptr(slot), comp_persist_ptr() + offset, static_cast<size_t>(total), cudaMemcpyHostToDevice, copy_stream_);
+            else
+                cudaMemcpyAsync(comp_pack_ptr(slot), comp_stage_ptr(slot), static_cast<size_t>(total), cudaMemcpyHostToDevice, copy_stream_);
+        }
+        (void)stage_start;
+        if (compress_tier_ == 0)
+            comp_copy_scales(comp_persist_ptr() + offset + total, slot, fwd_len, false, cudaMemcpyDeviceToDevice);
+        else if (compress_tier_ == 1)
+            comp_copy_scales(comp_persist_ptr() + offset + total, slot, fwd_len, false, cudaMemcpyHostToDevice);
+        else
+            comp_copy_scales(comp_stage_ptr(slot) + total, slot, fwd_len, false, cudaMemcpyHostToDevice);
+        if (n > 0) {
+            sweep_nvcomp::scan_piece_sizes_kernel<<<1, sweep_nvcomp::kScanThreads, 0, copy_stream_>>>(
+                comp_index_dev_row(k) + sweep_nvcomp::kIdxSizes, n, comp_pack_ptr(slot),
+                comp_tab_dev(t, sweep_nvcomp::kRowCompPtr), nullptr, nullptr, nullptr, 0);
+            const auto& api = sweep_nvcomp::require();
+            auto st = api.decompress(
+                reinterpret_cast<const void* const*>(comp_tab_dev(t, sweep_nvcomp::kRowCompPtr)),
+                reinterpret_cast<const size_t*>(comp_index_dev_row(k) + sweep_nvcomp::kIdxSizes),
+                reinterpret_cast<const size_t*>(comp_tab_dev(t, sweep_nvcomp::kRowUncBytes)),
+                reinterpret_cast<size_t*>(comp_tab_dev(t, sweep_nvcomp::kRowActual)),
+                static_cast<size_t>(n), saver_->comp_temp.data_ptr(), static_cast<size_t>(comp_temp_bytes_),
+                reinterpret_cast<void* const*>(comp_tab_dev(t, sweep_nvcomp::kRowUncPtr)),
+                sweep_nvcomp::decompress_opts(), comp_status_dev(t), copy_stream_);
+            SWEEP_CHECK(st == sweep_nvcomp::kSuccess, "nvcompBatchedBitcompDecompressAsync failed: status ", st);
+            cudaMemcpyAsync(comp_status_host(t), comp_status_dev(t), static_cast<size_t>(n) * 4,
+                            cudaMemcpyDeviceToHost, copy_stream_);
+            comp_status_used_[t] = 1;
+        }
+        cudaEventRecord(copy_ready_[slot], copy_stream_);
+        if (profile_enabled_ && boundary_on_disk_)
+            backward_copy_profile_pending_[slot] = 1;
+#endif
+    }
+
+    // After the copy stream is drained: every batch's statuses are on the host.
+    inline void finish_compress_phase()
+    {
+        for (int t = 0; t <= ring_buffers_; ++t) {
+            if (!comp_status_used_[t]) continue;
+            sweep_nvcomp::check_statuses(comp_status_host(t), comp_npieces_[t], "compress/decompress");
+            comp_status_used_[t] = 0;
+        }
+        int64_t* stats = reinterpret_cast<int64_t*>(saver_->comp_stats_host.data_ptr());
+        if (comp_chunks_landed_ > 0) {
+            stats[0] = comp_packed_bytes_;
+            stats[1] = comp_raw_bytes_;
+            stats[2] = comp_chunks_landed_;
+            stats[3] = comp_arena_bytes_;
+        }
     }
 };

@@ -66,6 +66,7 @@ The backward needs the forward wavefield. Choose how it is kept with
 | `BoundarySaving(storage="cpu", pinned_memory=True)` / `"disk"` | ring in host RAM / files | slower | | `disk_dir=`, `disk_async_read=True` for disk; `impl='c'` on a CPU device refuses both (its ring is already in RAM) |
 | `BoundarySaving(storage_dtype="bf16"\|"fp16"\|"int8")` | 2x / ~2x / ~4x smaller ring | | | lossy: perturbs the gradient; validate before use |
 | `BoundarySaving(tail_steps=K)` | last K steps only | shorter backward | | `impl='c'` `Acoustic`/`Acoustic3D` only, steady-state (frequency-selection) losses only |
+| `BoundarySaving(compress="bitcomp")` | ring packed losslessly per chunk (nvCOMP Bitcomp) | same per-step time | `impl='c'` template drivers | gradient bit-identical to the same `storage_dtype`; packed ring 28-52 % of int8, 33-60 % of fp32 (Marmousi2 elastic / Overthrust); `compress_budget` sizes the gpu/cpu arena; needs `nvidia-nvcomp-cu12` or `SWEEP_NVCOMP_LIB` |
 | `Ckpt(mode="chunk", chunks=100)` | checkpoints every `chunks` steps | recomputes | eager / PropJax | `storage="cpu"` keeps checkpoints on the host (c on CUDA) |
 | `Ckpt(mode="recursive", count=n)` | fixed `n` checkpoints | most recompute | | `impl='c'` only |
 
@@ -120,6 +121,7 @@ assert all(cos(grads["full"], g) > 0.999 for g in grads.values())
 | `impl='c'` `ElasticBorn` | `dvp, dvs, drho` gradients only; background and wavelet refused |
 | `ModelParallel` (any) | models only; a wavelet requiring grad is refused |
 | `impl='c'`, second `backward()` on the same graph | `RuntimeError`; re-run the forward (eager keeps the graph) |
+| `create_graph=True` (double backward) | only eager with `use_compile=False` and `Full()`/`Ckpt()`; `impl='c'`, `BoundarySaving()`, compiled eager, `ModelParallel`, custom-gradient imaging conditions raise `RuntimeError` |
 
 ## 5. Finite-difference gradient checks (and the outer ring)
 
@@ -204,9 +206,86 @@ is read with `solver.imaging(wavelet, sources, receivers, models=..., observed=o
 
 ## 7. Precision
 
-- Everything runs in float32; `impl='c'` refuses float64 models. Accumulate scalar misfits over
+- Everything runs in float32; `impl='c'` refuses any model that is not float32 (`TypeError`),
+  `impl='eager'` casts it. Accumulate scalar misfits over
   many shots in float64 when comparing runs.
 - Eager on Ampere+ GPUs: TF32 convolutions move 3-D gradients by 1e-2..1e-1 relative unless
   `torch.backends.cudnn.allow_tf32 = False` (sweep warns once).
 - Boundary-saving `storage_dtype` other than `"fp32"` changes the gradient (int8 most).
 - The two backends agree to ~1e-6..1e-4 relative, not bit for bit.
+
+## 8. Second derivatives (Hessian-vector products)
+
+- Exact `H h` by double backward: `impl='eager'`, `memory=Full()` or `Ckpt()`,
+  `eager_options=EagerOptions(use_compile=False)`, TF32 off. Take `g` with
+  `create_graph=True`, then `torch.autograd.grad((g * h).sum(), m, retain_graph=True)`; the
+  tape is reused for further directions. It holds the whole forward and first backward
+  (gigabytes and minutes on a 100 x 200 x 1000-step model), so it is for small models.
+- Any size, any `impl` and memory strategy: `H h ~ (g(m + eps*h) - g(m - eps*h)) / (2*eps)`.
+  Scan `eps` against one reference: the error falls as 1/eps (fp32 round-off) and rises as
+  eps^2; the minimum was at `eps*max|h|` of about 0.5-2 % of the velocity.
+- Gauss-Newton `J^T J h`, exact: the Born record of `h` (`AcousticBorn` with
+  `mp = 2*h/vp`, receivers on `sh1`) as `grad_outputs` of a gradient of the plain forward.
+- Full `H h`, exact, first derivatives only (so `impl='c'` + `BoundarySaving()` and compiled
+  eager work): with `m` requiring grad, `s = born(models=[m, 2*h/m])`, `d = fwd(models=[m])`,
+  `psi = (d * s.detach()).sum() + (s * (d - d_obs).detach()).sum()`, then
+  `H h = autograd.grad(psi, m)`. Needs the Born equation's background-model gradient
+  (`AcousticBorn` impl='c' in Full/BoundarySaving; not `Ckpt`; `ElasticBorn` only on eager).
+  Matched the double backward to 1e-5..1e-4 at about the cost of two gradients.
+- J h from any eager equation, no Born equation, no tape: forward-mode AD.
+  `with torch.no_grad(), fwAD.dual_level(): d, jh = fwAD.unpack_dual(prop(w, src, rec,
+  models=[fwAD.make_dual(vp, h)]))` (`import torch.autograd.forward_ad as fwAD`). Only
+  `impl='eager'` + `Full()` + `EagerOptions(use_compile=False)`; compiled, `Ckpt`,
+  `BoundarySaving`, `impl='c'`, `ModelParallel`, `PropSEM`, qP 'adjoint'/'frozen' and the
+  qP Born pair (every mode: at mp = 0 its scattered-field tangent is elliptic) raise. About
+  2x the forward's memory, 11-17x its time (uncompiled, V100). AcousticVTI/TTI: J h with
+  `s_gradient='exact'` only; `ViscoAcoustic`'s Q tangent holds the fractional exponent
+  fixed, as its gradient does.
+  Without `no_grad` and with `vp.requires_grad_()`, `grad(<d,s.detach()> + <s,(d-d_obs).detach()>)`
+  is the exact H h (reverse over forward).
+- The qP equations (AcousticVTI/TTI and their Born pair) refuse a second derivative in every
+  `s_gradient` mode (off the tape / NaN / not a Hessian); 'exact' and 'frozen' still allow
+  `create_graph=True` for a derivative w.r.t. the residual (double vjp: J h for 'exact', the
+  S_n-frozen linearisation for 'frozen'). Differences are no substitute: S_n follows the
+  direction of a field's own gradient, so where eps != delta the record and gradient are not
+  smooth in the model (differences converge only at steps ~1e-5 of the model, below fp32's
+  reach), and the 'exact' gradient moves by tens of % fp32 vs fp64. `sweep.autodiff` refuses
+  their Gauss-Newton and H h products and differences; only J h along a smooth direction by
+  forward mode with `s_gradient='exact'` (AcousticVTI/TTI) holds.
+- Forward mode and differences differentiate the returned gradient; on the outermost ring
+  (cropped gradient) they give a non-symmetric product and double backward the symmetric one
+  -- compare routes, or build a symmetric operator, with `h` off that ring.
+- 2-D `AcousticBorn` uses `Acoustic`'s CPML stencils on every device, so its record is J h of
+  `Acoustic` (eager). `impl='c'` 2-D Born still differs slightly in the CPML.
+- One call: `from sweep.autodiff import hessian_vector_product, gauss_newton_vector_product,
+  jacobian_vector_product`; `(hv,) = hessian_vector_product(prop, w, src, rec, [vp], [h],
+  loss)` with `loss(record) -> scalar`. `route="auto"` takes forward mode on uncompiled eager
+  `Full()` (exact, not fastest), else a central difference (`rel_step`, default 1e-2 of each
+  model's peak; an all-zero model counts as 1; `ModelParallel` tiles share one step);
+  `route="double_backward"` / `"forward"` / `"difference"` force one. A `None` direction
+  holds a model fixed: no gradient taken (impl='c' ElasticBorn / qP Born backgrounds need
+  this), `None` returned; directions are cast to the model's dtype. 'auto' never picks
+  double backward (exact on uncompiled `Ckpt` too). V100, 100x200, nt 1000, 4 shots, one H h:
+  double backward 7.3 s / 5.3 GiB, reverse over forward 27 s / 3.3 GiB, difference 5.4 s
+  (uncompiled `Full`) / 0.95 s, 127 MiB (eager defaults) / 0.13 s (c).
+- Many directions: `hessian_vector_products(prop, w, src, rec, [vp], [dirs], loss, route=...,
+  batch=B)` with `dirs` of shape `(K, *vp.shape)` returns the K products stacked. Where the
+  equation takes a model per shot (2-D Acoustic, Elastic, ElasticBorn, ViscoAcoustic, Biot) and
+  the models are shared, B directions run as copies of the survey in one call (one forward and
+  one double backward; one dual forward for 'forward'; one gradient of 2B copies for
+  'difference', any impl), else one call per direction; B bounds the memory. All 600 columns of
+  a 20x30 Hessian (1 shot, 400 steps, V100): 29 min one call per column, 12 s / 6 GiB double
+  backward with B=150, 0.55 s impl='c' differences. `torch.autograd.grad(..., is_grads_batched=True)` and
+  `functional.hessian(vectorize=True)` loop per direction inside the eager step (PyTorch's
+  legacy vmap has no batching rule for its convolution derivatives).
+- `with sweep.operators.torch.slice_stencils():` runs the uncompiled step's stencils as shifted
+  slices (same values). A double backward inside it holds 3-4x less memory at 1.4-1.7x the time
+  of the convolutions at the same batch (600 columns: 19 s / 1.6 GiB against 12 s / 6.0 GiB at
+  B=150; 9.8 s / 3.1 GiB at B=300): use it to raise `batch` when memory is the limit. Nothing
+  switches to it by itself; it carries no forward-mode tangent.
+- Reusing one eager propagator while an earlier graph is alive (e.g. `create_graph=True`,
+  then more forwards, then the Hv) works: each call starts from fresh zeros.
+- Keep `h` off the outermost ring when checking against differences (Section 5).
+- Notebook `46_hessian_vector_product.ipynb` compares the routes with `sweep.autodiff`, scans
+  `rel_step`, and assembles a small full Hessian and Gauss-Newton matrix with
+  `hessian_vector_products`.

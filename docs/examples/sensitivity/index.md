@@ -59,4 +59,19 @@ trade-off.
 
     [:material-notebook-outline: Open notebook](../../notebooks/39_radiation_poroelastic.ipynb)
 
+-   ![Hessian-vector products](../../figures/gallery/46_hessian_vector_product.png){ loading=lazy }
+
+    **Sensitivity · Hessian-vector products**
+
+    ---
+
+    The action of the FWI Hessian on a direction with `sweep.autodiff`: by
+    double backward through the eager step, in forward mode, as a difference
+    of two gradients, as the Gauss-Newton product, and exactly from first
+    derivatives of the Born system with `impl='c'` and boundary saving -- with
+    their accuracy, memory and time, and the full Hessian of a small model from
+    batched products, with its eigenvalues.
+
+    [:material-notebook-outline: Open notebook](../../notebooks/46_hessian_vector_product.ipynb)
+
 </div>

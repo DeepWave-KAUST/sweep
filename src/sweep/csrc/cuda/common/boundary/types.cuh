@@ -11,8 +11,8 @@
 // parallel pointer sets — FP32 / FP16 / BF16 — are populated depending
 // on the storage dtype chosen.  ``dtype`` and ``use_fp16`` together
 // drive the kernel dispatch.  Kernels cast at the storage boundary so
-// arithmetic remains FP32.  Drives are wired via Python BoundaryOptions
-// ``storage_dtype`` / env var SWEEP_BOUNDARY_DTYPE.
+// arithmetic remains FP32.  The dtype is chosen in Python, BoundaryOptions
+// ``storage_dtype``, and read off the buffer tensors handed over.
 struct GeneralBoundaryPointer {
     // FP32 storage (default)
     float* __restrict__ left = nullptr;

@@ -73,22 +73,24 @@ public:
         int ring_buffers,
         const std::vector<std::string>& disk_files)
     {
-        const bool staged = boundary_on_cpu || boundary_on_disk;
+        const bool staged = boundary_on_cpu || boundary_on_disk || saver.compress;
         if (!rt_.has_value()) {
             cfg_ = Cfg{dim, use_boundary_saving, boundary_on_cpu, boundary_on_disk,
-                       boundary_disk_async_read, transfer_interval, ring_buffers};
+                       boundary_disk_async_read, saver.compress, transfer_interval, ring_buffers};
             async_.emplace(staged);
             rt_.emplace(saver, dim, use_boundary_saving, boundary_on_cpu,
                         boundary_on_disk, boundary_disk_async_read,
                         transfer_interval, ring_buffers, disk_files,
                         async_->compute_stream, async_->copy_stream);
+            if (phase == Phase::Forward)
+                rt_->begin_forward();
         } else {
             Cfg want{dim, use_boundary_saving, boundary_on_cpu, boundary_on_disk,
-                     boundary_disk_async_read, transfer_interval, ring_buffers};
+                     boundary_disk_async_read, saver.compress, transfer_interval, ring_buffers};
             SWEEP_CHECK(
                 want == cfg_,
                 "BoundarySession reused with a different staging configuration "
-                "(dim/use_bs/cpu/disk/async_read/transfer_interval/ring_buffers). "
+                "(dim/use_bs/cpu/disk/async_read/compress/transfer_interval/ring_buffers). "
                 "The persistent events and ring bookkeeping are sized for the "
                 "first binding; make a new session instead of rebinding.");
             // A phase change means the previous phase's copies must land before
@@ -98,6 +100,9 @@ public:
             if (phase != phase_)
                 rt_->synchronize();
             rt_->rebind(saver, disk_files);
+            // A new forward restarts the compressed arena from byte 0.
+            if (phase == Phase::Forward && phase_ != Phase::Forward)
+                rt_->begin_forward();
         }
         phase_ = phase;
         used_ = true;
@@ -130,12 +135,12 @@ public:
 private:
     struct Cfg {
         int dim = 0;
-        bool use_bs = false, on_cpu = false, on_disk = false, disk_async = false;
+        bool use_bs = false, on_cpu = false, on_disk = false, disk_async = false, compress = false;
         int transfer_interval = 0, ring_buffers = 0;
         bool operator==(const Cfg& o) const
         {
             return dim == o.dim && use_bs == o.use_bs && on_cpu == o.on_cpu
-                && on_disk == o.on_disk && disk_async == o.disk_async
+                && on_disk == o.on_disk && disk_async == o.disk_async && compress == o.compress
                 && transfer_interval == o.transfer_interval
                 && ring_buffers == o.ring_buffers;
         }
@@ -167,7 +172,7 @@ public:
         int ring_buffers,
         const std::vector<std::string>& disk_files)
     {
-        const bool staged = boundary_on_cpu || boundary_on_disk;
+        const bool staged = boundary_on_cpu || boundary_on_disk || saver.compress;
         if (session != nullptr) {
             rt_ = &session->bind(phase, saver, dim, use_boundary_saving,
                                  boundary_on_cpu, boundary_on_disk,
@@ -185,6 +190,8 @@ public:
             rt_ = &*local_rt_;
             async_ = &*local_async_;
             owns_ = true;
+            if (phase == BoundarySessionImpl::Phase::Forward)
+                rt_->begin_forward();
         }
     }
 

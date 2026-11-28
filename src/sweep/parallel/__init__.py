@@ -47,6 +47,7 @@ from sweep.parallel.routing import (
 
 __all__ = [
     "ModelParallel",
+    "EagerModelParallel",
     "HaloExchange",
     "MeshTopology",
     "ModelParallelMesh",
@@ -65,4 +66,7 @@ def __getattr__(name):  # lazy: ModelParallel pulls in PropTorch (heavy import)
     if name == "ModelParallel":
         from sweep.parallel.dd_propagator import ModelParallel
         return ModelParallel
+    if name == "EagerModelParallel":
+        from sweep.parallel.eager_dd import EagerModelParallel
+        return EagerModelParallel
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
